@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::backend::{self, Backend};
+use crate::platform::host;
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 use running_process::{
@@ -67,9 +68,9 @@ pub enum InstallPlatform {
 
 impl InstallPlatform {
     pub fn current() -> Self {
-        if cfg!(target_os = "windows") {
+        if host::WINDOWS {
             Self::Windows
-        } else if cfg!(target_os = "macos") {
+        } else if host::MACOS {
             Self::MacOs
         } else {
             Self::Linux
@@ -532,7 +533,7 @@ pub fn run_trusted_codex_update() -> i32 {
 }
 
 fn trusted_codex_update() -> Result<(), String> {
-    if !cfg!(target_os = "linux") {
+    if !host::LINUX {
         return Err("Codex standalone update is supported here only on Linux".into());
     }
     let home = std::env::var_os("HOME").ok_or("HOME is required")?;
@@ -556,7 +557,7 @@ fn trusted_codex_update() -> Result<(), String> {
     run_verified_codex_installer(&script, CODEX_TRUSTED_INSTALLER_SHA256, &home)
 }
 
-fn trusted_codex_update_env(
+pub(crate) fn trusted_codex_update_env(
     home: &Path,
     original_path: Option<&str>,
     shell: Option<&str>,
@@ -587,7 +588,7 @@ fn trusted_codex_update_env(
     env
 }
 
-fn run_verified_codex_installer(
+pub(crate) fn run_verified_codex_installer(
     script: &[u8],
     expected_sha256: &str,
     home: &Path,
@@ -596,7 +597,7 @@ fn run_verified_codex_installer(
     run_verified_codex_installer_with_parent_env(script, expected_sha256, home, &parent_env)
 }
 
-fn run_verified_codex_installer_with_parent_env(
+pub(crate) fn run_verified_codex_installer_with_parent_env(
     script: &[u8],
     expected_sha256: &str,
     home: &Path,
@@ -696,8 +697,10 @@ fn run_windows_powershell_installer(
     }
 }
 
-#[cfg(windows)]
 fn run_windows_cmd_installer(command: &'static str, backend: Backend) -> Result<(), String> {
+    if !host::WINDOWS {
+        return Err("CMD fallback is only available on Windows".to_string());
+    }
     let dir = std::env::temp_dir().join(format!(
         "clud-{}-install-{}",
         backend.executable_name(),
@@ -717,11 +720,6 @@ fn run_windows_cmd_installer(command: &'static str, backend: Backend) -> Result<
     );
     let _ = std::fs::remove_dir_all(&dir);
     result
-}
-
-#[cfg(not(windows))]
-fn run_windows_cmd_installer(_command: &'static str, _backend: Backend) -> Result<(), String> {
-    Err("CMD fallback is only available on Windows".to_string())
 }
 
 fn run_interactive_command(command: CommandSpec, cwd: Option<PathBuf>) -> Result<(), String> {
@@ -904,7 +902,7 @@ pub fn probe_claude_cwd_changed_support(claude_path: &Path) -> bool {
         .is_some_and(|version| version >= MIN_CWD_CHANGED_CLAUDE_CODE_VERSION)
 }
 
-fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
+pub(crate) fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
     let process = subprocess::ManagedSubprocess::start_inheriting_env(
         command,
         None,
@@ -940,167 +938,6 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_update_env_does_not_inherit_session_shims_or_installer_overrides() {
-        let home = Path::new("/tmp/clud-codex-update-home");
-        let env =
-            trusted_codex_update_env(home, Some("/untrusted/shims:/usr/bin"), Some("/bin/bash"));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "PATH" && value.ends_with("/usr/bin:/bin")));
-        assert!(env
-            .iter()
-            .all(|(_, value)| !value.contains("/untrusted/shims")));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "SHELL" && value == "/bin/bash"));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "HOME" && value == &home.to_string_lossy()));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "CODEX_NON_INTERACTIVE" && value == "1"));
-        assert!(!env.iter().any(|(key, _)| key == "CLUD_RM_DRY_RUN"));
-        assert!(!env.iter().any(|(key, _)| key == "CODEX_INSTALL_DIR"));
-        let with_visible_bin = trusted_codex_update_env(
-            home,
-            Some("/untrusted/shims:/tmp/clud-codex-update-home/.local/bin:/usr/bin"),
-            None,
-        );
-        assert!(with_visible_bin.iter().any(|(key, value)| key == "PATH"
-            && value.ends_with(":/tmp/clud-codex-update-home/.local/bin")));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_update_fixture_covers_fresh_complete_and_stale_staging() {
-        use sha2::{Digest, Sha256};
-        let home = tempfile::tempdir().unwrap();
-        let home = home.path();
-        std::fs::write(
-            home.join("fixture-codex"),
-            b"#!/bin/sh\nprintf 'codex-cli 0.156.0\\n'\n",
-        )
-        .unwrap();
-        let script = br#"set -eu
-root="$HOME/.codex/packages/standalone"
-releases="$root/releases"
-mkdir -p "$releases"
-tmp_dir="$(mktemp -d "$HOME/.codex/tmp.XXXXXX")"
-remove=rm
-cleanup() { "$remove" -rf "$tmp_dir"; }
-trap cleanup EXIT
-find "$releases" -mindepth 1 -maxdepth 1 -name '.staging.*' -exec "$remove" -rf {} +
-stage="$releases/.staging.fixture.$$"
-"$remove" -rf "$stage"
-if [ ! -f "$releases/0.156.0/version" ]; then
-  mkdir -p "$stage/bin"
-  cp "$HOME/fixture-codex" "$stage/bin/codex"
-  chmod 0755 "$stage/bin/codex"
-  printf '0.156.0' > "$stage/version"
-  mv "$stage" "$releases/0.156.0"
-fi
-ln -sfn releases/0.156.0 "$root/current"
-"#;
-        let digest = format!("{:x}", Sha256::digest(script));
-        let root = home.join(".codex/packages/standalone");
-        let releases = root.join("releases");
-        run_verified_codex_installer(script, &digest, home).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(releases.join("0.156.0/version")).unwrap(),
-            "0.156.0"
-        );
-        assert_eq!(
-            std::fs::read_link(root.join("current")).unwrap(),
-            Path::new("releases/0.156.0")
-        );
-        let (code, version) = run_captured_command(vec![
-            root.join("current/bin/codex")
-                .to_string_lossy()
-                .into_owned(),
-            "--version".into(),
-        ])
-        .unwrap();
-        assert_eq!(code, 0);
-        assert_eq!(version.trim(), "codex-cli 0.156.0");
-        run_verified_codex_installer(script, &digest, home).unwrap();
-        let stale = releases.join(".staging.old");
-        std::fs::create_dir(&stale).unwrap();
-        run_verified_codex_installer(script, &digest, home).unwrap();
-        assert!(!stale.exists());
-        assert!(std::fs::read_dir(home.join(".codex"))
-            .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("tmp.")));
-        assert!(std::fs::read_dir(releases).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".staging.")));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_update_removes_stale_files_from_both_session_routes() {
-        use sha2::{Digest, Sha256};
-        use std::os::unix::fs::PermissionsExt;
-        let home = tempfile::tempdir().unwrap();
-        let home_path = home.path().to_string_lossy().into_owned();
-        let shim_dir = home.path().join("session-shim");
-        std::fs::create_dir(&shim_dir).unwrap();
-        let poisoned_rm = shim_dir.join("rm");
-        std::fs::write(&poisoned_rm, b"#!/bin/sh\nexit 27\n").unwrap();
-        std::fs::set_permissions(&poisoned_rm, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let base = vec![
-            ("HOME".to_string(), home_path),
-            (
-                "PATH".to_string(),
-                format!("{}:/usr/bin:/bin", shim_dir.display()),
-            ),
-        ];
-        let routes = [
-            (
-                "foreground",
-                crate::runner::apply_child_env_policy(base.clone()),
-            ),
-            ("daemon", crate::daemon::io_helpers::child_env_from(&base)),
-        ];
-        let script = b"set -eu\nrm -rf \"$HOME/stale\"\n";
-        let digest = format!("{:x}", Sha256::digest(script));
-        for (route, parent_env) in routes {
-            let path = parent_env
-                .iter()
-                .find(|(key, _)| key == "PATH")
-                .map(|(_, value)| value.as_str())
-                .unwrap();
-            assert!(
-                path.contains("session-shim"),
-                "{route} route lost the shim: {path}"
-            );
-            let stale = home.path().join("stale");
-            std::fs::create_dir(&stale).unwrap();
-            std::fs::write(stale.join("old"), b"old").unwrap();
-            run_verified_codex_installer_with_parent_env(script, &digest, home.path(), &parent_env)
-                .unwrap();
-            assert!(!stale.exists(), "{route} route retained stale files");
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_update_rejects_changed_installer_before_execution() {
-        let home = tempfile::tempdir().unwrap();
-        let err =
-            run_verified_codex_installer(b"touch \"$HOME/not-run\"\n", "wrong-digest", home.path())
-                .unwrap_err();
-        assert!(err.contains("installer contents changed"));
-        assert!(!home.path().join("not-run").exists());
-    }
 
     #[test]
     fn unified_claude_version_parser_accepts_supported_output_shapes() {
@@ -1620,7 +1457,7 @@ ln -sfn releases/0.156.0 "$root/current"
     fn path_fallback_uses_documented_native_install_location() {
         for backend in [Backend::Claude, Backend::Codex] {
             let temp = tempfile::tempdir().expect("tempdir");
-            let native = temp.path().join(if cfg!(windows) {
+            let native = temp.path().join(if crate::platform::host::WINDOWS {
                 format!("{}.exe", backend.executable_name())
             } else {
                 backend.executable_name().to_string()
@@ -1650,7 +1487,7 @@ ln -sfn releases/0.156.0 "$root/current"
     fn existing_native_install_is_used_when_path_lookup_misses() {
         for backend in [Backend::Claude, Backend::Codex] {
             let temp = tempfile::tempdir().expect("tempdir");
-            let native = temp.path().join(if cfg!(windows) {
+            let native = temp.path().join(if crate::platform::host::WINDOWS {
                 format!("{}.exe", backend.executable_name())
             } else {
                 backend.executable_name().to_string()

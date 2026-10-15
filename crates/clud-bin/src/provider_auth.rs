@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 use crate::args::{Args, Command, DeepseekAuthSubcommand};
 use crate::backend::{Backend, ModelProvider};
 use crate::command;
+use crate::platform::provider_auth as vault;
 use crate::provider_registry::{self, AnthropicCompatProvider};
 use crate::secret_redaction::mask_key;
 
@@ -43,8 +44,7 @@ pub const OPENROUTER_VAULT_ACCOUNT: &str = "api-key-v1";
 /// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
 /// exact composition on every platform, even though only the Windows
 /// Credential Manager path consumes it at runtime.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn vault_target(service: &str, account: &str) -> String {
+pub fn vault_target(service: &str, account: &str) -> String {
     format!("{service}/{account}")
 }
 
@@ -141,151 +141,6 @@ fn test_vault_path(dir: &std::path::Path, service: &str, account: &str) -> std::
     dir.join(format!("{}--{}.secret", safe(service), safe(account)))
 }
 
-#[cfg(not(windows))]
-fn with_native_vault<T: Send + 'static>(
-    service: &'static str,
-    account: &'static str,
-    operation: impl FnOnce(keyring::Entry) -> Result<T, SecretStoreError> + Send + 'static,
-) -> Result<T, SecretStoreError> {
-    let worker = std::thread::Builder::new()
-        .name("clud-vault".to_string())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let entry =
-                keyring::Entry::new(service, account).map_err(|_| SecretStoreError::Unavailable)?;
-            operation(entry)
-        })
-        .map_err(|_| SecretStoreError::Unavailable)?;
-    worker.join().unwrap_or(Err(SecretStoreError::Unavailable))
-}
-
-#[cfg(windows)]
-mod windows_vault {
-    use std::slice;
-
-    use std::ffi::c_void;
-
-    use zeroize::Zeroizing;
-
-    const CRED_TYPE_GENERIC: u32 = 1;
-    const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
-    const ERROR_NOT_FOUND: u32 = 1168;
-
-    #[repr(C)]
-    struct FileTime {
-        low: u32,
-        high: u32,
-    }
-
-    #[repr(C)]
-    struct Credential {
-        flags: u32,
-        credential_type: u32,
-        target_name: *mut u16,
-        comment: *mut u16,
-        last_written: FileTime,
-        blob_size: u32,
-        blob: *mut u8,
-        persist: u32,
-        attribute_count: u32,
-        attributes: *mut c_void,
-        target_alias: *mut u16,
-        user_name: *mut u16,
-    }
-
-    // Lowercase: xwin's vendored SDK (used by the cross-compiled CI build)
-    // normalizes lib filenames to lowercase, and lld-link on a case-sensitive
-    // host filesystem fails to find "Advapi32.lib". Native MSVC builds on
-    // Windows work with either case since NTFS is case-insensitive.
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn CredReadW(
-            target: *const u16,
-            credential_type: u32,
-            flags: u32,
-            credential: *mut *mut Credential,
-        ) -> i32;
-        fn CredWriteW(credential: *const Credential, flags: u32) -> i32;
-        fn CredDeleteW(target: *const u16, credential_type: u32, flags: u32) -> i32;
-        fn CredFree(buffer: *const c_void);
-    }
-
-    unsafe extern "system" {
-        fn GetLastError() -> u32;
-    }
-
-    use super::SecretStoreError;
-
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(Some(0)).collect()
-    }
-
-    fn is_missing() -> bool {
-        // SAFETY: GetLastError reads the current thread's Win32 failure code
-        // immediately after a Credential Manager call has returned false.
-        unsafe { GetLastError() == ERROR_NOT_FOUND }
-    }
-
-    pub fn get(target: &str) -> Result<Option<String>, SecretStoreError> {
-        let target = wide(target);
-        let mut credential = std::ptr::null_mut();
-        // SAFETY: `target` is NUL-terminated and Windows initializes the output
-        // pointer only on success, which we free after copying the blob.
-        let result = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
-        if result == 0 {
-            return if is_missing() {
-                Ok(None)
-            } else {
-                Err(SecretStoreError::Unavailable)
-            };
-        }
-        // SAFETY: `credential` was allocated by CredReadW. Its blob is valid
-        // for `CredentialBlobSize` bytes until the matching CredFree below.
-        let secret = unsafe {
-            let bytes = slice::from_raw_parts((*credential).blob, (*credential).blob_size as usize);
-            String::from_utf8(bytes.to_vec()).map_err(|_| SecretStoreError::Unavailable)
-        };
-        // SAFETY: the pointer came from CredReadW and is freed exactly once.
-        unsafe { CredFree(credential.cast::<std::ffi::c_void>()) };
-        secret.map(Some)
-    }
-
-    pub fn set(target: &str, secret: &str) -> Result<(), SecretStoreError> {
-        let mut target = wide(target);
-        let mut user = wide("clud");
-        let mut blob = Zeroizing::new(secret.as_bytes().to_vec());
-        // SAFETY: CREDENTIALW is a Win32 C struct containing only integer,
-        // pointer, and FILETIME fields, all of which permit zero initialization.
-        // The fields Credential Manager requires are set below before use.
-        let mut credential: Credential = unsafe { std::mem::zeroed() };
-        credential.credential_type = CRED_TYPE_GENERIC;
-        credential.target_name = target.as_mut_ptr();
-        credential.blob_size = blob
-            .len()
-            .try_into()
-            .map_err(|_| SecretStoreError::Unavailable)?;
-        credential.blob = blob.as_mut_ptr();
-        credential.persist = CRED_PERSIST_LOCAL_MACHINE;
-        credential.user_name = user.as_mut_ptr();
-        // SAFETY: every pointer in `credential` remains live for this call.
-        if unsafe { CredWriteW(&credential, 0) } == 0 {
-            Err(SecretStoreError::Unavailable)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn delete(target: &str) -> Result<(), SecretStoreError> {
-        let target = wide(target);
-        // SAFETY: `target` is NUL-terminated and lives for this call.
-        if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 || is_missing() {
-            Ok(())
-        } else {
-            Err(SecretStoreError::Unavailable)
-        }
-    }
-}
-
 impl SecretStore for NativeSecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
         if let Some(dir) = test_vault_dir() {
@@ -296,16 +151,7 @@ impl SecretStore for NativeSecretStore {
                 Err(_) => Err(SecretStoreError::Unavailable),
             };
         }
-        #[cfg(windows)]
-        return windows_vault::get(&vault_target(self.service, self.account));
-        #[cfg(not(windows))]
-        with_native_vault(self.service, self.account, |entry| {
-            match entry.get_password() {
-                Ok(secret) => Ok(Some(secret)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(_) => Err(SecretStoreError::Unavailable),
-            }
-        })
+        vault::get(self.service, self.account)
     }
 
     fn set(&self, secret: &str) -> Result<(), SecretStoreError> {
@@ -316,17 +162,7 @@ impl SecretStore for NativeSecretStore {
             )
             .map_err(|_| SecretStoreError::Unavailable);
         }
-        #[cfg(windows)]
-        return windows_vault::set(&vault_target(self.service, self.account), secret);
-        #[cfg(not(windows))]
-        {
-            let secret = Zeroizing::new(secret.to_owned());
-            with_native_vault(self.service, self.account, move |entry| {
-                entry
-                    .set_password(&secret)
-                    .map_err(|_| SecretStoreError::Unavailable)
-            })
-        }
+        vault::set(self.service, self.account, secret)
     }
 
     fn delete(&self) -> Result<(), SecretStoreError> {
@@ -337,15 +173,7 @@ impl SecretStore for NativeSecretStore {
                 Err(_) => Err(SecretStoreError::Unavailable),
             };
         }
-        #[cfg(windows)]
-        return windows_vault::delete(&vault_target(self.service, self.account));
-        #[cfg(not(windows))]
-        with_native_vault(self.service, self.account, |entry| {
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(_) => Err(SecretStoreError::Unavailable),
-            }
-        })
+        vault::delete(self.service, self.account)
     }
 }
 
@@ -1327,24 +1155,6 @@ mod tests {
             "[clud] saved OpenRouter key ****wxyz to the native credential vault"
         );
         assert!(!notice.contains("1111"));
-    }
-
-    /// Windows stores keys through Credential Manager directly (not the
-    /// `keyring` crate). Round-trip a key through the real API so a Windows
-    /// regression in the storage path fails CI rather than a user's launch.
-    #[cfg(windows)]
-    #[test]
-    fn windows_credential_manager_round_trips_an_api_key() {
-        let target = format!("clud.test-inline-api-key/{}", std::process::id());
-        let key = "sk-0123456789abcdef0123456789abcdef";
-        if let Err(error) = windows_vault::set(&target, key) {
-            eprintln!("SKIP: Credential Manager unavailable on this runner: {error}");
-            return;
-        }
-        let read = windows_vault::get(&target);
-        let _ = windows_vault::delete(&target);
-        assert_eq!(read, Ok(Some(key.to_string())));
-        assert_eq!(windows_vault::get(&target), Ok(None));
     }
 
     #[test]

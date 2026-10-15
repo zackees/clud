@@ -36,6 +36,7 @@ use super::repo_worktree_reclaim::{
     ProcessCwdSnapshot,
 };
 use crate::gc::worktree_root::is_under_worktree_root;
+use crate::platform::repo_worktree_reclaim_exec::make_writable;
 
 const GIT_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Removing a worktree deletes its ignored build output too (a `target/` can
@@ -188,33 +189,6 @@ fn clear_readonly(root: &Path) {
         }
     }
 }
-
-#[cfg(unix)]
-fn make_writable(path: &Path, meta: &std::fs::Metadata) {
-    use std::os::unix::fs::PermissionsExt;
-    // Unlinking needs write on the parent directory only; files are fine.
-    if !meta.is_dir() {
-        return;
-    }
-    let mode = meta.permissions().mode();
-    if mode & 0o700 != 0o700 {
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700));
-    }
-}
-
-#[cfg(windows)]
-fn make_writable(path: &Path, meta: &std::fs::Metadata) {
-    let mut perms = meta.permissions();
-    if perms.readonly() {
-        // Windows has no mode bits: this only clears FILE_ATTRIBUTE_READONLY.
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        let _ = std::fs::set_permissions(path, perms);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn make_writable(_path: &Path, _meta: &std::fs::Metadata) {}
 
 /// Run one reclaim. `lookup_prs` is injected so tests never reach the
 /// network; production passes `repo_worktree_probe::lookup_prs`.

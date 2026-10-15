@@ -552,15 +552,17 @@ mod tests {
         assert!(check_cap_root(&wrong_name, &parent).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn cap_root_refuses_a_symlink_escape() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let parent = tmp.path().join("cache");
         std::fs::create_dir_all(&parent).unwrap();
         let target = tmp.path().join("user-uv-cache");
         std::fs::create_dir_all(&target).unwrap();
-        std::os::unix::fs::symlink(&target, parent.join("uv")).unwrap();
+        crate::platform::gc_test_fs::symlink(&target, parent.join("uv")).unwrap();
         assert_eq!(
             check_cap_root(&parent.join("uv"), &parent),
             Err("root is a symlink")
@@ -569,22 +571,22 @@ mod tests {
 
     /// Writes a fake `uv` that records its argv and empties the cache dir it
     /// was given (argv[4]), as `uv cache clean --cache-dir <root>` would.
-    #[cfg(unix)]
     fn fake_uv(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let exe = dir.join("uv");
         std::fs::write(
             &exe,
             "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/argv.txt\"\nrm -rf \"$4\"/*\n",
         )
         .unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&exe, 0o755).unwrap();
         exe
     }
 
-    #[cfg(unix)]
     #[test]
     fn enforce_cap_runs_uv_cache_clean_over_the_cap() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -602,9 +604,11 @@ mod tests {
         assert!(!root.join(ENVIRONMENTS_SUBDIR).exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn enforce_cap_never_invokes_uv_when_spared() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();

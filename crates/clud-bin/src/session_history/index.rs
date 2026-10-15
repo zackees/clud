@@ -139,7 +139,7 @@ pub fn canonical_cwd(cwd: &Path) -> String {
         .strip_prefix(r"\\?\")
         .map(str::to_string)
         .unwrap_or(text);
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         text.to_lowercase()
     } else {
         text

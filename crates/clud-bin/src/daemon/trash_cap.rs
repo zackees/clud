@@ -272,8 +272,9 @@ mod tests {
         let old = entry(&trash, "old", 3_000, Duration::from_secs(48 * 3_600));
         let young = entry(&trash, "young", 3_000, Duration::from_secs(2 * 3_600));
         let fresh = entry(&trash, "fresh", 3_000, Duration::from_secs(60));
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, trash.join("escape")).unwrap();
+        if crate::platform::host::UNIX {
+            crate::platform::gc_test_fs::symlink(&outside, trash.join("escape")).unwrap();
+        }
 
         let report = enforce_at(&trash, 7_000, SystemTime::now());
 
@@ -285,16 +286,16 @@ mod tests {
         assert!(report.failed.is_empty(), "{report:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn enforce_removes_read_only_trees() {
-        use std::os::unix::fs::PermissionsExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let trash = temp.path().join("trash");
         std::fs::create_dir_all(&trash).unwrap();
         let old = entry(&trash, "sealed", 3_000, Duration::from_secs(48 * 3_600));
-        std::fs::set_permissions(old.join("target"), std::fs::Permissions::from_mode(0o555))
-            .unwrap();
+        crate::platform::gc_test_fs::set_mode(old.join("target"), 0o555).unwrap();
 
         let report = enforce_at(&trash, 1, SystemTime::now());
 
