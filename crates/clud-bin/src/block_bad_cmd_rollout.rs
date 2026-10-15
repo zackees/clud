@@ -426,7 +426,9 @@ fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool 
     let Some(dir) = found.parent() else {
         return false;
     };
-    let beside_clud = clud.parent().is_some_and(|clud_dir| same_dir(dir, clud_dir));
+    let beside_clud = clud
+        .parent()
+        .is_some_and(|clud_dir| same_dir(dir, clud_dir));
     let helper_bin = home.is_some_and(|home| same_dir(dir, &home.join(HELPER_BIN_SUBDIR)));
     if !beside_clud && !helper_bin {
         return false;
@@ -791,7 +793,10 @@ mod tests {
         assert!(!refresh_owned_helper(&foreign, &clud, Some(&home)));
 
         assert_eq!(std::fs::read_to_string(&beside).unwrap(), "clud-v2-longer");
-        assert_eq!(std::fs::read_to_string(&helper_bin).unwrap(), "clud-v2-longer");
+        assert_eq!(
+            std::fs::read_to_string(&helper_bin).unwrap(),
+            "clud-v2-longer"
+        );
         assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "someone-else");
     }
 
