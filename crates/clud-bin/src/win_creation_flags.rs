@@ -21,7 +21,6 @@
 /// Bit value of the Windows `CREATE_NO_WINDOW` process creation flag.
 ///
 /// See <https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags>.
-#[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Bit value of the Windows `CREATE_NEW_PROCESS_GROUP` process creation flag.
@@ -31,19 +30,15 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// console signal path), but CTRL_BREAK_EVENT can still be delivered with
 /// `GenerateConsoleCtrlEvent`. See
 /// <https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags>.
-#[cfg(windows)]
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Returns the creation-flags bitmask to apply to a daemon-helper spawn so
 /// that it does not pop a visible console window. On non-Windows, returns
 /// `0` (callers can pass it unconditionally).
 pub fn invisible_helper_flags() -> u32 {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         CREATE_NO_WINDOW
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         0
     }
 }
@@ -54,12 +49,9 @@ pub fn invisible_helper_flags() -> u32 {
 /// short-circuit stay intact (passing `Some(0)` would also work, but is
 /// semantically misleading).
 pub fn invisible_helper_creationflags() -> Option<u32> {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         Some(CREATE_NO_WINDOW)
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         None
     }
 }
@@ -86,12 +78,9 @@ pub fn invisible_helper_creationflags() -> Option<u32> {
 /// child tree down — which it already does via `process_tree::kill_tree`
 /// in the interrupt branch.
 pub fn new_process_group_flags() -> u32 {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         CREATE_NEW_PROCESS_GROUP
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         0
     }
 }
@@ -106,57 +95,17 @@ pub fn new_process_group_flags() -> u32 {
 /// short-circuit stays intact — POSIX has no equivalent flag and the
 /// terminal foreground-process-group behavior is already correct.
 pub fn user_facing_backend_creationflags() -> Option<u32> {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         Some(CREATE_NEW_PROCESS_GROUP)
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         None
     }
 }
 
+// Host-specific tests live in `platform/{windows,unix}/win_creation_flags_tests.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn create_no_window_value_matches_winapi() {
-        // Sanity: must be exactly 0x0800_0000 — that's the documented
-        // CREATE_NO_WINDOW bit (see Microsoft `winbase.h`). Anchoring the
-        // literal here means a refactor that quietly flips a digit fails
-        // CI instead of silently re-popping consoles in production.
-        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
-        assert_eq!(invisible_helper_flags(), 0x0800_0000);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn invisible_helper_flags_is_zero_off_windows() {
-        // Spreading `creation_flags(invisible_helper_flags())` into a
-        // `std::process::Command` on Linux/macOS must be a true no-op:
-        // the bit pattern is zero, so `creation_flags(0)` leaves the
-        // `Command` semantically untouched. The `creationflags` field on
-        // `ProcessConfig` is `Option<u32>` and we return `None` to hit
-        // running-process-core's "no override" short-circuit.
-        assert_eq!(invisible_helper_flags(), 0);
-        assert!(invisible_helper_creationflags().is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn invisible_helper_creationflags_is_some_on_windows() {
-        // The Option<u32> form mirrors `ProcessConfig::creationflags`.
-        // `Some(CREATE_NO_WINDOW)` is what every daemon-helper spawn site
-        // hands to running-process-core.
-        assert_eq!(invisible_helper_creationflags(), Some(0x0800_0000));
-        // Both helpers must agree on the bit pattern.
-        assert_eq!(
-            invisible_helper_creationflags(),
-            Some(invisible_helper_flags())
-        );
-    }
 
     #[test]
     fn invisible_helper_flags_does_not_collide_with_create_new_process_group() {
@@ -170,18 +119,9 @@ mod tests {
             combined & create_new_process_group,
             create_new_process_group
         );
-        #[cfg(windows)]
-        assert_eq!(combined & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
-    }
-
-    /// The exported `CREATE_NEW_PROCESS_GROUP` constant on Windows must
-    /// match the documented Win32 bit pattern. Anchoring the literal here
-    /// means a typo in a future refactor fails CI rather than silently
-    /// re-routing console Ctrl+C events into our backend children.
-    #[cfg(windows)]
-    #[test]
-    fn create_new_process_group_value_matches_winapi() {
-        assert_eq!(CREATE_NEW_PROCESS_GROUP, 0x0000_0200);
+        if crate::platform::host::WINDOWS {
+            assert_eq!(combined & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
+        }
     }
 
     /// `new_process_group_flags()` returns the Win32 bit pattern on
@@ -189,10 +129,11 @@ mod tests {
     /// new_process_group_flags()` unconditionally.
     #[test]
     fn new_process_group_flags_per_os() {
-        #[cfg(windows)]
-        assert_eq!(new_process_group_flags(), 0x0000_0200);
-        #[cfg(not(windows))]
-        assert_eq!(new_process_group_flags(), 0);
+        if crate::platform::host::WINDOWS {
+            assert_eq!(new_process_group_flags(), 0x0000_0200);
+        } else {
+            assert_eq!(new_process_group_flags(), 0);
+        }
     }
 
     /// The `Option<u32>`-shaped helper for `ProcessConfig::creationflags`:
@@ -201,46 +142,10 @@ mod tests {
     /// POSIX where the flag has no meaning.
     #[test]
     fn user_facing_backend_creationflags_per_os() {
-        #[cfg(windows)]
-        assert_eq!(user_facing_backend_creationflags(), Some(0x0000_0200));
-        #[cfg(not(windows))]
-        assert!(user_facing_backend_creationflags().is_none());
-    }
-
-    /// CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP are independent bits
-    /// (0x0800_0000 vs 0x0000_0200) and must remain composable so a
-    /// daemon-helper that wants both can OR them without losing either.
-    #[cfg(windows)]
-    #[test]
-    fn create_no_window_and_create_new_process_group_compose() {
-        let combined = invisible_helper_flags() | new_process_group_flags();
-        assert_eq!(combined & CREATE_NO_WINDOW, CREATE_NO_WINDOW);
-        assert_eq!(
-            combined & CREATE_NEW_PROCESS_GROUP,
-            CREATE_NEW_PROCESS_GROUP
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn invisible_helper_flags_does_not_collide_with_detached_process() {
-        // DETACHED_PROCESS = 0x0000_0008. The trampoline uses this for the
-        // self-spawned daemon launch. CREATE_NO_WINDOW is reserved for the
-        // *child-process* helper paths; it is mutually meaningful with
-        // DETACHED_PROCESS but the bits don't overlap, so anyone composing
-        // them in the future won't lose either signal.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        assert_eq!(invisible_helper_flags() & DETACHED_PROCESS, 0);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn invisible_helper_flags_is_idempotent_under_repeated_or() {
-        // OR'ing the same bit twice yields the same value — important
-        // because some call sites build `creationflags` incrementally and
-        // we don't want a future maintainer worrying about double-applies.
-        let once = invisible_helper_flags();
-        let twice = once | invisible_helper_flags();
-        assert_eq!(once, twice);
+        if crate::platform::host::WINDOWS {
+            assert_eq!(user_facing_backend_creationflags(), Some(0x0000_0200));
+        } else {
+            assert!(user_facing_backend_creationflags().is_none());
+        }
     }
 }

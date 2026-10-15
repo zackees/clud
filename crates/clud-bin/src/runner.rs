@@ -207,10 +207,10 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
 /// with the daemon+client merged base — the merge #1209 introduced after
 /// the Windows stdio pair had drifted into only one of the two builders.
 pub fn apply_child_env_policy(base: Vec<(String, String)>) -> Vec<(String, String)> {
-    apply_child_env_policy_with(base, cfg!(windows))
+    apply_child_env_policy_with(base, crate::platform::host::WINDOWS)
 }
 
-/// Test seam — `windows_stdio` is `cfg!(windows)` in production. Passed in
+/// Test seam — `windows_stdio` is `host::WINDOWS` in production. Passed in
 /// rather than read so the Windows UTF-8 layer (the layer that actually
 /// drifted) is assertable on a Linux CI lane.
 pub fn apply_child_env_policy_with(
@@ -615,15 +615,13 @@ mod tests {
         let env = apply_child_env_policy_with_nounset_opt_out(base(&path), false, true);
         assert_eq!(value(&env, "CLUD_CMD_GATE"), None, "no tap, no gate");
 
-        let tap = bin
-            .path()
-            .join(if cfg!(windows) { "tap.exe" } else { "tap" });
+        let tap = bin.path().join(if crate::platform::host::WINDOWS {
+            "tap.exe"
+        } else {
+            "tap"
+        });
         std::fs::write(&tap, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tap, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::runner::mark_executable_for_test(&tap);
         let env = apply_child_env_policy_with_nounset_opt_out(base(&path), false, true);
         assert_eq!(value(&env, "CLUD_CMD_GATE"), Some("enforce"));
 
