@@ -3,7 +3,7 @@
 A session control is a switch only the user can turn, enforced against every
 agent in the session, subagents included. The first one gates git worktree
 creation: refused unless the user opted in. Rationale:
-[DD-173](../DESIGN_DECISIONS.md#dd-173-a-session-control-takes-consent-only-from-the-users-own-channels).
+[DD-175](../DESIGN_DECISIONS.md#dd-175-a-session-control-takes-consent-only-from-the-users-own-channels).
 
 ## How state moves
 
@@ -69,7 +69,7 @@ A session the daemon cannot answer for is refused. The rule has no
 `CLUD_BAD_CMD_OVERRIDE` id.
 
 **Limits.** This deters a forgetful agent; it is not a security boundary
-(DD-173). Codex launches are not gated. The Bash check sees what the parser captures; a git alias
+(DD-175). Codex launches are not gated. The Bash check sees what the parser captures; a git alias
 (`git wt add`) is not a `worktree add`. A pasted document that says "use a
 worktree" counts as the user's yes.
 

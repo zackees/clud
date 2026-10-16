@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn a_symlinked_parent_that_leaves_the_roots_is_refused_and_a_final_link_is_removed_as_a_link() {
         let w = world();
-        let outside = w.home.join("outside");
+        let outside = w.home.parent().unwrap().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep"), b"precious").unwrap();
         std::os::unix::fs::symlink(&outside, w.root.join("escape")).unwrap();

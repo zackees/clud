@@ -1324,13 +1324,11 @@ pub fn save_rust_optimize_settings_at(
 ) -> Result<(), SettingsError> {
     with_settings_document(home, |document| {
         let optimize = object_entry(document, "optimize");
-        let mut rust = json!({
+        // No `soldr_version`: soldr cannot be pinned (it always follows latest).
+        let rust = json!({
             "use_soldr_shims": settings.use_soldr_shims,
             "install_soldr": settings.install_soldr,
         });
-        if !settings.soldr_version.eq_ignore_ascii_case("latest") {
-            rust["soldr_version"] = json!(settings.soldr_version.clone());
-        }
         optimize.insert("rust".to_string(), rust);
     })
 }

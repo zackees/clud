@@ -4,7 +4,7 @@
 //! often right after the user said not to: a subagent never sees the user's
 //! prompt. So creation is refused unless this session opted in, and the
 //! opt-in comes only from the user's own channels (a deterrent for a
-//! forgetful agent, not a security boundary; DD-173):
+//! forgetful agent, not a security boundary; DD-175):
 //!
 //! - the user's own prompt: the `UserPromptSubmit` hook ([`handle_prompt`])
 //!   sets the daemon's `worktrees` flag for the payload's `session_id`
