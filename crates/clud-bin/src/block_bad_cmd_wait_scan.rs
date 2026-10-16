@@ -225,6 +225,7 @@ pub(super) enum HeredocUse {
 /// written by `cat`/`tee` to a `.sh`/`.py` file (or a file whose body starts
 /// with a shell or Python shebang). Other heredocs (commit messages, issue
 /// bodies) are data and are not returned.
+#[cfg(test)]
 pub(super) fn heredoc_scripts(text: &str) -> Vec<(HeredocUse, ScriptKind, String)> {
     parse_command(text, ShellDialect::Posix, None)
         .invocations

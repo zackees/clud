@@ -241,14 +241,26 @@ impl<'s> Walker<'s, '_> {
             }
             (None, _) => false,
         };
-        let redirects: Vec<Redirect> = children
-            .iter()
-            .filter_map(|child| match child.kind() {
-                "file_redirect" => self.file_redirect(*child, env, ctx),
-                "heredoc_redirect" | "herestring_redirect" => Some(self.input_redirect(*child)),
-                _ => None,
-            })
-            .collect();
+        let mut redirects = Vec::new();
+        for child in &children {
+            match child.kind() {
+                "file_redirect" => redirects.extend(self.file_redirect(*child, env, ctx)),
+                "heredoc_redirect" | "herestring_redirect" => {
+                    redirects.push(self.input_redirect(*child));
+                    // `cat <<'EOF' > run.sh`: the grammar files a redirect
+                    // written after the heredoc marker under the heredoc.
+                    let mut inner = child.walk();
+                    let nested: Vec<Node<'_>> = child
+                        .named_children(&mut inner)
+                        .filter(|grandchild| grandchild.kind() == "file_redirect")
+                        .collect();
+                    for grandchild in nested {
+                        redirects.extend(self.file_redirect(grandchild, env, ctx));
+                    }
+                }
+                _ => {}
+            }
+        }
         if body.is_some() && piped.is_none() {
             self.out.redirect_since(start, ctx.depth, &redirects);
         }

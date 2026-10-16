@@ -753,3 +753,20 @@ fn a_heredoc_body_is_kept_on_the_command_that_reads_it() {
         .as_deref()
         .is_some_and(|body| body.contains("import time")));
 }
+
+/// `cat <<'EOF' > run.sh`: a redirect after the heredoc marker still
+/// belongs to the command.
+#[test]
+fn a_redirect_after_the_heredoc_marker_is_the_commands() {
+    let script = parse(
+        "cat <<'EOF' > run.sh\nsleep 1\nEOF",
+        Dialect::Posix,
+        &posix_env(),
+    );
+    let cat = only(&script, "cat");
+    assert!(cat
+        .redirects
+        .iter()
+        .any(|redirect| redirect.writes_file() && redirect.target.as_literal() == Some("run.sh")));
+    assert!(cat.heredoc.is_some());
+}

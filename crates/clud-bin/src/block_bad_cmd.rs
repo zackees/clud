@@ -2115,12 +2115,27 @@ fn blocking_pr_wait_reason(script: &crate::shell_ast::Script, shim_active: bool)
     // #1880: an unbounded loop, or a `sleep` chained before a status read (a
     // loop split across turns), polls just the same. The read may sit in a
     // substitution (`p=$(gh pr checks 1)`); the invocations include those.
-    let unbounded = script.loop_kinds().any(is_unbounded_loop);
-    let sleeps = commands.iter().any(|words| {
-        words
-            .first()
-            .is_some_and(|word| matches!(program_name(word).as_str(), "sleep" | "start-sleep"))
-    });
+    // Only the command's own loops and sleeps count here: one inside a
+    // `bash -c` / `eval` / heredoc-fed shell is the hand-written-wait rule's
+    // (#1972), whose refusal names `pr_merge_watch` and honors its override.
+    let own = |invocation: &&crate::shell_ast::Invocation| {
+        invocation.origin != crate::shell_ast::Origin::NestedShell
+    };
+    let unbounded = script
+        .invocations
+        .iter()
+        .filter(own)
+        .any(|invocation| invocation.loop_kind.is_some_and(is_unbounded_loop));
+    let sleeps = script
+        .invocations
+        .iter()
+        .zip(&commands)
+        .filter(|(invocation, _)| own(invocation))
+        .any(|(_, words)| {
+            words
+                .first()
+                .is_some_and(|word| matches!(program_name(word).as_str(), "sleep" | "start-sleep"))
+        });
     if (unbounded || sleeps) && commands.iter().any(|words| gh_poll_target(words)) {
         return Some(format!(
             "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
