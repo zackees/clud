@@ -1107,6 +1107,10 @@ fn only_a_component_named_exactly_venv_is_exempt() {
         let (code, _out, err) = w.run(Kind::Safe, &["-r", dir.to_str().unwrap()]);
         assert_ne!(code, 0, "{name} must stay refused");
         assert!(err.contains("outside the allowed roots"), "{name}: {err}");
+        assert!(
+            err.contains("clud trash <PATH>"),
+            "{name}: the refusal names the workaround: {err}"
+        );
         assert!(dir.exists());
     }
 }

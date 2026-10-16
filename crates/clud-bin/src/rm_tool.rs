@@ -41,9 +41,10 @@ pub const ROOTS_ENV: &str = "CLUD_RM_ROOTS";
 pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
 /// Appended to every outside-the-roots refusal (#1659): `--purge` changes
 /// only trash-versus-delete, never where a call may delete.
-const OUTSIDE_HINT: &str = "; --purge does not relax this check. Write scratch data under an \
-     allowed root (the session temp dir) or a system temp dir instead, or ask the user to \
-     remove this path";
+const OUTSIDE_HINT: &str = "; --purge does not relax this check. To quarantine it reversibly \
+     instead, run `clud trash <PATH>` (recoverable from ~/.clud/trash until GC). Write scratch \
+     data under an allowed root (the session temp dir) or a system temp dir instead, or ask the \
+     user to remove this path";
 
 /// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
