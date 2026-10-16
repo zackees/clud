@@ -186,4 +186,72 @@ mod tests {
         let checkout = r#"{"checkout_op":"who_all"}"#;
         assert!(serde_json::from_str::<SessionFlagRequest>(checkout).is_err());
     }
+
+    /// A daemon serving only the session-flag lane, recorded in a fresh
+    /// state dir the way the real daemon records itself (`daemon.json`).
+    fn serve_session_flags() -> tempfile::TempDir {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            super::super::paths::daemon_info_path(state.path()),
+            json!({ "pid": std::process::id(), "port": port }).to_string(),
+        )
+        .unwrap();
+        let registry = SessionFlagRegistry::default();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request = serde_json::from_str(&line).unwrap();
+                handle_session_flag_connection(&mut stream, &registry, request).unwrap();
+            }
+        });
+        state
+    }
+
+    fn prompt(state: &Path, session: &str, text: &str) {
+        let payload = json!({ "session_id": session, "prompt": text }).to_string();
+        assert_eq!(
+            crate::worktree_consent::handle_prompt_in(state, &payload),
+            0,
+            "the prompt hook never blocks the prompt"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_prompts_never_allowed_worktrees_is_refused() {
+        let state = serve_session_flags();
+        let dir = state.path();
+        let refusal = |session| crate::worktree_consent::refusal_in(dir, Some(session));
+
+        // No mention at all: refused.
+        prompt(dir, "s1", "fix the login bug and open a PR");
+        assert!(refusal("s1").unwrap().contains("has not allowed"));
+
+        // A mention that says no, and one that is only about a branch.
+        prompt(dir, "s1", "Just do one agent - no worktrees");
+        prompt(
+            dir,
+            "s1",
+            "Don't use the git work tree. Put it on a branch.",
+        );
+        assert!(refusal("s1").unwrap().contains("has not allowed"));
+
+        // A yes allows that session only.
+        prompt(dir, "s1", "ok, you can use worktrees for this one");
+        assert_eq!(refusal("s1"), None);
+        assert!(refusal("s2").unwrap().contains("has not allowed"));
+    }
+
+    #[test]
+    fn a_session_is_refused_when_no_daemon_is_recorded() {
+        let empty = tempfile::TempDir::new().unwrap();
+        prompt(empty.path(), "s1", "use worktrees");
+        let refusal = crate::worktree_consent::refusal_in(empty.path(), Some("s1")).unwrap();
+        assert!(refusal.contains("could not be asked"), "{refusal}");
+    }
 }

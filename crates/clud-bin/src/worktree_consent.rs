@@ -20,6 +20,8 @@
 //! A session the daemon cannot answer for is refused: this control fails
 //! closed. It is not overridable through `CLUD_BAD_CMD_OVERRIDE`.
 
+use std::path::Path;
+
 use serde_json::Value;
 
 /// Launch-environment opt-in for the whole session.
@@ -97,6 +99,18 @@ pub fn tool_creates_worktree(tool_name: &str, tool_input: Option<&Value>) -> boo
 /// conversation, and exit 2 would erase the user's prompt.
 #[must_use]
 pub fn handle_prompt(stdin: &str) -> i32 {
+    match crate::daemon::default_state_dir() {
+        Ok(dir) => handle_prompt_in(&dir, stdin),
+        Err(error) => {
+            eprintln!("[clud worktrees] could not record consent: {error}");
+            0
+        }
+    }
+}
+
+/// [`handle_prompt`] against the daemon recorded in `state_dir`.
+#[must_use]
+pub fn handle_prompt_in(state_dir: &Path, stdin: &str) -> i32 {
     let Ok(payload) = serde_json::from_str::<Value>(stdin) else {
         return 0;
     };
@@ -108,10 +122,9 @@ pub fn handle_prompt(stdin: &str) -> i32 {
     if !says_yes(prompt) {
         return 0;
     }
-    let outcome = crate::daemon::default_state_dir().and_then(|dir| {
-        crate::daemon::session_flag_set(&dir, session, FLAG_KEY, Value::Bool(true))
-    });
-    if let Err(error) = outcome {
+    if let Err(error) =
+        crate::daemon::session_flag_set(state_dir, session, FLAG_KEY, Value::Bool(true))
+    {
         eprintln!("[clud worktrees] could not record consent: {error}");
     }
     0
@@ -131,6 +144,14 @@ pub fn refusal(session_id: Option<&str>) -> Option<String> {
     decide(env_allows || grind_run, session_id, |session| {
         let dir = crate::daemon::default_state_dir()?;
         crate::daemon::session_flag_get(&dir, session, FLAG_KEY)
+    })
+}
+
+/// The daemon-only part of [`refusal`], against the daemon in `state_dir`.
+#[must_use]
+pub fn refusal_in(state_dir: &Path, session_id: Option<&str>) -> Option<String> {
+    decide(false, session_id, |session| {
+        crate::daemon::session_flag_get(state_dir, session, FLAG_KEY)
     })
 }
 
