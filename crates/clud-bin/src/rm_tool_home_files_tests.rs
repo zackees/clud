@@ -1,6 +1,7 @@
 //! #1956, #1957: paths under `$HOME` outside the roots. Single files are
-//! trashed, directories only inside the tool data dirs; personal folders and
-//! denylisted credentials are refused.
+//! trashed only inside the tool and app data dirs, directories only inside
+//! the tool data dirs; personal folders and denylisted credentials are
+//! refused.
 
 use super::*;
 
@@ -45,6 +46,22 @@ fn a_directory_inside_a_tool_data_dir_is_trashed_but_not_the_dir_itself() {
     let (code, _, err) = w.run(Kind::File, &["-r", claude.to_str().unwrap()]);
     assert_eq!(code, 1, "{err}");
     assert!(claude.exists());
+}
+
+#[test]
+fn a_single_file_elsewhere_under_home_is_still_refused() {
+    let w = world();
+    for rel in [
+        "dev/other-repo/src/main.rs",
+        "notes.txt",
+        ".config/app/x.toml",
+    ] {
+        let path = file(&w, rel);
+        let (code, _, err) = w.run(Kind::File, &[path.to_str().unwrap()]);
+        assert_eq!(code, 1, "{rel}: {err}");
+        assert!(err.contains("outside the allowed roots"), "{rel}: {err}");
+        assert!(path.exists(), "{rel}");
+    }
 }
 
 #[test]
@@ -133,4 +150,10 @@ fn rule_tables_match_whole_components_case_insensitively() {
     assert!(home_files::dir_allowed(Path::new(".cache/pip")));
     assert!(!home_files::dir_allowed(Path::new(".cache")));
     assert!(!home_files::dir_allowed(Path::new("dev/x")));
+    assert!(home_files::file_allowed(Path::new(
+        ".local/share/applications/x.desktop"
+    )));
+    assert!(!home_files::file_allowed(Path::new(".local/share")));
+    assert!(!home_files::file_allowed(Path::new(".local/sharex/f")));
+    assert!(!home_files::file_allowed(Path::new("dev/x/f.rs")));
 }

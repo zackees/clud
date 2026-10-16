@@ -6869,8 +6869,9 @@ file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
 `.desktop` entry, a wrong Claude Code memory file) was refused, so agents
 overwrote it in place or left a manual cleanup list for the user.
 
-**Decision.** Outside the roots, a single file or symlink strictly under
-`$HOME` is trashed, and a directory is trashed only strictly inside a tool
+**Decision.** Outside the roots, a single file or symlink is trashed only
+strictly inside a tool or app data dir (`~/.claude`, `~/.codex`, `~/.cache`,
+`~/.local/share`), and a directory is trashed only strictly inside a tool
 data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
 (`~/Documents` and the other XDG user dirs) and a credentials/settings
 denylist are refused outright, as is any directory containing a denylisted
@@ -6883,7 +6884,9 @@ that hold regenerable tool data. Keys, credentials and settings are not
 recoverable in the way that matters: a deleted key is a lockout, and a
 deleted clud settings file silently drops the user's overrides.
 
-**Rejected.** Every subfolder of home (the owner's first proposal: one wrong
+**Rejected.** Any single file under home (the first cut of this rule: it
+reached the source files of every other repo under `~/dev`, which no
+#1956/#1957 case needs). Every subfolder of home (the owner's first proposal: one wrong
 `safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
 trees are copied there). Extending the ledger to every Write/Edit/redirect
 (more plumbing, and still misses files from earlier sessions). A slug-matched

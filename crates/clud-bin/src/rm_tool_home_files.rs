@@ -1,11 +1,12 @@
 //! Paths under `$HOME` outside the roots (#1956, #1957).
 //!
-//! A single regular file or symlink strictly under the user's home may be
-//! trashed: an agent that wrote `~/.local/share/applications/x.desktop`, or a
-//! memory file under `~/.claude/projects/<slug>/memory/`, must be able to
-//! take it back. A directory (so any recursive delete) is allowed only
-//! strictly inside the tool data dirs in [`DIR_ROOTS`]; anywhere else under
-//! home it keeps the roots-or-ledger refusal. The personal data folders in
+//! A single regular file or symlink strictly inside the tool and app data
+//! dirs in [`FILE_ROOTS`] may be trashed: an agent that wrote
+//! `~/.local/share/applications/x.desktop`, or a memory file under
+//! `~/.claude/projects/<slug>/memory/`, must be able to take it back. A
+//! directory (so any recursive delete) is allowed only strictly inside the
+//! tool data dirs in [`DIR_ROOTS`]. Anywhere else under home (another repo's
+//! source, a dotfile) keeps the roots-or-ledger refusal. The personal data folders in
 //! [`PERSONAL`] and the credential paths in [`DENYLIST`] are refused
 //! outright, as is a directory that contains a denylisted path. Home itself
 //! and `.git` components are refused earlier, by `resolve`.
@@ -72,6 +73,10 @@ pub const PERSONAL: &[&str] = &[
 /// Tool data dirs a directory may be deleted inside (never the dir itself).
 pub const DIR_ROOTS: &[&str] = &[".claude", ".codex", ".cache"];
 
+/// Dirs a single file may be deleted inside: the tool data dirs plus
+/// `~/.local/share` (desktop entries, icons, app data).
+pub const FILE_ROOTS: &[&str] = &[".claude", ".codex", ".cache", ".local/share"];
+
 /// The reason recorded in the audit log for a path this rule allowed.
 pub const GRANT_REASON: &str = "under $HOME (#1956)";
 
@@ -111,6 +116,15 @@ pub fn dir_allowed(rel: &Path) -> bool {
     parts.len() >= 2 && DIR_ROOTS.iter().any(|root| parts[0] == *root)
 }
 
+/// Whether a single file at `rel` lies strictly inside one of [`FILE_ROOTS`].
+pub fn file_allowed(rel: &Path) -> bool {
+    let parts = lowered(rel);
+    FILE_ROOTS.iter().any(|root| {
+        let want = split(root);
+        parts.len() > want.len() && parts[..want.len()] == want[..]
+    })
+}
+
 /// Whether `path` (canonical parent + final name, existing) may be deleted
 /// under `home` (ownership is the caller's check). `Ok(false)` means the
 /// rule does not apply (so the caller keeps its own refusal); `Err` is a
@@ -138,5 +152,9 @@ pub fn check(path: &Path, is_dir: bool, home: Option<&Path>) -> Result<bool, Str
              allowed roots; ask the user to remove it"
         ));
     }
-    Ok(!is_dir || dir_allowed(rel))
+    Ok(if is_dir {
+        dir_allowed(rel)
+    } else {
+        file_allowed(rel)
+    })
 }

@@ -164,10 +164,12 @@ Outside every root and without a ledger entry, `rm_tool_home_files` still
 allows some paths strictly under `$HOME`, owned by the caller on Unix, and
 always trashes them:
 
-- **A single file or symlink** anywhere under home. The ledger records only
-  `safe-mktemp`, so a file the agent wrote with Write, `cp` or `install` (a
-  `.desktop` entry, a Claude Code memory file) could otherwise never be taken
-  back.
+- **A single file or symlink** only strictly inside a dir in `FILE_ROOTS`
+  (`~/.claude`, `~/.codex`, `~/.cache`, `~/.local/share`). The ledger
+  records only `safe-mktemp`, so a file the agent wrote with Write, `cp` or
+  `install` (a `.desktop` entry, a Claude Code memory file) could otherwise
+  never be taken back. A file anywhere else under home (another repo's
+  source, a dotfile) keeps the refusal.
 - **A directory, recursively,** only strictly inside a tool data dir in
   `DIR_ROOTS` (`~/.claude`, `~/.codex`, `~/.cache`), never the dir itself. A
   directory anywhere else under home (`~/dev/project`) keeps the refusal.
