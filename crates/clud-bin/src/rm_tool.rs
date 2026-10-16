@@ -460,7 +460,9 @@ impl Roots {
             Ok(true) => {
                 self.ledger_grants
                     .insert(path.to_path_buf(), home_files::GRANT_REASON.into());
-                Some(Ok(path.parent().map_or(path.to_path_buf(), Path::to_path_buf)))
+                Some(Ok(path
+                    .parent()
+                    .map_or(path.to_path_buf(), Path::to_path_buf)))
             }
         }
     }
