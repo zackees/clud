@@ -589,7 +589,9 @@ fn report_presence_end(end: PresenceEnd, interrupted: &AtomicBool) {
     match end {
         PresenceEnd::Stopped => {}
         PresenceEnd::ClaimLost(error) => {
-            eprintln!("[clud] checkout claim lost after daemon restart: {error}; stopping this session");
+            eprintln!(
+                "[clud] checkout claim lost after daemon restart: {error}; stopping this session"
+            );
             interrupted.store(true, Ordering::SeqCst);
         }
         PresenceEnd::Disabled(error) => {
