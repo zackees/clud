@@ -680,6 +680,11 @@ Skills and hooks:
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
+- `codex_cmd_scan_install.rs` - issue #1972: Codex global-setup pass that
+  keeps a `matcher: "*"` `clud-cmd-scan` PreToolUse entry in
+  `~/.codex/hooks.json` and its `hooks.state` trust in `~/.codex/config.toml`
+  (same lock; never duplicates, never clobbers malformed files). See
+  [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#global-codex-hook-1972).
 
 Diagnostics and misc:
 

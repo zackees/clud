@@ -932,13 +932,7 @@ fn build_launch_plan_for_target_at(
 }
 
 fn codex_hook_hash(command: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let value = serde_json::json!({
-        "event_name": "pre_tool_use",
-        "hooks": [{"async": false, "command": command, "timeout": 600, "type": "command"}],
-        "matcher": "Bash",
-    });
-    format!("sha256:{:x}", Sha256::digest(value.to_string().as_bytes()))
+    crate::codex_cmd_scan_install::codex_hook_trust_hash("Bash", command, 600)
 }
 
 fn existing_codex_instructions(args: &Args) -> Option<String> {

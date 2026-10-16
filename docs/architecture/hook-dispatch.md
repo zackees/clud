@@ -244,8 +244,9 @@ refused. PR/CI refusals spell out `clud tool run github/pr_merge_watch.py
 <PR> [--repo OWNER/NAME] [--timeout SECS]` under `run_in_background`. The
 helpers live in `block_bad_cmd_wait_scan.rs`; the audit's regression corpus
 is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`, run by
-`block_bad_cmd_wait_scan_tests.rs`. Codex sessions get no `cmd-scan` hook from
-clud, so none of this runs there.
+`block_bad_cmd_wait_scan_tests.rs`. Codex sessions run it through the
+session-flag hook clud injects at launch and, for a bare `codex`, the global
+entry described in [Global Codex hook](#global-codex-hook-1972).
 
 ### Repeated-call guard (#1674)
 
@@ -331,8 +332,36 @@ into each frontend's native surface and passes it at launch:
   launch. clud injects a `clud-cmd-scan` command hook and a trusted hash for
   its exact canonical JSON, without bypassing hook trust. It also injects
   generated deletion instructions through `developer_instructions`. Existing
-  user hooks and instructions are preserved. clud does not write to
-  `~/.codex/hooks.json` or `config.toml`.
+  user hooks and instructions are preserved. The one exception to "never
+  written to files" is the global scanner entry below.
+
+### Global Codex hook (#1972)
+
+The `-c` hook only guards Codex sessions clud launches. A bare `codex` in any
+other repo ran unguarded (the #1972 audit counted ~1,300 Codex `exec` wait
+loops), so every Codex global launch setup also runs
+`codex_cmd_scan_install.rs` (action `codex-cmd-scan-install` in
+`launch_setup.rs`, after `codex-hook-normalize`):
+
+- `~/.codex/hooks.json` gets `{"matcher":"*","hooks":[{"type":"command","command":"clud-cmd-scan"}]}`
+  appended to `hooks.PreToolUse`, unless any handler there already runs
+  `clud-cmd-scan` (whatever its matcher). The file is created if missing.
+- `~/.codex/config.toml` gets `[hooks.state."<hooks.json path>:pre_tool_use:G:H"]
+  trusted_hash = "sha256:..."` for that handler, because Codex runs no file
+  hook it has not trusted. An existing entry for the key is never overwritten.
+- Read-modify-write under `~/.clud/settings.lock`, like `codex_hook_normalize`.
+  Malformed JSON/TOML or an unexpected shape is logged (verbose) and left
+  untouched; unknown fields and other hooks are preserved; nothing is
+  rewritten when nothing changed. Codex's `[features] hooks` flag is not
+  touched: current Codex runs hooks by default, which the `-c` path already
+  relies on, and an explicit `hooks = false` is the user's choice.
+- Opt out with `"hooks": {"codex_global_cmd_scan": false}` in
+  `~/.clud/settings.json`; removing the entry by hand without that switch
+  gets it reinstalled on the next launch.
+- A clud-launched Codex session sees both hooks, so a Bash call is scanned
+  twice. The verdicts agree; the repeated-call guard counts each call twice.
+
+Rationale: [DD-171](../DESIGN_DECISIONS.md#dd-171-codex-gets-a-global-clud-cmd-scan-hook-written-to-its-user-config).
 
 This removes a whole hazard class that writing files would carry: idempotence,
 read-modify-write lost updates, two writers fighting over one file (the #847
