@@ -38,6 +38,14 @@ test ─ Harness ─ claude -p … (real Claude Code, isolated config)
   - a git repo on `main` with a bare `origin`
   - a fake `gh` backed by a JSON state file
   - a hook recorder chained before the real `clud-cmd-scan`
+- **`Harness.run` vs `Harness.run_clud`:** `run` launches `claude -p`
+  directly. `run_clud` launches the real `clud --openrouter -p` (#1984), so
+  clud's own launch is under test: its `--settings` hooks (PreToolUse,
+  `UserPromptSubmit`), its route env and a disposable daemon. The OpenRouter
+  key comes from a test vault, and the debug-only
+  `CLUD_TEST_DIRECT_UPSTREAM_URL` (with `CLUD_INTEGRATION_TESTS=1`) points the
+  direct route at the scripted mock. `tool_results()` reads the JSONL stream's
+  `tool_result` blocks. Example: `test_worktree_consent_e2e.py`.
 - **Assertions** read three logs: the requests that reached the model, the
   hook calls (with each call's `agent_type`), and the world state (git refs,
   fake-GitHub PRs).
