@@ -49,7 +49,7 @@ impl fmt::Display for IncompatibleDaemonVersion {
 
 impl std::error::Error for IncompatibleDaemonVersion {}
 
-fn incompatible_daemon_error(info: &DaemonInfo) -> io::Error {
+pub(super) fn incompatible_daemon_error(info: &DaemonInfo) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
         IncompatibleDaemonVersion {

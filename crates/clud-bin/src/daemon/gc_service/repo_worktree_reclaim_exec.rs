@@ -289,7 +289,7 @@ pub(crate) fn run_reclaim_with(
     ReclaimOutcome::Removed { notes }
 }
 
-/// Issue #1486: reclaim an unused `tmp-wt` reservation. Re-probes it from
+/// Issue #1486: reclaim an unused `worktrees` reservation. Re-probes it from
 /// scratch (fresh process table, fresh emptiness, fresh age), requires the
 /// unchanged `reserved-unused` verdict ([`reverify_reservation`]), then
 /// calls `remove_dir`, which the OS refuses for a directory that gained an

@@ -12,8 +12,13 @@ use super::*;
 
 const CORPUS: &str = include_str!("../tests/fixtures/wait_loop/corpus.json");
 
+/// The first command's words, as the evaluated syntax tree reads them.
 fn words(text: &str) -> Vec<String> {
-    tokenize(text)
+    parse_command(text, ShellDialect::Posix, None)
+        .invocations
+        .first()
+        .map(|invocation| invocation.argv())
+        .unwrap_or_default()
 }
 
 /// The decision the hook reaches for one corpus entry, with its files

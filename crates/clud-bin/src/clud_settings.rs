@@ -264,7 +264,7 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
     }
 
     if let Some(worktrees) = seed_object_entry(document, "worktrees") {
-        // #1485: warn-only size threshold for ~/.clud/tmp-wt; 0 disables.
+        // #1485: warn-only size threshold for ~/.clud/worktrees; 0 disables.
         worktrees
             .entry("warn_bytes".to_string())
             .or_insert(json!(crate::gc::worktree_root::DEFAULT_WARN_BYTES));
@@ -929,7 +929,7 @@ pub fn gc_delete_remote_branches_from(document: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// `worktrees.warn_bytes` (#1485): when `~/.clud/tmp-wt` grows past this,
+/// `worktrees.warn_bytes` (#1485): when `~/.clud/worktrees` grows past this,
 /// `clud gc list` warns. Warn-only: size never deletes pinned work. `0`
 /// disables; absent or not a non-negative integer means the default.
 pub fn load_worktrees_warn_bytes() -> Result<u64, SettingsError> {

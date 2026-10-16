@@ -45,7 +45,7 @@ silently with no error. Signs of this failure:
 
 - the router's turn ended with no Workflow `tool_use` in the transcript;
 - `~/.clud/tmp/grind/<session>.json` gets no run-facts update and no
-  worktree appears under `~/.clud/tmp-wt/`;
+  worktree appears under `~/.clud/worktrees/`;
 - `--disallowedTools` in `clud --dry-run ... grind <url>` names Workflow.
 
 The remedy is to rerun on the Claude route or on a model that supports tool

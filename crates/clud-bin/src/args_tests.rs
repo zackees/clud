@@ -376,6 +376,13 @@ fn deepseek_harness_accepts_model_only_when_clud_routes_the_model() {
 }
 
 #[test]
+fn doctor_is_a_dispatched_subcommand() {
+    let args = parse(&["clud", "doctor"]);
+    assert!(matches!(args.command, Some(Command::Doctor)));
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
 fn dsh_update_is_a_dispatched_subcommand() {
     let args = parse(&["clud", "dsh-update"]);
     assert!(matches!(args.command, Some(Command::DshUpdate)));

@@ -1,6 +1,6 @@
 # clud-issue-triage/
 
-Bundled skill that triages GitHub issues for the user - closing only issues that a merged PR on the default branch unambiguously resolves, and silently filing follow-up issues for substantive un-addressed CodeRabbit comments. Triggered when the user types `/clud-issue-triage` (optionally with an issue number/URL or `all`), or asks to "triage issues", "sweep stale issues", or "clean up the issue tracker". Supports three modes: single-issue (handled directly), last-7-days bulk (no arg), and `all` open issues; bulk modes dispatch one parallel sub-agent per issue inside disposable `.claude/worktrees/triage-<num>/` worktrees and tear them down on completion. Output is two lines per issue: closure decision plus one-line evidence, and any follow-up issues filed.
+Bundled skill that triages GitHub issues for the user - closing only issues that a merged PR on the default branch unambiguously resolves, and silently filing follow-up issues for substantive un-addressed CodeRabbit comments. Triggered when the user types `/clud-issue-triage` (optionally with an issue number/URL or `all`), or asks to "triage issues", "sweep stale issues", or "clean up the issue tracker". Supports three modes: single-issue (handled directly), last-7-days bulk (no arg), and `all` open issues; bulk modes dispatch one parallel sub-agent per issue inside disposable `~/.clud/worktrees/<repo>-wt-<num>/` worktrees and tear them down on completion. Output is two lines per issue: closure decision plus one-line evidence, and any follow-up issues filed.
 
 ## Files
 

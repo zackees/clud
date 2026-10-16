@@ -4,7 +4,7 @@ clud names a host platform in exactly one kind of place: a **platform
 boundary**. Everywhere else, the code is neutral and calls a host-independent
 API. The `enforce_platform_boundary` Dylint lint enforces this with no
 baseline and no allowlist (#1946, #1953;
-[DD-170](../DESIGN_DECISIONS.md#dd-170-the-platform-boundary-has-no-exceptions)).
+[DD-172](../DESIGN_DECISIONS.md#dd-172-the-platform-boundary-has-no-exceptions)).
 soldr, zccache and fbuild enforce the same boundary.
 
 ## What counts as naming a host

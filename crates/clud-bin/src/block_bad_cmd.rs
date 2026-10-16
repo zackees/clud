@@ -15,16 +15,15 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Cap on `$(...)`/backtick/subshell recursion depth (zackees/clud#519).
-/// Past this depth the hook fails open (allows, logs a warning) rather
-/// than denying or risking a stack overflow on pathological input —
+/// Cap on `$(...)`/backtick/nested-shell depth (zackees/clud#519), enforced
+/// by `shell_ast`. Past it the hook fails open (allows, logs a warning)
+/// rather than denying or risking a stack overflow on pathological input —
 /// this hook is a friction-reducing nudge, not a security sandbox.
-const MAX_SUBSTITUTION_RECURSION_DEPTH: usize = 8;
+const MAX_SUBSTITUTION_RECURSION_DEPTH: usize = crate::shell_ast::MAX_DEPTH;
 /// Env var read for the `bad_commands` override escape hatch. Read
 /// only from the real process environment, never parsed out of the
-/// command text — see zackees/clud#519 comment thread for why
-/// text-parsing this would race `command_words()`'s own env-assignment
-/// stripping.
+/// command text — see zackees/clud#519 comment thread for why: a
+/// `VAR=x cmd` prefix is the command's own environment, not the hook's.
 const BAD_CMD_OVERRIDE_ENV: &str = "CLUD_BAD_CMD_OVERRIDE";
 const PR_WATCH_REPLACEMENT: &str = "clud tool run github/pr_merge_watch.py <PR>";
 
@@ -63,7 +62,6 @@ const LEGACY_RUST_TRAMPOLINES: &[&str] = &[
     concat!("_rust", "c"),
     concat!("_rust", "fmt"),
 ];
-const SHELL_WRAPPERS: &[&str] = &["cmd", "powershell", "pwsh", "bash", "sh", "zsh", "eval"];
 
 pub(crate) const UV_RUN_OPTIONS_WITH_VALUE: &[&str] = &[
     "--allow-insecure-host",
@@ -175,6 +173,9 @@ pub const GIT_WORKTREE_ADD_CAPTURE_KIND: &str = "git-worktree-add";
 /// by default; this is the rule id an agent sets via
 /// `CLUD_BAD_CMD_OVERRIDE` to bypass the guard for one call (zackees/clud#532).
 const CLONE_EXTERN_REPOS_GUARD_RULE_ID: &str = "git-clone-outside-extern-repos";
+/// `git worktree add` destinations outside clud's worktree root are denied
+/// by default (#1962); the override rule id for one call.
+const WORKTREE_ROOT_GUARD_RULE_ID: &str = "git-worktree-add-outside-worktree-root";
 /// zackees/clud#589: `find /` never terminates and, on Windows/MSYS,
 /// leaks handles until the whole host stops being able to start
 /// processes. See `find_filesystem_root_reason`.
@@ -340,6 +341,16 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             .then(block_bad_cmd_cwd_changed::session_parent_root)
             .flatten();
         return block_bad_cmd_cwd_changed::handle_cwd_changed(&stdin.text, parent.as_deref());
+    }
+
+    // #1962/#1971: Claude Code's worktrees, built under `~/.clud/worktrees`
+    // instead of `.claude/worktrees/`. Placement, not policy, so it runs
+    // ahead of every switch below; these events speak their own protocol.
+    if event == crate::claude_worktree_hook::WORKTREE_CREATE_EVENT {
+        return crate::claude_worktree_hook::run_create(&read_stdin_bounded().text);
+    }
+    if event == crate::claude_worktree_hook::WORKTREE_REMOVE_EVENT {
+        return crate::claude_worktree_hook::run_remove(&read_stdin_bounded().text);
     }
 
     // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
@@ -541,6 +552,23 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    // #1962/#1971: nothing may create `.claude/worktrees/` or a new entry in
+    // it; Claude Code's own worktrees are relocated by the WorktreeCreate hook.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = block_bad_cmd_claude_worktrees::reason(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+            &payload.command,
+            shell_dialect_for_tool(&payload.tool_name),
+            &payload.cwd,
+        ) {
+            append_log(&format!("CLAUDE-WORKTREES-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud] {reason}");
+            return 2;
+        }
+    }
+
     // `/grind` role caps: a capped agent's shell call must fit its role.
     if event == PRE_TOOL_USE_EVENT {
         if let Some(reason) = grind_caps_reason(&payload) {
@@ -671,6 +699,12 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     } else {
         None
     };
+    // #1962: worktrees belong under clud's worktree root.
+    let worktree_root = if may_touch_git_paths {
+        crate::gc::worktree_root::worktree_root()
+    } else {
+        None
+    };
     // Best-effort: a missing/unreadable global settings file must never
     // block the hook itself — fall back to the documented off default.
     let pr_wait_fail_fast_enabled =
@@ -684,6 +718,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         &config.bad_pipelines,
         shell_dialect_for_tool(&payload.tool_name),
         repo_root.as_deref(),
+        worktree_root.as_deref(),
         pr_wait_fail_fast_enabled,
         rust_use_soldr,
         // #1083: a shell-shaped tool labeled powershell/pwsh/cmd still gets the
@@ -845,87 +880,81 @@ fn git_mutation_targets(
     if !command_text.to_ascii_lowercase().contains("git") {
         return Ok(Vec::new());
     }
-    let ambiguous_cd = command_text.contains('|');
-    let mut directories = vec![cwd.to_path_buf()];
+    let script = parse_command(command_text, dialect, Some(cwd));
+    let inherited_git_env = script
+        .assigned
+        .iter()
+        .any(|name| name == "GIT_WORK_TREE" || name == "GIT_DIR");
     let mut targets = Vec::new();
-    let mut inherited_git_env = false;
-    for segment in split_shell_segments(command_text, dialect) {
-        let words = command_words(&segment);
-        let raw_words = tokenize(&segment);
-        let Some(first) = words.first() else {
-            inherited_git_env |= raw_words
-                .iter()
-                .any(|word| word.starts_with("GIT_WORK_TREE=") || word.starts_with("GIT_DIR="));
-            continue;
-        };
-        let program = program_name(first);
-        if program == "export" {
-            inherited_git_env |= raw_words
-                .iter()
-                .any(|word| word.starts_with("GIT_WORK_TREE=") || word.starts_with("GIT_DIR="));
-            continue;
-        }
-        if matches!(program.as_str(), "cd" | "pushd") {
-            let path_index = if words.get(1).is_some_and(|word| word == "--") {
-                2
-            } else {
-                1
-            };
-            if let Some(path) = words.get(path_index) {
-                let next = directories
-                    .iter()
-                    .map(|dir| dir.join(path))
-                    .collect::<Vec<_>>();
-                if !ambiguous_cd {
-                    directories.clear();
-                }
-                directories.extend(next);
-                if directories.len() > 16 {
-                    return Err("cannot verify checkout after many directory changes; run Git in a separate tool call".to_string());
-                }
-            }
-            continue;
-        }
-        if !program.eq_ignore_ascii_case("git") && !program.eq_ignore_ascii_case("git.exe") {
+    for invocation in &script.invocations {
+        let words = rule_words(invocation);
+        if words
+            .first()
+            .is_none_or(|first| program_name(first) != "git")
+        {
             continue;
         }
         if inherited_git_env {
             return Err("cannot verify Git checkout after changing Git environment; run Git in a separate tool call".to_string());
         }
-        let git_index = raw_words
-            .iter()
-            .position(|word| matches!(program_name(word).as_str(), "git" | "git.exe"))
-            .unwrap_or(0);
-        let assignments = &raw_words[..git_index];
-        if assignments.iter().any(|word| {
-            word == "-C"
-                || word.starts_with("-C")
-                || word == "--chdir"
-                || word.starts_with("--chdir=")
-        }) {
-            return Err(
-                "cannot verify Git checkout after env --chdir; run Git in a separate tool call"
-                    .to_string(),
-            );
-        }
-        let env_work_tree = assignments
-            .iter()
-            .rev()
-            .find_map(|word| word.strip_prefix("GIT_WORK_TREE="));
-        let env_git_dir = assignments
-            .iter()
-            .rev()
-            .find_map(|word| word.strip_prefix("GIT_DIR="));
-        for directory in &directories {
-            if let Some(target) = git_segment_target(&words, directory, env_work_tree, env_git_dir)?
-            {
-                if !targets.contains(&target) {
-                    targets.push(target);
-                }
+        if let Some(target) = git_invocation_target(invocation, &words)? {
+            if !targets.contains(&target) {
+                targets.push(target);
             }
         }
     }
     Ok(targets)
+}
+
+/// Where one `git` invocation acts, read from its evaluated cwd, the
+/// `GIT_WORK_TREE` / `GIT_DIR` it is given, and its own options.
+fn git_invocation_target(
+    invocation: &crate::shell_ast::Invocation,
+    words: &[String],
+) -> Result<Option<PathBuf>, String> {
+    let argv = invocation.argv();
+    let git_index = argv
+        .iter()
+        .position(|word| program_name(word) == "git")
+        .unwrap_or(0);
+    let launcher = &argv[..git_index];
+    if launcher
+        .iter()
+        .any(|word| word.starts_with("-C") || word == "--chdir" || word.starts_with("--chdir="))
+    {
+        return Err(
+            "cannot verify Git checkout after env --chdir; run Git in a separate tool call"
+                .to_string(),
+        );
+    }
+    let env_value = |name: &str| -> Result<Option<String>, String> {
+        let prefix = format!("{name}=");
+        if let Some(word) = launcher
+            .iter()
+            .rev()
+            .find_map(|word| word.strip_prefix(&prefix))
+        {
+            return Ok(Some(word.to_string()));
+        }
+        match invocation.env.iter().rev().find(|(key, _)| key == name) {
+            Some((_, crate::shell_ast::Value::Literal(value))) => Ok(Some(value.clone())),
+            Some(_) => Err(format!(
+                "cannot verify Git checkout: {name} is only known when the command runs"
+            )),
+            None => Ok(None),
+        }
+    };
+    let env_work_tree = env_value("GIT_WORK_TREE")?;
+    let env_git_dir = env_value("GIT_DIR")?;
+    let Some(cwd) = invocation.cwd.as_literal() else {
+        return Err("cannot verify Git checkout after a directory change only known when the command runs; run Git in a separate tool call".to_string());
+    };
+    git_segment_target(
+        words,
+        Path::new(cwd),
+        env_work_tree.as_deref(),
+        env_git_dir.as_deref(),
+    )
 }
 
 fn git_segment_target(
@@ -1462,10 +1491,9 @@ fn capture_git_paths_without_policy(payload: &HookPayloadView) {
     }
     let repo_root = locate_repo_root_from(&payload.cwd);
     let dialect = shell_dialect_for_tool(&payload.tool_name);
-    let command = strip_heredoc_bodies(&payload.command);
-    for segment in split_shell_segments(&command, dialect) {
-        let words = command_words(segment.trim());
-        if let Some(capture) = detect_git_path_capture(&words, Some(&payload.cwd)) {
+    let script = parse_command(&payload.command, dialect, Some(&payload.cwd));
+    for invocation in &script.invocations {
+        if let Some(Ok(capture)) = detect_git_path(invocation, Some(&payload.cwd)) {
             report_git_path_capture_to_daemon(&capture, repo_root.as_deref());
         }
     }
@@ -1797,6 +1825,7 @@ fn evaluate_command_with_policy_dialect_and_repo_root(
         bad_pipelines,
         dialect,
         repo_root,
+        None,  // worktree_root — the location guard is off for these callers
         true,  // pr_wait_fail_fast_enabled
         true,  // rust_use_soldr — default blocking for tests/legacy callers
         false, // force_rm_resolver — only run()'s shell-tool path forces it
@@ -1823,6 +1852,7 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
     bad_pipelines: &[BadPipelineRule],
     dialect: ShellDialect,
     repo_root: Option<&Path>,
+    worktree_root: Option<&Path>,
     pr_wait_fail_fast_enabled: bool,
     rust_use_soldr: bool,
     force_rm_resolver: bool,
@@ -1833,6 +1863,7 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         bad_commands,
         bad_pipelines,
         repo_root,
+        worktree_root,
         pr_wait_fail_fast_enabled,
         rust_use_soldr,
     };
@@ -1848,6 +1879,10 @@ struct EvaluationContext<'a> {
     bad_commands: &'a [BadCommandRule],
     bad_pipelines: &'a [BadPipelineRule],
     repo_root: Option<&'a Path>,
+    /// clud's worktree root (`~/.clud/worktrees`): the only place, besides
+    /// /grind's feature directory, a `git worktree add` may land (#1962).
+    /// `None` disables that guard.
+    worktree_root: Option<&'a Path>,
     pr_wait_fail_fast_enabled: bool,
     /// When false (`.clud/settings.local.json` sets `rust.use_soldr = false`),
     /// the hook skips built-in blocking of bare `cargo`/`rustc`/`rustfmt` etc.
@@ -1856,24 +1891,19 @@ struct EvaluationContext<'a> {
     rust_use_soldr: bool,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
+/// Evaluate `command_text` against every rule, recording the first denial.
+///
+/// The command is parsed once into evaluated invocations (#1962), which
+/// already include the commands inside substitutions, subshells and nested
+/// shells, so every rule sees every command without re-splitting text.
+/// `_depth` is kept for callers; recursion now lives in `shell_ast`.
 fn evaluate_command_into(
     command_text: &str,
     context: &EvaluationContext<'_>,
     dialect: ShellDialect,
-    depth: usize,
+    _depth: usize,
     evaluation: &mut CommandEvaluation,
 ) {
-    if depth > MAX_SUBSTITUTION_RECURSION_DEPTH {
-        evaluation.log_messages.push(format!(
-            "substitution recursion depth {depth} exceeds cap {MAX_SUBSTITUTION_RECURSION_DEPTH}; failing open on remainder of command"
-        ));
-        return;
-    }
-
     if command_text.to_ascii_lowercase().contains(SENTINEL_PHRASE) {
         evaluation.reason = Some(format!(
             "command contains {:?}. Full command: {}",
@@ -1882,269 +1912,246 @@ fn evaluate_command_into(
         ));
         return;
     }
-
-    // Heredoc bodies are data, not commands, at every recursion depth: a
-    // heredoc nested inside a `$(...)`/backtick/`<(...)` substitution is
-    // extracted verbatim by scan_command_substitutions below and recurses
-    // here with its heredoc still attached, so a depth-0-only strip would
-    // miss it (zackees/clud#1540).
-    let raw_command_text = command_text;
-    let command_text_owned = strip_heredoc_bodies(command_text);
-    let command_text = command_text_owned.as_str();
-
-    for inner in scan_command_substitutions(command_text) {
-        evaluate_command_into(&inner, context, dialect, depth + 1, evaluation);
-        if evaluation.reason.is_some() {
-            return;
-        }
+    let script = parse_command(command_text, dialect, context.cwd);
+    if script.depth_capped {
+        evaluation.log_messages.push(format!(
+            "substitution recursion depth exceeds cap {MAX_SUBSTITUTION_RECURSION_DEPTH}; failing open on remainder of command"
+        ));
     }
-
-    if let Some(reason) =
-        evaluate_pipeline_rules(command_text, context.bad_pipelines, dialect, evaluation)
-    {
-        evaluation.reason = Some(reason);
+    evaluation.reason = script_level_reason(&script, command_text, context, evaluation);
+    if evaluation.reason.is_some() {
         return;
     }
-
-    let shim_active = std::env::var(crate::shim_registry::GH_ACTIVE_KEY).as_deref() == Ok("1");
-    if context.pr_wait_fail_fast_enabled {
-        if let Some(reason) = blocking_pr_wait_reason(command_text, dialect, shim_active) {
+    for invocation in &script.invocations {
+        if let Some(reason) = invocation_reason(invocation, context, evaluation) {
             evaluation.reason = Some(reason);
-            return;
-        }
-    }
-
-    // #1880: every hand-written wait, PR-related or not, for every agent.
-    // #1972: judged on the raw text, so a heredoc-fed or heredoc-written
-    // script is read too.
-    let scan = ScanContext {
-        cwd: context.cwd,
-        native_gate: context.pr_wait_fail_fast_enabled,
-        shim_active,
-    };
-    if let Some(reason) = hand_written_wait_reason(raw_command_text, dialect, scan, evaluation) {
-        evaluation.reason = Some(reason);
-        return;
-    }
-
-    for segment in split_shell_segments(command_text, dialect) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        // #519: bare `(...)` subshell grouping in command position. This was
-        // assumed to fall out of tokenization — it does not. `(playwright run)`
-        // tokenizes with `words[0] == "(playwright"`, which matches no rule,
-        // so the segment sailed through.
-        //
-        // Only stripped at the *start of a segment*, which is the only place a
-        // `(` opens a subshell. Treating every `(` as one would deny
-        // `echo "(playwright run)"`, where the parens are literal text — the
-        // same class of false positive that keeps `rg playwright` allowed.
-        let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
-        if segment.is_empty() {
-            continue;
-        }
-        let words = command_words(segment);
-        if words.is_empty() {
-            continue;
-        }
-
-        let first = program_name(&words[0]);
-
-        // #1082: a script handed to a non-whitelisted `-c` shell (`dash`,
-        // `ksh`, `busybox sh`, `uv run bash`, `find … -exec sh -c …`) is real
-        // executable text, but `nested_shell_command`'s recursion only reaches
-        // the denylist path — never the rm-variable resolver. Run the resolver
-        // on the extracted script directly so `dash -c 'rm -rf "$V"/'` denies
-        // like `bash -c` already does. Benign scripts (`ls`, `echo hi`) resolve
-        // Unchanged and fall through unharmed.
-        if let Some((nested, nested_dialect)) = nested_shell_command(&words, dialect) {
-            evaluate_command_into(&nested, context, nested_dialect, depth + 1, evaluation);
-            if evaluation.reason.is_some() {
-                return;
-            }
-            continue;
-        }
-
-        if let Some(capture) = detect_git_path_capture(&words, context.cwd) {
-            if let Some(reason) =
-                extern_repos_violation_reason(&capture, context.repo_root, evaluation)
-            {
-                evaluation.reason = Some(reason);
-                return;
-            }
-            evaluation.git_path_captures.push(capture);
-        }
-
-        if let Some(reason) = find_filesystem_root_reason(&words, evaluation) {
-            evaluation.reason = Some(reason);
-            return;
-        }
-
-        if let Some(reason) = evaluate_structured_rules(&words, context.bad_commands, evaluation) {
-            evaluation.reason = Some(reason);
-            return;
-        }
-
-        if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &first) {
-            evaluation.reason = Some(format!(
-                "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
-                first.trim_start_matches('_'),
-                words[0]
-            ));
-            return;
-        }
-
-        if first == "soldr" {
-            continue;
-        }
-
-        if first == "uv" && words.len() > 1 && words[1] == "run" {
-            if let Some(tool) = resolve_uv_run_tool(&words) {
-                let tool_bare = program_name(&tool);
-                if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &tool_bare) {
-                    evaluation.reason = Some(format!(
-                        "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
-                        tool_bare.trim_start_matches('_'),
-                        tool
-                    ));
-                    return;
-                }
-                if context.rust_use_soldr && contains_str(RUST_TOOLS, &tool_bare) {
-                    evaluation.reason = Some(format!(
-                        "Use `soldr {tool_bare} ...` instead of `uv run {tool} ...`. `uv run <rust-tool>` bypasses soldr's toolchain selection."
-                    ));
-                    return;
-                }
-            }
-
-            let uv_safe_flags = ["--no-project", "--no-sync", "--frozen"];
-            let has_uv_safe_flag = words[2..].iter().any(|word| {
-                uv_safe_flags
-                    .iter()
-                    .any(|flag| word == flag || word.starts_with(&format!("{flag}=")))
-            });
-            if !has_uv_safe_flag {
-                if let Some(hybrid_root) = python_rust_hybrid_root(context.cwd) {
-                    if context.allow_hybrid_uv_run {
-                        evaluation.log_messages.push(format!(
-                            "CLUD_UV_RUST_ALLOW_ALL=1 bypassed hybrid block at {}",
-                            hybrid_root.display()
-                        ));
-                        evaluation
-                            .warnings
-                            .push(hybrid_bypass_warning(&hybrid_root));
-                    } else {
-                        evaluation.reason = Some(format!(
-                            "this hook fired because {} contains both pyproject.toml and Cargo.toml (a Python+Rust hybrid project). `uv run` without --no-project / --no-sync / --frozen triggers the project auto-sync, which on a Rust-backed wheel is a full native rebuild. Pass `--no-project` for pure-Python scripts, `--no-sync` to use the existing venv, or `--frozen` to lock to the existing lockfile. Escape hatch for a legitimate full-rebuild: run `./test` (or `bash ./test`) - the canonical full-build entrypoint. Set CLUD_UV_RUST_ALLOW_ALL=1 to bypass this gate with a warning. See zackees/soldr#805.",
-                            hybrid_root.display()
-                        ));
-                        return;
-                    }
-                }
-            }
-            continue;
-        }
-
-        if context.rust_use_soldr && contains_str(RUST_TOOLS, &first) {
-            evaluation.reason = Some(format!(
-                "Use `soldr {first} ...` instead of bare `{first}`. soldr resolves the pinned rustup-managed toolchain and avoids GNU/Chocolatey shims."
-            ));
             return;
         }
     }
 }
 
-fn blocking_pr_wait_reason(
+/// Rules that read the whole script: pipelines and waits.
+fn script_level_reason(
+    script: &crate::shell_ast::Script,
     command_text: &str,
-    dialect: ShellDialect,
-    shim_active: bool,
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
 ) -> Option<String> {
-    // Heredoc bodies are data, not commands. The depth-0 caller already
-    // strips them, but this function is also reached recursively with
-    // substitution-inner text that still carries its heredoc (a commit
-    // message quoting `gh pr checks --watch` must not read as a waiter).
-    let stripped = strip_heredoc_bodies(command_text);
-    let segments = split_shell_segments(&stripped, dialect);
-    for segment in &segments {
-        // #1972: peel `timeout`, `nohup`, `env`, `VAR=`, `stdbuf`, `nice`,
-        // `xargs`, ... and the gate prefix (`tap gh ...`), so a wrapper
-        // cannot hide the waiter.
-        let words = block_bad_cmd_wait_scan::peel_wrappers(&command_words(segment)).words;
+    if let Some(reason) =
+        evaluate_pipeline_rules(script, command_text, context.bad_pipelines, evaluation)
+    {
+        return Some(reason);
+    }
+    let shim_active = std::env::var(crate::shim_registry::GH_ACTIVE_KEY).as_deref() == Ok("1");
+    if context.pr_wait_fail_fast_enabled {
+        if let Some(reason) = blocking_pr_wait_reason(script, shim_active) {
+            return Some(reason);
+        }
+    }
+    // #1880: every hand-written wait, PR-related or not, for every agent.
+    // #1972: a wrapper, an embedded script or a written script does not
+    // launder it.
+    let scan = ScanContext {
+        cwd: context.cwd,
+        native_gate: context.pr_wait_fail_fast_enabled,
+        shim_active,
+    };
+    hand_written_wait_reason(script, command_text, scan, evaluation)
+}
+
+/// Rules that read one command.
+fn invocation_reason(
+    invocation: &crate::shell_ast::Invocation,
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    if let Some(reason) = git_path_reason(invocation, context, evaluation) {
+        return Some(reason);
+    }
+    let words = rule_words(invocation);
+    if words.is_empty() {
+        return None;
+    }
+    if invocation.program_is_unknown() && !context.bad_commands.is_empty() {
+        // Unknown policy for config rules: the program is only known at run
+        // time, so say so instead of guessing a match.
+        evaluation.log_messages.push(format!(
+            "BAD_CMD_UNKNOWN_PROGRAM command={:?}: rules keyed on the program cannot be checked",
+            invocation.source
+        ));
+    }
+    if let Some(reason) = find_filesystem_root_reason(&words, evaluation) {
+        return Some(reason);
+    }
+    if let Some(reason) = evaluate_structured_rules(&words, context.bad_commands, evaluation) {
+        return Some(reason);
+    }
+    rust_tool_reason(&words, context, evaluation)
+}
+
+/// Capture `git clone` / `git worktree add` destinations, applying the
+/// location guards first: a denied command never runs, so it is never
+/// tracked.
+fn git_path_reason(
+    invocation: &crate::shell_ast::Invocation,
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    match detect_git_path(invocation, context.cwd)? {
+        Ok(capture) => {
+            if let Some(reason) =
+                extern_repos_violation_reason(&capture, context.repo_root, evaluation)
+            {
+                return Some(reason);
+            }
+            if let Some(reason) =
+                worktree_root_violation_reason(&capture, invocation, context, evaluation)
+            {
+                return Some(reason);
+            }
+            evaluation.git_path_captures.push(capture);
+            None
+        }
+        Err(kind) => unresolved_git_destination_reason(kind, invocation, context, evaluation),
+    }
+}
+
+/// The soldr / `uv run` rules for Rust tools.
+fn rust_tool_reason(
+    words: &[String],
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    let first = program_name(&words[0]);
+    if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &first) {
+        return Some(format!(
+            "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
+            first.trim_start_matches('_'),
+            words[0]
+        ));
+    }
+    if first == "soldr" {
+        return None;
+    }
+    if first == "uv" && words.len() > 1 && words[1] == "run" {
+        return uv_run_reason(words, context, evaluation);
+    }
+    if context.rust_use_soldr && contains_str(RUST_TOOLS, &first) {
+        return Some(format!(
+            "Use `soldr {first} ...` instead of bare `{first}`. soldr resolves the pinned rustup-managed toolchain and avoids GNU/Chocolatey shims."
+        ));
+    }
+    None
+}
+
+fn uv_run_reason(
+    words: &[String],
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    if let Some(tool) = resolve_uv_run_tool(words) {
+        let tool_bare = program_name(&tool);
+        if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &tool_bare) {
+            return Some(format!(
+                "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
+                tool_bare.trim_start_matches('_'),
+                tool
+            ));
+        }
+        if context.rust_use_soldr && contains_str(RUST_TOOLS, &tool_bare) {
+            return Some(format!(
+                "Use `soldr {tool_bare} ...` instead of `uv run {tool} ...`. `uv run <rust-tool>` bypasses soldr's toolchain selection."
+            ));
+        }
+    }
+    let uv_safe_flags = ["--no-project", "--no-sync", "--frozen"];
+    let has_uv_safe_flag = words[2..].iter().any(|word| {
+        uv_safe_flags
+            .iter()
+            .any(|flag| word == flag || word.starts_with(&format!("{flag}=")))
+    });
+    if has_uv_safe_flag {
+        return None;
+    }
+    let hybrid_root = python_rust_hybrid_root(context.cwd)?;
+    if context.allow_hybrid_uv_run {
+        evaluation.log_messages.push(format!(
+            "CLUD_UV_RUST_ALLOW_ALL=1 bypassed hybrid block at {}",
+            hybrid_root.display()
+        ));
+        evaluation
+            .warnings
+            .push(hybrid_bypass_warning(&hybrid_root));
+        return None;
+    }
+    Some(format!(
+        "this hook fired because {} contains both pyproject.toml and Cargo.toml (a Python+Rust hybrid project). `uv run` without --no-project / --no-sync / --frozen triggers the project auto-sync, which on a Rust-backed wheel is a full native rebuild. Pass `--no-project` for pure-Python scripts, `--no-sync` to use the existing venv, or `--frozen` to lock to the existing lockfile. Escape hatch for a legitimate full-rebuild: run `./test` (or `bash ./test`) - the canonical full-build entrypoint. Set CLUD_UV_RUST_ALLOW_ALL=1 to bypass this gate with a warning. See zackees/soldr#805.",
+        hybrid_root.display()
+    ))
+}
+
+fn blocking_pr_wait_reason(script: &crate::shell_ast::Script, shim_active: bool) -> Option<String> {
+    // #1972: peel `timeout`, `nohup`, `env`, `VAR=`, `stdbuf`, `nice`,
+    // `xargs`, ... and the gate prefix (`tap gh ...`), so a wrapper cannot
+    // hide the waiter.
+    let commands: Vec<Vec<String>> = script
+        .invocations
+        .iter()
+        .map(|invocation| block_bad_cmd_wait_scan::peel_wrappers(&rule_words(invocation)).words)
+        .collect();
+    for words in &commands {
         let canonical_shimmed_watch = shim_active
             && gh_positionals(words.get(1..).unwrap_or(&[])).starts_with(&["pr", "checks"])
             && words
                 .iter()
                 .any(|word| word == "--watch" || word.starts_with("--watch="));
-        if native_gh_waiter(&words) && !canonical_shimmed_watch {
+        if native_gh_waiter(words) && !canonical_shimmed_watch {
             return Some(format!(
                 "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. Fallback: `{PR_WATCH_REPLACEMENT}`. {WAIT_REPLACEMENT}"
             ));
         }
     }
 
-    // #1880: a counted `for` loop that sleeps, and a `sleep` chained before
-    // a status read (a loop split across turns), poll just the same.
-    let is_loop = segments.iter().any(|segment| {
-        is_polling_loop_head(segment, dialect) || is_sleep_segment(segment, dialect)
-    });
-    if !is_loop {
-        return None;
-    }
-
-    for inner in scan_command_substitutions(&stripped) {
-        // Heredoc bodies inside a substitution are data, not commands — a
-        // commit message quoting `gh pr checks --watch` must not be denied
-        // as a hand-rolled polling loop.
-        let inner = strip_heredoc_bodies(&inner);
-        let words = command_words(&inner);
-        if gh_poll_target(&words) {
-            return Some(format!(
-                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
-            ));
-        }
-    }
-
-    let words = tokenize(&stripped);
-    for (index, word) in words.iter().enumerate() {
-        if program_name(word) == "gh" && gh_poll_target(&words[index..]) {
-            return Some(format!(
-                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
-            ));
-        }
+    // #1880: an unbounded loop, or a `sleep` chained before a status read (a
+    // loop split across turns), polls just the same. The read may sit in a
+    // substitution (`p=$(gh pr checks 1)`); the invocations include those.
+    // Only the command's own loops and sleeps count here: one inside a
+    // `bash -c` / `eval` / heredoc-fed shell is the hand-written-wait rule's
+    // (#1972), whose refusal names `pr_merge_watch` and honors its override.
+    let own = |invocation: &&crate::shell_ast::Invocation| {
+        invocation.origin != crate::shell_ast::Origin::NestedShell
+    };
+    let unbounded = script
+        .invocations
+        .iter()
+        .filter(own)
+        .any(|invocation| invocation.loop_kind.is_some_and(is_unbounded_loop));
+    let sleeps = script
+        .invocations
+        .iter()
+        .zip(&commands)
+        .filter(|(invocation, _)| own(invocation))
+        .any(|(_, words)| {
+            words
+                .first()
+                .is_some_and(|word| matches!(program_name(word).as_str(), "sleep" | "start-sleep"))
+        });
+    if (unbounded || sleeps) && commands.iter().any(|words| gh_poll_target(words)) {
+        return Some(format!(
+            "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
+        ));
     }
     None
 }
 
-fn is_polling_loop_head(segment: &str, dialect: ShellDialect) -> bool {
-    let words = command_words(segment);
-    let Some(word) = words.first() else {
-        return false;
-    };
-    let head = program_name(word);
-    let keyword = head.split_once('(').map_or(head.as_str(), |(name, _)| name);
-    let compact: String = segment.chars().filter(|ch| !ch.is_whitespace()).collect();
-    match dialect {
-        ShellDialect::Posix => {
-            matches!(keyword, "until" | "while") || compact.starts_with("for((;;))")
-        }
-        ShellDialect::PowerShell => {
-            matches!(keyword, "while" | "do") || compact.starts_with("for(;;)")
-        }
-        ShellDialect::Cmd => false,
-    }
-}
-
-/// A `sleep`/`Start-Sleep` segment, including a loop body's `do sleep 30`.
-fn is_sleep_segment(segment: &str, dialect: ShellDialect) -> bool {
-    let mut words = command_words(segment);
-    if dialect == ShellDialect::Posix && words.first().is_some_and(|word| word == "do") {
-        words.remove(0);
-    }
-    words
-        .first()
-        .is_some_and(|word| matches!(program_name(word).as_str(), "sleep" | "start-sleep"))
+/// A loop with no bound written into it: `while`, `until`, `select`,
+/// `for ((;;))`, PowerShell `do`.
+fn is_unbounded_loop(kind: crate::shell_ast::LoopKind) -> bool {
+    use crate::shell_ast::LoopKind;
+    matches!(
+        kind,
+        LoopKind::While | LoopKind::Until | LoopKind::Do | LoopKind::CStyle { infinite: true }
+    )
 }
 
 fn native_gh_waiter(words: &[String]) -> bool {
@@ -2265,23 +2272,42 @@ fn command_matcher_matches(words: &[String], matcher: &CommandMatcher) -> bool {
             .is_none_or(|arguments| argument_matcher_matches(&candidate[1..], arguments))
 }
 
+/// Each pipeline of two or more stages, as the rule words of every stage's
+/// first command, in stage order.
+fn pipeline_stage_words(script: &crate::shell_ast::Script) -> Vec<Vec<Vec<String>>> {
+    let mut groups: Vec<(usize, Vec<Option<Vec<String>>>)> = Vec::new();
+    for invocation in &script.invocations {
+        let Some(slot) = invocation.pipeline else {
+            continue;
+        };
+        let at = match groups.iter().position(|(id, _)| *id == slot.id) {
+            Some(at) => at,
+            None => {
+                groups.push((slot.id, vec![None; slot.stages]));
+                groups.len() - 1
+            }
+        };
+        let stage = &mut groups[at].1[slot.stage];
+        if stage.is_none() {
+            *stage = Some(rule_words(invocation));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, stages)| stages.into_iter().map(Option::unwrap_or_default).collect())
+        .collect()
+}
+
 fn evaluate_pipeline_rules(
+    script: &crate::shell_ast::Script,
     command_text: &str,
     bad_pipelines: &[BadPipelineRule],
-    dialect: ShellDialect,
     evaluation: &mut CommandEvaluation,
 ) -> Option<String> {
     if bad_pipelines.is_empty() {
         return None;
     }
-    for group in split_pipeline_groups(command_text, dialect) {
-        if group.len() < 2 {
-            continue;
-        }
-        let stages = group
-            .iter()
-            .map(|stage| command_words(stage))
-            .collect::<Vec<_>>();
+    for stages in pipeline_stage_words(script) {
         for rule in bad_pipelines {
             if rule.stages.len() > stages.len() {
                 continue;
@@ -2485,58 +2511,318 @@ fn log_bad_cmd_denied(provenance: &DenialProvenance, payload: &HookPayloadView) 
     append_log(&event.to_string());
 }
 
-/// Detect a `git clone <repo> [<dir>]` or `git worktree add <path>`
-/// invocation in one already-tokenized segment and compute the
-/// destination path it would create (zackees/clud#532). Pure — no
-/// filesystem or git subprocess access, so callers (including tests) can
-/// drive it with fabricated `words`/`cwd` and no real repo.
+/// Detect a `git clone <repo> [<dir>]` or `git worktree add <path>` and
+/// compute the destination it creates (zackees/clud#532, #1962). Pure: no
+/// filesystem or git access.
 ///
-/// Deliberately a pragmatic subset: recognizes the common `clone`/`add`
-/// flags that take a value so they don't get mistaken for the
-/// destination positional, but does not attempt to model every git flag
-/// (e.g. a leading global `git -C <dir> clone ...`). Unrecognized shapes
-/// simply return `None` — a missed capture just means that one call isn't
-/// eagerly tracked (the daemon-owned watcher is still a fallback for anything
-/// landing under the conventional directories), it
-/// never blocks or misreports a command.
-fn detect_git_path_capture(words: &[String], cwd: Option<&Path>) -> Option<GitPathCapture> {
-    // `command_words` already unwraps `env`/`command`/`exec` for every
-    // segment, but `sudo` is only unwrapped per-rule (opt-in via
-    // `through_wrappers`) elsewhere in this file, so `sudo git clone ...`
-    // would otherwise reach here with `words[0] == "sudo"` and silently
-    // skip both tracking and the .extern-repos guard (zackees/clud#532).
-    let unwrapped;
-    let words = if program_name(words.first()?) == "sudo" {
-        unwrapped = unwrap_sudo(words)?;
-        unwrapped
-    } else {
-        words
-    };
-    if program_name(words.first()?) != "git" {
+/// Reads one evaluated invocation, so the spelling does not matter: git's
+/// global options (`-C`, `-c`, `--git-dir`, ...) are skipped and `-C`
+/// moves the base directory, launchers (`env`, `sudo`, `nohup`, ...) are
+/// peeled off, `cd` earlier in the command has already moved the
+/// invocation's cwd, and variables are already substituted. A program that
+/// is only known at run time counts as git when its arguments are
+/// `clone`/`worktree add` (the Unknown policy for these guards: a command
+/// that might create a checkout is judged as one).
+///
+/// `Some(Err(kind))` when the destination depends on a value only known at
+/// run time; it is never captured.
+fn detect_git_path(
+    invocation: &crate::shell_ast::Invocation,
+    fallback_cwd: Option<&Path>,
+) -> Option<Result<GitPathCapture, &'static str>> {
+    let argv = invocation.effective_argv();
+    let program_known_git = argv
+        .first()
+        .and_then(crate::shell_ast::Value::as_literal)
+        .is_some_and(|word| program_name(word) == "git");
+    let program_unknown = argv
+        .first()
+        .is_some_and(crate::shell_ast::Value::is_unknown);
+    if !program_known_git && !program_unknown {
         return None;
     }
-    let origin_cwd = cwd
-        .map(Path::to_path_buf)
+    let origin_cwd = invocation
+        .cwd
+        .as_literal()
+        .map(PathBuf::from)
+        .or_else(|| fallback_cwd.map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    match words.get(1).map(String::as_str) {
-        Some("clone") => {
-            let dest = git_clone_destination(&words[2..])?;
-            Some(GitPathCapture {
-                kind: GIT_CLONE_CAPTURE_KIND,
-                path: resolve_against(&origin_cwd, &dest),
-                origin_cwd,
-            })
-        }
-        Some("worktree") if words.get(2).map(String::as_str) == Some("add") => {
-            let dest = git_worktree_add_destination(&words[3..])?;
-            Some(GitPathCapture {
-                kind: GIT_WORKTREE_ADD_CAPTURE_KIND,
-                path: resolve_against(&origin_cwd, &dest),
-                origin_cwd,
-            })
-        }
-        _ => None,
+    let (base, rest) = skip_git_global_options(&argv[1..], &origin_cwd)?;
+    let texts: Vec<String> = rest.iter().map(|value| value.text().to_string()).collect();
+    let (kind, destination) = match texts.first().map(String::as_str) {
+        Some("clone") => (GIT_CLONE_CAPTURE_KIND, git_clone_destination(&texts[1..])),
+        Some("worktree") if texts.get(1).map(String::as_str) == Some("add") => (
+            GIT_WORKTREE_ADD_CAPTURE_KIND,
+            git_worktree_add_destination(&texts[2..]),
+        ),
+        _ => return None,
+    };
+    let destination = destination?;
+    let unresolved = rest
+        .iter()
+        .any(|value| value.is_unknown() && destination.contains(value.text()))
+        || destination.contains('$');
+    if unresolved || program_unknown {
+        return Some(Err(kind));
     }
+    Some(Ok(GitPathCapture {
+        kind,
+        path: resolve_against(&base, &destination),
+        origin_cwd,
+    }))
+}
+
+/// Git's global options take effect before the subcommand: skip them,
+/// applying `-C <dir>` to the base directory. `None` when a value is
+/// missing or a `-C` directory is unknown.
+fn skip_git_global_options<'a>(
+    args: &'a [crate::shell_ast::Value],
+    cwd: &Path,
+) -> Option<(PathBuf, &'a [crate::shell_ast::Value])> {
+    const WITH_VALUE: &[&str] = &[
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--config-env",
+        "--super-prefix",
+        "--list-cmds",
+    ];
+    let mut base = cwd.to_path_buf();
+    let mut index = 0;
+    while let Some(text) = args
+        .get(index)
+        .and_then(crate::shell_ast::Value::as_literal)
+    {
+        if !text.starts_with('-') {
+            break;
+        }
+        if text == "-C" {
+            let dir = args.get(index + 1)?.as_literal()?;
+            base = resolve_against(&base, dir);
+            index += 2;
+        } else if WITH_VALUE.contains(&text) {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Some((base, args.get(index..)?))
+}
+
+#[cfg(test)]
+fn detect_git_path_capture(command: &str, cwd: Option<&Path>) -> Option<GitPathCapture> {
+    let script = parse_command(command, ShellDialect::Posix, cwd);
+    script
+        .invocations
+        .iter()
+        .find_map(|invocation| detect_git_path(invocation, cwd))
+        .and_then(Result::ok)
+}
+
+/// `git worktree add` destinations must land in clud's worktree root
+/// (`~/.clud/worktrees`, reclaimed by the daemon) or in /grind's own
+/// `.clud/grind/worktrees/` (#1962). Overridable for one call.
+fn worktree_root_violation_reason(
+    capture: &GitPathCapture,
+    invocation: &crate::shell_ast::Invocation,
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    if capture.kind != GIT_WORKTREE_ADD_CAPTURE_KIND {
+        return None;
+    }
+    let root = context.worktree_root?;
+    let mut allowed = vec![root.to_path_buf()];
+    if let Some(repo_root) = context.repo_root {
+        allowed.push(repo_root.join(".clud").join("grind").join("worktrees"));
+    }
+    if crate::extern_root::is_within_any(&capture.path, &allowed) {
+        return None;
+    }
+    if let Some(override_reason) = accepted_override_reason(WORKTREE_ROOT_GUARD_RULE_ID) {
+        evaluation.log_messages.push(format!(
+            "BAD_CMD_OVERRIDE accepted rule={WORKTREE_ROOT_GUARD_RULE_ID} reason={override_reason:?} path={:?}",
+            capture.path
+        ));
+        return None;
+    }
+    let repo = context
+        .repo_root
+        .unwrap_or(&capture.origin_cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let rewrite = rewrite_worktree_add(invocation, context.cwd, root, &repo);
+    Some(worktree_root_denial(
+        root,
+        &crate::path_norm::display_slash(&capture.path),
+        rewrite.as_ref(),
+    ))
+}
+
+fn worktree_root_denial(
+    root: &Path,
+    destination: &str,
+    rewrite: Option<&WorktreeAddRewrite>,
+) -> String {
+    let root = crate::path_norm::display_slash(root);
+    let advice = rewrite.map_or_else(
+        || {
+            format!(
+                " For example: `git worktree add {root}/<repo>-wt-<name> -b <branch> origin/main`."
+            )
+        },
+        WorktreeAddRewrite::advice,
+    );
+    format!(
+        "git worktree add outside clud's worktree root is not allowed: {destination} would never be reclaimed. Worktrees go in {root}/<repo>-wt-<name>, where the daemon reclaims them once their work lands.{advice} Set {BAD_CMD_OVERRIDE_ENV}=\"{WORKTREE_ROOT_GUARD_RULE_ID}:<your reason for needing the raw command>\" to create one elsewhere anyway."
+    )
+}
+
+/// A refused `git worktree add`, rewritten to land in clud's worktree root.
+pub(super) struct WorktreeAddRewrite {
+    /// The command to run instead.
+    pub command: String,
+    /// When the original named no branch, git would have used a branch
+    /// named after the folder: created if missing, checked out if it
+    /// exists. The rewrite keeps that name with `-b`; this is the
+    /// `(branch, command)` for when the branch already exists.
+    pub existing_branch: Option<(String, String)>,
+}
+
+impl WorktreeAddRewrite {
+    /// The sentence a refusal ends with.
+    pub(super) fn advice(&self) -> String {
+        let mut text = format!(" Run this instead: `{}`.", self.command);
+        if let Some((branch, command)) = &self.existing_branch {
+            text.push_str(&format!(
+                " If branch `{branch}` already exists, check it out instead: `{command}`."
+            ));
+        }
+        text
+    }
+}
+
+/// `invocation`, a `git worktree add`, with its destination moved to a free
+/// `<root>/<repo>-wt-<name>` and every other word kept as typed, so a
+/// refused agent can run it as is. `<name>` is the folder it asked for. A
+/// `-C <dir>` is added when the command ran somewhere other than the
+/// session's directory (after a `cd`). Pure apart from checking which
+/// names in `root` are taken; nothing is created.
+pub(super) fn rewrite_worktree_add(
+    invocation: &crate::shell_ast::Invocation,
+    session_cwd: Option<&Path>,
+    root: &Path,
+    repo: &str,
+) -> Option<WorktreeAddRewrite> {
+    let texts = invocation.argv();
+    if invocation.raw.len() != texts.len() {
+        return None;
+    }
+    let worktree_at = texts
+        .windows(2)
+        .position(|pair| pair[0] == "worktree" && pair[1] == "add")?;
+    let args = &texts[worktree_at + 2..];
+    let positionals = positional_indices(args, GIT_WORKTREE_ADD_OPTIONS_WITH_VALUE);
+    let destination_at = worktree_at + 2 + *positionals.first()?;
+    let folder = last_component(&texts[destination_at]);
+    let path = crate::gc::worktree_root::suggest_wt_path_in(root, repo, &folder);
+    let mut words = invocation.raw.clone();
+    words[destination_at] = shell_word(&crate::path_norm::display_slash(&path));
+
+    let run_in = invocation
+        .cwd
+        .as_literal()
+        .filter(|cwd| session_cwd.is_none_or(|session| Path::new(cwd) != session))
+        .filter(|_| !texts[..worktree_at].iter().any(|word| word == "-C"));
+    let finish = |mut words: Vec<String>| {
+        if let Some(cwd) = run_in {
+            words.splice(
+                worktree_at..worktree_at,
+                ["-C".to_string(), shell_word(cwd)],
+            );
+        }
+        words.join(" ")
+    };
+    let names_branch = positionals.len() > 1
+        || args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-b" | "-B" | "-d" | "--detach" | "--orphan"));
+    if names_branch {
+        return Some(WorktreeAddRewrite {
+            command: finish(words),
+            existing_branch: None,
+        });
+    }
+    let branch = shell_word(&folder);
+    let mut new_branch = words.clone();
+    new_branch.splice(
+        destination_at + 1..destination_at + 1,
+        ["-b".to_string(), branch.clone()],
+    );
+    let mut existing = words;
+    existing.insert(destination_at + 1, branch);
+    Some(WorktreeAddRewrite {
+        command: finish(new_branch),
+        existing_branch: Some((folder, finish(existing))),
+    })
+}
+
+/// The last component of a path as typed, either separator.
+fn last_component(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `text` as one shell word: bare when it is plainly a path or name,
+/// otherwise double-quoted (valid in bash, PowerShell and cmd).
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:~+@,=".contains(c));
+    if plain {
+        text.to_string()
+    } else {
+        format!("\"{text}\"")
+    }
+}
+
+/// A clone or worktree whose destination is only known at run time cannot
+/// be shown to land in an allowed place, so the guard that would judge it
+/// refuses it (the Unknown policy for safety rules).
+fn unresolved_git_destination_reason(
+    kind: &'static str,
+    invocation: &crate::shell_ast::Invocation,
+    context: &EvaluationContext<'_>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    let (rule, guarded) = if kind == GIT_CLONE_CAPTURE_KIND {
+        (
+            CLONE_EXTERN_REPOS_GUARD_RULE_ID,
+            context.repo_root.is_some(),
+        )
+    } else {
+        (WORKTREE_ROOT_GUARD_RULE_ID, context.worktree_root.is_some())
+    };
+    if !guarded {
+        return None;
+    }
+    if let Some(override_reason) = accepted_override_reason(rule) {
+        evaluation.log_messages.push(format!(
+            "BAD_CMD_OVERRIDE accepted rule={rule} reason={override_reason:?} command={:?}",
+            invocation.source
+        ));
+        return None;
+    }
+    Some(format!(
+        "`{}` creates a checkout whose program or destination depends on a value only known when it runs, so the hook cannot verify where it lands. Spell the destination out literally. Set {BAD_CMD_OVERRIDE_ENV}=\"{rule}:<your reason for needing the raw command>\" to run it anyway.",
+        invocation.source
+    ))
 }
 
 const GIT_CLONE_OPTIONS_WITH_VALUE: &[&str] = &[
@@ -2593,25 +2879,31 @@ fn git_worktree_add_destination(args: &[String]) -> Option<String> {
 /// values), boolean flags, and an inline `--flag=value` form, collecting
 /// everything else as positionals. `--` ends flag parsing.
 fn collect_positionals(args: &[String], options_with_value: &[&str]) -> Vec<String> {
+    positional_indices(args, options_with_value)
+        .into_iter()
+        .map(|index| args[index].clone())
+        .collect()
+}
+
+/// [`collect_positionals`], as indices into `args`.
+fn positional_indices(args: &[String], options_with_value: &[&str]) -> Vec<usize> {
     let mut positionals = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--" {
-            positionals.extend(args[i + 1..].iter().cloned());
+            positionals.extend(i + 1..args.len());
             break;
         }
         if arg.starts_with('-') {
-            if arg.contains('=') {
-                i += 1;
-            } else if options_with_value.contains(&arg.as_str()) {
+            if !arg.contains('=') && options_with_value.contains(&arg.as_str()) {
                 i += 2;
             } else {
                 i += 1;
             }
             continue;
         }
-        positionals.push(arg.clone());
+        positionals.push(i);
         i += 1;
     }
     positionals
@@ -2952,7 +3244,7 @@ fn unwrap_env(words: &[String]) -> Option<Vec<String>> {
         if VALUE_OPTIONS.contains(&word.as_str()) {
             let value = words.get(index + 1)?;
             if ["-S", "--split-string"].contains(&word.as_str()) {
-                let mut split = tokenize(value);
+                let mut split = split_env_string(value);
                 split.extend_from_slice(words.get(index + 2..).unwrap_or_default());
                 return Some(split);
             }
@@ -2965,7 +3257,7 @@ fn unwrap_env(words: &[String]) -> Option<Vec<String>> {
             || word.starts_with("--split-string=")
         {
             if let Some(value) = word.strip_prefix("--split-string=") {
-                let mut split = tokenize(value);
+                let mut split = split_env_string(value);
                 split.extend_from_slice(words.get(index + 1..).unwrap_or_default());
                 return Some(split);
             }
@@ -3165,6 +3457,18 @@ fn accepted_override_reason(rule_id: &str) -> Option<String> {
 /// JSON rather than the previous prose line so the trail is greppable and
 /// countable — "how often was this rule overridden, and by whom" should not
 /// require parsing English.
+/// Record that this hook build differs from the session's launcher and the
+/// call is relayed to it (#1954).
+pub fn log_hook_skew(launcher: &Path, own: &str, expected: &str) {
+    let event = serde_json::json!({
+        "event": "HOOK-SKEW",
+        "launcher": launcher.display().to_string(),
+        "hook_build": own,
+        "launcher_build": expected,
+    });
+    append_log(&event.to_string());
+}
+
 fn log_override_attempt(rule_id: &str, outcome: &OverrideOutcome) {
     if matches!(outcome, OverrideOutcome::NotAttempted) {
         return;
@@ -3195,320 +3499,6 @@ fn log_override_attempt(rule_id: &str, outcome: &OverrideOutcome) {
     append_log(&event.to_string());
 }
 
-/// Detect and strip heredoc bodies (`<<'DELIM'`, `<<DELIM`, `<<-DELIM`)
-/// from `text` so their contents are never scanned as commands — a
-/// heredoc body is data piped to the receiving command, not executed.
-/// Deliberately does not touch `<<<` here-strings (single-line, never
-/// span multiple lines, so segment-splitting already treats them as
-/// plain argument text).
-fn strip_heredoc_bodies(text: &str) -> String {
-    if !text.contains("<<") {
-        return text.to_string();
-    }
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut out_lines: Vec<&str> = Vec::with_capacity(lines.len());
-    let mut i = 0usize;
-    while i < lines.len() {
-        let line = lines[i];
-        out_lines.push(line);
-        if let Some(delim) = find_heredoc_delimiter(line) {
-            let body_start = i + 1;
-            let mut j = body_start;
-            let mut terminator_index = None;
-            while j < lines.len() {
-                // Trim a trailing '\r' too: `text` may have originated
-                // from a CRLF payload split on '\n' alone, leaving a
-                // stray '\r' that would otherwise make a real
-                // terminator line fail to match `delim`.
-                let body_line = lines[j].trim_start_matches('\t').trim_end_matches('\r');
-                if body_line == delim {
-                    terminator_index = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-            match terminator_index {
-                Some(terminator_index) => {
-                    // Skip the body lines (never scanned as commands)
-                    // and the terminator line itself.
-                    i = terminator_index + 1;
-                }
-                None => {
-                    // No matching terminator found (malformed/adversarial
-                    // input, e.g. a mismatched delimiter). Fail toward
-                    // *more* scanning, not less: keep every line from
-                    // here on in the output rather than silently
-                    // dropping real trailing commands unscanned.
-                    out_lines.extend_from_slice(&lines[body_start..]);
-                    i = lines.len();
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out_lines.join("\n")
-}
-
-/// Hide heredoc data while preserving byte offsets for the command gate's
-/// source spans. This is syntax masking, not deletion operand analysis.
-fn mask_heredoc_bodies_preserving_offsets(command: &str) -> String {
-    if !command.contains("<<") {
-        return command.to_string();
-    }
-    let mut masked = command.as_bytes().to_vec();
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (index, byte) in command.bytes().enumerate() {
-        if byte == b'\n' {
-            lines.push((start, index));
-            start = index + 1;
-        }
-    }
-    lines.push((start, command.len()));
-
-    let mut index = 0;
-    while index < lines.len() {
-        let (line_start, line_end) = lines[index];
-        let Some(delimiter) = find_heredoc_delimiter(&command[line_start..line_end]) else {
-            index += 1;
-            continue;
-        };
-        let terminator = lines.iter().enumerate().skip(index + 1).find_map(
-            |(candidate, &(body_start, body_end))| {
-                (command[body_start..body_end]
-                    .trim_start_matches('\t')
-                    .trim_end_matches('\r')
-                    == delimiter)
-                    .then_some(candidate)
-            },
-        );
-        let Some(terminator) = terminator else {
-            break;
-        };
-        for byte in &mut masked[lines[index + 1].0..lines[terminator].1] {
-            if *byte != b'\n' && *byte != b'\r' {
-                *byte = b' ';
-            }
-        }
-        index = terminator + 1;
-    }
-    String::from_utf8(masked).expect("masking ASCII bytes preserves UTF-8")
-}
-
-fn find_heredoc_delimiter(line: &str) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let mut idx = 0usize;
-    let mut quote: Option<char> = None;
-    // Depth of arithmetic context. Both `$((…))` arithmetic *expansion* and a
-    // bare `((…))` arithmetic *command* make an embedded `<<` a left-shift
-    // operator, never a heredoc redirection (#1080). A run of `((` opens the
-    // context; `))` closes it. (Two adjacent subshells are written `( (`, with
-    // a space, so consecutive `((` unambiguously means arithmetic in bash.)
-    let mut arithmetic_depth = 0i32;
-    while idx + 1 < chars.len() {
-        let c = chars[idx];
-        if let Some(q) = quote {
-            if c == q {
-                quote = None;
-            }
-            idx += 1;
-            continue;
-        }
-        if c == '\'' || c == '"' {
-            quote = Some(c);
-            idx += 1;
-            continue;
-        }
-        // A `#` that opens a comment ends the scannable part of the line: a
-        // `<<E` living inside a comment starts no heredoc (#1080). Bash treats
-        // `#` as a comment only at a word boundary (start of line, or after
-        // whitespace / a metacharacter), so `a#b` and a URL fragment are safe.
-        if c == '#'
-            && arithmetic_depth == 0
-            && (idx == 0 || matches!(chars[idx - 1], ' ' | '\t' | ';' | '|' | '&' | '(' | ')'))
-        {
-            return None;
-        }
-        // Enter arithmetic on a run of `((` — this covers both `$((` (the `$`
-        // falls through to here) and a bare `((` arithmetic command.
-        if c == '(' && chars[idx + 1] == '(' {
-            arithmetic_depth += 1;
-            idx += 2;
-            continue;
-        }
-        if arithmetic_depth > 0 {
-            if c == ')' && chars[idx + 1] == ')' {
-                arithmetic_depth -= 1;
-                idx += 2;
-                continue;
-            }
-            idx += 1;
-            continue;
-        }
-        if c == '<' && chars[idx + 1] == '<' {
-            // Count the run of `<`. Exactly two is a heredoc; three (`<<<`) is
-            // a here-string carrying single-line data, and anything else is
-            // some other redirection — skip the whole run so the trailing `<`
-            // of a `<<<` is not re-read as the start of a fresh `<<` (#1080).
-            let mut run_end = idx;
-            while run_end < chars.len() && chars[run_end] == '<' {
-                run_end += 1;
-            }
-            if run_end - idx != 2 {
-                idx = run_end;
-                continue;
-            }
-            let mut j = idx + 2;
-            if j < chars.len() && chars[j] == '-' {
-                j += 1;
-            }
-            while j < chars.len() && chars[j] == ' ' {
-                j += 1;
-            }
-            let delim_quote = if j < chars.len() && (chars[j] == '\'' || chars[j] == '"') {
-                let q = chars[j];
-                j += 1;
-                Some(q)
-            } else {
-                None
-            };
-            let start = j;
-            while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
-                j += 1;
-            }
-            if j == start {
-                idx += 1;
-                continue;
-            }
-            let delimiter: String = chars[start..j].iter().collect();
-            let _ = delim_quote;
-            return Some(delimiter);
-        }
-        idx += 1;
-    }
-    None
-}
-
-/// Extract the inner text of every command-substitution / subshell /
-/// process-substitution span in `text` — backticks, `$(...)`
-/// (excluding `$((...))` arithmetic expansion), and `<(...)`/`>(...)`
-/// process substitution — for recursive evaluation.
-///
-/// Bare `(...)` subshell grouping is deliberately *not* handled here: an
-/// unqualified `(` is only a subshell in command position, and treating every
-/// one as a substitution span would deny `echo "(playwright run)"`. The
-/// per-segment scan in `evaluate_command_into` strips a leading `(` instead,
-/// which is precise about position. (An earlier comment here claimed
-/// tokenization already covered it — it did not; see #519.)
-fn scan_command_substitutions(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut spans = Vec::new();
-    let mut i = 0usize;
-    while i < chars.len() {
-        match chars[i] {
-            '`' => {
-                let start = i + 1;
-                let mut j = start;
-                let mut escaped = false;
-                while j < chars.len() {
-                    if escaped {
-                        escaped = false;
-                        j += 1;
-                        continue;
-                    }
-                    if chars[j] == '\\' {
-                        escaped = true;
-                        j += 1;
-                        continue;
-                    }
-                    if chars[j] == '`' {
-                        break;
-                    }
-                    j += 1;
-                }
-                if j < chars.len() {
-                    spans.push(chars[start..j].iter().collect());
-                    i = j + 1;
-                } else {
-                    i = chars.len();
-                }
-            }
-            '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
-                if i + 2 < chars.len() && chars[i + 2] == '(' {
-                    // Arithmetic expansion $((...)) — not a command;
-                    // skip past its matching `))` without recursing.
-                    if let Some(end) = find_matching_double_paren_close(&chars, i + 2) {
-                        i = end + 1;
-                    } else {
-                        i += 1;
-                    }
-                } else if let Some((inner, end)) = extract_paren_balanced(&chars, i + 1) {
-                    spans.push(inner);
-                    i = end;
-                } else {
-                    i += 1;
-                }
-            }
-            '<' | '>' if i + 1 < chars.len() && chars[i + 1] == '(' => {
-                if let Some((inner, end)) = extract_paren_balanced(&chars, i + 1) {
-                    spans.push(inner);
-                    i = end;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    spans
-}
-
-/// `chars[open]` must be `(`. Returns (inner text, index just past the
-/// matching close paren), tracking nested-paren depth. Ignores quotes
-/// inside the span (acceptable simplification for this hot-path scan).
-fn extract_paren_balanced(chars: &[char], open: usize) -> Option<(String, usize)> {
-    let mut depth = 0i32;
-    let mut j = open;
-    while j < chars.len() {
-        match chars[j] {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((chars[open + 1..j].iter().collect(), j + 1));
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    None
-}
-
-/// `chars[open]` must be the first `(` of a `$((` arithmetic-expansion
-/// opener. Returns the index of the final closing `)` of the matching
-/// `))`, tracking nested-paren depth starting at 2 (for the doubled
-/// open).
-fn find_matching_double_paren_close(chars: &[char], open: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut j = open;
-    while j < chars.len() {
-        match chars[j] {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(j);
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    None
-}
-
 /// #1087: whether a rewrite's blanket `allow` is safe — true only when every
 /// non-assignment statement in the command is itself a removal the rewrite
 /// vetted. A single safe rewrite (`SP=/tmp/x; rm -rf "$SP"/*`, #963) stays
@@ -3516,18 +3506,15 @@ fn find_matching_double_paren_close(chars: &[char], open: usize) -> Option<usize
 /// false so the decision downgrades to `ask` instead of laundering the rest.
 fn rewrite_only_covers_removals(command_text: &str, dialect: ShellDialect) -> bool {
     const REMOVAL_PROGRAMS: &[&str] = &["rm", "rmdir", "unlink"];
-    for segment in split_shell_segments(command_text, dialect) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
-        let mut words = command_words(segment);
-        if words.is_empty() {
-            // A pure env-assignment statement (`SP=/tmp/x`) — rewrite context.
-            continue;
-        }
-        if program_name(&words[0]) == "sudo" {
+    let script = parse_command(command_text, dialect, None);
+    // Only the statements the shell runs directly: a substitution feeding a
+    // removal's operand is its context, as before #1962.
+    for invocation in script.invocations.iter().filter(|inv| inv.depth == 0) {
+        let mut words = rule_words(invocation);
+        if words
+            .first()
+            .is_some_and(|first| program_name(first) == "sudo")
+        {
             if let Some(rest) = unwrap_sudo(&words) {
                 words = rest.to_vec();
             }
@@ -3633,6 +3620,17 @@ mod block_bad_cmd_wait_scan_tests;
 #[cfg(test)]
 #[path = "block_bad_cmd_wait_loop_tests.rs"]
 mod block_bad_cmd_wait_loop_tests;
+
+#[cfg(test)]
+#[path = "block_bad_cmd_ast_tests.rs"]
+mod block_bad_cmd_ast_tests;
+
+#[path = "block_bad_cmd_claude_worktrees.rs"]
+mod block_bad_cmd_claude_worktrees;
+
+#[cfg(test)]
+#[path = "block_bad_cmd_claude_worktrees_tests.rs"]
+mod block_bad_cmd_claude_worktrees_tests;
 
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
@@ -4028,6 +4026,23 @@ mod tests {
         !denies(command)
     }
 
+    /// Whether `command` runs `program` anywhere (substitutions and nested
+    /// shells included); heredoc bodies are data.
+    fn runs_program(command: &str, program: &str) -> bool {
+        parse_command(command, ShellDialect::Posix, None)
+            .invocations
+            .iter()
+            .any(|invocation| invocation.program().as_deref() == Some(program))
+    }
+
+    fn pr_wait_reason_for(
+        command: &str,
+        dialect: ShellDialect,
+        shim_active: bool,
+    ) -> Option<String> {
+        blocking_pr_wait_reason(&parse_command(command, dialect, None), shim_active)
+    }
+
     fn denies_with_rules(command: &str, rules: &[BadCommandRule]) -> bool {
         evaluate_command(command, None, false, rules)
             .reason
@@ -4398,12 +4413,12 @@ mod tests {
     #[test]
     fn blocks_hand_written_pr_polling_loops() {
         let infinite_for = "for ((;;)); do gh pr checks 528; sleep 30; done";
-        let infinite_for_segments = split_shell_segments(infinite_for, ShellDialect::Posix);
+        let loops: Vec<_> = parse_command(infinite_for, ShellDialect::Posix, None)
+            .loop_kinds()
+            .collect();
         assert!(
-            infinite_for_segments
-                .iter()
-                .any(|segment| is_polling_loop_head(segment, ShellDialect::Posix)),
-            "segments={infinite_for_segments:?}"
+            loops.iter().copied().any(is_unbounded_loop),
+            "loops={loops:?}"
         );
         for (command, dialect) in [
             (
@@ -4517,6 +4532,7 @@ mod tests {
             &[],
             ShellDialect::Posix,
             None,
+            None,
             false, // pr_wait_fail_fast_enabled
             true,  // rust_use_soldr
             false, // force_rm_resolver
@@ -4540,6 +4556,7 @@ mod tests {
             &[],
             ShellDialect::Posix,
             None,
+            None,
             true,  // pr_wait_fail_fast_enabled
             true,  // rust_use_soldr
             false, // force_rm_resolver
@@ -4553,15 +4570,14 @@ mod tests {
     #[test]
     fn active_gh_shim_allows_canonical_watch_but_not_run_id() {
         let dialect = ShellDialect::Posix;
-        assert!(blocking_pr_wait_reason("gh pr checks 528 --watch", dialect, true).is_none());
+        assert!(pr_wait_reason_for("gh pr checks 528 --watch", dialect, true).is_none());
         assert!(
-            blocking_pr_wait_reason("gh -R zackees/clud pr checks --watch", dialect, true)
-                .is_none()
+            pr_wait_reason_for("gh -R zackees/clud pr checks --watch", dialect, true).is_none()
         );
-        let denied = blocking_pr_wait_reason("gh run watch 123456", dialect, true)
+        let denied = pr_wait_reason_for("gh run watch 123456", dialect, true)
             .expect("run-id watch should remain denied");
         assert!(denied.contains("canonical"), "{denied}");
-        assert!(blocking_pr_wait_reason("gh pr checks --watch", dialect, false).is_some());
+        assert!(pr_wait_reason_for("gh pr checks --watch", dialect, false).is_some());
     }
 
     #[test]
@@ -4801,12 +4817,15 @@ mod tests {
     }
 
     #[test]
-    fn rm_legacy_variable_resolution_is_not_used_by_policy_evaluation() {
+    /// #1962: config rules read evaluated words, so `$SP` is the path it
+    /// was assigned. Before #1962 a rule saw the raw `$SP/*.txt` and this
+    /// command slipped past a rule written for the path it deletes.
+    fn config_rules_see_resolved_variable_values() {
         let evaluation = evaluation_with_policy(
             r#"SP=/tmp/safe/path; rm -f "$SP"/*.txt"#,
             r#"{"bad_commands":[{"match":"rm","arguments":{"any":["/tmp/safe/path/*"]},"replacement":"approved-cleanup"}]}"#,
         );
-        assert!(evaluation.reason.is_none());
+        assert!(evaluation.reason.is_some());
         assert!(evaluation.rewritten_command.is_none());
     }
 
@@ -5178,11 +5197,9 @@ mod tests {
     }
 
     /// #519 listed bare `(...)` subshell grouping alongside the other
-    /// substitution shapes. `scan_command_substitutions` deliberately does not
-    /// handle it — the comment there says tokenization already does, because
-    /// `(` becomes an ordinary token boundary. That reasoning is load-bearing
-    /// and untested, so pin it: if a future tokenizer change stops splitting on
-    /// `(`, this is the only thing that would notice.
+    /// substitution shapes. Commands inside a subshell are invocations like
+    /// any other (#1962); pin it so a walker change that skipped subshells
+    /// would be noticed.
     #[test]
     fn generic_rule_denied_inside_bare_subshell() {
         let rules = [playwright_rule()];
@@ -5559,8 +5576,8 @@ mod tests {
     #[test]
     fn git_clone_capture_records_explicit_destination_and_origin_cwd() {
         let cwd = PathBuf::from("/repo/.extern-repos");
-        let words = command_words("git clone https://example.com/foo.git bar");
-        let capture = detect_git_path_capture(&words, Some(&cwd)).expect("clone should capture");
+        let command = "git clone https://example.com/foo.git bar";
+        let capture = detect_git_path_capture(command, Some(&cwd)).expect("clone should capture");
         assert_eq!(capture.kind, GIT_CLONE_CAPTURE_KIND);
         assert_eq!(capture.path, cwd.join("bar"));
         assert_eq!(capture.origin_cwd, cwd);
@@ -5569,37 +5586,36 @@ mod tests {
     #[test]
     fn git_clone_capture_derives_dir_from_repo_url_when_no_explicit_dest() {
         let cwd = PathBuf::from("/repo/.extern-repos");
-        let words = command_words("git clone git@github.com:zackees/soldr.git");
-        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        let command = "git clone git@github.com:zackees/soldr.git";
+        let capture = detect_git_path_capture(command, Some(&cwd)).unwrap();
         assert_eq!(capture.path, cwd.join("soldr"));
     }
 
     #[test]
     fn git_clone_capture_skips_known_value_flags_when_finding_positionals() {
         let cwd = PathBuf::from("/repo/.extern-repos");
-        let words = command_words(
-            "git clone --depth 1 --branch main --origin upstream https://example.com/foo.git bar",
-        );
-        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        let command =
+            "git clone --depth 1 --branch main --origin upstream https://example.com/foo.git bar";
+        let capture = detect_git_path_capture(command, Some(&cwd)).unwrap();
         assert_eq!(capture.path, cwd.join("bar"));
     }
 
     #[test]
     fn git_worktree_add_capture_records_destination() {
         let cwd = PathBuf::from("/repo");
-        let words = command_words("git worktree add .claude/worktrees/agent-42 -b agent-42");
-        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        let command = "git worktree add .claude/worktrees/agent-42 -b agent-42";
+        let capture = detect_git_path_capture(command, Some(&cwd)).unwrap();
         assert_eq!(capture.kind, GIT_WORKTREE_ADD_CAPTURE_KIND);
         assert_eq!(capture.path, cwd.join(".claude/worktrees/agent-42"));
     }
 
     #[test]
     fn git_clone_capture_survives_env_wrapper() {
-        // `command_words` already unwraps `env` unconditionally for every
-        // segment, so this must be captured exactly like a bare `git clone`.
+        // Launchers like `env` are peeled off before detection, so this must
+        // be captured exactly like a bare `git clone`.
         let cwd = PathBuf::from("/repo/.extern-repos");
-        let words = command_words("env FOO=bar git clone https://example.com/foo.git bar");
-        let capture = detect_git_path_capture(&words, Some(&cwd))
+        let command = "env FOO=bar git clone https://example.com/foo.git bar";
+        let capture = detect_git_path_capture(command, Some(&cwd))
             .expect("env-wrapped clone should still be captured");
         assert_eq!(capture.path, cwd.join("bar"));
     }
@@ -5607,8 +5623,8 @@ mod tests {
     #[test]
     fn git_clone_capture_survives_sudo_wrapper() {
         let cwd = PathBuf::from("/repo/.extern-repos");
-        let words = command_words("sudo git clone https://example.com/foo.git bar");
-        let capture = detect_git_path_capture(&words, Some(&cwd))
+        let command = "sudo git clone https://example.com/foo.git bar";
+        let capture = detect_git_path_capture(command, Some(&cwd))
             .expect("sudo-wrapped clone should still be captured, not silently skipped");
         assert_eq!(capture.kind, GIT_CLONE_CAPTURE_KIND);
         assert_eq!(capture.path, cwd.join("bar"));
@@ -5617,8 +5633,8 @@ mod tests {
     #[test]
     fn git_worktree_add_capture_survives_sudo_wrapper() {
         let cwd = PathBuf::from("/repo");
-        let words = command_words("sudo git worktree add .claude/worktrees/agent-9");
-        let capture = detect_git_path_capture(&words, Some(&cwd))
+        let command = "sudo git worktree add .claude/worktrees/agent-9";
+        let capture = detect_git_path_capture(command, Some(&cwd))
             .expect("sudo-wrapped worktree add should still be captured");
         assert_eq!(capture.kind, GIT_WORKTREE_ADD_CAPTURE_KIND);
         assert_eq!(capture.path, cwd.join(".claude/worktrees/agent-9"));
@@ -5679,9 +5695,8 @@ mod tests {
             "git worktree prune",
             "git worktree lock .claude/worktrees/agent-1",
         ] {
-            let words = command_words(command);
             assert!(
-                detect_git_path_capture(&words, Some(&cwd)).is_none(),
+                detect_git_path_capture(command, Some(&cwd)).is_none(),
                 "{command} should not be captured"
             );
         }
@@ -5691,9 +5706,8 @@ mod tests {
     fn non_git_and_unrelated_git_subcommands_are_not_captured() {
         let cwd = PathBuf::from("/repo");
         for command in ["git status", "git commit -m msg", "echo git clone foo"] {
-            let words = command_words(command);
             assert!(
-                detect_git_path_capture(&words, Some(&cwd)).is_none(),
+                detect_git_path_capture(command, Some(&cwd)).is_none(),
                 "{command} should not be captured"
             );
         }
@@ -6175,24 +6189,31 @@ mod tests {
         // `<<` inside a `((…))` arithmetic command is left-shift; the masker
         // must not blank the real `rm` line that follows.
         assert!(allows("(( 1 << E ))\nrm -rf \"$V\"/*\nE"));
-        assert_eq!(find_heredoc_delimiter("(( 1 << E ))"), None);
-        assert_eq!(find_heredoc_delimiter("echo $(( 1 << 4 ))"), None);
+        assert!(runs_program("(( 1 << E ))\nrm -rf x\nE", "rm"));
+        assert!(runs_program("echo $(( 1 << 4 ))\nrm -rf x\n4", "rm"));
     }
 
     #[test]
     fn heredoc_operator_inside_a_comment_starts_no_heredoc() {
         assert!(allows("echo done # <<E\nrm -rf \"$V\"/*\nE"));
-        assert_eq!(find_heredoc_delimiter("echo done # <<E"), None);
+        assert!(runs_program("echo done # <<E\nrm -rf x\nE", "rm"));
         // A `#` mid-word is not a comment and must not swallow a real heredoc.
-        assert_eq!(find_heredoc_delimiter("a#b <<EOF").as_deref(), Some("EOF"));
+        // (tree-sitter-bash mis-reads a `#` inside a *command name*, `a#b
+        // <<EOF`, as a comment; that only over-scans, and agents do not name
+        // programs that way.)
+        assert!(!runs_program("echo issue#123 <<EOF\nrm -rf x\nEOF", "rm"));
+        assert!(!runs_program(
+            "git commit -m fix#1 <<EOF\nrm -rf x\nEOF",
+            "rm"
+        ));
     }
 
     #[test]
     fn here_string_is_not_mis_parsed_as_a_heredoc() {
         assert!(allows("cat <<<x\nrm -rf \"$V\"/*\nx"));
-        assert_eq!(find_heredoc_delimiter("cat <<<x"), None);
-        // A genuine heredoc still masks its body (stays allowed as data).
-        assert_eq!(find_heredoc_delimiter("cat <<EOF").as_deref(), Some("EOF"));
+        assert!(runs_program("cat <<<x\nrm -rf x\nx", "rm"));
+        // A genuine heredoc's body is data, not a command.
+        assert!(!runs_program("cat <<EOF\nrm -rf x\nEOF", "rm"));
         assert!(allows("cat <<EOF\nrm -rf \"$V\"/\nEOF"));
     }
 
@@ -6246,6 +6267,7 @@ mod tests {
             &[],
             ShellDialect::PowerShell,
             None,
+            None,
             true,
             true,
             false,
@@ -6259,6 +6281,7 @@ mod tests {
             &[],
             &[],
             ShellDialect::PowerShell,
+            None,
             None,
             true,
             true,
@@ -6274,6 +6297,7 @@ mod tests {
             &[],
             &[],
             ShellDialect::PowerShell,
+            None,
             None,
             true,
             true,

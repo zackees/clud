@@ -304,6 +304,37 @@ impl HarnessSetupAction for CodexHookNormalizeAction {
     }
 }
 
+/// #1972: keep `clud-cmd-scan` installed (and trusted) as a global Codex
+/// `PreToolUse` hook so bare `codex` sessions are guarded too.
+struct CodexCmdScanInstallAction;
+
+impl HarnessSetupAction for CodexCmdScanInstallAction {
+    fn name(&self) -> &'static str {
+        "codex-cmd-scan-install"
+    }
+
+    fn backend(&self) -> Backend {
+        Backend::Codex
+    }
+
+    fn supports(&self, scope: LaunchSetupScope) -> bool {
+        matches!(scope, LaunchSetupScope::Global)
+    }
+
+    fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        let clud_dir = ctx.home.join(".clud");
+        let codex_dir = ctx.home.join(".codex");
+        if let Err(error) =
+            crate::codex_cmd_scan_install::run_at(&clud_dir, &codex_dir, ctx.out, ctx.verbose)
+        {
+            if ctx.verbose {
+                let _ = writeln!(ctx.out, "[clud] codex cmd-scan hook: {error}");
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
     // Note: bundled Python tools (~/.clud/tools/*) are refreshed by
     // foreground startup and daemon startup, not as part of this
@@ -324,6 +355,7 @@ pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
             backend: Backend::Codex,
         }),
         Box::new(CodexHookNormalizeAction),
+        Box::new(CodexCmdScanInstallAction),
     ]
 }
 
@@ -667,13 +699,21 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
+        assert_eq!(
+            report.ran,
+            vec![
+                "bundled-skills",
+                "codex-hook-normalize",
+                "codex-cmd-scan-install"
+            ]
+        );
         let codex_skill = ".codex/skills/clud-issue/SKILL.md"; // skill-source-lint: allow (asserts install state, not a writer)
         assert!(home.path().join(codex_skill).exists());
         assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout": 30"#), "{hooks}");
+        assert!(hooks.contains(r#""command": "clud-cmd-scan""#), "{hooks}");
         assert!(home.path().join(".clud/settings.json").exists());
     }
 

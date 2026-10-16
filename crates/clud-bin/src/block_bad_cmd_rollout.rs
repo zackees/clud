@@ -74,6 +74,7 @@ struct FileMigration {
 
 pub fn run_startup_checks(auto_fix_hooks: bool) {
     ensure_helper_on_session_path();
+    crate::hook_handshake::export_for_session();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
 
@@ -337,20 +338,25 @@ fn dangling_pinned_helper_replacement(command: &str) -> Option<&'static str> {
     (exact && is_helper && path.is_absolute() && !path.exists()).then_some(replacement)
 }
 
-/// The program a hook command runs: its first word, with a leading
-/// PowerShell `& ` and surrounding quotes removed.
+/// The program a hook command runs: its first word as written, quotes
+/// removed and variables left unexpanded. A leading `& ` is PowerShell's call
+/// operator, so such a command is read as PowerShell.
 pub fn hook_program(command: &str) -> Option<String> {
-    let rest = command.trim_start();
-    let rest = rest.strip_prefix("& ").unwrap_or(rest).trim_start();
-    let first = rest.chars().next()?;
-    if first == '\'' || first == '"' {
-        let end = rest[1..].find(first)?;
-        return Some(rest[1..1 + end].to_string());
-    }
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == ';')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_string())
+    let script = parse_hook_command(command);
+    let invocation = script.invocations.first()?;
+    Some(invocation.words.first()?.text().to_string())
+}
+
+/// Parse a hook command line from a settings file. Nothing is inherited, so
+/// `$CLAUDE_PROJECT_DIR` and friends read as written.
+pub fn parse_hook_command(command: &str) -> crate::shell_ast::Script {
+    use crate::shell_ast::{BaseEnv, Dialect};
+    let dialect = if command.trim_start().starts_with('&') {
+        Dialect::PowerShell
+    } else {
+        Dialect::Posix
+    };
+    crate::shell_ast::parse(command, dialect, &BaseEnv::new(""))
 }
 
 /// Warnings for hook commands whose program is an absolute path that does
