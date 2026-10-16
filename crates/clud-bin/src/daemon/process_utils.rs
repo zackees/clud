@@ -5,7 +5,7 @@ use crate::process_identity::ProcessIdentity;
 /// Minimal sysinfo refresh: just the parent-PID graph, no CPU/memory/cmdline.
 /// `System::new_all()` enumerates every process's full metadata and takes
 /// **tens of seconds on Windows** (the same trap that `process_tree::kill_tree`
-/// already documents). For `pid_is_alive` and `signal_process_tree` we only
+/// already documents). For the signal helpers and batched sweeps we only
 /// need the PID graph, which the minimal refresh provides in sub-second time
 /// — critical on the `clud kill --all` path where a daemon-terminate request
 /// calls into these helpers multiple times per session.
@@ -19,23 +19,24 @@ fn fresh_minimal_system() -> System {
 /// of persisted state: this answers "is *some* process holding that number",
 /// which after PID reuse is not the same question (issue #558).
 pub(super) fn pid_is_alive(pid: u32) -> bool {
-    let system = fresh_minimal_system();
-    system.process(Pid::from_u32(pid)).is_some()
+    ProcessIdentity::observe(pid).is_some()
 }
 
 /// Liveness of a specific process, not merely of a PID.
 ///
 /// `false` both when the PID is gone and when it has been recycled onto an
-/// unrelated process.
+/// unrelated process. Looks up only `identity.pid`: `ensure_daemon` runs this
+/// on every call, and a full process-table refresh here made each reconnect
+/// attempt read every `/proc/<pid>/stat` on the machine (#1981).
 pub(super) fn identity_is_alive(identity: &ProcessIdentity) -> bool {
-    identity_alive_in(&fresh_minimal_system(), identity)
+    identity.is_live()
 }
 
 /// A minimal-refresh `System` snapshot for batched liveness checks.
 ///
 /// A caller reconciling many records refreshes once and reuses this across
-/// every [`identity_alive_in`] call, instead of paying [`identity_is_alive`]'s
-/// full-table refresh per record.
+/// every [`identity_alive_in`] call, instead of one [`identity_is_alive`]
+/// lookup per record.
 pub(super) fn refreshed_minimal_system() -> System {
     fresh_minimal_system()
 }
@@ -93,4 +94,43 @@ fn signal_tree_in(system: &System, root: Pid, signal: Signal) {
 /// Windows recycled onto `root` must not pull an older process into the kill.
 pub(super) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
     crate::process_tree::descendant_pids(system, root)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// Read syscalls made by the calling thread, which parallel tests do not
+    /// disturb.
+    fn thread_read_syscalls() -> u64 {
+        std::fs::read_to_string("/proc/thread-self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("syscr: "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// #1981: `ensure_daemon` probes the daemon through `identity_is_alive`, so
+    /// it must read only the probed PID's procfs entries, never the whole table.
+    #[test]
+    fn identity_probe_reads_only_the_probed_pid() {
+        let identity = ProcessIdentity::observe(std::process::id()).unwrap();
+        let before = thread_read_syscalls();
+        assert!(identity_is_alive(&identity));
+        assert!(pid_is_alive(identity.pid));
+        let reads = thread_read_syscalls() - before;
+        // Two lookups plus the counter read itself. A full refresh reads one
+        // stat file per process and task on the host.
+        assert!(reads <= 32, "liveness probes made {reads} read syscalls");
+    }
+
+    #[test]
+    fn identity_probe_rejects_a_recycled_pid() {
+        let identity = ProcessIdentity::observe(std::process::id()).unwrap();
+        let recycled = ProcessIdentity::new(identity.pid, identity.start_time + 1);
+        assert!(!identity_is_alive(&recycled));
+    }
 }
