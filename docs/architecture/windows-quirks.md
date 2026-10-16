@@ -223,7 +223,7 @@ the codebase stays portable.
   - Ctrl+V may become a saved clipboard-image path; otherwise the upstream
     control byte passes through.
 
-- **File**: `crates/clud-bin/src/console_input.rs`
+- **File**: `crates/clud-bin/src/platform/windows/console_input.rs`
   (`spawn_console_input_reader`, `start_native_reader`,
   `translate_key_records`, `adapt_event_with_clipboard`) and the
   platform-neutral `crates/clud-bin/src/console_surrogates.rs`; construction

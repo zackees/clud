@@ -17,7 +17,6 @@
 //! pump), elsewhere stdin itself, polled so the source can stop cleanly
 //! before the continue-in-background prompt reads the terminal.
 
-use std::io;
 use std::time::Duration;
 
 use crate::session::session_stdin::{normalize_interactive_console_stdin_chunk, InterruptScanner};
@@ -141,69 +140,20 @@ pub(super) enum InputPoll {
     Closed,
 }
 
-/// The raw terminal input source for one interactive attach.
+/// The raw terminal input source for one interactive attach: the
+/// `console_input` reader on Windows, polled stdin elsewhere
+/// (`crate::platform::attach_input`).
 pub(super) struct RawInput {
-    #[cfg(windows)]
-    rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    /// Dropping the handle stops the native reader and restores the
-    /// console mode it changed.
-    #[cfg(windows)]
-    console: Option<crate::console_input::ConsoleInputHandle>,
-    #[cfg(unix)]
-    fd: std::os::fd::RawFd,
+    source: crate::platform::attach_input::RawInputSource,
 }
 
 impl RawInput {
     /// Start reading the real terminal. Call before entering raw mode:
     /// on Windows the native reader snapshots the original console mode.
     pub(super) fn start() -> Self {
-        #[cfg(windows)]
-        {
-            match crate::console_input::spawn_console_input_reader() {
-                Ok(handle) => {
-                    if let Some(input) = Self::from_console(handle) {
-                        return input;
-                    }
-                }
-                Err(err) => {
-                    eprintln!("[clud] note: console-input reader unavailable: {err}");
-                }
-            }
-            // Same fallback as the local pump: a detached byte-stream
-            // reader. It cannot be stopped while blocked in `read`, so it
-            // is only the fallback.
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let mut stdin = io::stdin();
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = stdin.read(&mut buf) {
-                    if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            });
-            Self { rx, console: None }
+        Self {
+            source: crate::platform::attach_input::RawInputSource::start(),
         }
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            Self::from_fd(io::stdin().as_raw_fd())
-        }
-    }
-
-    #[cfg(unix)]
-    fn from_fd(fd: std::os::fd::RawFd) -> Self {
-        Self { fd }
-    }
-
-    #[cfg(windows)]
-    fn from_console(mut handle: crate::console_input::ConsoleInputHandle) -> Option<Self> {
-        let rx = handle.take_receiver()?;
-        Some(Self {
-            rx,
-            console: Some(handle),
-        })
     }
 
     /// True when this source delivers Ctrl+V as a raw 0x16 byte that the
@@ -212,67 +162,16 @@ impl RawInput {
     /// expands Ctrl+V (`console_input::adapt_event`), like the local
     /// pump's side channel.
     pub(super) fn expands_ctrl_v(&self) -> bool {
-        #[cfg(windows)]
-        {
-            self.console.is_none()
-        }
-        #[cfg(unix)]
-        {
-            true
-        }
+        self.source.expands_ctrl_v()
     }
 
     /// Wait up to `timeout` for the next chunk.
     pub(super) fn poll(&mut self, timeout: Duration) -> InputPoll {
-        #[cfg(windows)]
-        {
-            use std::sync::mpsc::RecvTimeoutError;
-            match self.rx.recv_timeout(timeout) {
-                Ok(chunk) => InputPoll::Chunk(chunk),
-                Err(RecvTimeoutError::Timeout) => InputPoll::Idle,
-                Err(RecvTimeoutError::Disconnected) => InputPoll::Closed,
-            }
+        match self.source.poll(timeout) {
+            Some(Some(chunk)) => InputPoll::Chunk(chunk),
+            Some(None) => InputPoll::Idle,
+            None => InputPoll::Closed,
         }
-        #[cfg(unix)]
-        {
-            poll_fd(self.fd, timeout)
-        }
-    }
-}
-
-/// Wait for `fd` to become readable, then read what is there. Polling
-/// instead of a blocked reader thread means nothing is left reading the
-/// terminal once the attach loop returns.
-#[cfg(unix)]
-fn poll_fd(fd: std::os::fd::RawFd, timeout: Duration) -> InputPoll {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let timeout_ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: `pollfd` is a valid, exclusively borrowed array of length 1.
-    let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
-    if ready < 0 {
-        return if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            InputPoll::Idle
-        } else {
-            InputPoll::Closed
-        };
-    }
-    if ready == 0 {
-        return InputPoll::Idle;
-    }
-    let mut buf = [0u8; 4096];
-    // SAFETY: `buf` is valid for writes of `buf.len()` bytes.
-    let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    match read {
-        0 => InputPoll::Closed,
-        n if n < 0 => match io::Error::last_os_error().kind() {
-            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => InputPoll::Idle,
-            _ => InputPoll::Closed,
-        },
-        n => InputPoll::Chunk(buf[..n as usize].to_vec()),
     }
 }
 
@@ -459,10 +358,12 @@ mod tests {
     }
 
     /// POSIX stdin is a byte stream, so the attach expands Ctrl+V itself.
-    #[cfg(unix)]
     #[test]
     fn stdin_source_needs_ctrl_v_expansion() {
-        assert!(RawInput::from_fd(0).expands_ctrl_v());
+        let Some(source) = crate::platform::attach_input::stdin_fd_source_for_test() else {
+            return; // Windows reads the console, not a descriptor.
+        };
+        assert!(RawInput { source }.expands_ctrl_v());
     }
 
     /// #1373 on Windows: the attach reads the `console_input` reader, which
@@ -470,30 +371,13 @@ mod tests {
     /// event injected into the reader arrives as the reader's own output
     /// (the image path, or 0x16 when the clipboard holds no image) and the
     /// filter forwards it without a second clipboard read.
-    #[cfg(windows)]
     #[test]
     fn console_source_expands_ctrl_v_upstream_and_the_filter_passes_it_through() {
-        use running_process::pty::terminal_input::{TerminalInputCore, TerminalInputEventRecord};
-        use std::sync::Arc;
-
-        let core = Arc::new(TerminalInputCore::new());
-        {
-            let mut state = core.state.lock().expect("terminal input state");
-            state.events.push_back(TerminalInputEventRecord {
-                data: vec![0x16],
-                submit: false,
-                shift: false,
-                ctrl: true,
-                alt: false,
-                virtual_key_code: 0x56,
-                repeat_count: 1,
-            });
-            state.closed = false;
-        }
-        core.condvar.notify_all();
-        let handle = crate::console_input::spawn_terminal_input_adapter(Arc::clone(&core))
-            .expect("spawn terminal input adapter");
-        let mut input = RawInput::from_console(handle).expect("console receiver");
+        let Some(source) = crate::platform::attach_input::injected_ctrl_v_console_source_for_test()
+        else {
+            return; // The console reader exists on Windows only.
+        };
+        let mut input = RawInput { source };
         assert!(!input.expands_ctrl_v());
 
         let InputPoll::Chunk(chunk) = input.poll(Duration::from_secs(5)) else {
@@ -510,23 +394,18 @@ mod tests {
         assert!(chunk == [0x16] || chunk.ends_with(b".png\n"), "{chunk:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn fd_source_reads_raw_bytes_then_reports_close() {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-        let mut fds = [0 as libc::c_int; 2];
-        // SAFETY: `fds` is a valid array of two descriptors for pipe(2).
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: pipe(2) returned two fresh descriptors this test owns.
-        let (read_end, write_end) =
-            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let mut input = RawInput::from_fd(read_end.as_raw_fd());
+        let Some((source, mut writer, _read_end)) =
+            crate::platform::attach_input::pipe_source_for_test()
+        else {
+            return; // Windows reads the console, not a descriptor.
+        };
+        let mut input = RawInput { source };
 
         assert_eq!(input.poll(Duration::from_millis(10)), InputPoll::Idle);
 
         let reply = b"\x1b[3;1R";
-        let mut writer = std::fs::File::from(write_end);
         std::io::Write::write_all(&mut writer, reply).unwrap();
         assert_eq!(
             input.poll(Duration::from_secs(5)),

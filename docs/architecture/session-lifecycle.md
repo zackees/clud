@@ -32,7 +32,7 @@ moves on; the RAII guards restore console mode on drop.
 | `crates/clud-bin/src/terminal_queries.rs` | `TerminalQueryScanner`: stub replies to a child's terminal queries when no real terminal answers, shared with the daemon worker and resumable across reads (#1702). |
 | `crates/clud-bin/src/console_setup.rs` | `ConsoleVtGuard` RAII for `ENABLE_VIRTUAL_TERMINAL_INPUT`. |
 | `crates/clud-bin/src/console_title.rs` | One-shot title stamp, daemon keeper thread, `OscTitleStripper` stream filter. |
-| `crates/clud-bin/src/console_input.rs` | Adapter over `running-process::TerminalInputCore`; preserves clud-specific Shift+Enter/Ctrl+V policy and forwards complete translated key events (#141/#575). |
+| `crates/clud-bin/src/platform/windows/console_input.rs` | Adapter over `running-process::TerminalInputCore`; preserves clud-specific Shift+Enter/Ctrl+V policy and forwards complete translated key events (#141/#575). |
 | `crates/clud-bin/src/capture.rs` | `TerminalCapture` — `vt100` parser plus the sticky-mode `vte` sniffer. Used by the daemon worker for attach repaint. |
 | `crates/clud-bin/src/dnd/injectors.rs` | `pty_master_injector` adapter that the OLE callback writes through. |
 | `crates/clud-bin/src/voice/mode.rs` | `VoiceMode::on_f3_press` / `on_f3_release` / `on_tick`, the only `InteractiveHooks` implementor in production. |
@@ -388,7 +388,7 @@ and on panics, because the workspace unwinds. A forced kill (`kill -9`,
 | `TerminalCapture::snapshot_bytes` | `crates/clud-bin/src/capture.rs:192` |
 | `ConsoleVtGuard` | `crates/clud-bin/src/console_setup.rs:110` |
 | `enable_console_vt_input` | `crates/clud-bin/src/console_setup.rs:140` |
-| `console_input::spawn_console_input_reader` | `crates/clud-bin/src/console_input.rs:81` |
+| `console_input::spawn_console_input_reader` | `crates/clud-bin/src/platform/windows/console_input.rs:79` |
 | `console_title::set_for_current_cwd` | `crates/clud-bin/src/console_title.rs:173` |
 | `console_title::keep_setting_in_background` | `crates/clud-bin/src/console_title.rs:198` |
 | Title keeper thread entry (Windows) | `crates/clud-bin/src/console_title.rs:263` |

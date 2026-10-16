@@ -1,10 +1,15 @@
 //! Windows implementations of the `crate::platform` areas.
 
 pub mod alias_link;
+pub mod attach_input;
 pub mod block_bad_cmd_io;
 pub mod block_bad_cmd_repeat;
 pub mod codex_auth;
 pub mod config;
+pub mod console_input;
+pub mod console_setup;
+pub mod console_title;
+pub mod crash_report;
 pub mod ctrl_c_track;
 pub mod dnd;
 #[cfg(test)]
@@ -38,11 +43,13 @@ pub mod runtime_cache;
 pub mod safe_mktemp;
 pub mod self_install;
 pub mod self_install_activation;
+pub mod session;
 pub mod session_registry;
 pub mod session_tmp_continuation;
 pub mod shim_fs;
 pub mod shim_main;
 pub mod shim_telemetry;
+pub mod startup;
 pub mod subprocess;
 pub mod trampoline;
 pub mod usage_ledger;

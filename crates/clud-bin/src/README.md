@@ -278,7 +278,7 @@ CLI surface and backend resolution:
 
 Console and terminal:
 
-- `console_input.rs` - Windows adapter over
+- `console_input.rs` - (now `platform/windows/console_input.rs`, re-exported from `lib.rs`) Windows adapter over
   `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
   #575): runs its own `ReadConsoleInputW` loop so surrogate pairs are joined
   first (#1351), forwards upstream's complete virtual-key translations atomically

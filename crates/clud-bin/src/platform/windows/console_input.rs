@@ -26,8 +26,6 @@
 //! zackees/running-process#1215; once clud depends on a release with it, this
 //! loop can go back to `TerminalInputCore::start_impl`.
 
-#![cfg(windows)]
-
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
