@@ -63,7 +63,11 @@ fn a_directory_elsewhere_under_home_is_still_refused() {
 #[test]
 fn personal_folders_are_refused_even_for_single_files() {
     let w = world();
-    for rel in ["Documents/taxes.pdf", "desktop/note.txt", "Pictures/a/b.png"] {
+    for rel in [
+        "Documents/taxes.pdf",
+        "desktop/note.txt",
+        "Pictures/a/b.png",
+    ] {
         let path = file(&w, rel);
         let (code, _, err) = w.run(Kind::File, &[path.to_str().unwrap()]);
         assert_eq!(code, 1, "{rel}: {err}");
@@ -121,7 +125,10 @@ fn rule_tables_match_whole_components_case_insensitively() {
     assert_eq!(home_files::denied(Path::new(".sshx/config")), None);
     assert_eq!(home_files::denied(Path::new("notes/.bashrc")), None);
     assert_eq!(home_files::denied(Path::new(".config")), Some(".config/gh"));
-    assert_eq!(home_files::personal(Path::new("documents/x")), Some("Documents"));
+    assert_eq!(
+        home_files::personal(Path::new("documents/x")),
+        Some("Documents")
+    );
     assert_eq!(home_files::personal(Path::new("Documentsx/x")), None);
     assert!(home_files::dir_allowed(Path::new(".cache/pip")));
     assert!(!home_files::dir_allowed(Path::new(".cache")));
