@@ -233,16 +233,6 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
     }
 }
 
-/// Open the registry and spawn the single worker thread. Returns the
-/// sender every connection thread uses to dispatch GC ops. Caller keeps
-/// the sender alive for the daemon's lifetime; dropping it stops the
-/// worker.
-#[cfg(test)]
-pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<RegistryMsg>> {
-    let registry = Registry::open_default().map_err(std::io::Error::other)?;
-    spawn_registry_worker_with(registry)
-}
-
 pub(super) fn spawn_registry_worker_for_state(
     state_dir: PathBuf,
     periodic_maintenance_enabled: bool,
@@ -262,8 +252,7 @@ pub(super) fn spawn_registry_worker_for_state(
     )
 }
 
-/// Same as [`spawn_registry_worker`] but accepts a pre-constructed
-/// `Registry`. Tests use this to bind a worker to an isolated `redb`
+/// Spawns the registry worker on a pre-constructed `Registry`. Tests use this to bind a worker to an isolated `redb`
 /// file without depending on the process-global `CLUD_DATA_DB` env var.
 #[cfg(test)]
 pub(super) fn spawn_registry_worker_with(
