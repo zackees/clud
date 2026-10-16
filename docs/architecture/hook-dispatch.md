@@ -362,8 +362,10 @@ loops), so every Codex global launch setup also runs
 - Opt out with `"hooks": {"codex_global_cmd_scan": false}` in
   `~/.clud/settings.json`; removing the entry by hand without that switch
   gets it reinstalled on the next launch.
-- A clud-launched Codex session sees both hooks, so a Bash call is scanned
-  twice. The verdicts agree; the repeated-call guard counts each call twice.
+- A clud-launched Codex session sees both hooks (both match `*` since
+  #1954), so each guarded call is scanned twice. The verdicts agree; the
+  repeated-call guard counts each call twice. The session hook still guards
+  a user who opted out of the global entry.
 
 Rationale: [DD-171](../DESIGN_DECISIONS.md#dd-171-codex-gets-a-global-clud-cmd-scan-hook-written-to-its-user-config).
 
