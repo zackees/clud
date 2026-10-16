@@ -59,9 +59,15 @@ fn an_idle_worktree_moves_and_git_follows_it() {
     assert!(moved.join("unpushed.txt").exists(), "{log:?}");
     assert!(!old.exists(), "{log:?}");
     let list = run_git(&repo, &["worktree", "list", "--porcelain"]);
+    // Windows temp dirs can be 8.3 short names (`RUNNER~1`) while git records
+    // the long form, so also compare the canonical spelling.
+    let canonical = crate::path_norm::canonicalize_plain(&moved)
+        .map(|path| crate::path_norm::display_slash(&path))
+        .unwrap_or_default();
     assert!(
         list.contains(&crate::path_norm::display_slash(&moved))
-            || list.contains(&moved.to_string_lossy().into_owned()),
+            || list.contains(&moved.to_string_lossy().into_owned())
+            || (!canonical.is_empty() && list.contains(&canonical)),
         "git still records the old path: {list}"
     );
     assert_eq!(
