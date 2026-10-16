@@ -22,20 +22,14 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let result = (|| {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        crate::platform::fs_private::owner_only_mode(&mut options);
         let mut file = options.open(&temp)?;
-        #[cfg(windows)]
-        crate::codex_auth::protect_windows_credential_file(&temp).map_err(io::Error::other)?;
+        crate::platform::fs_private::protect_owner_only(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temp, path)?;
-        #[cfg(windows)]
-        crate::codex_auth::protect_windows_credential_file(path).map_err(io::Error::other)?;
+        crate::platform::fs_private::protect_owner_only(path)?;
         Ok(())
     })();
     if result.is_err() {
@@ -75,16 +69,5 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn files_are_owner_only_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("secret.json");
-        write_private_atomic(&path, b"{}").unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
     }
 }

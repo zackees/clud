@@ -23,7 +23,12 @@ ALLOWED: dict[str, frozenset[str]] = {
     ),
     # The registry write: defined, called by the daemon worker, and tests.
     "insert_created(": frozenset(
-        {"gc/registry.rs", "daemon/gc_service.rs", "gc_tests.rs", "safe_mktemp_tests.rs"}
+        {
+            "gc/registry.rs",
+            "daemon/gc_service.rs",
+            "gc_tests.rs",
+            "platform/unix/safe_mktemp_tests.rs",
+        }
     ),
 }
 

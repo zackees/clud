@@ -100,22 +100,11 @@ pub fn probe(entry: &SafeRmExtraRootEntry, home: Option<&Path>, me: Option<u32>)
         raw: entry.path.clone(),
         reason: entry.reason.clone(),
         is_dir: meta.as_ref().is_some_and(std::fs::Metadata::is_dir),
-        owner: meta.as_ref().and_then(owner_of),
+        owner: meta.as_ref().and_then(crate::platform::rm_tool::file_owner),
         canonical,
         home: home.and_then(|h| crate::path_norm::canonicalize_plain(h).ok()),
         me,
     }
-}
-
-#[cfg(unix)]
-fn owner_of(meta: &std::fs::Metadata) -> Option<u32> {
-    use std::os::unix::fs::MetadataExt;
-    Some(meta.uid())
-}
-
-#[cfg(not(unix))]
-fn owner_of(_: &std::fs::Metadata) -> Option<u32> {
-    None
 }
 
 /// Vet every well-formed entry; returns the honored roots and the messages

@@ -28,17 +28,15 @@ use crate::gc::CreatedEntry;
 pub const COMMAND: &str = "safe-mktemp";
 
 /// Where a created directory is recorded. The production writer is the
-/// daemon; tests inject one. Crate-internal on purpose: no CLI form records
-/// a path, so a row can only follow `safe-mktemp`'s own `mkdir`.
-// Windows refuses before reading any of it (`create`).
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) trait LedgerWriter {
+/// daemon; tests inject one. Only the crate-internal [`create`] takes one:
+/// no CLI form records a path, so a row can only follow `safe-mktemp`'s own
+/// `mkdir`. (Public only so the Windows build, which refuses before using
+/// it, does not see it as dead code.)
+pub trait LedgerWriter {
     fn record(&self, entry: &CreatedEntry) -> Result<(), String>;
 }
 
 /// The daemon's GC registry, through its creation-ledger insert op.
-// Windows refuses before reading any of it (`create`).
-#[cfg_attr(not(unix), allow(dead_code))]
 struct DaemonWriter {
     state_dir: Option<PathBuf>,
 }
@@ -53,10 +51,8 @@ impl LedgerWriter for DaemonWriter {
 }
 
 /// Everything a call needs from its environment.
-// Windows refuses before reading any of it (`create`).
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone)]
-pub(crate) struct Request {
+pub struct Request {
     pub cwd: PathBuf,
     pub session_id: Option<String>,
     pub role: String,
@@ -70,7 +66,7 @@ pub(crate) struct Failure {
     pub message: String,
 }
 
-fn fail(code: i32, message: impl Into<String>) -> Failure {
+pub(crate) fn fail(code: i32, message: impl Into<String>) -> Failure {
     Failure {
         code,
         message: message.into(),
@@ -145,173 +141,9 @@ pub(crate) fn create(
     request: &Request,
     writer: &dyn LedgerWriter,
 ) -> Result<PathBuf, Failure> {
-    #[cfg(not(unix))]
-    {
-        let _ = (raw, request, writer);
-        Err(fail(
-            2,
-            "not supported on Windows: the creation ledger needs a device/inode identity, \
-             which clud cannot read there, so safe-rm would refuse the directory; nothing \
-             created. Use the session temp directory for scratch data instead.",
-        ))
-    }
-    #[cfg(unix)]
-    {
-        unix::create(raw, request, writer)
-    }
-}
-
-#[cfg(unix)]
-mod unix {
-    use super::*;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-    use std::path::{Component, Path};
-
-    /// The `(dev, ino)` of the directory this call made.
-    type Identity = (u64, u64);
-
-    pub(super) fn create(
-        raw: &str,
-        request: &Request,
-        writer: &dyn LedgerWriter,
-    ) -> Result<PathBuf, Failure> {
-        let session = request
-            .session_id
-            .clone()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                fail(
-                    2,
-                    "no clud session id (CLUD_SESSION_ID / CLAUDE_CODE_SESSION_ID); \
-                     launch through clud, or set CLUD_SESSION_ID to a unique value before \
-                     starting this session; nothing created",
-                )
-            })?;
-        let target = target_path(raw, &request.cwd)?;
-        if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(&target) {
-            return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
-                fail(
-                    1,
-                    format!(
-                        "{} already exists; nothing created or recorded",
-                        target.display()
-                    ),
-                )
-            } else {
-                fail(1, format!("cannot create {}: {error}", target.display()))
-            });
-        }
-        let identity = verify_fresh(&target).map_err(|why| {
-            fail(
-                1,
-                format!(
-                    "{} changed right after it was created ({why}); not recorded and left \
-                     in place",
-                    target.display()
-                ),
-            )
-        })?;
-        let entry = CreatedEntry {
-            session_id: session,
-            path: target.display().to_string(),
-            kind: crate::gc::CreatedKind::Dir,
-            role: request.role.clone(),
-            created_unix: request.now_unix,
-            dev: Some(identity.0),
-            ino: Some(identity.1),
-            uid: Some(euid()),
-        };
-        if let Err(error) = writer.record(&entry) {
-            let cleanup = remove_if_same(&target, identity);
-            return Err(fail(
-                1,
-                format!("creation ledger insert failed ({error}); {cleanup}; nothing recorded",),
-            ));
-        }
-        Ok(target)
-    }
-
-    fn euid() -> u32 {
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        unsafe { libc::geteuid() }
-    }
-
-    /// The canonical parent joined with the final name. The final component
-    /// must be a plain name, and the parent must exist.
-    fn target_path(raw: &str, cwd: &Path) -> Result<PathBuf, Failure> {
-        let path = Path::new(raw);
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            cwd.join(path)
-        };
-        let (Some(Component::Normal(name)), Some(parent)) =
-            (absolute.components().next_back(), absolute.parent())
-        else {
-            return Err(fail(2, format!("{raw}: not a plain directory name")));
-        };
-        let parent = crate::path_norm::canonicalize_plain(parent).map_err(|error| {
-            fail(
-                1,
-                format!(
-                    "parent {} is not usable ({error}); {COMMAND} creates one directory, \
-                     never its parents",
-                    parent.display()
-                ),
-            )
-        })?;
-        Ok(parent.join(name))
-    }
-
-    /// Open the new directory without following a symlink, and require it to
-    /// be an empty directory the caller owns at the path's current identity.
-    fn verify_fresh(target: &Path) -> Result<Identity, String> {
-        let handle = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(target)
-            .map_err(|error| format!("cannot open it as a directory: {error}"))?;
-        let meta = handle
-            .metadata()
-            .map_err(|error| format!("cannot stat it: {error}"))?;
-        if !meta.is_dir() {
-            return Err("not a directory".into());
-        }
-        if meta.uid() != euid() {
-            return Err("not owned by you".into());
-        }
-        let identity = (meta.dev(), meta.ino());
-        let mut entries =
-            std::fs::read_dir(target).map_err(|error| format!("cannot list it: {error}"))?;
-        if entries.next().is_some() {
-            return Err("not empty".into());
-        }
-        let now = std::fs::symlink_metadata(target)
-            .map_err(|error| format!("cannot stat it: {error}"))?;
-        if now.file_type().is_symlink() || (now.dev(), now.ino()) != identity {
-            return Err("replaced".into());
-        }
-        Ok(identity)
-    }
-
-    /// Undo this call's `mkdir` when it is still the same empty directory.
-    fn remove_if_same(target: &Path, identity: Identity) -> String {
-        let same = std::fs::symlink_metadata(target)
-            .map(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == identity)
-            .unwrap_or(false);
-        if !same {
-            return format!("{} was changed, so it was left in place", target.display());
-        }
-        match std::fs::remove_dir(target) {
-            Ok(()) => format!("removed {} again", target.display()),
-            Err(error) => format!(
-                "could not remove {} ({error}); it is NOT deletable via the ledger",
-                target.display()
-            ),
-        }
-    }
+    crate::platform::safe_mktemp::create(raw, request, writer)
 }
 
 #[cfg(test)]
 #[path = "safe_mktemp_tests.rs"]
-mod tests;
+pub(crate) mod tests;
