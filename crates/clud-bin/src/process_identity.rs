@@ -32,7 +32,7 @@
 //! case explicitly so a reader can tell "not recorded" from "recorded as 0".
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessStatus, System};
 
 #[cfg(not(windows))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
@@ -86,10 +86,13 @@ impl ProcessIdentity {
 
     /// Read the identity of `pid` out of an already-refreshed snapshot.
     ///
-    /// `None` means no process currently holds that PID.
+    /// `None` means no running process holds that PID, including a zombie: it
+    /// has exited and only awaits reaping, as Windows' `STILL_ACTIVE` check
+    /// already treats an exited process.
     pub fn observe_in(system: &System, pid: u32) -> Option<Self> {
         system
             .process(Pid::from_u32(pid))
+            .filter(|process| is_running(process.status()))
             .map(|process| Self::new(pid, process.start_time()))
     }
 
@@ -197,9 +200,26 @@ pub fn start_time_of(pid: u32) -> u64 {
         .unwrap_or(UNKNOWN_START_TIME)
 }
 
+/// Whether a process in `status` is still running. A just-SIGKILLed daemon
+/// stays a zombie until its parent or init reaps it; counting it as alive made
+/// `clud daemon stop` dial its closed port once liveness became a single-PID
+/// lookup, which no longer outlasts the reap (#1981).
+fn is_running(status: ProcessStatus) -> bool {
+    !matches!(status, ProcessStatus::Zombie | ProcessStatus::Dead)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exited_processes_are_not_running() {
+        assert!(!is_running(ProcessStatus::Zombie));
+        assert!(!is_running(ProcessStatus::Dead));
+        assert!(is_running(ProcessStatus::Run));
+        assert!(is_running(ProcessStatus::Sleep));
+        assert!(is_running(ProcessStatus::Stop));
+    }
 
     // Every case below uses synthetic identities. Forcing the OS to actually
     // recycle a PID is not something a test can do deterministically, so the
