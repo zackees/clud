@@ -137,7 +137,7 @@ fn reads_cleanup_and_other_places_are_allowed() {
             "safe-rm -r .claude/worktrees/scratch",
             "mv .claude/worktrees/feat /home/u/.clud/tmp-wt/repo-wt-feat",
             "git worktree add /home/u/.clud/tmp-wt/repo-wt-feat -b feat",
-            "mkdir -p .claude/skills/x",
+            "mkdir -p .claude/agents/x",
             "echo hi > notes/worktrees.md",
             "mkdir \"$UNKNOWN_DIR\"",
         ] {

@@ -219,7 +219,7 @@ mod tests {
         assert!(is_forbidden("/repo/.claude/worktrees/notes.md"));
         assert!(is_forbidden("/home/u/.claude/worktrees/x/y"));
         assert!(is_forbidden(r"C:\repo\.claude\worktrees\notes.md"));
-        assert!(!is_forbidden("/repo/.claude/skills/x"));
+        assert!(!is_forbidden("/repo/.claude/agents/x"));
         assert!(!is_forbidden("/repo/worktrees/x"));
         assert!(!is_forbidden("/repo/.claude-worktrees/x"));
     }
