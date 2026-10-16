@@ -9,6 +9,7 @@ pub mod ctrl_c_track;
 pub mod dnd;
 #[cfg(test)]
 mod foreground_runtime;
+pub mod fs_private;
 #[cfg(test)]
 pub mod gc_test_fs;
 #[cfg(test)]
@@ -23,14 +24,18 @@ pub mod large_file_guard;
 pub mod log_event;
 pub mod login_env;
 pub mod optimize;
+pub mod path_norm;
 pub mod process_identity;
 pub mod process_tree;
 pub mod provider_auth;
 pub mod reaper_facts;
 pub mod repo_worktree_reclaim_exec;
+pub mod rm_guard;
+pub mod rm_tool;
 pub mod runner;
 pub mod runner_execution;
 pub mod runtime_cache;
+pub mod safe_mktemp;
 pub mod self_install;
 pub mod self_install_activation;
 pub mod session_registry;

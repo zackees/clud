@@ -355,10 +355,12 @@ fn volumes_differ(source: &Path, trash_root: &Path) -> bool {
     }
 }
 
-#[cfg(windows)]
 fn volume_key(path: &Path) -> Option<String> {
     use std::path::{Component, Prefix};
 
+    if !crate::platform::host::WINDOWS {
+        return None;
+    }
     let Component::Prefix(prefix) = path.components().next()? else {
         return None;
     };
@@ -373,11 +375,6 @@ fn volume_key(path: &Path) -> Option<String> {
         )),
         _ => Some(prefix.as_os_str().to_string_lossy().to_string()),
     }
-}
-
-#[cfg(not(windows))]
-fn volume_key(_path: &Path) -> Option<String> {
-    None
 }
 
 fn volume_label(path: &Path) -> String {

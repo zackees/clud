@@ -5,53 +5,6 @@
 use super::*;
 use crate::clud_settings::{safe_rm_extra_roots_from, SafeRmExtraRootEntry};
 use extra_roots::ExtraRoot;
-#[cfg(unix)]
-use extra_roots::{verdict, EntryFacts};
-
-#[cfg(unix)]
-fn facts(raw: &str, reason: &str) -> EntryFacts {
-    EntryFacts {
-        raw: raw.into(),
-        reason: reason.into(),
-        canonical: Ok(PathBuf::from(raw)),
-        is_dir: true,
-        home: Some(PathBuf::from("/home/u")),
-        owner: Some(1000),
-        me: Some(1000),
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn entry_decision_table() {
-    let ok = |f: EntryFacts| verdict(&f).map(|r| r.root);
-    let err = |f: EntryFacts| verdict(&f).unwrap_err();
-    assert_eq!(
-        ok(facts("/srv/bench", "benchmark output")),
-        Ok(PathBuf::from("/srv/bench"))
-    );
-    // Inside HOME is allowed (that is the point); HOME and above are not.
-    assert!(ok(facts("/home/u/bench-out", "bench")).is_ok());
-    assert!(err(facts("/home/u", "x")).contains("home directory"));
-    assert!(err(facts("/home", "x")).contains("home directory"));
-    assert!(err(facts("/", "x")).contains("filesystem root"));
-    assert!(err(facts("/srv/bench", "  ")).contains("reason"));
-    assert!(err(facts("relative/dir", "x")).contains("absolute"));
-    assert!(err(facts("/srv/repo/.git", "x")).contains("git metadata"));
-    let mut missing = facts("/srv/gone", "x");
-    missing.canonical = Err("No such file or directory".into());
-    assert!(err(missing).contains("cannot resolve"));
-    let mut file = facts("/srv/file", "x");
-    file.is_dir = false;
-    assert!(err(file).contains("not a directory"));
-    let mut foreign = facts("/srv/theirs", "x");
-    foreign.owner = Some(0);
-    assert!(err(foreign).contains("not owned by you"));
-    // A symlinked entry is judged by its canonical target.
-    let mut link = facts("/srv/link", "x");
-    link.canonical = Ok(PathBuf::from("/home"));
-    assert!(err(link).contains("home directory"));
-}
 
 #[test]
 fn settings_entry_without_a_reason_is_rejected_at_load_with_a_message() {
@@ -95,14 +48,14 @@ fn peek_reads_only_the_given_home() {
 }
 
 /// A world with an extra root `<base>/extra` outside the session roots.
-fn extra_world() -> (World, PathBuf) {
+pub(crate) fn extra_world() -> (World, PathBuf) {
     let w = world();
     let extra = w.home.parent().unwrap().join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     (w, extra)
 }
 
-fn run_extra(w: &World, roots: &mut Roots, list: &[&str]) -> (i32, String, String) {
+pub(crate) fn run_extra(w: &World, roots: &mut Roots, list: &[&str]) -> (i32, String, String) {
     let options = parse_args(&args(list)).unwrap().unwrap();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run_with(Kind::Safe, &options, &w.ctx(), roots, &mut out, &mut err);
@@ -113,7 +66,7 @@ fn run_extra(w: &World, roots: &mut Roots, list: &[&str]) -> (i32, String, Strin
     )
 }
 
-fn with_extra(w: &World, extra: &Path) -> Roots {
+pub(crate) fn with_extra(w: &World, extra: &Path) -> Roots {
     w.roots().with_extra_roots(
         vec![ExtraRoot {
             root: extra.to_path_buf(),
@@ -202,36 +155,6 @@ fn the_extra_root_itself_is_refused() {
     assert!(extra.exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlink_under_an_extra_root_cannot_escape_it() {
-    let (w, extra) = extra_world();
-    let victim = w.home.parent().unwrap().join("victim");
-    std::fs::create_dir_all(&victim).unwrap();
-    std::fs::write(victim.join("keep.txt"), "keep").unwrap();
-    std::os::unix::fs::symlink(&victim, extra.join("link")).unwrap();
-    let mut roots = with_extra(&w, &extra);
-    let through = extra.join("link").join("keep.txt");
-    let (code, _, err) = run_extra(&w, &mut roots, &[through.to_str().unwrap()]);
-    assert_eq!(code, 1, "{err}");
-    assert!(victim.join("keep.txt").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn an_entry_under_an_extra_root_owned_by_another_user_is_refused() {
-    let (w, extra) = extra_world();
-    let target = extra.join("theirs.txt");
-    std::fs::write(&target, "x").unwrap();
-    // SAFETY: geteuid has no preconditions.
-    let other = unsafe { libc::geteuid() }.wrapping_add(1);
-    let mut roots = with_extra(&w, &extra).with_temp_owner(other);
-    let (code, _, err) = run_extra(&w, &mut roots, &[target.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(err.contains("not owned by you"), "{err}");
-    assert!(target.exists());
-}
-
 #[test]
 fn dropped_entries_are_reported_on_every_call() {
     let (w, extra) = extra_world();
@@ -248,27 +171,4 @@ fn dropped_entries_are_reported_on_every_call() {
         "{err}"
     );
     assert!(target.exists(), "an entry without a reason is not honored");
-}
-
-#[cfg(unix)]
-#[test]
-fn load_drops_home_and_reasonless_entries_and_keeps_good_ones() {
-    let (w, extra) = extra_world();
-    let entries = vec![
-        SafeRmExtraRootEntry {
-            path: extra.display().to_string(),
-            reason: "bench".into(),
-        },
-        SafeRmExtraRootEntry {
-            path: w.home.display().to_string(),
-            reason: "everything".into(),
-        },
-    ];
-    // SAFETY: geteuid has no preconditions.
-    let me = Some(unsafe { libc::geteuid() });
-    let (roots, rejected) = extra_roots::load(&entries, vec!["shape".into()], Some(&w.home), me);
-    assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].root, extra);
-    assert_eq!(rejected.len(), 2, "{rejected:?}");
-    assert!(rejected[1].contains("home directory"), "{rejected:?}");
 }

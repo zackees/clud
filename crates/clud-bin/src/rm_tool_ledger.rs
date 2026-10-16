@@ -125,13 +125,10 @@ pub fn probe(target: &Path, ledger: &dyn CreationLedger, me: Option<u32>) -> Led
 fn stat(path: &Path) -> Option<LiveEntry> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     let is_symlink = meta.file_type().is_symlink();
-    #[cfg(unix)]
-    let (id, uid) = {
-        use std::os::unix::fs::MetadataExt;
-        (Some((meta.dev(), meta.ino())), Some(meta.uid()))
-    };
-    #[cfg(not(unix))]
-    let (id, uid) = (None, None);
+    let (id, uid) = (
+        crate::platform::rm_tool::file_identity(&meta),
+        crate::platform::rm_tool::file_owner(&meta),
+    );
     Some(LiveEntry {
         is_dir: !is_symlink && meta.is_dir(),
         is_symlink,
