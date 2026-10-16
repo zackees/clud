@@ -42,7 +42,10 @@ impl std::fmt::Display for Finding {
             }
             Self::ForeignScanner { found, .. } => {
                 let note = "hooks relay to the launcher";
-                write!(f, "first clud-cmd-scan on PATH is {path} (build {found}); {note}")
+                write!(
+                    f,
+                    "first clud-cmd-scan on PATH is {path} (build {found}); {note}"
+                )
             }
         }
     }
@@ -108,7 +111,10 @@ pub fn run() -> i32 {
         return 2;
     };
     println!("clud {} (build {own})", exe.display());
-    println!("hook matcher: {}", crate::clud_hooks_compile::guarded_tools_matcher());
+    println!(
+        "hook matcher: {}",
+        crate::clud_hooks_compile::guarded_tools_matcher()
+    );
     let home = crate::home::user_home();
     let path_env = std::env::var("PATH").unwrap_or_default();
     let findings = inspect(&exe, &own, home.as_deref(), &path_env);

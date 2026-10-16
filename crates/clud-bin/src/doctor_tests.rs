@@ -14,7 +14,9 @@ fn current_aliases_are_clean_and_stale_or_retired_ones_are_reported() {
     write(&fresh, 10);
     let stale = dir.path().join(crate::shim_registry::file_name("stale"));
     write(&stale, 7);
-    let retired = dir.path().join(crate::shim_registry::file_name("old-alias"));
+    let retired = dir
+        .path()
+        .join(crate::shim_registry::file_name("old-alias"));
     write(&retired, 10);
     let names = ["fresh", "stale", "absent"].map(String::from).to_vec();
     let findings = inspect_dir(dir.path(), &names, &["old-alias", "older-alias"], &own);

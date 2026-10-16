@@ -110,7 +110,12 @@ fn run_personality(personality: Personality, argv: &[OsString]) -> i32 {
 fn run_cmd_scan(args: &[OsString]) -> i32 {
     use crate::hook_handshake as handshake;
     let decision = handshake::decide(&handshake::probe());
-    if let handshake::Decision::Relay { launcher, own, expected } = decision {
+    if let handshake::Decision::Relay {
+        launcher,
+        own,
+        expected,
+    } = decision
+    {
         crate::block_bad_cmd::log_hook_skew(&launcher, &own, &expected);
         if let Some(code) = handshake::relay(&launcher, &args[1..]) {
             return code;

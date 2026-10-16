@@ -47,6 +47,9 @@ fn the_fingerprint_names_the_version_and_size() {
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("clud");
     std::fs::write(&exe, b"12345").unwrap();
-    assert_eq!(fingerprint(&exe), Some(format!("{}+5", env!("CARGO_PKG_VERSION"))));
+    assert_eq!(
+        fingerprint(&exe),
+        Some(format!("{}+5", env!("CARGO_PKG_VERSION")))
+    );
     assert_eq!(fingerprint(&dir.path().join("missing")), None);
 }
