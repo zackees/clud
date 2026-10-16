@@ -550,6 +550,10 @@ pub enum Command {
     CodexUpdate,
     /// Install or confirm DeepSeek Harness in clud's private npm prefix.
     DshUpdate,
+    /// Report hook and alias health: stale or retired aliases in clud's own
+    /// alias dirs, a foreign `clud-cmd-scan` first on PATH, and the hook
+    /// matcher's tool coverage (#1954). Exits 1 when anything is wrong.
+    Doctor,
     /// Run a CI job locally under bosn and show only the verdict and the
     /// failing steps' diagnostics (#1839).
     Ci {
@@ -1437,6 +1441,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "models",
     "codex-update",
     "dsh-update",
+    "doctor",
     "ci",
     "codex-auth",
     "deepseek-auth",
