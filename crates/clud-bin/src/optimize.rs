@@ -54,6 +54,12 @@ fn run_rust(
     use_soldr_shims: bool,
     soldr_version: &str,
 ) -> i32 {
+    // soldr cannot be pinned: a requested version is ignored with a yellow
+    // warning, nothing is persisted, and the install follows latest.
+    if let Some(pin) = crate::soldr_activate::pinned_version(Some(soldr_version)) {
+        eprintln!("{}", crate::soldr_activate::pin_ignored_warning(pin));
+    }
+    let soldr_version = "latest";
     let settings = RustOptimizeSettings {
         use_soldr_shims,
         install_soldr,
@@ -253,14 +259,11 @@ fn write_repo_directive_at(path: &Path, settings: &RustOptimizeSettings) -> io::
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    let mut rust = serde_json::json!({
+    // No `soldr_version`: soldr cannot be pinned (it always follows latest).
+    root["optimize"]["rust"] = serde_json::json!({
         "use_soldr_shims": settings.use_soldr_shims,
         "install_soldr": settings.install_soldr,
     });
-    if !settings.soldr_version.eq_ignore_ascii_case("latest") {
-        rust["soldr_version"] = serde_json::json!(settings.soldr_version);
-    }
-    root["optimize"]["rust"] = rust;
     let mut body = serde_json::to_string_pretty(&root).map_err(io::Error::other)?;
     body.push('\n');
     fs::write(path, body)
@@ -699,7 +702,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["optimize"]["rust"]["use_soldr_shims"], false);
         assert_eq!(parsed["optimize"]["rust"]["install_soldr"], true);
-        assert_eq!(parsed["optimize"]["rust"]["soldr_version"], "9.9.9");
+        assert!(
+            parsed["optimize"]["rust"].get("soldr_version").is_none(),
+            "a soldr version is never written: soldr cannot be pinned"
+        );
     }
 
     #[test]
