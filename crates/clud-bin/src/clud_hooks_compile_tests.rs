@@ -228,16 +228,22 @@ fn deletion_safety_fragment_denies_file_tool_edits_of_the_user_settings_file() {
 }
 
 #[test]
-fn deletion_safety_fragment_routes_schedule_wakeup_to_the_dispatcher() {
+fn deletion_safety_fragment_routes_every_guarded_tool_to_the_dispatcher() {
     // #1949: the /loop first-round stop guard never fired in a launch whose
     // only clud matcher was `Bash`, because the harness filters by matcher
-    // before the hook runs.
+    // before the hook runs. The same filter hid every other non-Bash rule.
     let fragment = deletion_safety_fragment();
     let entries = fragment["hooks"]["PreToolUse"].as_array().unwrap();
-    let wakeup = entries
-        .iter()
-        .find(|entry| entry["matcher"] == SCHEDULE_WAKEUP_MATCHER)
-        .expect("ScheduleWakeup must reach the dispatcher");
-    assert_eq!(wakeup["hooks"][0]["command"], DISPATCHER_BINARY);
-    assert!(entries.iter().any(|entry| entry["matcher"] == "Bash"));
+    let matcher = regex::Regex::new(&format!(
+        "^(?:{})$",
+        entries[0]["matcher"].as_str().unwrap()
+    ))
+    .unwrap();
+    for tool in GUARDED_TOOLS {
+        assert!(matcher.is_match(tool), "{tool} must reach the dispatcher");
+    }
+    for tool in ["Read", "Grep", "Glob", "WebFetch"] {
+        assert!(!matcher.is_match(tool), "{tool} has no rule");
+    }
+    assert_eq!(entries[0]["hooks"][0]["command"], DISPATCHER_BINARY);
 }

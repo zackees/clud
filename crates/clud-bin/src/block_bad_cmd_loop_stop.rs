@@ -26,7 +26,7 @@ use serde_json::Value;
 pub const RULE_ID: &str = "loop-first-round-stop";
 
 /// The harness tool that schedules, or ends, a dynamic `/loop`.
-const SCHEDULE_WAKEUP: &str = "ScheduleWakeup";
+pub(super) const SCHEDULE_WAKEUP: &str = "ScheduleWakeup";
 
 /// The marker a `/loop` invocation leaves in the transcript. Each wakeup
 /// re-enters the skill with the same marker, so the last one starts the
