@@ -1059,3 +1059,54 @@ fn daemon_ledger_without_a_running_daemon_is_unavailable() {
 
 #[path = "rm_tool_extra_roots_tests.rs"]
 mod extra_roots_tests;
+
+/// A `.venv` is disposable wherever it lives: safe-rm moves it to the trash
+/// even outside every root, with the reason in the audit record.
+#[test]
+fn venv_outside_the_roots_is_trashed() {
+    let w = world();
+    let outside = w.root.parent().unwrap().join("other-project");
+    let venv = outside.join(".venv");
+    std::fs::create_dir_all(venv.join("lib")).unwrap();
+    std::fs::write(venv.join("lib").join("site.py"), "x").unwrap();
+    let (code, _out, err) = w.run(Kind::Safe, &["-r", venv.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!venv.exists(), "the .venv must be moved to the trash");
+    assert_eq!(w.entries().len(), 1);
+    let reasons: Vec<String> = w
+        .audit_records()
+        .iter()
+        .flat_map(|r| r["paths"].as_array().cloned().unwrap_or_default())
+        .filter_map(|p| p["reason"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        reasons.iter().any(|r| r.contains(".venv")),
+        "audit records must say why: {reasons:?}"
+    );
+}
+
+#[test]
+fn path_inside_a_venv_outside_the_roots_is_trashed() {
+    let w = world();
+    let venv = w.root.parent().unwrap().join("other-project").join(".venv");
+    std::fs::create_dir_all(venv.join("bin")).unwrap();
+    let python = venv.join("bin").join("python");
+    std::fs::write(&python, "x").unwrap();
+    let (code, _out, err) = w.run(Kind::Safe, &[python.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!python.exists());
+}
+
+#[test]
+fn only_a_component_named_exactly_venv_is_exempt() {
+    let w = world();
+    let outside = w.root.parent().unwrap().join("other-project");
+    for name in [".venv-old", "venv", "src"] {
+        let dir = outside.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (code, _out, err) = w.run(Kind::Safe, &["-r", dir.to_str().unwrap()]);
+        assert_ne!(code, 0, "{name} must stay refused");
+        assert!(err.contains("outside the allowed roots"), "{name}: {err}");
+        assert!(dir.exists());
+    }
+}
