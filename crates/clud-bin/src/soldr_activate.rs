@@ -422,7 +422,6 @@ fn refresh_rolling_latest(cfg: &RepoCludConfig) {
     }
 }
 
-
 /// Install soldr via `uv tool install` (preferred) or `pip install --user`
 /// (fallback), as `soldr>=<minimum>`: the resolver picks the newest release
 /// that satisfies the floor, and the uv receipt never records an exact pin

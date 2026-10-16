@@ -46,6 +46,15 @@ pub fn run(
     }
 }
 
+/// soldr cannot be pinned: a requested version is ignored with a yellow
+/// warning, nothing is persisted, and the install follows latest.
+fn ignore_soldr_pin(requested: &str) -> &'static str {
+    if let Some(pin) = crate::soldr_activate::pinned_version(Some(requested)) {
+        eprintln!("{}", crate::soldr_activate::pin_ignored_warning(pin));
+    }
+    "latest"
+}
+
 fn run_rust(
     args: &Args,
     global: bool,
@@ -54,12 +63,7 @@ fn run_rust(
     use_soldr_shims: bool,
     soldr_version: &str,
 ) -> i32 {
-    // soldr cannot be pinned: a requested version is ignored with a yellow
-    // warning, nothing is persisted, and the install follows latest.
-    if let Some(pin) = crate::soldr_activate::pinned_version(Some(soldr_version)) {
-        eprintln!("{}", crate::soldr_activate::pin_ignored_warning(pin));
-    }
-    let soldr_version = "latest";
+    let soldr_version = ignore_soldr_pin(soldr_version);
     let settings = RustOptimizeSettings {
         use_soldr_shims,
         install_soldr,
