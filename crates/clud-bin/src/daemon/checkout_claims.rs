@@ -959,16 +959,16 @@ mod tests {
     #[test]
     fn transient_failures_back_off_to_the_cap() {
         let stop = AtomicBool::new(false);
-        let mut clock = Duration::ZERO;
+        let clock = std::cell::Cell::new(Duration::ZERO);
         let mut sleeps = Vec::new();
         let mut attempts_in_first_minute = 0;
         let result = reconnect_with_backoff(
             &stop,
             || {
-                if clock < Duration::from_secs(60) {
+                if clock.get() < Duration::from_secs(60) {
                     attempts_in_first_minute += 1;
                 }
-                if clock >= Duration::from_secs(600) {
+                if clock.get() >= Duration::from_secs(600) {
                     Ok("connected")
                 } else {
                     Err(io::Error::from(io::ErrorKind::ConnectionRefused))
@@ -976,7 +976,7 @@ mod tests {
             },
             |delay| {
                 sleeps.push(delay);
-                clock += delay;
+                clock.set(clock.get() + delay);
             },
             |delay| delay,
         );
