@@ -785,13 +785,15 @@ fn the_state_machine_drives_show_then_close_for_a_short_episode() {
 
 /// #1981: a full-table walk must not leave one open `/proc` handle per host
 /// process behind for the session's lifetime.
-#[cfg(target_os = "linux")]
 #[test]
 fn sampler_keeps_a_bounded_number_of_procfs_handles() {
     let mut sampler = Sampler::new();
     let _ = sampler.tick(std::process::id());
-    let procfs_fds = std::fs::read_dir("/proc/self/fd")
-        .unwrap()
+    // Only Linux exposes per-process procfs handles to count.
+    let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+        return;
+    };
+    let procfs_fds = fds
         .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
         .filter(|target| target.starts_with("/proc"))
         .count();

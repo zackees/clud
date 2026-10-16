@@ -96,21 +96,20 @@ pub(super) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
     crate::process_tree::descendant_pids(system, root)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// Read syscalls made by the calling thread, which parallel tests do not
-    /// disturb.
-    fn thread_read_syscalls() -> u64 {
+    /// disturb. `None` off Linux, where procfs has no such counter.
+    fn thread_read_syscalls() -> Option<u64> {
         std::fs::read_to_string("/proc/thread-self/io")
-            .unwrap()
+            .ok()?
             .lines()
-            .find_map(|line| line.strip_prefix("syscr: "))
-            .unwrap()
+            .find_map(|line| line.strip_prefix("syscr: "))?
             .trim()
             .parse()
-            .unwrap()
+            .ok()
     }
 
     /// #1981: `ensure_daemon` probes the daemon through `identity_is_alive`, so
@@ -118,13 +117,22 @@ mod tests {
     #[test]
     fn identity_probe_reads_only_the_probed_pid() {
         let identity = ProcessIdentity::observe(std::process::id()).unwrap();
-        let before = thread_read_syscalls();
+        let Some(before) = thread_read_syscalls() else {
+            return;
+        };
+        assert!(identity_is_alive(&identity));
+        let reads = thread_read_syscalls().unwrap() - before;
+        // A handful of the probed PID's own files, each read to EOF, plus the
+        // counter read itself. A full refresh reads a stat file for every
+        // process and task on the host (about 5,500 in #1981).
+        assert!(reads <= 32, "one liveness probe made {reads} read syscalls");
+    }
+
+    #[test]
+    fn liveness_probes_find_a_live_process() {
+        let identity = ProcessIdentity::observe(std::process::id()).unwrap();
         assert!(identity_is_alive(&identity));
         assert!(pid_is_alive(identity.pid));
-        let reads = thread_read_syscalls() - before;
-        // Two lookups plus the counter read itself. A full refresh reads one
-        // stat file per process and task on the host.
-        assert!(reads <= 32, "liveness probes made {reads} read syscalls");
     }
 
     #[test]
