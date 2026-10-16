@@ -3,7 +3,8 @@
 //! Agents made hundreds of worktrees a week, each a cold Rust `target/`,
 //! often right after the user said not to: a subagent never sees the user's
 //! prompt. So creation is refused unless this session opted in, and the
-//! opt-in comes from places an agent cannot write:
+//! opt-in comes only from the user's own channels (a deterrent for a
+//! forgetful agent, not a security boundary; DD-173):
 //!
 //! - the user's own prompt: the `UserPromptSubmit` hook ([`handle_prompt`])
 //!   sets the daemon's `worktrees` flag for the payload's `session_id`
@@ -26,6 +27,12 @@ use serde_json::Value;
 
 /// Launch-environment opt-in for the whole session.
 pub const ALLOW_ENV: &str = "CLUD_ALLOW_WORKTREES";
+
+/// Set by clud on a launch whose `--settings` registers the prompt hook.
+/// Only those sessions can ever record consent, so only they are gated: a
+/// plain `claude` or Codex session that runs `clud-cmd-scan` from a
+/// committed or global hook config keeps creating worktrees as before.
+pub const GATE_ENV: &str = "CLUD_WORKTREE_GATE";
 
 /// The daemon session-flag key.
 pub const FLAG_KEY: &str = "worktrees";
@@ -133,7 +140,8 @@ pub fn handle_prompt_in(state_dir: &Path, stdin: &str) -> i32 {
 /// The refusal for creating a worktree in `session_id`, or `None` to allow.
 #[must_use]
 pub fn refusal(session_id: Option<&str>) -> Option<String> {
-    if crate::runner::unsafe_mode_enabled() {
+    if crate::runner::unsafe_mode_enabled() || std::env::var(GATE_ENV).ok().as_deref() != Some("1")
+    {
         return None;
     }
     let env_allows = std::env::var(ALLOW_ENV).ok().as_deref() == Some("1");
@@ -178,9 +186,10 @@ fn decide(
 fn denial(why: &str) -> String {
     format!(
         "Git worktrees are off for this session: {why}. Work in this checkout; a feature \
-         branch (`git switch -c <branch>`) is fine. If you need a worktree, ask the user: \
-         they allow it by saying so in a prompt (\"use worktrees\") or by launching with \
-         {ALLOW_ENV}=1."
+         branch (`git switch -c <branch>`) is fine. If you need a worktree, tell the user to \
+         send the message \"use worktrees\" themselves. A yes to your question, or an \
+         AskUserQuestion answer, does not allow it; only the user's own prompt (or launching \
+         with {ALLOW_ENV}=1) does."
     )
 }
 

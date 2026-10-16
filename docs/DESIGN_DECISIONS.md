@@ -6888,7 +6888,7 @@ and host-gated tests are exactly the code a Linux-only run never compiles.
 Facade files beside the selector that are allowed to `cfg`: that would be
 a second selector.
 
-## DD-173: a session control takes consent only from places an agent cannot write
+## DD-173: a session control takes consent only from the user's own channels
 
 **Context.** Agents created git worktrees hundreds of times a week, each a
 cold Rust `target/`, often right after the user said "no worktrees". The
@@ -6897,7 +6897,8 @@ only the brief the main agent writes, and the constraint gets dropped (#1984).
 Instructions alone cannot hold such a rule; it needs enforcement.
 
 **Decision.** Worktree creation is refused unless the session opted in, and
-consent comes only from sources the agent cannot write: the user's prompt
+consent comes only from the user's own channels, never from anything an
+agent does in its normal work: the user's prompt
 (the `UserPromptSubmit` payload, which carries only what the user typed or
 pasted), the launch environment (`CLUD_ALLOW_WORKTREES`, or `--worktree`),
 or an active `/grind` run. The prompt hook stores consent in a daemon
@@ -6921,6 +6922,15 @@ with their parent. An unanswerable lookup refuses, and the rule has no
   and that clud can display. Its costs are named: a restart forgets consent
   (safe direction), and a down daemon refuses.
 - *An agent override.* Any escape the agent can set, it will set once refused.
+
+**Not a security boundary.** The agent runs as the same user, so a
+determined one could still reach the daemon's loopback port, set
+`CLUD_ALLOW_ALL_CMDS`, or write `/grind` run facts. The control stops the
+observed failure, an agent that forgets or never saw the user's "no"; it does
+not contain an adversarial one. Only sessions clud launched with the prompt
+hook are gated (`CLUD_WORKTREE_GATE=1`): a plain `claude` or Codex session
+that runs `clud-cmd-scan` from a committed or global hook config could never
+record consent, so it is left as it was.
 
 **Consequences.** Concurrent sessions on one checkout can no longer fall back
 to a worktree on their own; they wait or ask. Codex, with no prompt event

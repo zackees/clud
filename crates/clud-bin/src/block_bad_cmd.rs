@@ -353,11 +353,23 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return crate::claude_worktree_hook::run_remove(&read_stdin_bounded().text);
     }
 
-    // #1984: the user's prompt may allow worktrees for this session. Records
-    // consent only; never denies and never prints, so it runs ahead of the
-    // tool-call machinery below.
+    // #1984: the user's prompt may allow worktrees for this session. clud's
+    // line records consent only, never denying or printing, so it skips the
+    // tool-call machinery below; a repo that declares its own
+    // UserPromptSubmit hooks shares this (deduplicated) line and still gets
+    // them run.
     if event == crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT {
-        return crate::worktree_consent::handle_prompt(&read_stdin_bounded().text);
+        let stdin = read_stdin_bounded();
+        let _ = crate::worktree_consent::handle_prompt(&stdin.text);
+        if serves_declared_hooks(invocation) {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(payload) = parse_payload(&stdin.text, &cwd) {
+                if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
+                    return code;
+                }
+            }
+        }
+        return 0;
     }
 
     // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every

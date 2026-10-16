@@ -3,7 +3,7 @@
 A session control is a switch only the user can turn, enforced against every
 agent in the session, subagents included. The first one gates git worktree
 creation: refused unless the user opted in. Rationale:
-[DD-173](../DESIGN_DECISIONS.md#dd-173-a-session-control-takes-consent-only-from-places-an-agent-cannot-write).
+[DD-173](../DESIGN_DECISIONS.md#dd-173-a-session-control-takes-consent-only-from-the-users-own-channels).
 
 ## How state moves
 
@@ -43,8 +43,13 @@ claude
 
 ## The worktree control
 
-Allowed when any of these holds, else refused with a message that says how
-the user allows it:
+Gated only in sessions clud launched with its prompt hook: clud sets
+`CLUD_WORKTREE_GATE=1` for a Claude launch that is not unsafe (and clears an
+inherited one otherwise). A plain `claude` or Codex session running
+`clud-cmd-scan` from a committed or global hook config cannot record consent,
+so it is not gated. In a gated session, a worktree is allowed when any of
+these holds, else refused with a message telling the agent to have the user
+type "use worktrees" (a yes to the agent's question does not count):
 
 1. the daemon flag `worktrees` is `true` for the session (the prompt said yes:
    "use worktrees", "you can use a git worktree", "worktrees ok"; a no such as
@@ -63,8 +68,8 @@ the `WorktreeCreate` handler, which every Claude Code worktree goes through.
 A session the daemon cannot answer for is refused. The rule has no
 `CLUD_BAD_CMD_OVERRIDE` id.
 
-**Limits.** Codex has no prompt event mapped, so there only the environment
-allows worktrees. The Bash check sees what the parser captures; a git alias
+**Limits.** This deters a forgetful agent; it is not a security boundary
+(DD-173). Codex launches are not gated. The Bash check sees what the parser captures; a git alias
 (`git wt add`) is not a `worktree add`. A pasted document that says "use a
 worktree" counts as the user's yes.
 

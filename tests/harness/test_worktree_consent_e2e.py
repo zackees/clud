@@ -31,7 +31,7 @@ def _worktree_script(harness: Harness, *, expect_error: bool, done: str) -> dict
                         "tool_use": {
                             "name": "Bash",
                             "input": {
-                                "command": f"git worktree add -b fix/e2e {destination}",
+                                "command": f"git worktree add -b fix/e2e {destination.as_posix()}",
                                 "description": "isolate the fix",
                             },
                         }

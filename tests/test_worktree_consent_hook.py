@@ -103,6 +103,8 @@ def world(tmp_path: Path) -> Iterator[dict[str, object]]:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["CLUD_DAEMON_STATE_DIR"] = str(state)
+    # A clud launch that registers the prompt hook sets this marker.
+    env["CLUD_WORKTREE_GATE"] = "1"
     for key in (
         "CLUD_ALLOW_WORKTREES",
         "CLUD_UNSAFE_MODE",
@@ -157,7 +159,7 @@ def _worktree_add(
             "session_id": session,
             "tool_name": "Bash",
             "cwd": str(world["repo"]),
-            "tool_input": {"command": f"git worktree add -b feat/x {dest}"},
+            "tool_input": {"command": f"git worktree add -b feat/x {dest.as_posix()}"},
         },
     )
 
@@ -241,7 +243,9 @@ def test_the_launch_environment_allows_and_a_command_prefix_does_not(
             "session_id": SESSION,
             "tool_name": "Bash",
             "cwd": str(world["repo"]),
-            "tool_input": {"command": f"CLUD_ALLOW_WORKTREES=1 git worktree add -b feat/y {dest}"},
+            "tool_input": {
+                "command": f"CLUD_ALLOW_WORKTREES=1 git worktree add -b feat/y {dest.as_posix()}"
+            },
         },
     )
     _assert_denied(prefixed, "has not allowed")
@@ -259,3 +263,16 @@ def test_the_worktree_create_backstop_refuses_without_consent(world: dict[str, o
     assert result.returncode == 1, result.stdout + result.stderr
     assert DENIED in result.stderr, result.stderr
     assert result.stdout == "", "nothing may reach stdout, which Claude Code reads as the path"
+
+
+def test_a_session_clud_did_not_gate_keeps_its_worktrees(world: dict[str, object]) -> None:
+    # A plain `claude` or Codex session running clud-cmd-scan from a committed
+    # or global hook config has no prompt hook, so it can never consent.
+    world["env"].pop("CLUD_WORKTREE_GATE")  # type: ignore[union-attr]
+    (Path(str(world["state"])) / "daemon.json").unlink()
+    for result in (
+        _tool(world, "EnterWorktree", {}),
+        _tool(world, "Agent", {"description": "x", "prompt": "x", "isolation": "worktree"}),
+    ):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert DENIED not in result.stdout

@@ -530,6 +530,17 @@ impl ForegroundRuntime {
                 "1".to_string(),
             ));
         }
+        // #1984: this launch registers the prompt hook that records worktree
+        // consent, so its hooks enforce it. Sessions clud did not launch this
+        // way never see the marker and are not gated.
+        // A nested launch decides afresh, like the unsafe marker.
+        env.retain(|(key, _)| key != crate::worktree_consent::GATE_ENV);
+        if plan.effective_harness().settings_surface().accepts_hooks() && !plan.unsafe_mode {
+            env.push((
+                crate::worktree_consent::GATE_ENV.to_string(),
+                "1".to_string(),
+            ));
+        }
         // #967 Phase 3b: carry roots the hook cannot rediscover -- `--add-dir`
         // targets and `permissions.additionalDirectories` appear in no hook
         // payload.
@@ -4399,6 +4410,30 @@ pub(crate) mod tests {
 
         assert_eq!(settings_argument(&runtime), None);
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    #[test]
+    fn only_a_launch_that_registers_the_prompt_hook_gates_worktrees() {
+        // #1984: consent can only be recorded where clud's UserPromptSubmit
+        // line is registered; everywhere else the gate must stay off, and an
+        // inherited marker must not leak into a launch that has no prompt hook.
+        let gate = crate::worktree_consent::GATE_ENV;
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let inherited = vec![(gate.to_string(), "1".to_string())];
+
+        let claude = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        let runtime = ForegroundRuntime::start(&claude, Vec::new()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), Some("1"));
+
+        let mut unsafe_launch = claude.clone();
+        unsafe_launch.unsafe_mode = true;
+        let runtime = ForegroundRuntime::start(&unsafe_launch, inherited.clone()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
+
+        let codex = plan_in(ModelProvider::Codex, Backend::Codex, repo.path());
+        let runtime = ForegroundRuntime::start(&codex, inherited).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
     }
 
     // ── #1189: Claude status-line injection ────────────────────────────────
