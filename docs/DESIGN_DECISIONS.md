@@ -6862,23 +6862,30 @@ session whose user opted out of the global entry or whose files are malformed,
 at the cost of scanning a Bash call twice.
 
 
-## DD-172: safe-rm trashes single HOME files outside the roots, but never directories
+## DD-172: safe-rm trashes HOME files and tool data dirs outside the roots
 
-**Context (#1956).** The creation ledger records only `safe-mktemp`. A file an
-agent wrote under `$HOME` with Write, `cp` or `install` (a stale `.desktop`
-entry) was refused, so agents overwrote it in place or left a manual cleanup
-list for the user.
+**Context (#1956, #1957).** The creation ledger records only `safe-mktemp`. A
+file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
+`.desktop` entry, a wrong Claude Code memory file) was refused, so agents
+overwrote it in place or left a manual cleanup list for the user.
 
-**Decision.** Split the policy by what is deleted. A regular file or symlink
-strictly under `$HOME`, owned by the caller on Unix, is trashed (never purged
-by this rule alone) unless `rm_tool_home_files::DENYLIST` covers it.
-Directories, and so every recursive delete, keep the roots-or-ledger rule.
+**Decision.** Outside the roots, a single file or symlink strictly under
+`$HOME` is trashed, and a directory is trashed only strictly inside a tool
+data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
+(`~/Documents` and the other XDG user dirs) and a credentials/settings
+denylist are refused outright, as is any directory containing a denylisted
+path. Home itself stays refused.
 
-**Why.** The damage that motivated the roots was recursive: one wrong `-r`
-removes a tree. A single file is bounded, recoverable from the trash for 72
-hours, and audited. The denylist covers the files whose loss or tampering is
-not bounded: keys, credentials and shell startup files.
+**Why.** A single file is bounded, recoverable from the trash for 72 hours,
+and audited. A recursive delete is not bounded: one wrong `-r` under home can
+take a project or years of documents, so directories stay limited to dirs
+that hold regenerable tool data. Keys, credentials and settings are not
+recoverable in the way that matters: a deleted key is a lockout, and a
+deleted clud settings file silently drops the user's overrides.
 
-**Rejected.** Extending the ledger to every Write/Edit/redirect (more
-plumbing, and still misses files from earlier sessions). Allowing directories
-under `$HOME` too (reopens the recursive-delete risk the roots exist for).
+**Rejected.** Every subfolder of home (the owner's first proposal: one wrong
+`safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
+trees are copied there). Extending the ledger to every Write/Edit/redirect
+(more plumbing, and still misses files from earlier sessions). A slug-matched
+exception for only the current project's memory dir (#1957's first draft,
+superseded once `~/.claude` became deletable).

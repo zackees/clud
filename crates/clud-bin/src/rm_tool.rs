@@ -445,16 +445,18 @@ impl Roots {
         Err(refusal + &ledger_clause + OUTSIDE_HINT)
     }
 
-    /// A single file or symlink under `home` outside every root (#1956):
-    /// `Some(Ok(parent))` allows it, `Some(Err)` is a denylist refusal and
-    /// `None` leaves the caller's refusal standing (directories included).
+    /// A path under `home` outside every root (#1956, #1957): a file or
+    /// symlink, or a directory inside a tool data dir. `Some(Ok(parent))`
+    /// allows it, `Some(Err)` is a denylist refusal and `None` leaves the
+    /// caller's refusal standing.
     fn home_file_grant(
         &mut self,
         path: &Path,
         home: Option<&Path>,
     ) -> Option<Result<PathBuf, String>> {
         let meta = std::fs::symlink_metadata(path).ok()?;
-        match home_files::check(path, &meta, home) {
+        let is_dir = !meta.file_type().is_symlink() && meta.is_dir();
+        match home_files::check(path, is_dir, home) {
             Ok(false) => None,
             Err(refusal) => Some(Err(refusal)),
             Ok(true) => {
