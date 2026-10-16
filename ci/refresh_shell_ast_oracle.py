@@ -124,7 +124,9 @@ class Shim:
         self.keys = [line["ts_ms"] for line in lines]
 
     def window(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.lines[bisect.bisect_left(self.keys, start) : bisect.bisect_right(self.keys, end)]
+        first = bisect.bisect_left(self.keys, start)
+        last = bisect.bisect_right(self.keys, end)
+        return self.lines[first:last]
 
 
 def session_owners(calls: list[tuple[int, int, str, str, str]], shim: Shim) -> dict[str, str]:
