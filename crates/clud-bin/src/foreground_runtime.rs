@@ -1542,6 +1542,17 @@ fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
     crate::clud_hooks_compile::claude_settings_fragment(&hooks, cwd_changed_supported)
 }
 
+/// Whether this launch's client takes clud's `WorktreeCreate` hook: a harness
+/// whose settings surface accepts hooks, on Claude Code 2.1.50 or newer.
+fn claude_takes_worktree_hooks(plan: &LaunchPlan) -> bool {
+    // Unit tests never probe whatever `claude` the machine has installed.
+    !cfg!(test)
+        && plan.effective_harness().settings_surface().accepts_hooks()
+        && plan.command.first().is_some_and(|binary| {
+            crate::backend_bootstrap::probe_claude_worktree_hooks_support(binary.as_ref())
+        })
+}
+
 /// Hand `generated` to Claude as a launch-scoped `--settings` source.
 ///
 /// When the user supplied their own `--settings`, clud merges into *their*
@@ -1557,13 +1568,29 @@ fn compose_launch_settings(
 
 fn compose_launch_settings_document(
     plan: &LaunchPlan,
+    settings: serde_json::Value,
+) -> Result<(serde_json::Value, bool), BridgeError> {
+    compose_launch_settings_document_with(plan, settings, claude_takes_worktree_hooks(plan))
+}
+
+/// [`compose_launch_settings_document`] with the worktree-hook decision
+/// made by the caller, so tests need not probe a real client.
+fn compose_launch_settings_document_with(
+    plan: &LaunchPlan,
     mut settings: serde_json::Value,
+    worktree_hooks: bool,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
     if !plan.unsafe_mode {
         let safety = crate::clud_hooks_compile::deletion_safety_fragment();
         crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
             .map_err(BridgeError::Settings)?;
         merge_deletion_denies(&mut settings, &safety)?;
+    }
+    // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
+    if worktree_hooks {
+        let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();
+        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &worktrees)
+            .map_err(BridgeError::Settings)?;
     }
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return Ok((settings, false));
@@ -4051,6 +4078,28 @@ mod tests {
             "clud-cmd-scan --event Stop"
         );
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_some());
+    }
+
+    /// #1962/#1971: a client that knows `WorktreeCreate` gets clud's line, so
+    /// its worktrees land under `~/.clud/worktrees`; one that does not gets no
+    /// line at all, since an unknown event could void the whole document.
+    #[test]
+    fn worktree_hooks_are_registered_only_when_the_client_takes_them() {
+        let launch = plan(ModelProvider::Claude, Backend::Claude);
+        let (with, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), true).unwrap();
+        assert_eq!(
+            with["hooks"]["WorktreeCreate"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeCreate"
+        );
+        assert_eq!(
+            with["hooks"]["WorktreeRemove"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeRemove"
+        );
+        assert!(with["hooks"]["PreToolUse"].is_array(), "the guards stay");
+        let (without, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), false).unwrap();
+        assert!(without["hooks"].get("WorktreeCreate").is_none());
     }
 
     #[test]

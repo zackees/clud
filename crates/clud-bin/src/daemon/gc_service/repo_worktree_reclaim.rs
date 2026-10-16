@@ -98,7 +98,7 @@ pub(crate) fn reverify_reclaim(
     }
 }
 
-/// Issue #1486: the pool-side re-check for an unused `tmp-wt` reservation.
+/// Issue #1486: the pool-side re-check for an unused `worktrees` reservation.
 /// `fresh` is `probe_reservation` re-run immediately before the delete;
 /// `still_under_root` is whether the path is still strictly inside the
 /// worktree root the verdict was computed against. Anything but an

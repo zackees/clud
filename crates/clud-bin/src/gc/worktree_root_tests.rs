@@ -11,13 +11,13 @@ fn age_path(path: &Path, age: Duration) {
     filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
 }
 
-/// Acceptance 1: the root is `<home>/.clud/tmp-wt` and is not under the
+/// Acceptance 1: the root is `<home>/.clud/worktrees` and is not under the
 /// `session_tmp` root.
 #[test]
 fn worktree_root_is_clud_home_tmp_wt_and_not_under_session_tmp() {
     let home = tempdir().unwrap();
     let root = worktree_root_for(home.path());
-    assert_eq!(root, home.path().join(".clud").join("tmp-wt"));
+    assert_eq!(root, home.path().join(".clud").join("worktrees"));
     let tmp = session_tmp_dir_for(home.path());
     assert!(
         !root.starts_with(&tmp),
@@ -25,7 +25,7 @@ fn worktree_root_is_clud_home_tmp_wt_and_not_under_session_tmp() {
         root.display(),
         tmp.display()
     );
-    assert_eq!(root.parent(), tmp.parent(), "tmp-wt is a sibling of tmp");
+    assert_eq!(root.parent(), tmp.parent(), "worktrees is a sibling of tmp");
 }
 
 /// Acceptance 1: the root exists after the start-up call, and the call is
@@ -41,7 +41,7 @@ fn ensure_worktree_root_creates_it_idempotently() {
     assert!(child.is_dir(), "a second start must not disturb worktrees");
 }
 
-/// Acceptance 2: the `session_tmp` sweep, given a `tmp-wt/<repo>-wt-1`
+/// Acceptance 2: the `session_tmp` sweep, given a `worktrees/<repo>-wt-1`
 /// entry far past the stale threshold, never touches it, because the root is
 /// outside its scope.
 #[test]
@@ -65,7 +65,7 @@ fn session_tmp_sweep_never_touches_tmp_wt() {
     session_tmp::sweep_stale_at(&tmp, SystemTime::now(), false).unwrap();
 
     assert!(!stale.exists(), "the sweep must have run over tmp");
-    assert!(wt.join("f.txt").exists(), "tmp-wt is outside the sweep");
+    assert!(wt.join("f.txt").exists(), "worktrees is outside the sweep");
 }
 
 #[test]
@@ -114,16 +114,10 @@ fn size_warning_only_when_over_or_unknown_and_enabled() {
     assert_eq!(size_warning(root, 0, SizeCheck::Over(11)), None);
 }
 
-/// Names allocated under the root keep the `<repo>-wt-<suffix>` shape, so
-/// reconcile's repo-scoped name matching is unchanged.
+/// The root's own directory name is never mistaken for a sibling clone.
+/// (Entries under the root are found by listing it, not by name shape.)
 #[test]
-fn allocated_names_keep_the_reconcile_shape() {
-    let home = tempdir().unwrap();
-    let wt = worktree_root_for(home.path()).join("clud2-wt-1485");
-    let name = wt.file_name().unwrap().to_str().unwrap();
-    assert!(crate::gc::reconcile::is_sibling_clone_dir_name(
-        "clud2", name
-    ));
+fn the_root_is_not_a_sibling_clone_name() {
     assert!(!crate::gc::reconcile::is_sibling_clone_dir_name(
         "clud2",
         WORKTREE_ROOT_DIR_NAME
@@ -139,14 +133,10 @@ fn alloc_takes_the_plain_name_first_and_it_exists() {
     let path = alloc_wt_path_in(&root, "clud", "432").unwrap();
     assert!(path.is_dir(), "returned path must exist on return");
     assert_eq!(path, root.join("clud-wt-432"));
-    let name = path.file_name().unwrap().to_str().unwrap();
-    assert!(crate::gc::reconcile::is_sibling_clone_dir_name(
-        "clud", name
-    ));
 }
 
-/// #1486 acceptance 6 at the allocator: consecutive calls get `-wt-432`,
-/// `-wt-432-2`, `-wt-432-3`, and each exists the moment it is returned.
+/// #1486 acceptance 6 at the allocator: consecutive calls get `clud-wt-432`,
+/// `clud-wt-432-2`, `clud-wt-432-3`, and each exists the moment it is returned.
 #[test]
 fn alloc_collisions_take_the_next_ordinal_and_every_path_exists() {
     let home = tempdir().unwrap();
@@ -229,4 +219,42 @@ fn alloc_rejects_components_that_would_escape_the_root() {
         !root.exists() || fs::read_dir(&root).unwrap().next().is_none(),
         "a rejected call must reserve nothing"
     );
+}
+
+// ---- #1962: one constructor for every path under the root. ----
+
+#[test]
+fn every_worktree_path_is_repo_wt_name() {
+    let root = Path::new("/h/.clud/worktrees");
+    for (repo, name, ordinal, expected) in [
+        ("clud", "1962", 1, "clud-wt-1962"),
+        ("clud", "PR1234", 1, "clud-wt-PR1234"),
+        ("clud", "1962", 2, "clud-wt-1962-2"),
+        // A name that already carries the prefix is not prefixed twice.
+        ("clud", "clud-wt-1962", 1, "clud-wt-1962"),
+        // A bare `wt-` or `<repo>-` prefix is not repeated either.
+        ("clud", "wt-7", 1, "clud-wt-7"),
+        ("clud", "clud-7", 1, "clud-wt-7"),
+        // Branch-style names become one plain component.
+        ("clud", "feat/x y", 1, "clud-wt-feat-x-y"),
+        ("my repo", "a", 1, "my-repo-wt-a"),
+        // No name: the repo alone.
+        ("clud", "", 1, "clud"),
+    ] {
+        assert_eq!(
+            worktree_path_in(root, repo, name, ordinal),
+            root.join(expected),
+            "{repo:?} {name:?} {ordinal}"
+        );
+    }
+}
+
+#[test]
+fn the_suggestion_names_the_first_free_path_and_creates_nothing() {
+    let home = tempdir().unwrap();
+    let root = ensure_worktree_root_at(home.path()).unwrap();
+    fs::create_dir(root.join("clud-wt-1962")).unwrap();
+    let path = suggest_wt_path_in(&root, "clud", "1962");
+    assert_eq!(path, root.join("clud-wt-1962-2"));
+    assert!(!path.exists());
 }

@@ -274,7 +274,7 @@ the default branch, so ancestry-based checks call them live work forever
   `process inside` (a live session cwd or any process cwd),
   `process table unavailable`, `detached`, `dirty`, `untracked`,
   `open PR #N`, `commits after merge`, `no PR`, `unverifiable`, and under
-  `~/.clud/tmp-wt` only, `grace` (see the #1485 subsection below).
+  `~/.clud/worktrees` only, `grace` (see the #1485 subsection below).
 - **Surfacing.** `clud gc list [--json]` appends `kind: repo-worktree` rows
   (`id: 0`, since no redb row backs them) with `state`, `reason`,
   `reclaimable` and `evaluated_unix`. A path the registry already tracks keeps
@@ -322,9 +322,19 @@ the default branch, so ancestry-based checks call them live work forever
   any unrecognized value) probes and logs `would remove` without deleting;
   `0` turns the probe and the reclaim off.
 
-### The worktree root `~/.clud/tmp-wt` (#1485)
+### The worktree root `~/.clud/worktrees` (#1485)
 
-- **Location.** `gc::worktree_root::worktree_root()` is `~/.clud/tmp-wt`, a
+- **Renamed from `~/.clud/tmp-wt` (#1962).** `tmp-` invited treating unpushed
+  work as disposable. Each GC tick, before the worktree probe, the daemon
+  moves what is left in the old root into the new one
+  (`daemon/gc_service/legacy_worktree_root.rs`): git worktrees with
+  `git worktree move` from their main repo, anything else by rename, a taken
+  name with `-N`. Entries a live process is working in wait for a later tick,
+  and nothing moves without a process snapshot. The empty old root is
+  removed, and nothing is deleted. Until then, the `WorktreeRemove` hook
+  accepts either root.
+
+- **Location.** `gc::worktree_root::worktree_root()` is `~/.clud/worktrees`, a
   *sibling* of the `session_tmp` root `~/.clud/tmp`, never inside it, so the
   72 h mtime sweep cannot see a worktree by construction
   ([DD-124](../DESIGN_DECISIONS.md#dd-124-agent-worktrees-live-in-a-sibling-of-the-session-temp-root-and-are-never-on-its-timer)).
@@ -332,11 +342,11 @@ the default branch, so ancestry-based checks call them live work forever
   GC-worker start, and is never a removal target: `git worktree remove` only
   removes the child it is given.
 - **Allocation.** The bundled `grind-plan` and `clud-git` skills allocate new
-  agent worktrees as `~/.clud/tmp-wt/<repo>-wt-<suffix>`, keeping the
+  agent worktrees as `~/.clud/worktrees/<repo>-wt-<suffix>`, keeping the
   `<repo>-wt-` shape reconcile's name matching expects. Existing sibling
   worktrees are not moved; the discovery above still covers them.
 - **Discovery.** Each direct child of the root seeds the probe as a repo
-  root (`worktree_root_children`), so a tmp-wt worktree is judged even if
+  root (`worktree_root_children`), so a worktrees worktree is judged even if
   clud never recorded a visit to its repo. Same verdict, same reclaim path.
 - **Abandoned-empty.** Only under the root: a clean, idle worktree whose
   branch has zero commits past its merge-base with the default branch, and no
@@ -364,7 +374,7 @@ the default branch, so ancestry-based checks call them live work forever
   the root exceeds it (a bounded, early-exit walk). Warn-only: nothing is
   deleted for size. The launch banner warns too (#1610) without walking:
   the daemon's repo-worktree probe thread runs the same bounded walk after
-  each probe and writes `~/.clud/tmp-wt-size.json` (timestamp, limit,
+  each probe and writes `~/.clud/worktrees-size.json` (timestamp, limit,
   over/under/unknown + bytes; atomic temp-file rename). At launch
   `gc::worktree_size_cache::launch_warning` reads only that file and a
   lock-free settings peek, and prints one line naming the size, threshold,
@@ -560,7 +570,7 @@ and the patch-match fallback when `gh` is unavailable. Precedence, first match w
 | any other verdict, or no probe row | the ancestry action, unchanged |
 
 So the verdict only adds removals backed by positive evidence (merged PR covering the tip, patch
-match, abandoned-empty under `~/.clud/tmp-wt`); every spare verdict (`dirty`, `untracked`,
+match, abandoned-empty under `~/.clud/worktrees`); every spare verdict (`dirty`, `untracked`,
 `open PR #N`, `commits after merge`, `no PR`, `locked by live pid`, `process inside`, `detached`,
 `main checkout`, `unverifiable`, ...) leaves `--force`, `--stale-after` and the lock rules exactly
 as documented above. Verdict-backed removals go through `run_reclaim_with`

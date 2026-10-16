@@ -3,10 +3,18 @@
 //! written into `watch.sh` by a heredoc, and a Python `while True` +
 //! `time.sleep` poll read the same as the bare loop they wrap.
 //!
-//! These helpers only locate text; `block_bad_cmd_wait_loop` judges it. See
-//! DD-169 in `docs/DESIGN_DECISIONS.md`.
+//! These helpers only locate scripts; `block_bad_cmd_wait_loop` judges
+//! them. Commands come from the evaluated syntax tree (#1962): a `bash -c`,
+//! `eval` or heredoc fed to a shell is already parsed into its commands
+//! there, so what is left here is what the shell grammar cannot see into:
+//! Python payloads, script files, and heredocs written to a script file.
+//! See DD-169 in `docs/DESIGN_DECISIONS.md`.
 
 use super::*;
+use crate::shell_ast::Invocation;
+
+/// Shells whose `-c` argument is a script.
+const POSIX_C_SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh"];
 
 /// Largest script file read from disk for a `bash x.sh` / `./x.sh` /
 /// `python x.py` run. Larger files are not scanned.
@@ -125,10 +133,14 @@ pub(super) fn inline_script(
     words: &[String],
     dialect: ShellDialect,
 ) -> Option<(ScriptKind, String)> {
+    let _ = dialect;
     let head = program_name(words.first()?);
     if is_python(&head) {
         let index = words.iter().position(|word| word == "-c")?;
         return Some((ScriptKind::Python, words.get(index + 1)?.clone()));
+    }
+    if head == "eval" {
+        return Some((ScriptKind::Shell(ShellDialect::Posix), words[1..].join(" ")));
     }
     if contains_str(POSIX_C_SHELLS, &head) {
         // Only a short option cluster carrying `c` (`-c`, `-lc`) takes the
@@ -141,8 +153,16 @@ pub(super) fn inline_script(
             words.get(index + 1..)?.join(" "),
         ));
     }
-    let (script, nested) = nested_shell_command(words, dialect)?;
-    Some((ScriptKind::Shell(nested), script))
+    if matches!(head.as_str(), "pwsh" | "powershell") {
+        let index = words
+            .iter()
+            .position(|word| matches!(word.to_ascii_lowercase().as_str(), "-command" | "-c"))?;
+        return Some((
+            ScriptKind::Shell(ShellDialect::PowerShell),
+            words.get(index + 1..)?.join(" "),
+        ));
+    }
+    None
 }
 
 /// The `time.sleep(N)` of a loop-free `python -c` used as a shell sleep:
@@ -205,54 +225,38 @@ pub(super) enum HeredocUse {
 /// written by `cat`/`tee` to a `.sh`/`.py` file (or a file whose body starts
 /// with a shell or Python shebang). Other heredocs (commit messages, issue
 /// bodies) are data and are not returned.
+#[cfg(test)]
 pub(super) fn heredoc_scripts(text: &str) -> Vec<(HeredocUse, ScriptKind, String)> {
-    let mut scripts = Vec::new();
-    if !text.contains("<<") {
-        return scripts;
-    }
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut index = 0usize;
-    while index < lines.len() {
-        let line = lines[index];
-        index += 1;
-        let Some(delimiter) = find_heredoc_delimiter(line) else {
-            continue;
-        };
-        let start = index;
-        while index < lines.len()
-            && lines[index].trim_start_matches('\t').trim_end_matches('\r') != delimiter
-        {
-            index += 1;
-        }
-        let body = lines[start..index.min(lines.len())].join("\n");
-        index += 1;
-        if let Some((usage, kind)) = classify_heredoc(line, &body) {
-            scripts.push((usage, kind, body));
-        }
-    }
-    scripts
+    parse_command(text, ShellDialect::Posix, None)
+        .invocations
+        .iter()
+        .filter_map(heredoc_script)
+        .collect()
 }
 
-fn classify_heredoc(opener: &str, body: &str) -> Option<(HeredocUse, ScriptKind)> {
-    let segment = split_shell_segments(opener, ShellDialect::Posix)
-        .into_iter()
-        .rev()
-        .find(|segment| segment.contains("<<"))?;
-    let peeled = peel_wrappers(&tokenize(&segment));
+/// The heredoc `invocation` reads, when it is a script; see
+/// [`heredoc_scripts`].
+pub(super) fn heredoc_script(invocation: &Invocation) -> Option<(HeredocUse, ScriptKind, String)> {
+    let body = invocation.heredoc.as_ref()?;
+    let peeled = peel_wrappers(&rule_words(invocation));
     let head = program_name(peeled.words.first()?);
     let reads_stdin = positionals(&peeled.words)
         .iter()
-        .all(|word| word.as_str() == "-" || word.starts_with("<<"));
+        .all(|word| word.as_str() == "-");
     if contains_str(POSIX_C_SHELLS, &head) && reads_stdin {
-        return Some((HeredocUse::Fed, ScriptKind::Shell(ShellDialect::Posix)));
+        return Some((
+            HeredocUse::Fed,
+            ScriptKind::Shell(ShellDialect::Posix),
+            body.clone(),
+        ));
     }
     if is_python(&head) && reads_stdin {
-        return Some((HeredocUse::Fed, ScriptKind::Python));
+        return Some((HeredocUse::Fed, ScriptKind::Python, body.clone()));
     }
     if !matches!(head.as_str(), "cat" | "tee") {
         return None;
     }
-    let target = write_target(&peeled.words);
+    let target = write_target(invocation, &peeled.words);
     let shebang = body.lines().next().unwrap_or_default();
     let kind =
         if target.ends_with(".py") || (shebang.starts_with("#!") && shebang.contains("python")) {
@@ -265,26 +269,24 @@ fn classify_heredoc(opener: &str, body: &str) -> Option<(HeredocUse, ScriptKind)
         } else {
             return None;
         };
-    Some((HeredocUse::Written, kind))
+    Some((HeredocUse::Written, kind, body.clone()))
 }
 
-/// The file `cat > FILE` / `cat <<E > FILE` / `tee FILE` writes, quotes
-/// stripped; empty when none is named.
-fn write_target(words: &[String]) -> String {
-    for (index, word) in words.iter().enumerate() {
-        if word == ">" || word == ">>" {
-            return words.get(index + 1).cloned().unwrap_or_default();
-        }
-        if let Some(target) = word.strip_prefix(">>").or_else(|| word.strip_prefix('>')) {
-            if !target.is_empty() && !target.starts_with('&') {
-                return target.to_string();
-            }
-        }
+/// The file `cat > FILE` / `tee FILE` writes; empty when none is named or
+/// its name is only known at run time.
+fn write_target(invocation: &Invocation, words: &[String]) -> String {
+    let redirected = invocation
+        .redirects
+        .iter()
+        .filter(|redirect| redirect.writes_file())
+        .find_map(|redirect| redirect.target.as_literal());
+    if let Some(target) = redirected {
+        return target.to_string();
     }
     if program_name(words.first().map_or("", String::as_str)) == "tee" {
         return positionals(words)
             .into_iter()
-            .find(|word| !word.starts_with("<<"))
+            .next()
             .cloned()
             .unwrap_or_default();
     }

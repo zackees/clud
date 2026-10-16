@@ -69,7 +69,7 @@ pub(crate) struct RepoWorktreeFacts {
     /// commit on the default branch. Never true for a branch with no
     /// commits of its own.
     pub(crate) patch_landed: Option<bool>,
-    /// #1485: the worktree sits under the clud-owned root `~/.clud/tmp-wt`.
+    /// #1485: the worktree sits under the clud-owned root `~/.clud/worktrees`.
     /// Only there does the abandoned-empty rule apply; a hand-made sibling
     /// worktree elsewhere is never reclaimed for being empty.
     pub(crate) under_worktree_root: bool,
@@ -140,8 +140,8 @@ impl RepoWorktreeVerdict {
 /// | merged PR #N, coverage unknown             | pinned      | `unverifiable`             |
 /// | no PR / lookup unavailable, patch landed   | reclaimable | `landed by patch match`    |
 /// | no PR, no patch match                      | pinned      | `no PR`                    |
-/// | under tmp-wt, 0 ahead, age >= 24 h (#1485) | reclaimable | `abandoned-empty`          |
-/// | under tmp-wt, 0 ahead, younger/age unknown | pinned      | `grace`                    |
+/// | under worktrees, 0 ahead, age >= 24 h (#1485) | reclaimable | `abandoned-empty`          |
+/// | under worktrees, 0 ahead, younger/age unknown | pinned      | `grace`                    |
 /// | lookup unavailable, no patch match         | pinned      | `unverifiable`             |
 ///
 /// The abandoned-empty rows apply only when no PR is open or merged for the
@@ -213,7 +213,7 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
     }
 }
 
-/// Issue #1486: facts for a direct child of `~/.clud/tmp-wt` that no
+/// Issue #1486: facts for a direct child of `~/.clud/worktrees` that no
 /// `git worktree list` claimed — typically a directory reserved through
 /// `alloc_wt_path` that nobody used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,7 +230,7 @@ pub(crate) struct ReservedDirFacts {
     pub(crate) age_secs: Option<u64>,
 }
 
-/// Decide one unclaimed `tmp-wt` child. Precedence, first match wins:
+/// Decide one unclaimed `worktrees` child. Precedence, first match wins:
 ///
 /// | condition                          | state       | reason                     |
 /// |------------------------------------|-------------|----------------------------|
@@ -417,7 +417,7 @@ mod tests {
 
     const DAY: u64 = 24 * 60 * 60;
 
-    /// #1485: a clean, commit-free, idle worktree under `~/.clud/tmp-wt`
+    /// #1485: a clean, commit-free, idle worktree under `~/.clud/worktrees`
     /// with no PR — a reservation that was never used.
     fn empty_in_root(age_secs: u64) -> RepoWorktreeFacts {
         RepoWorktreeFacts {
@@ -723,7 +723,7 @@ mod tests {
         );
     }
 
-    // ---- #1485: abandoned-empty under tmp-wt. ----
+    // ---- #1485: abandoned-empty under worktrees. ----
 
     #[test]
     fn abandoned_empty_past_grace_is_reclaimable() {
@@ -753,7 +753,7 @@ mod tests {
         );
     }
 
-    /// Outside tmp-wt an empty worktree is someone's hand-made checkout:
+    /// Outside worktrees an empty worktree is someone's hand-made checkout:
     /// the existing `no PR` spare stands however old it is.
     #[test]
     fn empty_worktree_outside_root_is_never_reclaimed_for_age() {
@@ -798,7 +798,7 @@ mod tests {
     }
 
     /// #1485 acceptance 4: arbitrarily old age never changes a spare, even
-    /// under tmp-wt with zero commits ahead.
+    /// under worktrees with zero commits ahead.
     #[test]
     fn age_never_overrides_a_spare_in_root() {
         let old = empty_in_root(10_000 * DAY);

@@ -850,15 +850,63 @@ fn parse_claude_code_version(output: &str) -> Option<ClaudeCodeVersion> {
 /// The backstop is hygiene, never correctness (DD-064), so the probe is
 /// deliberately conservative: any failure — the binary missing or hanging,
 /// output that will not parse, an older version — answers `false`, and the
-/// launch simply registers no `CwdChanged` line. It runs once per launch and
-/// only for a repo that opted into `.clud/hooks.json`, so its budget is
-/// bounded: the whole probe gives up after a few seconds and degrades to no
-/// line rather than stall a launch.
+/// launch simply registers no `CwdChanged` line.
 #[must_use]
 pub fn probe_claude_cwd_changed_support(claude_path: &Path) -> bool {
+    probe_claude_code_version(claude_path)
+        .is_some_and(|version| version >= MIN_CWD_CHANGED_CLAUDE_CODE_VERSION)
+}
+
+/// The version floor for the `WorktreeCreate` / `WorktreeRemove` hook events
+/// (#1962, #1971), which Claude Code introduced in 2.1.50. Before 2.1.101 an
+/// unrecognized hook event made Claude Code ignore a whole settings
+/// document, so the lines must never reach an older client.
+const MIN_WORKTREE_HOOKS_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
+    major: 2,
+    minor: 1,
+    patch: 50,
+};
+
+/// Whether `version` knows the `WorktreeCreate` / `WorktreeRemove` events.
+#[must_use]
+pub fn supports_worktree_hooks(version: ClaudeCodeVersion) -> bool {
+    version >= MIN_WORKTREE_HOOKS_CLAUDE_CODE_VERSION
+}
+
+/// Whether the installed Claude Code can take clud's worktree hooks; any
+/// probe failure answers `false`, which keeps Claude Code's own placement.
+#[must_use]
+pub fn probe_claude_worktree_hooks_support(claude_path: &Path) -> bool {
+    probe_claude_code_version(claude_path).is_some_and(supports_worktree_hooks)
+}
+
+/// `claude --version`, parsed, once per binary per process: a launch asks
+/// several questions of the same client. `None` on any failure. The probe
+/// gives up after a few seconds rather than stall a launch.
+#[must_use]
+pub fn probe_claude_code_version(claude_path: &Path) -> Option<ClaudeCodeVersion> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<ClaudeCodeVersion>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(found) = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(claude_path).copied())
+    {
+        return found;
+    }
+    let version = run_version_probe(claude_path);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(claude_path.to_path_buf(), version);
+    }
+    version
+}
+
+fn run_version_probe(claude_path: &Path) -> Option<ClaudeCodeVersion> {
     const PROBE_BUDGET: Duration = Duration::from_secs(5);
 
-    let process = match subprocess::ManagedSubprocess::start_inheriting_env(
+    let process = subprocess::ManagedSubprocess::start_inheriting_env(
         vec![
             claude_path.to_string_lossy().into_owned(),
             "--version".to_string(),
@@ -866,17 +914,15 @@ pub fn probe_claude_cwd_changed_support(claude_path: &Path) -> bool {
         None,
         true,
         invisible_helper_creationflags(),
-    ) {
-        Ok(process) => process,
-        Err(_) => return false,
-    };
+    )
+    .ok()?;
 
     let deadline = std::time::Instant::now() + PROBE_BUDGET;
     let mut buf = Vec::<u8>::new();
     loop {
         if std::time::Instant::now() >= deadline {
             let _ = process.kill();
-            return false;
+            return None;
         }
         match process.read_stdout(Some(Duration::from_millis(100))) {
             ReadStatus::Line(line) => buf.extend_from_slice(&line),
@@ -896,12 +942,9 @@ pub fn probe_claude_cwd_changed_support(claude_path: &Path) -> bool {
         .map_err(|_| ())
         .ok();
     if exit_code != Some(0) {
-        return false;
+        return None;
     }
-
-    let output = String::from_utf8_lossy(&buf);
-    parse_claude_code_version(&output)
-        .is_some_and(|version| version >= MIN_CWD_CHANGED_CLAUDE_CODE_VERSION)
+    parse_claude_code_version(&String::from_utf8_lossy(&buf))
 }
 
 fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
@@ -940,6 +983,23 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io;
+
+    /// #1962/#1971: `WorktreeCreate` exists from Claude Code 2.1.50.
+    #[test]
+    fn worktree_hooks_need_claude_code_2_1_50() {
+        let version = |patch| ClaudeCodeVersion {
+            major: 2,
+            minor: 1,
+            patch,
+        };
+        assert!(supports_worktree_hooks(version(50)));
+        assert!(supports_worktree_hooks(version(300)));
+        assert!(!supports_worktree_hooks(version(49)));
+        assert_eq!(
+            parse_claude_code_version("2.1.301 (Claude Code)").map(supports_worktree_hooks),
+            Some(true)
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

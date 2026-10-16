@@ -1766,7 +1766,7 @@ fn emit_launch_notices(args: &args::Args, launch_target: backend::ResolvedLaunch
         eprintln!("{notice}");
     }
 
-    // Issue #1610: tmp-wt size warning from the daemon's cached walk. Reads
+    // Issue #1610: worktrees size warning from the daemon's cached walk. Reads
     // one small file; no walk, no daemon round trip, silent on any failure.
     if let Some(line) = gc::worktree_size_cache::launch_warning() {
         eprintln!("{line}");
