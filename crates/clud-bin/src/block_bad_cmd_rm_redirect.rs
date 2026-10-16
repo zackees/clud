@@ -413,14 +413,31 @@ pub(super) fn rm_tool_only(command: &str) -> bool {
                 && invocation.depth == 0
                 && invocation.origin == Origin::Script
         });
-    plain
-        && !script.invocations.is_empty()
-        && script.invocations.iter().all(|invocation| {
-            // The words as typed, so a wrapper (`env`, `sudo`) or `$CLUD_EXE`
-            // reads as written rather than as what it expands to.
-            let words: Vec<String> = invocation.raw.iter().map(|word| unquote(word)).collect();
-            runs_only_the_tool(&words)
-        })
+    if !plain {
+        return false;
+    }
+    let mut ran_tool = false;
+    for invocation in &script.invocations {
+        // The words as typed, so a wrapper (`env`, `sudo`) or `$CLUD_EXE`
+        // reads as written rather than as what it expands to.
+        let words: Vec<String> = invocation.raw.iter().map(|word| unquote(word)).collect();
+        match tool_statement(&words) {
+            ToolStatement::RunsTool => ran_tool = true,
+            ToolStatement::Neutral => {}
+            ToolStatement::Other => return false,
+        }
+    }
+    ran_tool
+}
+
+/// What one statement of an `rm_tool_only` candidate does.
+enum ToolStatement {
+    /// Runs `safe-rm` (directly, via `clud`, `find -exec` or `xargs`).
+    RunsTool,
+    /// A `find` that only lists paths for the tool to act on.
+    Neutral,
+    /// Anything else.
+    Other,
 }
 
 fn unquote(word: &str) -> String {
@@ -431,39 +448,50 @@ fn unquote(word: &str) -> String {
     word.to_string()
 }
 
-fn runs_only_the_tool(words: &[String]) -> bool {
+fn tool_statement(words: &[String]) -> ToolStatement {
+    let verdict = |runs: bool| {
+        if runs {
+            ToolStatement::RunsTool
+        } else {
+            ToolStatement::Other
+        }
+    };
     let Some(first) = words.first() else {
-        return false;
+        return ToolStatement::Other;
     };
     if is_tool_word(first) {
-        return true;
+        return ToolStatement::RunsTool;
     }
     if is_clud_word(first) {
-        return words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str()));
+        return verdict(words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str())));
     }
     match first.as_str() {
-        "xargs" => xargs_program_index(words).is_some_and(|at| is_tool_word(&words[at])),
-        "find" => find_runs_only_the_tool(words),
-        _ => false,
+        "xargs" => verdict(xargs_program_index(words).is_some_and(|at| is_tool_word(&words[at]))),
+        "find" => find_statement(words),
+        _ => ToolStatement::Other,
     }
 }
 
-fn find_runs_only_the_tool(words: &[String]) -> bool {
+fn find_statement(words: &[String]) -> ToolStatement {
     let mut ran_tool = false;
     for (i, word) in words.iter().enumerate().skip(1) {
         if matches!(word.as_str(), "-exec" | "-execdir") {
             if !words.get(i + 1).is_some_and(|next| is_tool_word(next)) {
-                return false;
+                return ToolStatement::Other;
             }
             ran_tool = true;
         } else if matches!(word.as_str(), "-delete" | "-ok" | "-okdir")
             || word.starts_with("-fprint")
             || word.starts_with("-fls")
         {
-            return false;
+            return ToolStatement::Other;
         }
     }
-    ran_tool
+    if ran_tool {
+        ToolStatement::RunsTool
+    } else {
+        ToolStatement::Neutral
+    }
 }
 
 #[cfg(test)]

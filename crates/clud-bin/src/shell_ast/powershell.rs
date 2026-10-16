@@ -175,7 +175,12 @@ impl<'s> Walker<'s, '_> {
                 }
                 "command_name_expr" => {
                     let inner = child.named_child(0).unwrap_or(child);
-                    let values = self.expression(inner, env, ctx);
+                    // `& $p`: the program is a path token, possibly a variable.
+                    let values = if inner.kind() == "path_command_name" {
+                        vec![self.bare_token(self.text(inner), env)]
+                    } else {
+                        self.expression(inner, env, ctx)
+                    };
                     raw.extend(std::iter::repeat_n(
                         self.text(inner).to_string(),
                         values.len(),

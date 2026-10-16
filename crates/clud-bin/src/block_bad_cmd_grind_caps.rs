@@ -2053,7 +2053,7 @@ mod tests {
         };
         for command in [
             "gh issue comment 100 --body x",
-            "gh issue comment #100 -R o/r --body-file p.md",
+            "gh issue comment '#100' -R o/r --body-file p.md",
             "gh issue comment https://github.com/o/r/issues/100 -b x",
             "gh issue view 7",
             "git log -1",
@@ -2235,12 +2235,35 @@ mod tests {
         }
     }
 
+    /// Bash reads an unquoted `#` after whitespace as the start of a
+    /// comment, so `gh pr merge #9 --admin` runs a bare `gh pr merge`: the
+    /// caps judge what runs, not what was typed after the `#` (#1962).
+    #[test]
+    fn an_unquoted_hash_starts_a_comment_as_in_bash() {
+        assert_eq!(
+            statement_words("gh pr merge #9 --admin --merge"),
+            Ok(vec![vec![
+                "gh".to_string(),
+                "pr".to_string(),
+                "merge".to_string()
+            ]])
+        );
+        assert!(shell_reason(
+            LANDER,
+            "gh pr merge #9 --admin --merge",
+            &feature_run(POLICIES[0])
+        )
+        .is_some());
+    }
+
     #[test]
     fn feature_pr_admin_is_always_denied() {
         for policy in POLICIES {
             let reason = shell_reason(
                 LANDER,
-                "gh pr merge #9 --admin --merge",
+                // Quoted: unquoted, `#9 …` is a shell comment (see
+                // `an_unquoted_hash_starts_a_comment_as_in_bash`).
+                "gh pr merge '#9' --admin --merge",
                 &feature_run(policy),
             )
             .expect("admin feature merge allowed");

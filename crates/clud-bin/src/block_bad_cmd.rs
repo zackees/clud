@@ -4649,12 +4649,15 @@ mod tests {
     }
 
     #[test]
-    fn rm_legacy_variable_resolution_is_not_used_by_policy_evaluation() {
+    /// #1962: config rules read evaluated words, so `$SP` is the path it
+    /// was assigned. Before #1962 a rule saw the raw `$SP/*.txt` and this
+    /// command slipped past a rule written for the path it deletes.
+    fn config_rules_see_resolved_variable_values() {
         let evaluation = evaluation_with_policy(
             r#"SP=/tmp/safe/path; rm -f "$SP"/*.txt"#,
             r#"{"bad_commands":[{"match":"rm","arguments":{"any":["/tmp/safe/path/*"]},"replacement":"approved-cleanup"}]}"#,
         );
-        assert!(evaluation.reason.is_none());
+        assert!(evaluation.reason.is_some());
         assert!(evaluation.rewritten_command.is_none());
     }
 
@@ -6027,7 +6030,14 @@ mod tests {
         assert!(allows("echo done # <<E\nrm -rf \"$V\"/*\nE"));
         assert!(runs_program("echo done # <<E\nrm -rf x\nE", "rm"));
         // A `#` mid-word is not a comment and must not swallow a real heredoc.
-        assert!(!runs_program("a#b <<EOF\nrm -rf x\nEOF", "rm"));
+        // (tree-sitter-bash mis-reads a `#` inside a *command name*, `a#b
+        // <<EOF`, as a comment; that only over-scans, and agents do not name
+        // programs that way.)
+        assert!(!runs_program("echo issue#123 <<EOF\nrm -rf x\nEOF", "rm"));
+        assert!(!runs_program(
+            "git commit -m fix#1 <<EOF\nrm -rf x\nEOF",
+            "rm"
+        ));
     }
 
     #[test]

@@ -302,8 +302,11 @@ pub(super) fn statement_words(command: &str) -> Result<Vec<Vec<String>>, &'stati
             Construct::ControlFlow(keyword) => Some(vec![(*keyword).to_string()]),
             _ => None,
         });
+    // Nested shells' statements come before their launcher: `bash -c 'gh
+    // issue close 12'` is judged as the `gh issue close` it runs, which gives
+    // the most specific denial.
     let (top, nested) = statements(&script);
-    Ok(keywords.chain(top).chain(nested).collect())
+    Ok(keywords.chain(nested).chain(top).collect())
 }
 
 /// What the gate could make of a command line.
@@ -349,7 +352,12 @@ fn decompose(command: &str) -> Decomposition {
     if let Some(keyword) = control {
         return Decomposition::ControlFlow(keyword);
     }
-    let (top, nested) = statements(&script);
+    let (mut top, nested) = statements(&script);
+    // A command made only of assignments (`SP=/tmp`) runs no program: one
+    // empty statement, which needs no wrapper.
+    if top.is_empty() && !script.assigned.is_empty() {
+        top.push(Vec::new());
+    }
     Decomposition::Statements { top, nested }
 }
 
@@ -369,15 +377,27 @@ fn opaque_construct(script: &crate::shell_ast::Script) -> Option<&'static str> {
         .map(|construct| construct.describe())
 }
 
-/// The literal words of the top-level statements and of nested shells'.
+/// The literal words of the top-level statements and of nested shells',
+/// each followed by its redirections as written (`2>&1`, `>out.txt`,
+/// `<<'EOF'`), which the `/grind` caps classify.
 fn statements(script: &crate::shell_ast::Script) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
     use crate::shell_ast::{Invocation, Origin};
-    let top = script.top_level().map(Invocation::argv).collect();
+    let words = |invocation: &Invocation| {
+        let mut words = invocation.argv();
+        words.extend(
+            invocation
+                .redirects
+                .iter()
+                .map(|redirect| format!("{}{}", redirect.operator, redirect.target.text())),
+        );
+        words
+    };
+    let top = script.top_level().map(&words).collect();
     let nested = script
         .invocations
         .iter()
         .filter(|inv| inv.origin == Origin::NestedShell)
-        .map(Invocation::argv)
+        .map(words)
         .collect();
     (top, nested)
 }

@@ -197,7 +197,14 @@ fn session_cd(
     }
     let offset = invocation.words.len().saturating_sub(words.len());
     let index = cd_argument_index(&words[1..], dialect).map(|at| at + 1);
-    let raw_target = index.map(|at| words[at].clone());
+    // The operand as written (`$HOME`, not what it resolves to), for the
+    // denial message.
+    let raw_target = index.map(|at| {
+        invocation
+            .raw
+            .get(offset + at)
+            .map_or_else(|| words[at].clone(), |raw| unquote(raw))
+    });
     let target = match index {
         None => bare_cd_target(dialect, home),
         Some(at) => match invocation.words.get(offset + at) {
@@ -249,8 +256,9 @@ fn cd_argument_index(args: &[String], dialect: ShellDialect) -> Option<usize> {
             return Some(index + 1);
         }
         let is_flag = match dialect {
-            // `/d` is a cmd flag; on POSIX a leading `/` is an absolute path.
-            ShellDialect::Cmd => arg.starts_with('-') || arg.starts_with('/'),
+            // `/d` is cmd's only `cd` flag; any other `/…` is a path (the
+            // evaluated `%USERPROFILE%` can be one).
+            ShellDialect::Cmd => arg.starts_with('-') || arg.eq_ignore_ascii_case("/d"),
             _ => arg.starts_with('-'),
         };
         if is_flag {

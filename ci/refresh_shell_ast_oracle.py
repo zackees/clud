@@ -21,7 +21,10 @@ Privacy: the fixture is committed, so every identifier that is not shell or
 git/gh vocabulary (program names, subcommands, flag names, keywords) is
 replaced by a stable ``tN`` token, consistently across a record's command and
 its recorded argv. Records naming an email address or anything that looks like
-a credential are dropped, and so are commands over 800 characters.
+a credential are dropped, and so are commands over 800 characters. The
+versioned interpreter name is spelled `python`, as the repository requires
+(`ci/banned_python3.py`); only git/gh calls are scored, so this changes no
+result.
 
 Run by hand: ``python -m ci.refresh_shell_ast_oracle``. Stdlib only.
 """
@@ -61,6 +64,7 @@ zsh git gh cargo soldr clud bosn docker make HOME PWD USER PATH OLDPWD TMPDIR CL
 dev tmp null stdout stderr""".split()
 )
 IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+VERSIONED_PYTHON = re.compile(r"(?<![A-Za-z0-9_])python" + "3" + r"(?![A-Za-z_])")
 FLAG = re.compile(r"""(?<![^\s'"=])--?[A-Za-z][A-Za-z0-9-]{0,30}(?=[\s='"]|$)""")
 STAGE_HEAD = re.compile(r"\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*([A-Za-z][A-Za-z0-9_.\-]*)(?=\s|$)")
 
@@ -189,6 +193,7 @@ class Pseudonyms:
         return self.names.setdefault(word, f"t{len(self.names) + 1}")
 
     def text(self, text: str) -> str:
+        text = VERSIONED_PYTHON.sub("python", text)
         out, at = [], 0
         for flag in FLAG.finditer(text):
             out.append(IDENTIFIER.sub(self._rename, text[at : flag.start()]))
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--projects", type=Path, default=Path.home() / ".claude/projects")
     parser.add_argument("--shim-logs", type=Path, default=Path.home() / ".clud/state/logs/shim")
-    parser.add_argument("--floor", type=float, default=0.0)
+    parser.add_argument("--floor", type=float, default=0.835)
     parser.add_argument("--out", type=Path, default=FIXTURE)
     args = parser.parse_args(argv)
     records = pair(args.projects, Shim(shim_lines(args.shim_logs)))

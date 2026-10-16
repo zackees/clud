@@ -27,8 +27,21 @@ const DYNAMIC_VARIABLES: &[&str] = &[
     "OLDPWD",
 ];
 
+/// The text the grammar parses. Bash treats a carriage return as an
+/// ordinary word character, but the grammar treats it as whitespace, so
+/// `x\r#`cmd`` would read as a comment while bash runs `cmd`. The swap
+/// keeps every byte offset, so all text is still sliced from the original.
+fn grammar_input(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace('\r', "\u{1}"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 /// Parse `text` as a POSIX shell script and walk it into `out`.
 pub(super) fn walk_text(text: &str, env: &mut Env, ctx: Ctx, out: &mut Collector) {
+    let parsed = grammar_input(text);
     let mut parser = Parser::new();
     if parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -37,7 +50,7 @@ pub(super) fn walk_text(text: &str, env: &mut Env, ctx: Ctx, out: &mut Collector
         out.has_error = true;
         return;
     }
-    let Some(tree) = parser.parse(text, None) else {
+    let Some(tree) = parser.parse(parsed.as_ref(), None) else {
         out.has_error = true;
         return;
     };
@@ -99,7 +112,7 @@ impl<'s> Walker<'s, '_> {
             "if_statement" => self.if_statement(node, env, ctx),
             "case_statement" => self.case_statement(node, env, ctx),
             "function_definition" => self.function(node, env, ctx),
-            "ERROR" => self.walk_sequence(node, env, ctx.errored()),
+            "ERROR" => self.error(node, env, ctx),
             "comment" | "heredoc_body" | "heredoc_start" | "heredoc_end" => {}
             _ => self.scan_children(node, env, ctx),
         }
@@ -126,6 +139,31 @@ impl<'s> Walker<'s, '_> {
         }
     }
 
+    /// Text the grammar could not parse. Commands inside it are still walked.
+    /// After a heredoc that never ends, the grammar files the rest as loose
+    /// words; the shell would read it as the body, but a delimiter typo is the
+    /// likelier story, so fail toward scanning: read it as commands.
+    fn error(&mut self, node: Node<'_>, env: &mut Env, ctx: Ctx) {
+        let ctx = ctx.errored();
+        self.walk_sequence(node, env, ctx);
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        let unterminated = children.iter().any(|c| c.kind() == "heredoc_start")
+            && !children.iter().any(|c| c.kind() == "heredoc_end");
+        if !unterminated || ctx.depth >= words::MAX_DEPTH {
+            return;
+        }
+        let start = children
+            .iter()
+            .find(|c| c.kind() == "heredoc_start")
+            .map_or(node.start_byte(), |c| c.end_byte());
+        let rest = &self.src[start..node.end_byte()];
+        if let Some((_, after_line)) = rest.split_once('\n') {
+            let mut inner = env.clone();
+            walk_text(after_line, &mut inner, ctx, self.out);
+        }
+    }
+
     /// Unknown constructs: find commands and substitutions anywhere inside.
     fn scan_children(&mut self, node: Node<'_>, env: &mut Env, ctx: Ctx) {
         let mut cursor = node.walk();
@@ -141,9 +179,14 @@ impl<'s> Walker<'s, '_> {
 
     fn pipeline(&mut self, node: Node<'_>, env: &mut Env, ctx: Ctx) {
         let mut cursor = node.walk();
-        let stages: Vec<Node<'_>> = node
-            .named_children(&mut cursor)
-            .filter(|child| child.kind() != "comment")
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        // A stray token the grammar could not place is not a stage.
+        for stray in children.iter().filter(|child| child.kind() == "ERROR") {
+            self.walk(*stray, &mut env.clone(), ctx);
+        }
+        let stages: Vec<Node<'_>> = children
+            .into_iter()
+            .filter(|child| !matches!(child.kind(), "comment" | "ERROR"))
             .collect();
         if stages.len() < 2 {
             for stage in stages {
@@ -200,8 +243,11 @@ impl<'s> Walker<'s, '_> {
         };
         let redirects: Vec<Redirect> = children
             .iter()
-            .filter(|child| child.kind() == "file_redirect")
-            .filter_map(|child| self.file_redirect(*child, env, ctx))
+            .filter_map(|child| match child.kind() {
+                "file_redirect" => self.file_redirect(*child, env, ctx),
+                "heredoc_redirect" | "herestring_redirect" => Some(self.input_redirect(*child)),
+                _ => None,
+            })
             .collect();
         if body.is_some() && piped.is_none() {
             self.out.redirect_since(start, ctx.depth, &redirects);
@@ -307,6 +353,26 @@ impl<'s> Walker<'s, '_> {
             operator,
             target: target?,
         })
+    }
+
+    /// `<<'EOF'`, `<<-EOF`, `<<< text`: the operator and what follows it, as
+    /// written. Input redirections write nothing.
+    fn input_redirect(&self, node: Node<'_>) -> Redirect {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        let operator = children
+            .iter()
+            .find(|child| !child.is_named())
+            .map_or("<<", |child| self.text(*child))
+            .to_string();
+        let target = children
+            .iter()
+            .find(|child| child.is_named() && child.kind() != "heredoc_body")
+            .map_or_else(String::new, |child| self.text(*child).to_string());
+        Redirect {
+            operator,
+            target: Value::literal(target),
+        }
     }
 
     /// `text` is a script a child shell reads from stdin.
@@ -938,18 +1004,29 @@ fn strip_quotes(text: &str) -> &str {
 }
 
 /// An unquoted word: a backslash makes the next character literal.
+///
+/// One deliberate deviation from bash: a backslash before a letter or digit
+/// is kept. Bash would drop it (`C:\tools\x` becomes `C:toolsx`), but that
+/// spelling only ever means a Windows path typed into Git Bash, and the
+/// guards must see the program it names.
 fn unescape_bare(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('\n') => {}
-                Some(next) => out.push(next),
-                None => out.push('\\'),
-            }
-        } else {
+        if ch != '\\' {
             out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some(next) if next.is_ascii_alphanumeric() => out.push('\\'),
+            Some('\n') => {
+                chars.next();
+            }
+            Some(next) => {
+                out.push(next);
+                chars.next();
+            }
+            None => out.push('\\'),
         }
     }
     out
