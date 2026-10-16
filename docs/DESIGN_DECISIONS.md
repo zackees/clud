@@ -6725,7 +6725,66 @@ session and the transcript scan found. Allowing bounded `for` loops with
 `sleep`: the bound is routinely hours of iterations.
 
 
-## DD-169: the platform boundary has no exceptions
+## DD-169: a wrapper, an embedded script or another tool does not launder a wait
+
+**Context.** The #1972 audit of every agent transcript on the dev machine
+found that agents told "never poll" kept writing PR/CI watch loops in forms
+DD-168's scan did not read: `timeout 590 bash -c '<loop>'` (128 distinct
+commands), `timeout 1500 gh run watch` and other wrapped native watchers
+(104), loops written to `watch.sh` by a heredoc or run from a script file
+(19), a `sleep` inside a `case` arm, `python -c 'time.sleep(20)'` as the
+loop's sleep, Python `while True` + `subprocess(gh)` + `time.sleep` polls, and
+the same loops moved into the Monitor tool.
+
+**Decision.** The hand-written-wait scan judges what actually runs:
+
+- **Wrappers are peeled** before every waiter and loop check: `VAR=val`,
+  `timeout`, `nohup`, `env`, `stdbuf`, `nice`, `ionice`, `setsid`, `xargs`,
+  `command`, `exec`, `time`, `builtin` and the gate prefix. A peeled
+  `timeout` still exempts `tail -f` (it has a deadline), but not a loop or a
+  native watcher.
+- **Embedded scripts are scanned recursively**: `bash|sh|zsh|dash … -c`,
+  `eval`, PowerShell `-Command`, `python -c`, and heredoc bodies fed to a
+  shell or Python. Every DD-168 rule applies to them.
+- **Scripts on their way to disk, or on disk, are scanned for PR/CI waits
+  only**: a heredoc written by `cat`/`tee` to a `.sh`/`.py` file (or one with
+  a shell/Python shebang), and a literal script path run as `bash x.sh`,
+  `./x.sh` or `python x.py` (read from the hook's `cwd`, at most 256 KiB).
+  Such a file may be the repository's own script with a harmless retry, so
+  only a loop or sleep beside a GitHub status read, or a native watcher,
+  refuses it.
+- **A sleep in a `case` arm is a sleep**, and so is a loop-free
+  `python -c '…time.sleep(N)…'`. A Python loop that sleeps is a loop that
+  sleeps; triple-quoted strings are data (edit scripts carry code in them).
+- **A native watcher in any loop is refused**, even the gh-shim's canonical
+  `gh pr checks --watch`. Outside a loop, `gh run watch` and an unshimmed
+  `gh pr checks --watch` are refused while `git.pr_wait_fail_fast` is on
+  (its opt-out still allows the bare watch, as before).
+- Every PR/CI refusal names the blessed waiter and how to run it,
+  `clud tool run github/pr_merge_watch.py <PR> [--repo OWNER/NAME]
+  [--timeout SECS]` under `run_in_background`, plus `clud ci` and
+  `bosn ci run --wait`. The audited `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`
+  remains the only escape.
+
+Monitor and PowerShell reach the same scan through `GUARDED_TOOLS` (#1954).
+The regression corpus is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`:
+one real command per audited shape plus legitimate neighbours that must stay
+allowed, run by `block_bad_cmd_wait_scan_tests.rs`.
+
+**Rejected.** Peeling wrappers in the shared `command_words`: it would change
+every other rule (`timeout 60 cargo build` would start tripping the soldr
+rule). Scanning every heredoc body: commit messages and issue bodies quote
+loops. Applying all of DD-168 to script files: a repository's install script
+with `for i in 1 2 3; do …; sleep 2; done` is not an agent's wait. Reading
+script paths that hold `$VAR`, globs or `~`: they cannot be resolved without
+running the shell.
+
+**Not covered.** Codex sessions: clud installs no `cmd-scan` hook into Codex
+(it only migrates and normalizes an existing `~/.codex/hooks.json`), so these
+rules do not run there. A script written by the Write tool and run later by
+a variable path is not read.
+
+## DD-170: the platform boundary has no exceptions
 
 **Context.** #1946 added `enforce_platform_boundary`, the pre-expansion lint
 soldr, zccache and fbuild use to confine host selection to one module. It

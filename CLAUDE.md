@@ -248,7 +248,7 @@ Everywhere else, call `crate::platform::<area>` and branch on
 `crate::platform::host::*`. The `enforce_platform_boundary` Dylint lint has
 no baseline, no allowlist and no test exemption
 ([platform-boundary.md](docs/architecture/platform-boundary.md),
-[DD-169](docs/DESIGN_DECISIONS.md#dd-169-the-platform-boundary-has-no-exceptions)).
+[DD-170](docs/DESIGN_DECISIONS.md#dd-170-the-platform-boundary-has-no-exceptions)).
 
 ### Home directory: `home::user_home` only
 

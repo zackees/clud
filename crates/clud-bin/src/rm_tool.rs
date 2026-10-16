@@ -41,9 +41,10 @@ pub const ROOTS_ENV: &str = "CLUD_RM_ROOTS";
 pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
 /// Appended to every outside-the-roots refusal (#1659): `--purge` changes
 /// only trash-versus-delete, never where a call may delete.
-const OUTSIDE_HINT: &str = "; --purge does not relax this check. Write scratch data under an \
-     allowed root (the session temp dir) or a system temp dir instead, or ask the user to \
-     remove this path";
+const OUTSIDE_HINT: &str = "; --purge does not relax this check. To quarantine it reversibly \
+     instead, run `clud trash <PATH>` (recoverable from ~/.clud/trash until GC). Write scratch \
+     data under an allowed root (the session temp dir) or a system temp dir instead, or ask the \
+     user to remove this path";
 
 /// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
@@ -364,6 +365,14 @@ impl Roots {
         if self.extra_roots.iter().any(|e| e.root == path) {
             return Err("is a safe_rm.extra_roots extra root itself".into());
         }
+        // A Python virtualenv is disposable wherever it lives: any path at or
+        // under a component named exactly `.venv` may be trashed, rooted at
+        // that `.venv`'s parent. The git, home and mount checks still apply.
+        if let Some(venv) = venv_ancestor(path) {
+            self.ledger_grants
+                .insert(path.to_path_buf(), VENV_REASON.to_string());
+            return Ok(venv.parent().map_or(venv.clone(), Path::to_path_buf));
+        }
         // A linked worktree of an allowed repo may itself be deleted (#1573):
         // git created it for that repo. It stays refused while it is a root.
         if self.worktrees().iter().any(|r| r == path) {
@@ -621,6 +630,21 @@ impl Roots {
         }
         self.worktrees.as_deref().unwrap_or_default()
     }
+}
+
+/// Audit reason recorded when a path is allowed only because it is in a `.venv`.
+const VENV_REASON: &str = "inside a .venv virtualenv, which is disposable anywhere";
+
+/// The outermost ancestor-or-self of `path` named exactly `.venv`.
+fn venv_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if component.as_os_str() == ".venv" {
+            return Some(prefix);
+        }
+    }
+    None
 }
 
 fn deepest_containing(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {

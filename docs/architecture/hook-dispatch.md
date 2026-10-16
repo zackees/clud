@@ -233,6 +233,20 @@ specific polling rule (`blocking_pr_wait_reason`) now also covers counted
 `for … sleep` loops, chained `sleep && gh …`, `gh api` run/job/check/Pages
 reads and `gh pr view --json mergeStateStatus|mergeable|state`.
 
+#1972 (DD-169) closes the laundering routes: wrapper programs (`timeout`,
+`nohup`, `env`, `VAR=`, `stdbuf`, `nice`, `setsid`, `xargs`, `command`,
+`exec`, …) are peeled before every check; `bash -c`/`eval`/`python -c`
+payloads and heredocs fed to a shell or Python are scanned recursively;
+heredocs written to a `.sh`/`.py` file and literal script files run from the
+call's `cwd` are scanned for PR/CI waits; a `case`-arm `sleep` and a
+`python -c` `time.sleep` count as sleeps; a native watcher inside any loop is
+refused. PR/CI refusals spell out `clud tool run github/pr_merge_watch.py
+<PR> [--repo OWNER/NAME] [--timeout SECS]` under `run_in_background`. The
+helpers live in `block_bad_cmd_wait_scan.rs`; the audit's regression corpus
+is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`, run by
+`block_bad_cmd_wait_scan_tests.rs`. Codex sessions get no `cmd-scan` hook from
+clud, so none of this runs there.
+
 ### Repeated-call guard (#1674)
 
 For every `PreToolUse` call that carries a `session_id`, the scan hashes the

@@ -634,8 +634,12 @@ fn extract_wheel(wheel: File, target: &mut File, asset: &ResolvedAsset) -> Resul
     let mut found = false;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let path = Path::new(entry.name());
-        if entry.name().contains(['\\', ':', '\0'])
+        let name = entry
+            .name()
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        let path = Path::new(&name);
+        if name.contains(['\\', ':', '\0'])
             || path
                 .components()
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))

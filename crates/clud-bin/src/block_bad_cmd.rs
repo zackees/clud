@@ -1888,6 +1888,7 @@ fn evaluate_command_into(
     // extracted verbatim by scan_command_substitutions below and recurses
     // here with its heredoc still attached, so a depth-0-only strip would
     // miss it (zackees/clud#1540).
+    let raw_command_text = command_text;
     let command_text_owned = strip_heredoc_bodies(command_text);
     let command_text = command_text_owned.as_str();
 
@@ -1905,8 +1906,8 @@ fn evaluate_command_into(
         return;
     }
 
+    let shim_active = std::env::var(crate::shim_registry::GH_ACTIVE_KEY).as_deref() == Ok("1");
     if context.pr_wait_fail_fast_enabled {
-        let shim_active = std::env::var(crate::shim_registry::GH_ACTIVE_KEY).as_deref() == Ok("1");
         if let Some(reason) = blocking_pr_wait_reason(command_text, dialect, shim_active) {
             evaluation.reason = Some(reason);
             return;
@@ -1914,7 +1915,14 @@ fn evaluate_command_into(
     }
 
     // #1880: every hand-written wait, PR-related or not, for every agent.
-    if let Some(reason) = hand_written_wait_reason(command_text, dialect, evaluation) {
+    // #1972: judged on the raw text, so a heredoc-fed or heredoc-written
+    // script is read too.
+    let scan = ScanContext {
+        cwd: context.cwd,
+        native_gate: context.pr_wait_fail_fast_enabled,
+        shim_active,
+    };
+    if let Some(reason) = hand_written_wait_reason(raw_command_text, dialect, scan, evaluation) {
         evaluation.reason = Some(reason);
         return;
     }
@@ -2059,15 +2067,11 @@ fn blocking_pr_wait_reason(
     // message quoting `gh pr checks --watch` must not read as a waiter).
     let stripped = strip_heredoc_bodies(command_text);
     let segments = split_shell_segments(&stripped, dialect);
-    let gate_prefix = block_bad_cmd_gate::gate_prefix();
     for segment in &segments {
-        let mut words = command_words(segment);
-        // Gated sessions wrap every command with the gate prefix (`tap gh
-        // ...`); strip it so the guard sees the real program name instead of
-        // letting the prefix hide the waiter.
-        if words.len() > 1 && program_name(&words[0]) == gate_prefix.as_str() {
-            words.remove(0);
-        }
+        // #1972: peel `timeout`, `nohup`, `env`, `VAR=`, `stdbuf`, `nice`,
+        // `xargs`, ... and the gate prefix (`tap gh ...`), so a wrapper
+        // cannot hide the waiter.
+        let words = block_bad_cmd_wait_scan::peel_wrappers(&command_words(segment)).words;
         let canonical_shimmed_watch = shim_active
             && gh_positionals(words.get(1..).unwrap_or(&[])).starts_with(&["pr", "checks"])
             && words
@@ -2075,7 +2079,7 @@ fn blocking_pr_wait_reason(
                 .any(|word| word == "--watch" || word.starts_with("--watch="));
         if native_gh_waiter(&words) && !canonical_shimmed_watch {
             return Some(format!(
-                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. Fallback: `{PR_WATCH_REPLACEMENT}`."
+                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. Fallback: `{PR_WATCH_REPLACEMENT}`. {WAIT_REPLACEMENT}"
             ));
         }
     }
@@ -3617,7 +3621,14 @@ mod block_bad_cmd_loop_stop;
 
 #[path = "block_bad_cmd_wait_loop.rs"]
 mod block_bad_cmd_wait_loop;
-use block_bad_cmd_wait_loop::{hand_written_wait_reason, WAIT_REPLACEMENT};
+use block_bad_cmd_wait_loop::{hand_written_wait_reason, ScanContext, WAIT_REPLACEMENT};
+
+#[path = "block_bad_cmd_wait_scan.rs"]
+mod block_bad_cmd_wait_scan;
+
+#[cfg(test)]
+#[path = "block_bad_cmd_wait_scan_tests.rs"]
+mod block_bad_cmd_wait_scan_tests;
 
 #[cfg(test)]
 #[path = "block_bad_cmd_wait_loop_tests.rs"]

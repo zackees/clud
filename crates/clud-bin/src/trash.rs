@@ -87,6 +87,10 @@ pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
         }
     };
 
+    if args.dry_run {
+        return dry_run(paths, &trash_root);
+    }
+
     let mut failed = false;
     for path in paths {
         match trash_one_path(path, &trash_root, cross_volume) {
@@ -131,6 +135,22 @@ pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
     } else {
         0
     }
+}
+
+/// `clud trash --dry-run`: report what would be quarantined and move nothing.
+/// A missing path is an error, exactly as the real run reports it.
+fn dry_run(paths: &[PathBuf], trash_root: &Path) -> i32 {
+    let mut failed = false;
+    for path in paths {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => println!("would trash {} -> {}", path.display(), trash_root.display()),
+            Err(err) => {
+                failed = true;
+                eprintln!("error: stat {}: {err}", path.display());
+            }
+        }
+    }
+    i32::from(failed)
 }
 
 pub fn insert_input_for_record(record: &TrashRecord, now_unix: i64) -> InsertInput {
@@ -403,6 +423,29 @@ mod tests {
         let value = randomish_hex(Duration::from_nanos(123));
         assert_eq!(value.len(), 6);
         assert!(value.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// `clud trash --dry-run` once moved the path for real: the global flag was
+    /// parsed and ignored. It must leave every path where it is.
+    #[test]
+    fn dry_run_moves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("artifact.log");
+        let trash_root = dir.path().join("trash");
+        std::fs::write(&source, b"keep me").unwrap();
+        assert_eq!(dry_run(std::slice::from_ref(&source), &trash_root), 0);
+        assert!(source.exists(), "dry run must not move the path");
+        assert!(
+            !trash_root.exists(),
+            "dry run must not create the trash dir"
+        );
+    }
+
+    #[test]
+    fn dry_run_reports_a_missing_path_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent");
+        assert_eq!(dry_run(&[missing], &dir.path().join("trash")), 1);
     }
 
     #[test]
