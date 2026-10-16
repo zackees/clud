@@ -34,6 +34,10 @@ the integration tests.
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
+- [platform/](platform/README.md) - the host-platform boundary (#1953): the
+  only place in this crate that names a host. `mod.rs` selects `windows/` or
+  `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
+  has matching items in both trees. See `docs/architecture/platform-boundary.md`.
 - [server_settings/](server_settings/README.md) - server-side settings (#1192):
   the `assets/server-settings.json` baked into the binary and refreshed from
   `main`, falling back section by section to the last valid value, plus a strict
