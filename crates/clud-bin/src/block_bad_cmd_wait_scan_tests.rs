@@ -171,7 +171,7 @@ fn inline_script_extracts_c_payloads() {
             "sleep",
         ),
         (
-            "python3 -c 'import time;time.sleep(2)'",
+            "python3 -c 'import time;time.sleep(2)'", // python-name-lint: allow
             ScriptKind::Python,
             "time.sleep",
         ),
@@ -221,7 +221,7 @@ fn heredoc_scripts_classify_fed_and_written_bodies() {
             Some((HeredocUse::Fed, ScriptKind::Shell(ShellDialect::Posix))),
         ),
         (
-            "python3 - <<'PY'\nprint(1)\nPY",
+            "python3 - <<'PY'\nprint(1)\nPY", // python-name-lint: allow
             Some((HeredocUse::Fed, ScriptKind::Python)),
         ),
         (

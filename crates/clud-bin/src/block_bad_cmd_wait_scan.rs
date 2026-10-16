@@ -106,7 +106,7 @@ pub(super) enum ScriptKind {
 }
 
 fn is_python(head: &str) -> bool {
-    matches!(head, "python" | "python3" | "py" | "pypy" | "pypy3")
+    matches!(head, "python" | "python3" | "py" | "pypy" | "pypy3") // python-name-lint: allow (matches agents' interpreter names)
 }
 
 /// Positional (non-option) arguments after the program.

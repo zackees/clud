@@ -220,7 +220,7 @@
   {
    "shape": "python stdin heredoc poll loop",
    "tool": "Bash",
-   "command": "python3 - <<'PY'\nimport subprocess, time\nwhile True:\n    out = subprocess.run(['gh', 'pr', 'checks', '1650'], capture_output=True, text=True).stdout\n    if 'pending' not in out:\n        print(out)\n        break\n    time.sleep(45)\nPY"
+   "lint": "python-name-lint: allow", "command": "python3 - <<'PY'\nimport subprocess, time\nwhile True:\n    out = subprocess.run(['gh', 'pr', 'checks', '1650'], capture_output=True, text=True).stdout\n    if 'pending' not in out:\n        print(out)\n        break\n    time.sleep(45)\nPY"
   },
   {
    "shape": "python -c poll loop",
@@ -390,7 +390,7 @@
   {
    "shape": "python edit script with sleep code in triple quotes",
    "tool": "Bash",
-   "command": "python3 - <<'EOF'\np='ci/publish.py'\ns=open(p).read()\ns=s.replace('''RELEASE_WORKFLOW = \"auto-release.yml\"\n''','''RELEASE_WORKFLOW = \"auto-release.yml\"\nRELEASE_POLL_SEC = 15\n''')\ns=s.replace('''def wait():\n    while True:\n        out = subprocess.check_output([\"gh\", \"run\", \"view\", rid])\n        time.sleep(15)\n''','''def wait():\n    pass\n''')\nopen(p,'w').write(s)\nEOF"
+   "lint": "python-name-lint: allow", "command": "python3 - <<'EOF'\np='ci/publish.py'\ns=open(p).read()\ns=s.replace('''RELEASE_WORKFLOW = \"auto-release.yml\"\n''','''RELEASE_WORKFLOW = \"auto-release.yml\"\nRELEASE_POLL_SEC = 15\n''')\ns=s.replace('''def wait():\n    while True:\n        out = subprocess.check_output([\"gh\", \"run\", \"view\", rid])\n        time.sleep(15)\n''','''def wait():\n    pass\n''')\nopen(p,'w').write(s)\nEOF"
   },
   {
    "shape": "python one-shot json",
