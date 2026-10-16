@@ -19,7 +19,7 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 
 ## Three hard rules
 
-1. **`.gitignore` gate first.** Before creating any worktree under `.claude/worktrees/`, confirm `.gitignore` covers `.claude/`. If it doesn't, refuse to create the worktree inside the repo — use clud's worktree root (`~/.clud/tmp-wt/<repo>-wt-<branch>/`, reclaimed by the daemon once the work lands) or ask to add `.claude/` to `.gitignore`.
+1. **Worktrees live in clud's worktree root.** Create every worktree at `~/.clud/tmp-wt/<repo>-wt-<name>/`, where the daemon reclaims it once the work lands. clud's command hook refuses `git worktree add` anywhere else (the only other allowed place is `/grind`'s own `<repo>/.clud/grind/worktrees/`), however the command is spelled (#1962). A worktree inside the repo is never reclaimed and gets walked by linters and builds.
 2. **Process audit before destructive removal.** Windows file locks routinely cause `git worktree remove` to fail with `Permission denied` / `Access is denied`. Always audit which processes hold the directory before resorting to `--force`, then prefer `"$CLUD_EXE" trash` over `rm -rf` retry loops.
 3. **Never blind-loop `rm -rf`.** A `rm -rf` retry loop hides the actual problem (a process holding a file open) instead of fixing it. Audit, stop the specific offender, OR quarantine via `"$CLUD_EXE" trash`.
 
@@ -27,9 +27,8 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 
 1. **Sync main.** `git fetch origin main` so the new worktree starts from current main, not stale local state.
 2. **Stale worktree prune.** `git worktree prune` to clear git's view of any worktrees deleted on disk without proper removal.
-3. **`.gitignore` gate.** Grep `.gitignore` for one of `.claude/`, `.claude/**`, `/.claude/`. If absent, refuse — see hard rule 1.
-4. **Create.** `git worktree add -b <branch> .claude/worktrees/<short-name> origin/main`. The path component is freely chosen — convention is `<slice-or-feature>-<issue-number>` so leftover dirs are searchable.
-5. **RED -> GREEN inside the worktree.** All edits, lint, tests, and commits happen inside the worktree path. Never edit the main checkout for worktree-scoped work.
+3. **Create in the worktree root.** `git worktree add -b <branch> ~/.clud/tmp-wt/<repo>-wt-<name> origin/main` (see hard rule 1). `<repo>` is the repository's directory name and `<name>` is freely chosen — convention is `<slice-or-feature>-<issue-number>` so leftover dirs are searchable.
+4. **RED -> GREEN inside the worktree.** All edits, lint, tests, and commits happen inside the worktree path. Never edit the main checkout for worktree-scoped work.
 
 ### Rust target directory for sequential work
 
@@ -53,10 +52,10 @@ already has a warm target. The measurement and limits are in
 1. **`git status` clean check.** Inside the worktree, confirm no uncommitted changes — refuse to tear down a dirty worktree without explicit user OK.
 2. **Process audit.** Before removal, identify what holds the worktree path open:
    - **Windows**: `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "*<branch>*" -or $_.CommandLine -like "*<worktree-path>*" }`. Common holders: `zccache.exe`, `rust-analyzer.exe`, the agent's own PowerShell session (cwd anchored inside the dir).
-   - **Unix**: `lsof +D .claude/worktrees/<name>` or `fuser -m .claude/worktrees/<name>`.
+   - **Unix**: `lsof +D <worktree-path>` or `fuser -m <worktree-path>`.
 3. **Stop only specific abandoned holders.** Never kill unrelated processes. If the holder is the agent's own shell session (cwd anchored), cd to an absolute path outside the worktree first.
 4. **`git worktree remove --force`.** Pass `--force` only after the audit shows no useful holders. If it still fails with "Access is denied" / "device or resource busy", fall through to step 5.
-5. **`"$CLUD_EXE" trash` quarantine fallback.** `"$CLUD_EXE" trash .claude/worktrees/<name>` moves the path to `~/.clud/trash/<timestamp>/` for the daemon's GC sweeper to reap when handles release. This is the documented fallback — see [[clud-windows-trash]] for the file-lock case.
+5. **`"$CLUD_EXE" trash` quarantine fallback.** `"$CLUD_EXE" trash <worktree-path>` moves the path to `~/.clud/trash/<timestamp>/` for the daemon's GC sweeper to reap when handles release. This is the documented fallback — see [[clud-windows-trash]] for the file-lock case.
 6. **`git worktree prune`** + verify `git worktree list` no longer mentions the path.
 7. **Delete the local branch** if it was created for the worktree: `git branch -D <branch>` for already-merged work; `git branch -d` for non-merged (which will refuse and force you to confirm). Never delete a `grind/*` branch (local or remote) that has an open PR (`gh pr list --head <branch> --state open`): it is a `/grind` feature branch holding landed goals until its feature PR merges. Push a worktree's branch before removing the worktree; a merged PR's commits stay reachable at `refs/pull/<n>/head`, unpushed commits do not.
 
@@ -73,7 +72,7 @@ When the user reports "my shell appears stuck" or `git` commands hang on a Windo
 | Symptom | Fix |
 |---|---|
 | `git worktree remove` → "Access is denied" | Process audit → stop specific holders → retry. If still failing → `"$CLUD_EXE" trash`. |
-| 10+ leftover dirs under `.claude/worktrees/` | Batch `git worktree remove --force` for each git-tracked one, then `"$CLUD_EXE" trash` for the orphan dirs. Delete the merged branches with `git branch -D` afterward. |
+| 10+ leftover dirs under `.claude/worktrees/` (made before #1962) or `~/.clud/tmp-wt/` | Batch `git worktree remove --force` for each git-tracked one, then `"$CLUD_EXE" trash` for the orphan dirs. Delete the merged branches with `git branch -D` afterward. |
 | "Shells appear stuck" after a teardown | Bash cwd is anchored on a deleted dir. Cd to absolute path. PowerShell tracks cwd independently and is usually the safer escape. |
 | Local branch list cluttered with old feature branches | `git branch --merged main \| grep feat/` to find merged ones; `git branch -D` to delete. Non-merged branches need explicit `git branch -D` after confirming the work landed via squash. |
 
@@ -88,7 +87,7 @@ When called from `/clud-fix-quick`, `/clud-issue-triage`, or any other skill:
 
 ## Hard rules summary
 
-1. **`.gitignore` gate before creating worktrees inside the repo.**
+1. **Create worktrees only under `~/.clud/tmp-wt/`.**
 2. **Process audit before destructive removal.**
 3. **`"$CLUD_EXE" trash` is the documented Windows fallback, not `rm -rf` retry loops.**
 4. **RED -> GREEN** for any code edits made inside a worktree.

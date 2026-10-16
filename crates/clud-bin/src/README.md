@@ -230,6 +230,10 @@ Entry and orchestration:
   overlay also pushes `API_TIMEOUT_MS` as a default and the launch names the
   effective value, because this is the one route with no clud process in the
   request path and therefore no byte-idle watchdog (#1263, DD-079).
+- `shell_ast/` - shell commands parsed into syntax trees (tree-sitter bash and
+  PowerShell, a cmd.exe splitter) and evaluated without running anything, for
+  the command scanner (#1962); see [`shell_ast/README.md`](shell_ast/README.md)
+  and [shell-ast.md](../../../docs/architecture/shell-ast.md).
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
@@ -580,9 +584,9 @@ which test tier a change belongs in — lives in
   enabling value (DD-056 lists them) in
   the session environment. Unlike the rest of `block_bad_cmd`, it **fails
   closed** — an unreadable or unparseable payload is a denial, since an
-  unverifiable command cannot be allowed. Deliberately does not reuse
-  `command_words`, whose wrapper-unwrapping would let `env tap ...` satisfy the
-  prefix check. Refuses anything it cannot decompose with certainty (command
+  unverifiable command cannot be allowed. Reads each statement's literal words
+  from the syntax tree rather than the scanner's rule words, whose
+  wrapper-unwrapping would let `env tap ...` satisfy the prefix check. Refuses anything it cannot decompose with certainty (command
   substitution, subshells, process substitution, control flow); the cost of
   that is one extra tool call, not a wedged session. See DD-056.
   `classify` (re-exported as `block_bad_cmd::classify_for_gate`) grades a
@@ -897,6 +901,9 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `rm_tool_clone.rs` — submodule of `rm_tool.rs`: whether a clone outside the roots may be removed (#1573), as `verdict` over injected `CloneFacts` (origin match, clean, fully pushed, no stash) plus the git `probe`; rule in [rm-tools.md](../../../docs/architecture/rm-tools.md#location-policy).
 - `rm_tool_extra_roots.rs` — submodule `rm_tool::extra_roots`: the human-set `safe_rm.extra_roots` override (#1668), as `verdict` over injected `EntryFacts` plus `probe`/`load`; the settings reader is `clud_settings::safe_rm_extra_roots_from`; tests in `rm_tool_extra_roots_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#override-safe_rmextra_roots-1668), [DD-137](../../../docs/DESIGN_DECISIONS.md#dd-137-the-safe-rm-root-override-is-user-level-only-and-agents-cannot-write-the-settings-file).
 - `rm_tool_session_grants.rs` — submodule `rm_tool::session_grants`: explicit session-scoped grants for sibling Git checkouts (#1784), with reasoned audit records and Unix checkout identity checks; tests in `rm_tool_session_grants_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#authorized-sibling-checkouts-1784), [DD-157](../../../docs/DESIGN_DECISIONS.md#dd-157-sibling-checkout-cleanup-uses-an-explicit-session-grant).
+- `block_bad_cmd_claude_worktrees.rs` — refuses creating `.claude/worktrees/` or a new entry in it, in any repo or the home directory, from the shell (read from the syntax tree) or the file tools; work inside an existing checkout there and cleanup stay allowed (#1962, #1971). Tests in `block_bad_cmd_claude_worktrees_tests.rs`.
+- `claude_worktree_hook.rs` — the `WorktreeCreate` / `WorktreeRemove` handlers (`clud-cmd-scan --event WorktreeCreate`): Claude Code's own worktrees are built under `~/.clud/tmp-wt` instead of `.claude/worktrees/`; registered for Claude Code 2.1.50+ by `clud_hooks_compile::worktree_hooks_fragment`. See [shell-ast.md](../../../docs/architecture/shell-ast.md#worktree-location-guards).
+- `block_bad_cmd_shell.rs` — the scanner's bridge to `shell_ast` (#1962): `parse_command` (seeded with the hook's environment and the payload cwd) and `rule_words` (argv with only `env`/`command`/`exec` unwrapped); no rule splits command text by hand. Scanner-level tests for capture and the location guards are in `block_bad_cmd_ast_tests.rs`.
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `block_bad_cmd_wait_loop.rs` — the hand-written wait guard (#1880): refuses `while`/`until`, sleeping `for` loops, `tail -f`, `watch` and `sleep` chained to a `gh` status read, naming `run_in_background` as the replacement; tests in `block_bad_cmd_wait_loop_tests.rs`; contract in [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#hand-written-wait-guard-1880), [DD-168](../../../docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not).
 - `block_bad_cmd_wait_scan.rs` — #1972 helpers for the wait guard: peels wrapper programs (`timeout`, `nohup`, `env`, `xargs`, …), extracts `-c`/`eval`/`python -c` payloads, heredoc scripts and literal script files, and judges Python poll loops; tests and the audit corpus runner in `block_bad_cmd_wait_scan_tests.rs` (fixture `../tests/fixtures/wait_loop/corpus.json`); [DD-169](../../../docs/DESIGN_DECISIONS.md#dd-169-a-wrapper-an-embedded-script-or-another-tool-does-not-launder-a-wait).

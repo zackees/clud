@@ -115,6 +115,26 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "NotebookEdit",
 ];
 
+/// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude
+/// Code's own worktrees are built under `~/.clud/tmp-wt` instead of
+/// `.claude/worktrees/` (`claude_worktree_hook`). Passed only to a Claude
+/// Code that knows these events (2.1.50+); older ones ignored a settings
+/// document that named an unknown event, which would also drop the guards.
+#[must_use]
+pub fn worktree_hooks_fragment() -> Value {
+    let mut events = serde_json::Map::new();
+    for event in [
+        crate::claude_worktree_hook::WORKTREE_CREATE_EVENT,
+        crate::claude_worktree_hook::WORKTREE_REMOVE_EVENT,
+    ] {
+        events.insert(
+            event.to_string(),
+            json!([{ "hooks": [{ "type": "command", "command": dispatcher_command(event) }] }]),
+        );
+    }
+    json!({ "hooks": Value::Object(events) })
+}
+
 /// [`GUARDED_TOOLS`] as one matcher; the harness reads it as an anchored
 /// regex over the tool name.
 #[must_use]

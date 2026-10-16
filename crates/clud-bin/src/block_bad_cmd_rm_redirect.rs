@@ -12,15 +12,13 @@
 //! `git clean` and inline `python -c`/`node -e` deletions are deliberately
 //! left alone. See `docs/architecture/rm-tools.md`.
 
-use super::block_bad_cmd_shell::{
-    command_words, nested_shell_command, posix_c_shell_script, program_name, split_shell_segments,
-    tokenize,
-};
-use super::{strip_heredoc_bodies, ShellDialect};
+use super::block_bad_cmd_shell::{parse_command, program_name, rule_words};
+use super::ShellDialect;
+use crate::shell_ast::{Invocation, Origin, Script};
 
 /// Leading words that run the next word as the program, with their options
 /// that take a separate value. `command`, `env` and `exec` are already
-/// unwrapped by `command_words`.
+/// unwrapped by `rule_words`.
 const RUNNERS: &[(&str, &[&str])] = &[
     (
         "sudo",
@@ -59,7 +57,8 @@ const XARGS_VALUE_OPTIONS: &[&str] = &[
 /// `safe-rm` command to run instead; `None` when it does not.
 #[cfg(test)]
 pub(super) fn redirect_reason(command: &str) -> Option<String> {
-    let (original, suggestion) = find_removal(command, 0)?;
+    let script = parse_command(command, ShellDialect::Posix, None);
+    let (original, suggestion) = find_removal(&script)?;
     Some(format!(
         "Use `safe-rm` for agent-authored deletion: it moves paths to the clud trash \
          (`--purge` deletes for real, `--tracked` allows git-tracked paths) and limits \
@@ -78,32 +77,32 @@ pub(super) enum Redirect {
 /// A rewrite must not launder a shell assignment that changes the deletion
 /// roots, role or program resolution used by the rewritten command.
 pub(super) fn changes_deletion_environment(command: &str) -> bool {
-    let words = tokenize(command);
-    words.iter().enumerate().any(|(index, word)| {
-        let word = word.trim_matches([';', '&', '|', '(', ')']);
-        let name = word
-            .split('=')
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches('+');
-        let protected = protected_env_name(name);
-        let shell_mutation = words[..index]
+    let script = parse_command(command, ShellDialect::Posix, None);
+    script.assigned.iter().any(|name| protected_env_name(name))
+        || script.invocations.iter().any(changes_environment_of)
+}
+
+/// `NAME=x cmd`, `env NAME=x cmd`, `env -u NAME cmd`, `env --unset=NAME`.
+fn changes_environment_of(invocation: &Invocation) -> bool {
+    if invocation
+        .env
+        .iter()
+        .any(|(name, _)| protected_env_name(name))
+    {
+        return true;
+    }
+    let argv = invocation.argv();
+    argv.iter().enumerate().any(|(index, word)| {
+        let assigns = word
+            .split_once('=')
+            .is_some_and(|(name, _)| protected_env_name(name.trim_end_matches('+')));
+        let unsets = index > 0
+            && matches!(argv[index - 1].as_str(), "-u" | "--unset")
+            && protected_env_name(word);
+        let attached = ["--unset=", "-u"]
             .iter()
-            .rev()
-            .take_while(|previous| !previous.ends_with([';', '&', '|']))
-            .any(|previous| {
-                matches!(
-                    previous.as_str(),
-                    "unset" | "unsetenv" | "export" | "setenv"
-                )
-            });
-        (protected && word.contains('='))
-            || (protected
-                && (shell_mutation
-                    || index > 0 && matches!(words[index - 1].as_str(), "-u" | "--unset")))
-            || ["--unset=", "-u"]
-                .iter()
-                .any(|prefix| word.strip_prefix(prefix).is_some_and(protected_env_name))
+            .any(|prefix| word.strip_prefix(prefix).is_some_and(protected_env_name));
+        assigns || unsets || attached
     })
 }
 
@@ -166,23 +165,15 @@ fn decode_ascii_json_escapes(raw: &str) -> String {
 }
 
 pub(super) fn redirect(command: &str) -> Option<Redirect> {
-    if shell_fed_heredoc_removal(command) {
-        return Some(Redirect::Refuse(
-            "a shell-fed heredoc may execute deletion; use safe-rm directly instead".into(),
-        ));
-    }
-    let (original, suggestion) = find_removal(command, 0)?;
+    let script = parse_command(command, ShellDialect::Posix, None);
+    let (original, suggestion) = find_removal(&script)?;
     let unsafe_form = ["sudo ", "doas ", "eval ", " -delete"]
         .iter()
         .any(|needle| command.contains(needle))
         || command.contains('`')
         || command.contains("$(")
-        || contains_nested_shell(command)
-        || tokenize(command).windows(2).any(|pair| {
-            crate::deletion_rules::redirect_for(&program_name(&pair[0]))
-                .is_some_and(|(_, prefix_arg)| prefix_arg.is_some())
-                && (pair[1] == "-p" || pair[1] == "--parents")
-        });
+        || contains_nested_shell(&script)
+        || removes_parents(&script);
     if unsafe_form || command.matches(&original).count() != 1 {
         Some(Redirect::Refuse(format!(
             "this deletion form cannot be rewritten safely; use `safe-rm` instead (suggestion: {suggestion})"
@@ -196,202 +187,38 @@ pub(super) fn redirect(command: &str) -> Option<Redirect> {
     }
 }
 
-fn contains_nested_shell(command: &str) -> bool {
-    split_shell_segments(command, ShellDialect::Posix)
-        .into_iter()
-        .any(|segment| {
-            let segment = segment.trim();
-            let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
-            let words = strip_runners(command_words(segment));
-            posix_c_shell_script(&words).is_some()
-                || nested_shell_command(&words, ShellDialect::Posix).is_some()
+/// Code another shell runs: `bash -c`, `eval`, or a heredoc fed to a shell.
+fn contains_nested_shell(script: &Script) -> bool {
+    script
+        .invocations
+        .iter()
+        .any(|invocation| invocation.origin == Origin::NestedShell)
+}
+
+/// `rmdir -p` / `--parents`, which `safe-rm` does not offer.
+fn removes_parents(script: &Script) -> bool {
+    script.invocations.iter().any(|invocation| {
+        rule_words(invocation).windows(2).any(|pair| {
+            crate::deletion_rules::redirect_for(&program_name(&pair[0]))
+                .is_some_and(|(_, prefix_arg)| prefix_arg.is_some())
+                && (pair[1] == "-p" || pair[1] == "--parents")
         })
+    })
 }
 
-/// The first removal in `text`: the statement as typed and its replacement.
-fn find_removal(text: &str, depth: usize) -> Option<(String, String)> {
-    if depth > 4 {
-        return None;
-    }
-    // A heredoc body is data, at every depth: `$(cat <<'EOF' … EOF)` is how
-    // a commit message is passed.
-    let text = strip_heredoc_bodies(text);
-    let text = text.as_str();
-    for inner in active_substitutions(text) {
-        if let Some(found) = find_removal(&inner, depth + 1) {
-            return Some(found);
-        }
-    }
-    for segment in split_shell_segments(text, ShellDialect::Posix) {
-        let segment = segment.trim();
-        let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
-        let words = strip_runners(command_words(segment));
+/// The first removal the script runs, at any depth: the statement as typed
+/// and its replacement. Substitutions and nested shells are already walked
+/// by the parser; heredoc bodies are data unless a shell reads them.
+fn find_removal(script: &Script) -> Option<(String, String)> {
+    script.invocations.iter().find_map(|invocation| {
+        let words = strip_runners(rule_words(invocation));
         if words.is_empty() {
-            continue;
+            return None;
         }
-        let raw = raw_words(segment, &words);
-        if let Some(script) = posix_c_shell_script(&words) {
-            if let Some(found) = find_removal(&script, depth + 1) {
-                return Some(found);
-            }
-        }
-        if let Some((nested, ShellDialect::Posix)) =
-            nested_shell_command(&words, ShellDialect::Posix)
-        {
-            if let Some(found) = find_removal(&nested, depth + 1) {
-                return Some(found);
-            }
-            continue;
-        }
-        if let Some(suggestion) = statement_suggestion(&words, &raw) {
-            return Some((segment.to_string(), suggestion));
-        }
-    }
-    None
-}
-
-fn shell_fed_heredoc_removal(command: &str) -> bool {
-    if !command.contains("<<") {
-        return false;
-    }
-    let lines: Vec<&str> = command.split('\n').collect();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        let Some(delimiter) = super::find_heredoc_delimiter(line) else {
-            index += 1;
-            continue;
-        };
-        let terminator = (index + 1..lines.len()).find(|&candidate| {
-            lines[candidate]
-                .trim_start_matches('\t')
-                .trim_end_matches('\r')
-                == delimiter
-        });
-        let end = terminator.unwrap_or(lines.len());
-        let body = lines[index + 1..end].join("\n");
-        let expands_body =
-            heredoc_expands_body(line, &delimiter) && (body.contains('`') || body.contains("$("));
-        if (line_feeds_shell(line) || expands_body) && find_removal(&body, 0).is_some() {
-            return true;
-        }
-        index = terminator.map_or(lines.len(), |end| end + 1);
-    }
-    false
-}
-
-fn heredoc_expands_body(line: &str, delimiter: &str) -> bool {
-    let Some((_, tail)) = line.split_once("<<") else {
-        return false;
-    };
-    let tail = tail.strip_prefix('-').unwrap_or(tail).trim_start();
-    tail.starts_with(delimiter)
-}
-
-fn line_feeds_shell(line: &str) -> bool {
-    for group in super::split_pipeline_groups(line, ShellDialect::Posix) {
-        let Some(start) = group
-            .iter()
-            .position(|stage| super::find_heredoc_delimiter(stage).is_some())
-        else {
-            continue;
-        };
-        if group[start..].iter().any(|stage| {
-            let words = command_words(stage);
-            let Some(first) = words.first() else {
-                return false;
-            };
-            let name = program_name(first);
-            let shell = if name == "busybox" {
-                words
-                    .get(1)
-                    .map(|word| program_name(word))
-                    .unwrap_or_default()
-            } else {
-                name
-            };
-            matches!(
-                shell.as_str(),
-                "bash" | "sh" | "zsh" | "dash" | "ksh" | "ash" | "mksh"
-            )
-        }) {
-            return true;
-        }
-    }
-    false
-}
-
-/// The bodies of the command substitutions (`$(…)` and backticks) that
-/// the shell would run: none inside single quotes, where they are text.
-fn active_substitutions(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut found = Vec::new();
-    let mut single = false;
-    let mut double = false;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        if single {
-            single = ch != '\'';
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\\' => {
-                i += 2;
-                continue;
-            }
-            '\'' if !double => single = true,
-            '"' => double = !double,
-            '$' if chars.get(i + 1) == Some(&'(') => {
-                if let Some(end) = closing_paren(&chars, i + 1) {
-                    found.push(chars[i + 2..end].iter().collect());
-                    i = end + 1;
-                    continue;
-                }
-            }
-            '`' => {
-                let end = (i + 1..chars.len()).find(|&j| chars[j] == '`' && chars[j - 1] != '\\');
-                if let Some(end) = end {
-                    found.push(chars[i + 1..end].iter().collect());
-                    i = end + 1;
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    found
-}
-
-/// The index of the `)` closing the `(` at `open`, honouring quotes.
-fn closing_paren(chars: &[char], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut i = open;
-    while i < chars.len() {
-        let ch = chars[i];
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some('"') if ch == '\\' => i += 1,
-            Some(_) => {}
-            None => match ch {
-                '\\' => i += 1,
-                '\'' | '"' => quote = Some(ch),
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    None
+        let raw = raw_words(invocation, &words);
+        let suggestion = statement_suggestion(&words, &raw)?;
+        Some((invocation.source.clone(), suggestion))
+    })
 }
 
 fn strip_runners(mut words: Vec<String>) -> Vec<String> {
@@ -420,41 +247,13 @@ fn strip_runners(mut words: Vec<String>) -> Vec<String> {
     words
 }
 
-/// The words of `segment` as typed, quotes kept, aligned with `words` (its
-/// unquoted program words): the same whitespace split as `tokenize`, so the
-/// suffix that `command_words` kept lines up. Falls back to shell-quoting
-/// the unquoted words when it does not.
-fn raw_words(segment: &str, words: &[String]) -> Vec<String> {
-    let mut raw = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    for ch in segment.chars() {
-        if let Some(q) = quote {
-            buf.push(ch);
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            buf.push(ch);
-            continue;
-        }
-        if ch.is_whitespace() {
-            if !buf.is_empty() {
-                raw.push(std::mem::take(&mut buf));
-            }
-            continue;
-        }
-        buf.push(ch);
-    }
-    if !buf.is_empty() {
-        raw.push(buf);
-    }
-    let unquoted = tokenize(segment);
-    if raw.len() == unquoted.len() && unquoted.ends_with(words) {
-        return raw.split_off(raw.len() - words.len());
+/// The words of `invocation` as typed, quotes kept, aligned with `words`
+/// (a suffix of its evaluated argv after launchers were peeled off), so the
+/// suggestion keeps the agent's quoting.
+fn raw_words(invocation: &Invocation, words: &[String]) -> Vec<String> {
+    let raw = &invocation.raw;
+    if raw.len() >= words.len() {
+        return raw[raw.len() - words.len()..].to_vec();
     }
     words
         .iter()
@@ -594,87 +393,74 @@ fn is_clud_word(word: &str) -> bool {
     )
 }
 
-/// Whether `command` has an unquoted `&` that is not part of `&&`, which
-/// runs the statement before it in the background and starts another.
-fn has_lone_ampersand(command: &str) -> bool {
-    let chars: Vec<char> = command.chars().collect();
-    let mut quote: Option<char> = None;
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => {}
-            None if ch == '\\' => i += 1,
-            None if ch == '\'' || ch == '"' => quote = Some(ch),
-            None if ch == '&' => {
-                if chars.get(i + 1) == Some(&'&') {
-                    i += 2;
-                    continue;
-                }
-                return true;
-            }
-            None => {}
-        }
-        i += 1;
-    }
-    false
-}
-
 /// Whether `command` does nothing but run `safe-rm`, directly,
 /// through `clud`, from `find … -exec`, or after `xargs`, with no
 /// substitution, redirection, background `&` or environment prefix. The hook
 /// allows such a command outright: the tools enforce the roots themselves,
 /// so there is nothing for a permission prompt to add.
 pub(super) fn rm_tool_only(command: &str) -> bool {
-    if command.contains(['`', '>', '<']) || command.contains("$(") || has_lone_ampersand(command) {
+    if command.contains(['`', '>', '<']) || command.contains("$(") {
         return false;
     }
-    let segments = split_shell_segments(command, ShellDialect::Posix);
+    let script = parse_command(command, ShellDialect::Posix, None);
+    let plain = !script.has_error
+        && script.assigned.is_empty()
+        && script.invocations.iter().all(|invocation| {
+            // An environment prefix (`CLUD_RM_ROOTS=/ …`), a background `&`
+            // or a nested command is not a plain tool call.
+            invocation.env.is_empty()
+                && !invocation.background
+                && invocation.depth == 0
+                && invocation.origin == Origin::Script
+        });
+    plain
+        && !script.invocations.is_empty()
+        && script.invocations.iter().all(|invocation| {
+            // The words as typed, so a wrapper (`env`, `sudo`) or `$CLUD_EXE`
+            // reads as written rather than as what it expands to.
+            let words: Vec<String> = invocation.raw.iter().map(|word| unquote(word)).collect();
+            runs_only_the_tool(&words)
+        })
+}
+
+fn unquote(word: &str) -> String {
+    let bytes = word.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'"' | b'\'') && bytes[0] == bytes[bytes.len() - 1] {
+        return word[1..word.len() - 1].to_string();
+    }
+    word.to_string()
+}
+
+fn runs_only_the_tool(words: &[String]) -> bool {
+    let Some(first) = words.first() else {
+        return false;
+    };
+    if is_tool_word(first) {
+        return true;
+    }
+    if is_clud_word(first) {
+        return words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str()));
+    }
+    match first.as_str() {
+        "xargs" => xargs_program_index(words).is_some_and(|at| is_tool_word(&words[at])),
+        "find" => find_runs_only_the_tool(words),
+        _ => false,
+    }
+}
+
+fn find_runs_only_the_tool(words: &[String]) -> bool {
     let mut ran_tool = false;
-    for segment in &segments {
-        // The words as typed: an environment prefix (`CLUD_RM_ROOTS=/ …`)
-        // or a wrapper (`env`, `sudo`) is not a plain tool call.
-        let words = tokenize(segment);
-        let Some(first) = words.first() else {
-            return false;
-        };
-        let is_tool = |word: &String| is_tool_word(word);
-        if is_tool_word(first) {
+    for (i, word) in words.iter().enumerate().skip(1) {
+        if matches!(word.as_str(), "-exec" | "-execdir") {
+            if !words.get(i + 1).is_some_and(|next| is_tool_word(next)) {
+                return false;
+            }
             ran_tool = true;
-            continue;
-        }
-        if is_clud_word(first) {
-            if words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str())) {
-                ran_tool = true;
-                continue;
-            }
+        } else if matches!(word.as_str(), "-delete" | "-ok" | "-okdir")
+            || word.starts_with("-fprint")
+            || word.starts_with("-fls")
+        {
             return false;
-        }
-        match first.as_str() {
-            "xargs" => match xargs_program_index(&words) {
-                Some(at) if is_tool(&words[at]) => ran_tool = true,
-                _ => return false,
-            },
-            "find" => {
-                let mut i = 1;
-                while i < words.len() {
-                    let word = words[i].as_str();
-                    if matches!(word, "-exec" | "-execdir") {
-                        if !words.get(i + 1).is_some_and(is_tool) {
-                            return false;
-                        }
-                        ran_tool = true;
-                    } else if matches!(word, "-delete" | "-ok" | "-okdir")
-                        || word.starts_with("-fprint")
-                        || word.starts_with("-fls")
-                    {
-                        return false;
-                    }
-                    i += 1;
-                }
-            }
-            _ => return false,
         }
     }
     ran_tool

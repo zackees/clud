@@ -150,7 +150,16 @@ pub(super) fn gate_reason(command: &str, prefix: &str) -> Option<String> {
     }
 
     let statements = match decompose(command) {
-        Decomposition::Statements(statements) => statements,
+        Decomposition::Statements { top, .. } => top,
+        Decomposition::ControlFlow(keyword) => {
+            return Some(refusal(
+                &format!(
+                    "`{keyword}` introduces a compound command; the gate cannot prove every \
+                     branch is wrapped"
+                ),
+                prefix,
+            ));
+        }
         Decomposition::Opaque(construct) => {
             return Some(refusal(
                 &format!(
@@ -169,8 +178,8 @@ pub(super) fn gate_reason(command: &str, prefix: &str) -> Option<String> {
         ));
     }
 
-    for statement in &statements {
-        if let Some(reason) = statement_reason(statement, prefix) {
+    for words in &statements {
+        if let Some(reason) = statement_reason(words, prefix) {
             return Some(reason);
         }
     }
@@ -207,15 +216,11 @@ pub fn classify(command: &str, prefix: &str) -> GateClass {
     if command.trim().is_empty() {
         return GateClass::Restructure("an empty command");
     }
-    let statements = match decompose(command) {
-        Decomposition::Statements(statements) => statements,
+    let programs = match decompose(command) {
+        Decomposition::Statements { top, .. } => top,
+        Decomposition::ControlFlow(_) => return GateClass::Restructure("control flow"),
         Decomposition::Opaque(construct) => return GateClass::Restructure(construct),
     };
-    let programs: Vec<Vec<String>> = statements
-        .iter()
-        .map(|statement| gate_words(statement))
-        .filter(|words| !words.is_empty())
-        .collect();
     if programs.is_empty() {
         return GateClass::Restructure("no runnable statement");
     }
@@ -226,17 +231,16 @@ pub fn classify(command: &str, prefix: &str) -> GateClass {
             return GateClass::Restructure("control flow");
         }
     }
-    if statements.len() == 1 {
+    if programs.len() == 1 {
         GateClass::PrefixSingle
     } else {
         GateClass::PrefixCompound
     }
 }
 
-fn statement_reason(statement: &str, prefix: &str) -> Option<String> {
-    let words = gate_words(statement);
-    // A pure assignment (`SP=/tmp`) runs no program. `tap` sees the expanded
-    // value when the variable is later used, so there is nothing to gate.
+fn statement_reason(words: &[String], prefix: &str) -> Option<String> {
+    // A pure assignment (`SP=/tmp`) runs no program, so it is no statement:
+    // `tap` sees the expanded value when the variable is later used.
     let first = words.first()?;
 
     let leading = first.trim_matches(&['\'', '"'][..]);
@@ -276,178 +280,106 @@ fn refusal(detail: &str, prefix: &str) -> String {
     )
 }
 
-/// Tokenize a statement for the gate.
-///
-/// Deliberately *not* [`command_words`]: that unwraps `env`, `exec`, `command`
-/// and other transparent wrappers so denylist rules can see the real program
-/// underneath. The gate needs the opposite — the literal first word — or
-/// `env tap …` and friends would satisfy the prefix check while running
-/// something else.
-fn gate_words(statement: &str) -> Vec<String> {
-    let mut words = tokenize(statement);
-    while words.first().is_some_and(|word| is_env_assignment(word)) {
-        words.remove(0);
-    }
-    words
-}
-
 /// The literal words of each statement in `command`, or the construct that
 /// made it undecomposable. Shared with the `/grind` role caps, which need the
-/// same refusal of anything that hides a program.
+/// same refusal of anything that hides a program. Nested shells' statements
+/// (`bash -c 'gh issue create'`) follow their launcher as statements of their
+/// own, so a cap sees what the nested shell runs.
+///
+/// Control flow is not refused here. Each `for`/`while`/`if`/... appears as
+/// a one-word statement naming its keyword, ahead of the statements it
+/// runs, so an allowlist refuses it and a denylist can see a loop.
 pub(super) fn statement_words(command: &str) -> Result<Vec<Vec<String>>, &'static str> {
-    match decompose(command) {
-        Decomposition::Statements(statements) => Ok(statements
-            .iter()
-            .map(|statement| gate_words(statement))
-            .filter(|words| !words.is_empty())
-            .collect()),
-        Decomposition::Opaque(construct) => Err(construct),
+    use crate::shell_ast::Construct;
+    let script = parse_command(command, ShellDialect::Posix, None);
+    if let Some(construct) = opaque_construct(&script) {
+        return Err(construct);
     }
+    let keywords = script
+        .constructs
+        .iter()
+        .filter_map(|construct| match construct {
+            Construct::ControlFlow(keyword) => Some(vec![(*keyword).to_string()]),
+            _ => None,
+        });
+    let (top, nested) = statements(&script);
+    Ok(keywords.chain(top).chain(nested).collect())
 }
 
-/// What the scanner could make of a command line.
+/// What the gate could make of a command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decomposition {
-    /// Trimmed, non-empty statements, split on unquoted `;`, `&`, `&&`, `|`,
-    /// `||`, and newlines.
-    Statements(Vec<String>),
+    /// The statements the shell runs: `top` in the command line itself,
+    /// `nested` inside nested shells. Each is a program's literal words,
+    /// leading `VAR=value` assignments excluded and nothing unwrapped: the
+    /// gate needs the literal first word, or `env tap ...` would satisfy the
+    /// prefix check while running something else.
+    Statements {
+        top: Vec<Vec<String>>,
+        nested: Vec<Vec<String>>,
+    },
+    /// `if`, `for`, `while`, `case`, ...: a compound command.
+    ControlFlow(&'static str),
     /// A construct the gate refuses to reason about, named for the message.
     Opaque(&'static str),
 }
 
 /// Split a command line into statements, or refuse.
 ///
-/// Every branch that returns [`Decomposition::Opaque`] does so because the
-/// construct can run a program the gate would never inspect — a command
-/// substitution's body, a subshell, a process substitution — or because the
-/// text cannot be lexed at all. Refusing costs one extra tool call; guessing
-/// costs the guarantee.
+/// Every [`Decomposition::Opaque`] is a construct that can run a program the
+/// gate would never inspect — a command substitution's body, a subshell, a
+/// process substitution — or text the shell itself could not parse.
+/// Refusing costs one extra tool call; guessing costs the guarantee. The
+/// command is parsed by `shell_ast` (#1962), so quoting, heredoc bodies,
+/// redirections like `2>&1` and escaped operators are the grammar's
+/// business, not a hand-written lexer's.
 fn decompose(command: &str) -> Decomposition {
-    let masked = super::mask_heredoc_bodies_preserving_offsets(command);
-    let chars: Vec<char> = masked.chars().collect();
-    let mut statements: Vec<String> = Vec::new();
-    let mut buf = String::new();
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // A backslash escape covers the next character wholesale, so an
-        // escaped operator is never treated as structure.
-        if ch == '\\' && i + 1 < chars.len() {
-            buf.push(ch);
-            buf.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-
-        if ch == '\'' {
-            buf.push(ch);
-            i += 1;
-            loop {
-                let Some(&c) = chars.get(i) else {
-                    return Decomposition::Opaque("an unterminated single quote");
-                };
-                buf.push(c);
-                i += 1;
-                if c == '\'' {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            buf.push(ch);
-            i += 1;
-            loop {
-                let Some(&c) = chars.get(i) else {
-                    return Decomposition::Opaque("an unterminated double quote");
-                };
-                // Expansions still run inside double quotes.
-                if c == '`' {
-                    return Decomposition::Opaque("backtick command substitution");
-                }
-                if c == '$' && chars.get(i + 1) == Some(&'(') {
-                    return Decomposition::Opaque("command substitution");
-                }
-                if c == '\\' && i + 1 < chars.len() {
-                    buf.push(c);
-                    buf.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                buf.push(c);
-                i += 1;
-                if c == '"' {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if ch == '`' {
-            return Decomposition::Opaque("backtick command substitution");
-        }
-        if ch == '$' && chars.get(i + 1) == Some(&'(') {
-            return Decomposition::Opaque("command substitution");
-        }
-        if matches!(ch, '<' | '>') && chars.get(i + 1) == Some(&'(') {
-            return Decomposition::Opaque("process substitution");
-        }
-        if ch == '(' {
-            return Decomposition::Opaque("a subshell");
-        }
-        // `{ cmd; }` is a brace group only at command position followed by
-        // whitespace; `${VAR}` and `{a,b}` are expansions and stay allowed.
-        if ch == '{' && buf.trim().is_empty() && chars.get(i + 1).is_some_and(|c| c.is_whitespace())
-        {
-            return Decomposition::Opaque("a brace group");
-        }
-
-        if matches!(ch, ';' | '\n' | '\r') {
-            push_statement(&mut buf, &mut statements);
-            i += 1;
-            continue;
-        }
-        // `&&` and a lone `&` (background) both end a statement — but an `&`
-        // belonging to a redirection does not. `2>&1` is ubiquitous, and
-        // splitting it yields the statement `1` and the nonsensical refusal
-        // "`1` was not invoked through `tap`".
-        if ch == '&' {
-            let preceded_by_redirect = buf.trim_end().ends_with(['>', '<']);
-            let opens_redirect = chars.get(i + 1) == Some(&'>');
-            if preceded_by_redirect || opens_redirect {
-                buf.push(ch);
-                i += 1;
-                continue;
-            }
-            push_statement(&mut buf, &mut statements);
-            i += if chars.get(i + 1) == Some(&'&') { 2 } else { 1 };
-            continue;
-        }
-        // `||` and a lone `|` (pipe) both end a statement: each pipeline stage
-        // is its own program and needs its own wrapper.
-        if ch == '|' {
-            push_statement(&mut buf, &mut statements);
-            i += if chars.get(i + 1) == Some(&'|') { 2 } else { 1 };
-            continue;
-        }
-
-        buf.push(ch);
-        i += 1;
+    use crate::shell_ast::Construct;
+    let script = parse_command(command, ShellDialect::Posix, None);
+    if let Some(construct) = opaque_construct(&script) {
+        return Decomposition::Opaque(construct);
     }
-
-    push_statement(&mut buf, &mut statements);
-    Decomposition::Statements(statements)
+    let control = script
+        .constructs
+        .iter()
+        .find_map(|construct| match construct {
+            Construct::ControlFlow(keyword) => Some(*keyword),
+            _ => None,
+        });
+    if let Some(keyword) = control {
+        return Decomposition::ControlFlow(keyword);
+    }
+    let (top, nested) = statements(&script);
+    Decomposition::Statements { top, nested }
 }
 
-fn push_statement(buf: &mut String, statements: &mut Vec<String>) {
-    let statement = buf.trim();
-    if !statement.is_empty() {
-        statements.push(statement.to_string());
+/// Text the shell cannot parse, or a construct that hides a program.
+fn opaque_construct(script: &crate::shell_ast::Script) -> Option<&'static str> {
+    use crate::shell_ast::Construct;
+    if script.has_error {
+        let error = script
+            .syntax_error
+            .unwrap_or(crate::shell_ast::SyntaxError::Other);
+        return Some(error.describe());
     }
-    buf.clear();
+    script
+        .constructs
+        .iter()
+        .find(|construct| !matches!(construct, Construct::ControlFlow(_)))
+        .map(|construct| construct.describe())
+}
+
+/// The literal words of the top-level statements and of nested shells'.
+fn statements(script: &crate::shell_ast::Script) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    use crate::shell_ast::{Invocation, Origin};
+    let top = script.top_level().map(Invocation::argv).collect();
+    let nested = script
+        .invocations
+        .iter()
+        .filter(|inv| inv.origin == Origin::NestedShell)
+        .map(Invocation::argv)
+        .collect();
+    (top, nested)
 }
 
 #[cfg(test)]
@@ -559,8 +491,8 @@ mod gate_tests {
 
     #[test]
     fn transparent_wrappers_do_not_satisfy_the_prefix() {
-        // `command_words` would unwrap these to find the real program; the
-        // gate must not, or the prefix check becomes bypassable.
+        // Denylist rules unwrap these to find the real program; the gate
+        // must not, or the prefix check becomes bypassable.
         for command in [
             "env tap ls",
             "exec tap ls",

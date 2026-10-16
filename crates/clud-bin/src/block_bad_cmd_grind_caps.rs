@@ -637,12 +637,10 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
         }
         INTEGRATOR => {
             // A denylist is only as good as what it sees, so look through
-            // wrappers (`bash -c "docker run …"`, `env act`, `xargs bosn`):
-            // every whitespace-separated token of every word counts.
-            let tokens: Vec<String> = words
-                .iter()
-                .flat_map(|w| w.split_whitespace().map(program_name).collect::<Vec<_>>())
-                .collect();
+            // wrappers (`env act`, `xargs bosn`): every word counts. A nested
+            // shell's code (`bash -c "docker run …"`) is parsed into
+            // statements of its own (#1962).
+            let tokens: Vec<String> = words.iter().map(|w| program_name(w)).collect();
             let has = |name: &str| tokens.iter().any(|t| t == name);
             if has("bosn") {
                 return deny("bosn");
@@ -1240,11 +1238,7 @@ fn runs_repo_script(words: &[String]) -> bool {
         "source",
         ".",
     ];
-    let tokens: Vec<&str> = words
-        .iter()
-        .flat_map(|w| w.split_whitespace())
-        .map(|t| t.trim_matches(&['\'', '"'][..]))
-        .collect();
+    let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
     // `Some(qualified)` when `t` names a lint/test script; `qualified` is true
     // for a path or a script extension, which the `test` builtin never has.
     let script_name = |t: &str| -> Option<bool> {
@@ -1281,12 +1275,10 @@ fn runs_repo_script(words: &[String]) -> bool {
 }
 
 /// Whether a statement runs `gh issue create`, looking through wrappers
-/// (`bash -c "gh issue create …"`) the way the integrator's denylist does.
+/// (`timeout 60 gh issue create …`) the way the integrator's denylist does;
+/// `bash -c "gh issue create …"` is a statement of its own.
 fn creates_issue(words: &[String]) -> bool {
-    let tokens: Vec<String> = words
-        .iter()
-        .flat_map(|w| w.split_whitespace().map(program_name).collect::<Vec<_>>())
-        .collect();
+    let tokens: Vec<String> = words.iter().map(|w| program_name(w)).collect();
     strip_gh_repo_flag(&tokens)
         .windows(3)
         .any(|w| w[0] == "gh" && w[1] == "issue" && w[2] == "create")
@@ -1297,12 +1289,7 @@ fn creates_issue(words: &[String]) -> bool {
 /// `--raw-field`, any method). Looks through wrappers like [`creates_issue`].
 /// `clud grind reconcile` is a clud invocation, not `gh`, so it is untouched.
 fn closes_issue(words: &[String]) -> bool {
-    let tokens: Vec<String> = words
-        .iter()
-        .flat_map(|w| w.split_whitespace())
-        .map(|t| t.trim_matches(&['\'', '"'][..]).to_string())
-        .collect();
-    let tokens = strip_gh_repo_flag(&tokens);
+    let tokens = strip_gh_repo_flag(words);
     let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
     let is_gh = |t: &str| program_name(t) == "gh";
     if tokens

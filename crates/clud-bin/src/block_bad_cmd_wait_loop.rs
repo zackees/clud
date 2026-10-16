@@ -7,10 +7,11 @@
 //! DD-168 in `docs/DESIGN_DECISIONS.md` for the `sleep` threshold.
 
 use super::block_bad_cmd_wait_scan::{
-    heredoc_scripts, inline_script, mentions_gh_status, peel_wrappers, python_sleep_seconds,
+    heredoc_script, inline_script, mentions_gh_status, peel_wrappers, python_sleep_seconds,
     python_wait, script_file, HeredocUse, Peeled, ScriptKind,
 };
 use super::*;
+use crate::shell_ast::{Invocation, Script};
 
 /// Rule id for `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`.
 pub(super) const WAIT_LOOP_RULE_ID: &str = "hand-written-wait";
@@ -20,85 +21,6 @@ pub(super) const WAIT_REPLACEMENT: &str = "Never poll. To wait, run the command 
 
 /// Longest `sleep` allowed outside a loop and not chained to a status poll.
 const MAX_STANDALONE_SLEEP_SECS: f64 = 60.0;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LoopKind {
-    /// `while`, `until`, `for ((;;))`, PowerShell `do`/`for (;;)`.
-    Unbounded,
-    /// A `for`/`foreach` over a list or a counted range.
-    Bounded,
-}
-
-/// Words of one segment with leading shell control keywords removed, so the
-/// body of `do sleep 5` reads as `sleep 5`.
-fn body_words(segment: &str, dialect: ShellDialect) -> Vec<String> {
-    let mut words = command_words(segment);
-    loop {
-        let Some(first) = words.first_mut() else {
-            return words;
-        };
-        let trimmed = first.trim_start_matches(['(', '{']).to_string();
-        if trimmed.is_empty() {
-            words.remove(0);
-            continue;
-        }
-        if trimmed.len() != first.len() {
-            *first = trimmed;
-        }
-        let keyword = first.to_ascii_lowercase();
-        if dialect == ShellDialect::Posix && keyword == "case" {
-            // #1972: `case "$s" in UNKNOWN*) sleep 5` keeps its arm's body.
-            let after_in = words
-                .iter()
-                .position(|word| word == "in")
-                .map_or(1, |i| i + 1);
-            words.drain(..after_in.min(words.len()));
-            continue;
-        }
-        let control = match dialect {
-            ShellDialect::Posix => {
-                matches!(
-                    keyword.as_str(),
-                    "do" | "then" | "else" | "elif" | "!" | "time"
-                ) || is_case_pattern(&keyword)
-            }
-            ShellDialect::PowerShell | ShellDialect::Cmd => false,
-        };
-        if !control {
-            return words;
-        }
-        words.remove(0);
-    }
-}
-
-/// A `case` arm's pattern word (`*)`, `completed*)`, `pass|fail)`), which
-/// starts the segment that holds the arm's first command.
-fn is_case_pattern(word: &str) -> bool {
-    word.len() > 1 && word.ends_with(')') && !word.contains('(')
-}
-
-fn loop_kind(segment: &str, words: &[String], dialect: ShellDialect) -> Option<LoopKind> {
-    let head = program_name(words.first()?);
-    let keyword = head.split_once('(').map_or(head.as_str(), |(name, _)| name);
-    let compact: String = segment.chars().filter(|ch| !ch.is_whitespace()).collect();
-    match dialect {
-        ShellDialect::Posix => match keyword {
-            "while" | "until" | "select" => Some(LoopKind::Unbounded),
-            "for" if compact.starts_with("for((;;))") => Some(LoopKind::Unbounded),
-            "for" => Some(LoopKind::Bounded),
-            _ => None,
-        },
-        ShellDialect::PowerShell => match keyword {
-            "while" | "do" => Some(LoopKind::Unbounded),
-            "for" if compact.to_ascii_lowercase().starts_with("for(;;)") => {
-                Some(LoopKind::Unbounded)
-            }
-            "for" | "foreach" => Some(LoopKind::Bounded),
-            _ => None,
-        },
-        ShellDialect::Cmd => None,
-    }
-}
 
 /// `Some(seconds)` for a `sleep`/`Start-Sleep` segment; the inner `None`
 /// means the duration is not a literal (a variable, `infinity` counts as
@@ -169,7 +91,8 @@ fn follows_output(words: &[String]) -> bool {
     }
 }
 
-/// Deepest embedded script (a `bash -c` inside a heredoc inside ...) read.
+/// Deepest embedded script (a script file run by a heredoc-written script
+/// ...) read.
 const MAX_SCRIPT_DEPTH: usize = 4;
 
 /// One hand-written wait the scanner found.
@@ -191,9 +114,9 @@ pub(super) struct ScanContext<'a> {
     pub(super) shim_active: bool,
 }
 
-/// Facts collected over one command's segments.
+/// Facts collected over one script's commands.
 #[derive(Default)]
-struct SegmentFacts {
+struct Facts {
     unbounded: bool,
     bounded: bool,
     sleeps: Vec<Option<f64>>,
@@ -203,6 +126,8 @@ struct SegmentFacts {
     any_native: bool,
     /// A native watcher that is not the gh-shim's canonical PR watch.
     raw_native: bool,
+    /// Some command reads GitHub PR, check or run state.
+    gh_read: bool,
 }
 
 /// The shim's own `gh pr checks --watch`, routed to the fail-fast waiter.
@@ -214,15 +139,26 @@ fn canonical_shimmed_watch(words: &[String], shim_active: bool) -> bool {
             .any(|word| word == "--watch" || word.starts_with("--watch="))
 }
 
-impl SegmentFacts {
-    fn record(&mut self, segment: &str, dialect: ShellDialect, scan: ScanContext<'_>) -> Peeled {
-        let words = body_words(segment, dialect);
-        match loop_kind(segment, &words, dialect) {
-            Some(LoopKind::Unbounded) => self.unbounded = true,
-            Some(LoopKind::Bounded) => self.bounded = true,
-            None => {}
+impl Facts {
+    fn new(script: &Script) -> Self {
+        use crate::shell_ast::LoopKind;
+        Self {
+            unbounded: script.loop_kinds().any(is_unbounded_loop),
+            bounded: script.loop_kinds().any(|kind| {
+                matches!(
+                    kind,
+                    LoopKind::ForEach | LoopKind::CStyle { infinite: false }
+                )
+            }),
+            ..Self::default()
         }
-        let peeled = peel_wrappers(&words);
+    }
+
+    /// Note what one command does; its words with wrappers peeled.
+    fn record(&mut self, invocation: &Invocation, scan: ScanContext<'_>) -> Peeled {
+        // #1972: `timeout`, `nohup`, `env`, `time`, the gate prefix, ...
+        // cannot hide the waiter.
+        let peeled = peel_wrappers(&rule_words(invocation));
         if let Some(seconds) =
             sleep_seconds(&peeled.words).or_else(|| python_sleep_seconds(&peeled.words))
         {
@@ -238,14 +174,17 @@ impl SegmentFacts {
             self.any_native = true;
             self.raw_native |= !canonical_shimmed_watch(&peeled.words, scan.shim_active);
         }
+        // The status read may sit in a substitution (`p=$(gh pr checks 1)`);
+        // the invocations include those.
+        self.gh_read |=
+            gh_poll_target(&peeled.words) || mentions_gh_status(&peeled.words.join(" "));
         peeled
     }
 
-    fn verdict(&self, stripped: &str, native_gate: bool) -> Option<Finding> {
+    fn verdict(&self, native_gate: bool) -> Option<Finding> {
         let looping = self.unbounded || self.bounded;
         let has_sleep = !self.sleeps.is_empty();
-        let poll =
-            self.any_native || ((self.unbounded || has_sleep) && mentions_gh_status(stripped));
+        let poll = self.any_native || ((self.unbounded || has_sleep) && self.gh_read);
         let what = if self.any_native && looping {
             "a native GitHub watcher (`gh run watch`, `gh pr checks --watch`) retried in a loop"
         } else if self.unbounded {
@@ -273,21 +212,34 @@ impl SegmentFacts {
     }
 }
 
-/// A script embedded in, or run by, one peeled command: `bash -c`, `eval`,
-/// `python -c`, or a literal script file on disk. A file on disk may be a
-/// repository's own script, so only a PR/CI wait in it counts.
+/// A script one command runs that the shell grammar cannot see into: a
+/// `python -c` payload, a heredoc fed to Python or written to a script
+/// file, or a literal script file on disk. (A `bash -c`, `eval` or heredoc
+/// fed to a shell is already parsed into the tree.) A written or on-disk
+/// script may be a repository's own, so only a PR/CI wait in it counts.
 fn embedded_wait(
+    invocation: &Invocation,
     peeled: &Peeled,
-    dialect: ShellDialect,
     scan: ScanContext<'_>,
     depth: usize,
 ) -> Option<Finding> {
-    if let Some((kind, script)) = inline_script(&peeled.words, dialect) {
-        if let Some(finding) = script_wait(kind, &script, scan, depth) {
+    if let Some((ScriptKind::Python, script)) = inline_script(&peeled.words, ShellDialect::Posix) {
+        if let Some(finding) = script_wait(ScriptKind::Python, &script, scan, depth) {
             return Some(finding);
         }
     }
-    let (kind, script) = script_file(&peeled.words, scan.cwd)?;
+    if let Some((usage, kind, body)) = heredoc_script(invocation) {
+        let parsed_already = usage == HeredocUse::Fed && matches!(kind, ScriptKind::Shell(_));
+        if !parsed_already {
+            let finding = script_wait(kind, &body, scan, depth)
+                .filter(|finding| usage == HeredocUse::Fed || finding.poll);
+            if finding.is_some() {
+                return finding;
+            }
+        }
+    }
+    let run_in = invocation.cwd.as_literal().map(Path::new).or(scan.cwd);
+    let (kind, script) = script_file(&peeled.words, run_in)?;
     script_wait(kind, &script, scan, depth).filter(|finding| finding.poll)
 }
 
@@ -298,7 +250,9 @@ fn script_wait(
     depth: usize,
 ) -> Option<Finding> {
     match kind {
-        ScriptKind::Shell(dialect) => hand_written_wait(script, dialect, scan, depth + 1),
+        ScriptKind::Shell(dialect) => {
+            scan_script(&parse_command(script, dialect, scan.cwd), scan, depth + 1)
+        }
         ScriptKind::Python => python_wait(script).map(|poll| Finding {
             what: "a Python loop that sleeps",
             poll,
@@ -306,39 +260,19 @@ fn script_wait(
     }
 }
 
-/// Heredoc bodies that are scripts: one fed to an interpreter is judged in
-/// full, one written to a script file only for a PR/CI wait.
-fn heredoc_wait(command_text: &str, scan: ScanContext<'_>, depth: usize) -> Option<Finding> {
-    heredoc_scripts(command_text)
-        .into_iter()
-        .find_map(|(usage, kind, body)| {
-            script_wait(kind, &body, scan, depth)
-                .filter(|finding| usage == HeredocUse::Fed || finding.poll)
-        })
-}
-
-/// What the command does that counts as a hand-written wait, if anything.
-pub(super) fn hand_written_wait(
-    command_text: &str,
-    dialect: ShellDialect,
-    scan: ScanContext<'_>,
-    depth: usize,
-) -> Option<Finding> {
+/// What the script does that counts as a hand-written wait, if anything.
+fn scan_script(script: &Script, scan: ScanContext<'_>, depth: usize) -> Option<Finding> {
     if depth > MAX_SCRIPT_DEPTH {
         return None;
     }
-    if let Some(finding) = heredoc_wait(command_text, scan, depth) {
-        return Some(finding);
-    }
-    let stripped = strip_heredoc_bodies(command_text);
-    let mut facts = SegmentFacts::default();
-    for segment in split_shell_segments(&stripped, dialect) {
-        let peeled = facts.record(&segment, dialect, scan);
-        if let Some(finding) = embedded_wait(&peeled, dialect, scan, depth) {
+    let mut facts = Facts::new(script);
+    for invocation in &script.invocations {
+        let peeled = facts.record(invocation, scan);
+        if let Some(finding) = embedded_wait(invocation, &peeled, scan, depth) {
             return Some(finding);
         }
     }
-    facts.verdict(&stripped, scan.native_gate)
+    facts.verdict(scan.native_gate)
 }
 
 /// How to run the blessed PR watcher, named in every PR/CI refusal.
@@ -347,12 +281,12 @@ pub(super) const PR_WATCH_USAGE: &str = "For a PR, run `clud tool run github/pr_
 /// The refusal for a hand-written wait, unless an audited
 /// `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>` accepts it.
 pub(super) fn hand_written_wait_reason(
+    script: &Script,
     command_text: &str,
-    dialect: ShellDialect,
     scan: ScanContext<'_>,
     evaluation: &mut CommandEvaluation,
 ) -> Option<String> {
-    let Finding { what, poll } = hand_written_wait(command_text, dialect, scan, 0)?;
+    let Finding { what, poll } = scan_script(script, scan, 0)?;
     if let Some(override_reason) = accepted_override_reason(WAIT_LOOP_RULE_ID) {
         evaluation.log_messages.push(format!(
             "BAD_CMD_OVERRIDE accepted rule={WAIT_LOOP_RULE_ID} reason={override_reason:?} command={command_text:?}"

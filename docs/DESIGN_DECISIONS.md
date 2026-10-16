@@ -6784,6 +6784,55 @@ running the shell.
 rules do not run there. A script written by the Write tool and run later by
 a variable path is not read.
 
+## DD-170: the command scanner reads syntax trees and says what it cannot know
+
+**Context.** `block_bad_cmd` read commands with a hand-written splitter and
+tokenizer, then matched rules on word positions. Each rule family grew its own
+partial lexer on top: heredoc stripping, substitution extraction, a
+top-level-segment splitter for `cd`, an offset-preserving heredoc masker for
+the gate, a redirect-aware tokenizer for the settings-file write check, and
+`split_whitespace` over words to look inside `bash -c`. Each was its own
+source of bypasses (#1299, #1305). #1961 measured the result: of 14 ways an agent
+created a worktree or clone, the scanner registered 1, and `git -C <dir> clone`
+walked past the extern-directory guard.
+
+**Decision.** Every command is parsed by a real grammar (`tree-sitter-bash`,
+`tree-sitter-powershell`; a minimal splitter for cmd.exe) and evaluated
+without running anything into one list of invocations, which every rule reads
+(`shell_ast`, [shell-ast.md](architecture/shell-ast.md)). Evaluation resolves
+what is knowable from the text and the base environment, such as assignments,
+`export`, `cd` chains, literal `for` lists and the text of nested shells. It
+marks every other value `Unknown` with a reason, and each rule declares what it
+does with an unknown (the table in shell-ast.md). The hand-written splitters
+are gone. A recall oracle replays real commands against the git/gh calls the
+shim recorded them running, and its floor may only rise. `git worktree add`
+outside `~/.clud/tmp-wt` (or `/grind`'s directory) is now refused, since the
+same parse makes that guard unbypassable too.
+
+**Why tree-sitter.** It is error-tolerant: bad input yields `ERROR` nodes,
+never a failed parse, so the scanner always has a structure. It covers bash
+and PowerShell behind one API, and its bash grammar is the one Codex CLI's
+command-safety parsing uses. Its parse cost is microseconds; the latency
+budget test holds parse plus evaluation under 5 ms at p99.
+
+**Why evaluate, and only statically.** Most bypasses were values a reader can
+see: `G=git; $G clone`, `R=/x; git -C "$R"`, `cd /repo && git worktree add ..`.
+Running anything to learn a value (`$(…)`, `read`) is never acceptable in a
+pre-execution hook, so those stay `Unknown`, and the runtime shim, which sees
+the real argv, covers what static evaluation cannot.
+
+**Rejected.** Patching each hand-written lexer: the bypasses lived in the
+position-based logic over them, not in one bug. `brush-parser`: bash only, and
+its evaluator is built to execute. `tree-sitter-batch` for cmd.exe: too little
+use to rely on, and cmd expands `%VAR%` when a line is read, which no grammar
+models, so a splitter that does exactly that is more faithful. Treating every
+unknown as a match in every rule: the right answer differs per rule, so it is
+declared per rule.
+
+This supersedes the mentions of `command_words()` in DD-016's override note
+and DD-056's gate note: the gate now reads literal words from the syntax tree
+for the same reason it avoided `command_words`.
+
 ## DD-171: Codex gets a global `clud-cmd-scan` hook written to its user config
 
 **Context.** clud's rule is to compile hooks into launch arguments and never

@@ -42,98 +42,24 @@ pub(super) fn reason(command: &str) -> Option<String> {
     Some(REFUSAL.to_string())
 }
 
-/// Whether every statement of `command` is a [`READ_ONLY`] program and no
-/// output is redirected anywhere but `/dev/null` or another descriptor.
+/// Whether every command in `command`, at any depth, is a [`READ_ONLY`]
+/// program and nothing is written anywhere but `/dev/null` (duplicating a
+/// descriptor, as in `2>&1`, writes nothing). Text the shell cannot parse
+/// fails closed.
 fn only_reads(command: &str) -> bool {
-    let mut statements: Vec<Vec<String>> = vec![Vec::new()];
-    let mut word = String::new();
-    let mut quote: Option<char> = None;
-    let mut redirect_pending = false;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            } else if ch == '\\' && q == '"' {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                }
-            } else {
-                word.push(ch);
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                }
-            }
-            '>' => {
-                // `2>` / `&>`: the descriptor digits are not a word.
-                if word.chars().all(|c| c.is_ascii_digit() || c == '&') {
-                    word.clear();
-                }
-                if !finish(&mut word, &mut statements, &mut redirect_pending) {
-                    return false;
-                }
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                }
-                if chars.peek() == Some(&'&') {
-                    // `>&2` duplicates a descriptor; it writes no file.
-                    chars.next();
-                    while chars.peek().is_some_and(char::is_ascii_digit) {
-                        chars.next();
-                    }
-                } else {
-                    redirect_pending = true;
-                }
-            }
-            ';' | '&' | '|' | '\n' | '\r' | '(' | ')' | '`' => {
-                if !finish(&mut word, &mut statements, &mut redirect_pending) {
-                    return false;
-                }
-                statements.push(Vec::new());
-            }
-            c if c.is_whitespace() => {
-                if !finish(&mut word, &mut statements, &mut redirect_pending) {
-                    return false;
-                }
-            }
-            c => word.push(c),
-        }
-    }
-    if !finish(&mut word, &mut statements, &mut redirect_pending) || redirect_pending {
-        return false;
-    }
-    statements.iter().all(|words| {
-        let Some(program) = words
-            .iter()
-            .find(|w| !super::block_bad_cmd_shell::is_env_assignment(w))
-        else {
-            return true;
-        };
-        let name = super::block_bad_cmd_shell::program_name(program);
-        READ_ONLY.contains(&name.as_str()) || program == "["
-    })
-}
-
-/// Close the current word. A redirection target that is not `/dev/null`
-/// means the command writes, which is reported as `false`.
-fn finish(word: &mut String, statements: &mut [Vec<String>], pending: &mut bool) -> bool {
-    if word.is_empty() {
-        return true;
-    }
-    let text = std::mem::take(word);
-    if std::mem::take(pending) {
-        return text == "/dev/null";
-    }
-    if let Some(last) = statements.last_mut() {
-        last.push(text);
-    }
-    true
+    let script =
+        super::block_bad_cmd_shell::parse_command(command, super::ShellDialect::Posix, None);
+    !script.has_error
+        && script.invocations.iter().all(|invocation| {
+            let writes = invocation.redirects.iter().any(|redirect| {
+                redirect.writes_file() && redirect.target.as_literal() != Some("/dev/null")
+            });
+            let Some(program) = invocation.words.first() else {
+                return true;
+            };
+            let name = super::block_bad_cmd_shell::program_name(program.text());
+            !writes && (READ_ONLY.contains(&name.as_str()) || program.text() == "[")
+        })
 }
 
 #[cfg(test)]
