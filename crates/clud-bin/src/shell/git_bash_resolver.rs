@@ -261,7 +261,9 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), FetchError> {
             None => {
                 return Err(FetchError::Zip(format!(
                     "rejected zip entry with unsafe path: {}",
-                    entry.name()
+                    entry
+                        .name()
+                        .map_or_else(|error| format!("<{error}>"), |name| name.into_owned())
                 )));
             }
         };
