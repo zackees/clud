@@ -399,13 +399,13 @@ which test tier a change belongs in — lives in
   the daemon. `delete_audit.rs` is the pre-deletion JSONL audit trail
   (`<state>/gc-audit.jsonl`, issue #893) written by every deletion path that can
   touch user data, plus the target-sweep over-match guard. `worktree_root.rs`
-  owns `~/.clud/tmp-wt` (issue #1485), the agent worktree root outside the
+  owns `~/.clud/worktrees` (issue #1485), the agent worktree root outside the
   `session_tmp` sweep, its ordinal allocator `alloc_wt_path` (#1486), plus
   the warn-only `worktrees.warn_bytes` size check; `worktree_size_cache.rs`
   caches that check from the daemon probe for the launch banner (#1610),
   and the same warn-only check for `~/.clud/tmp` behind `tmp.warn_bytes` (#1327),
   and for `~/.clud/cache` behind `cache.warn_bytes` (#1691);
-  see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludtmp-wt-1485).
+  see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludworktrees-1485).
   `uv_cache_repair.rs` invalidates live uv wheel pointers to gutted archives
   under uv's own locks (#1711, DD-148).
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
@@ -902,7 +902,7 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `rm_tool_extra_roots.rs` — submodule `rm_tool::extra_roots`: the human-set `safe_rm.extra_roots` override (#1668), as `verdict` over injected `EntryFacts` plus `probe`/`load`; the settings reader is `clud_settings::safe_rm_extra_roots_from`; tests in `rm_tool_extra_roots_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#override-safe_rmextra_roots-1668), [DD-137](../../../docs/DESIGN_DECISIONS.md#dd-137-the-safe-rm-root-override-is-user-level-only-and-agents-cannot-write-the-settings-file).
 - `rm_tool_session_grants.rs` — submodule `rm_tool::session_grants`: explicit session-scoped grants for sibling Git checkouts (#1784), with reasoned audit records and Unix checkout identity checks; tests in `rm_tool_session_grants_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#authorized-sibling-checkouts-1784), [DD-157](../../../docs/DESIGN_DECISIONS.md#dd-157-sibling-checkout-cleanup-uses-an-explicit-session-grant).
 - `block_bad_cmd_claude_worktrees.rs` — refuses creating `.claude/worktrees/` or a new entry in it, in any repo or the home directory, from the shell (read from the syntax tree) or the file tools; work inside an existing checkout there and cleanup stay allowed (#1962, #1971). Tests in `block_bad_cmd_claude_worktrees_tests.rs`.
-- `claude_worktree_hook.rs` — the `WorktreeCreate` / `WorktreeRemove` handlers (`clud-cmd-scan --event WorktreeCreate`): Claude Code's own worktrees are built under `~/.clud/tmp-wt` instead of `.claude/worktrees/`; registered for Claude Code 2.1.50+ by `clud_hooks_compile::worktree_hooks_fragment`. See [shell-ast.md](../../../docs/architecture/shell-ast.md#worktree-location-guards).
+- `claude_worktree_hook.rs` — the `WorktreeCreate` / `WorktreeRemove` handlers (`clud-cmd-scan --event WorktreeCreate`): Claude Code's own worktrees are built under `~/.clud/worktrees` instead of `.claude/worktrees/`; registered for Claude Code 2.1.50+ by `clud_hooks_compile::worktree_hooks_fragment`. See [shell-ast.md](../../../docs/architecture/shell-ast.md#worktree-location-guards).
 - `block_bad_cmd_shell.rs` — the scanner's bridge to `shell_ast` (#1962): `parse_command` (seeded with the hook's environment and the payload cwd) and `rule_words` (argv with only `env`/`command`/`exec` unwrapped); no rule splits command text by hand. Scanner-level tests for capture and the location guards are in `block_bad_cmd_ast_tests.rs`.
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `block_bad_cmd_wait_loop.rs` — the hand-written wait guard (#1880): refuses `while`/`until`, sleeping `for` loops, `tail -f`, `watch` and `sleep` chained to a `gh` status read, naming `run_in_background` as the replacement; tests in `block_bad_cmd_wait_loop_tests.rs`; contract in [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#hand-written-wait-guard-1880), [DD-168](../../../docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not).

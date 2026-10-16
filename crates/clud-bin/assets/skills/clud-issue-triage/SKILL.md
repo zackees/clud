@@ -16,7 +16,7 @@ Triage GitHub issues for closeable resolution and un-addressed CodeRabbit follow
 
 1. **Bias toward caution on closing.** Default action is *leave open*. Only close when the resolution is unambiguous: a merged PR landed code on the default branch and that code clearly satisfies the issue's acceptance criteria. When in doubt, don't close.
 2. **File follow-ups without asking.** Un-addressed CodeRabbit comments → file a new follow-up issue immediately, no user prompt. At the end, hand the user the list of follow-ups you filed.
-3. **Bulk mode = main scans, sub-agents triage in parallel git worktrees.** The main agent never does per-issue triage in bulk mode. It enumerates and filters the candidate set, then dispatches one sub-agent per issue in a single tool-use block. Each sub-agent runs in its own `~/.clud/tmp-wt/<repo>-wt-triage-<num>/`.
+3. **Bulk mode = main scans, sub-agents triage in parallel git worktrees.** The main agent never does per-issue triage in bulk mode. It enumerates and filters the candidate set, then dispatches one sub-agent per issue in a single tool-use block. Each sub-agent runs in its own `~/.clud/worktrees/<repo>-wt-<num>/`.
 4. **Nothing left in the repo when done.** Every worktree gets `git worktree remove`'d after its sub-agent finishes. Same `.gitignore` gate and stale-worktree rules as [[clud-git]].
 
 ## Forge support
@@ -132,15 +132,15 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
    - `all` → `gh issue list --state open --limit 1000 --json number,title,labels,createdAt,updatedAt`.
 2. **Filter (main agent, fast pass).** Drop issues that are obviously not triage candidates: anything labeled `grind:on-feature` (see Failure modes), a `grind:followup` issue that is not yet eligible (see Failure modes), `discussion`, `meta`, `roadmap`, `wontfix`, `duplicate`, `question`; anything updated in the last 24h (active conversation); anything with zero linked PRs/cross-references. The remainder is the work set.
 3. **Set the goal.** With `<N>` candidates known, invoke `/goal Triage <N> candidate issues; for each: close if unambiguously resolved or file CodeRabbit follow-ups, then report aggregate Closed/Follow-ups counts and tear down every worktree.` so the harness Stop hook blocks until the aggregate report is emitted and every worktree is gone. If the filtered set is empty, report that and clear the goal — do not set it.
-4. **Stale-worktree prompt.** Same as [[clud-git]]'s **Worktree creation playbook**: worktrees go under `~/.clud/tmp-wt/` (clud's hook refuses them anywhere else). Ask the user about deleting any stale `~/.clud/tmp-wt/<repo>-wt-triage-*` older than 24h before starting.
-5. **Plan worktrees.** One worktree per issue: `~/.clud/tmp-wt/<repo>-wt-triage-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach ~/.clud/tmp-wt/<repo>-wt-triage-<num> origin/<default>` for each.
+4. **Stale-worktree prompt.** Same as [[clud-git]]'s **Worktree creation playbook**: worktrees go under `~/.clud/worktrees/` (clud's hook refuses them anywhere else). Ask the user about deleting any stale `~/.clud/worktrees/<repo>-wt-<num>` triage worktree older than 24h before starting.
+5. **Plan worktrees.** One worktree per issue: `~/.clud/worktrees/<repo>-wt-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach ~/.clud/worktrees/<repo>-wt-<num> origin/<default>` for each.
 6. **Dispatch sub-agents in parallel.** Single tool-use block, one Agent call per issue. Each sub-agent gets:
    - The issue number and URL
    - The repo `<owner>/<repo>`
    - Its dedicated worktree path
    - Instruction: run the **Single-issue workflow** (steps 1–7 above, skipping the per-issue `/goal` step since the bulk goal already covers it) for this issue, in this worktree, and return a structured report (closed: bool, reason, follow-ups: list of {num, title, url})
    - Hard constraint: do not touch any path outside the assigned worktree; do not modify code in the main checkout
-7. **Aggregate.** Collect every sub-agent's report. Tear down every worktree (`git worktree remove ~/.clud/tmp-wt/<repo>-wt-triage-<num>` per issue). Confirm `git worktree list` shows none of them.
+7. **Aggregate.** Collect every sub-agent's report. Tear down every worktree (`git worktree remove ~/.clud/worktrees/<repo>-wt-<num>` per issue). Confirm `git worktree list` shows none of them.
 8. **Report (main agent).** Two sections:
    - **Closed (N):** one line per closed issue: `#<num> — <title> — resolved by #<pr>`.
    - **Follow-ups filed (M):** one line per filed follow-up: `#<num> — <title> — <url>`.
@@ -157,7 +157,7 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 - **Filing duplicate follow-ups.** Before `gh issue create`, search: `gh issue list --search "from #<pr> coderabbit-followup" --state all`. Skip if a matching follow-up already exists.
 - **Doing per-issue triage on the main agent in bulk mode.** Bulk mode = scan + dispatch + aggregate. Triage is sub-agent work, in worktrees, in parallel.
 - **Letting worktrees leak.** Every dispatched worktree gets removed at the end, even on partial failure. Verify with `git worktree list`.
-- **Touching the main checkout from a sub-agent.** Sub-agents only read/inspect inside their assigned `~/.clud/tmp-wt/<repo>-wt-triage-<num>/`. They do not commit, edit, or `cd` outside.
+- **Touching the main checkout from a sub-agent.** Sub-agents only read/inspect inside their assigned `~/.clud/worktrees/<repo>-wt-<num>/`. They do not commit, edit, or `cd` outside.
 
 ## When NOT to use this
 

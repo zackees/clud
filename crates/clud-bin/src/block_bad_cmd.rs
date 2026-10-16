@@ -343,7 +343,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return block_bad_cmd_cwd_changed::handle_cwd_changed(&stdin.text, parent.as_deref());
     }
 
-    // #1962/#1971: Claude Code's worktrees, built under `~/.clud/tmp-wt`
+    // #1962/#1971: Claude Code's worktrees, built under `~/.clud/worktrees`
     // instead of `.claude/worktrees/`. Placement, not policy, so it runs
     // ahead of every switch below; these events speak their own protocol.
     if event == crate::claude_worktree_hook::WORKTREE_CREATE_EVENT {
@@ -1879,7 +1879,7 @@ struct EvaluationContext<'a> {
     bad_commands: &'a [BadCommandRule],
     bad_pipelines: &'a [BadPipelineRule],
     repo_root: Option<&'a Path>,
-    /// clud's worktree root (`~/.clud/tmp-wt`): the only place, besides
+    /// clud's worktree root (`~/.clud/worktrees`): the only place, besides
     /// /grind's feature directory, a `git worktree add` may land (#1962).
     /// `None` disables that guard.
     worktree_root: Option<&'a Path>,
@@ -2004,7 +2004,9 @@ fn git_path_reason(
             {
                 return Some(reason);
             }
-            if let Some(reason) = worktree_root_violation_reason(&capture, context, evaluation) {
+            if let Some(reason) =
+                worktree_root_violation_reason(&capture, invocation, context, evaluation)
+            {
                 return Some(reason);
             }
             evaluation.git_path_captures.push(capture);
@@ -2604,10 +2606,11 @@ fn detect_git_path_capture(command: &str, cwd: Option<&Path>) -> Option<GitPathC
 }
 
 /// `git worktree add` destinations must land in clud's worktree root
-/// (`~/.clud/tmp-wt`, reclaimed by the daemon) or in /grind's own
+/// (`~/.clud/worktrees`, reclaimed by the daemon) or in /grind's own
 /// `.clud/grind/worktrees/` (#1962). Overridable for one call.
 fn worktree_root_violation_reason(
     capture: &GitPathCapture,
+    invocation: &crate::shell_ast::Invocation,
     context: &EvaluationContext<'_>,
     evaluation: &mut CommandEvaluation,
 ) -> Option<String> {
@@ -2629,17 +2632,149 @@ fn worktree_root_violation_reason(
         ));
         return None;
     }
+    let repo = context
+        .repo_root
+        .unwrap_or(&capture.origin_cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let rewrite = rewrite_worktree_add(invocation, context.cwd, root, &repo);
     Some(worktree_root_denial(
         root,
         &crate::path_norm::display_slash(&capture.path),
+        rewrite.as_ref(),
     ))
 }
 
-fn worktree_root_denial(root: &Path, destination: &str) -> String {
+fn worktree_root_denial(
+    root: &Path,
+    destination: &str,
+    rewrite: Option<&WorktreeAddRewrite>,
+) -> String {
     let root = crate::path_norm::display_slash(root);
+    let advice = rewrite.map_or_else(
+        || {
+            format!(
+                " For example: `git worktree add {root}/<repo>-wt-<name> -b <branch> origin/main`."
+            )
+        },
+        WorktreeAddRewrite::advice,
+    );
     format!(
-        "git worktree add outside clud's worktree root is not allowed: {destination} would never be reclaimed. Create worktrees at {root}/<repo>-wt-<name> (the daemon reclaims them once their work lands), e.g. `git worktree add {root}/<repo>-wt-<name> -b <branch> origin/main`. Set {BAD_CMD_OVERRIDE_ENV}=\"{WORKTREE_ROOT_GUARD_RULE_ID}:<your reason for needing the raw command>\" to create one elsewhere anyway."
+        "git worktree add outside clud's worktree root is not allowed: {destination} would never be reclaimed. Worktrees go in {root}/<repo>-wt-<name>, where the daemon reclaims them once their work lands.{advice} Set {BAD_CMD_OVERRIDE_ENV}=\"{WORKTREE_ROOT_GUARD_RULE_ID}:<your reason for needing the raw command>\" to create one elsewhere anyway."
     )
+}
+
+/// A refused `git worktree add`, rewritten to land in clud's worktree root.
+pub(super) struct WorktreeAddRewrite {
+    /// The command to run instead.
+    pub command: String,
+    /// When the original named no branch, git would have used a branch
+    /// named after the folder: created if missing, checked out if it
+    /// exists. The rewrite keeps that name with `-b`; this is the
+    /// `(branch, command)` for when the branch already exists.
+    pub existing_branch: Option<(String, String)>,
+}
+
+impl WorktreeAddRewrite {
+    /// The sentence a refusal ends with.
+    pub(super) fn advice(&self) -> String {
+        let mut text = format!(" Run this instead: `{}`.", self.command);
+        if let Some((branch, command)) = &self.existing_branch {
+            text.push_str(&format!(
+                " If branch `{branch}` already exists, check it out instead: `{command}`."
+            ));
+        }
+        text
+    }
+}
+
+/// `invocation`, a `git worktree add`, with its destination moved to a free
+/// `<root>/<repo>-wt-<name>` and every other word kept as typed, so a
+/// refused agent can run it as is. `<name>` is the folder it asked for. A
+/// `-C <dir>` is added when the command ran somewhere other than the
+/// session's directory (after a `cd`). Pure apart from checking which
+/// names in `root` are taken; nothing is created.
+pub(super) fn rewrite_worktree_add(
+    invocation: &crate::shell_ast::Invocation,
+    session_cwd: Option<&Path>,
+    root: &Path,
+    repo: &str,
+) -> Option<WorktreeAddRewrite> {
+    let texts = invocation.argv();
+    if invocation.raw.len() != texts.len() {
+        return None;
+    }
+    let worktree_at = texts
+        .windows(2)
+        .position(|pair| pair[0] == "worktree" && pair[1] == "add")?;
+    let args = &texts[worktree_at + 2..];
+    let positionals = positional_indices(args, GIT_WORKTREE_ADD_OPTIONS_WITH_VALUE);
+    let destination_at = worktree_at + 2 + *positionals.first()?;
+    let folder = last_component(&texts[destination_at]);
+    let path = crate::gc::worktree_root::suggest_wt_path_in(root, repo, &folder);
+    let mut words = invocation.raw.clone();
+    words[destination_at] = shell_word(&crate::path_norm::display_slash(&path));
+
+    let run_in = invocation
+        .cwd
+        .as_literal()
+        .filter(|cwd| session_cwd.is_none_or(|session| Path::new(cwd) != session))
+        .filter(|_| !texts[..worktree_at].iter().any(|word| word == "-C"));
+    let finish = |mut words: Vec<String>| {
+        if let Some(cwd) = run_in {
+            words.splice(
+                worktree_at..worktree_at,
+                ["-C".to_string(), shell_word(cwd)],
+            );
+        }
+        words.join(" ")
+    };
+    let names_branch = positionals.len() > 1
+        || args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-b" | "-B" | "-d" | "--detach" | "--orphan"));
+    if names_branch {
+        return Some(WorktreeAddRewrite {
+            command: finish(words),
+            existing_branch: None,
+        });
+    }
+    let branch = shell_word(&folder);
+    let mut new_branch = words.clone();
+    new_branch.splice(
+        destination_at + 1..destination_at + 1,
+        ["-b".to_string(), branch.clone()],
+    );
+    let mut existing = words;
+    existing.insert(destination_at + 1, branch);
+    Some(WorktreeAddRewrite {
+        command: finish(new_branch),
+        existing_branch: Some((folder, finish(existing))),
+    })
+}
+
+/// The last component of a path as typed, either separator.
+fn last_component(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `text` as one shell word: bare when it is plainly a path or name,
+/// otherwise double-quoted (valid in bash, PowerShell and cmd).
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:~+@,=".contains(c));
+    if plain {
+        text.to_string()
+    } else {
+        format!("\"{text}\"")
+    }
 }
 
 /// A clone or worktree whose destination is only known at run time cannot
@@ -2729,25 +2864,31 @@ fn git_worktree_add_destination(args: &[String]) -> Option<String> {
 /// values), boolean flags, and an inline `--flag=value` form, collecting
 /// everything else as positionals. `--` ends flag parsing.
 fn collect_positionals(args: &[String], options_with_value: &[&str]) -> Vec<String> {
+    positional_indices(args, options_with_value)
+        .into_iter()
+        .map(|index| args[index].clone())
+        .collect()
+}
+
+/// [`collect_positionals`], as indices into `args`.
+fn positional_indices(args: &[String], options_with_value: &[&str]) -> Vec<usize> {
     let mut positionals = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--" {
-            positionals.extend(args[i + 1..].iter().cloned());
+            positionals.extend(i + 1..args.len());
             break;
         }
         if arg.starts_with('-') {
-            if arg.contains('=') {
-                i += 1;
-            } else if options_with_value.contains(&arg.as_str()) {
+            if !arg.contains('=') && options_with_value.contains(&arg.as_str()) {
                 i += 2;
             } else {
                 i += 1;
             }
             continue;
         }
-        positionals.push(arg.clone());
+        positionals.push(i);
         i += 1;
     }
     positionals

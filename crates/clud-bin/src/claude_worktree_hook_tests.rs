@@ -94,7 +94,7 @@ fn branch_names_skip_ones_already_taken() {
 fn a_claude_code_worktree_lands_under_the_worktree_root() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo_with_origin(tmp.path());
-    let wt_root = tmp.path().join("tmp-wt");
+    let wt_root = tmp.path().join("worktrees");
     let request = CreateRequest {
         cwd: repo.clone(),
         name: "agent-a1".into(),
@@ -126,4 +126,16 @@ fn creation_outside_a_repository_fails_with_a_reason() {
         name: "x".into(),
     };
     assert!(create_in(&request, &tmp.path().join("wt"), BaseRef::Fresh).is_err());
+}
+
+#[test]
+fn removal_accepts_the_new_root_and_the_old_one_until_it_drains() {
+    let home = Path::new("/home/u");
+    assert!(removable(
+        Path::new("/home/u/.clud/worktrees/repo-wt-a"),
+        home
+    ));
+    assert!(removable(Path::new("/home/u/.clud/tmp-wt/repo-wt-a"), home));
+    assert!(!removable(Path::new("/repo/.claude/worktrees/a"), home));
+    assert!(!removable(Path::new("/home/u/.clud/tmp/x"), home));
 }

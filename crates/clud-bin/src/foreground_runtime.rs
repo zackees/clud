@@ -1586,7 +1586,7 @@ fn compose_launch_settings_document_with(
             .map_err(BridgeError::Settings)?;
         merge_deletion_denies(&mut settings, &safety)?;
     }
-    // #1962/#1971: build Claude Code's worktrees under `~/.clud/tmp-wt`.
+    // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
     if worktree_hooks {
         let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();
         crate::clud_hooks_compile::merge_hook_settings(&mut settings, &worktrees)
@@ -4081,7 +4081,7 @@ mod tests {
     }
 
     /// #1962/#1971: a client that knows `WorktreeCreate` gets clud's line, so
-    /// its worktrees land under `~/.clud/tmp-wt`; one that does not gets no
+    /// its worktrees land under `~/.clud/worktrees`; one that does not gets no
     /// line at all, since an unknown event could void the whole document.
     #[test]
     fn worktree_hooks_are_registered_only_when_the_client_takes_them() {

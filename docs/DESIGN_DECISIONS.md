@@ -6806,7 +6806,7 @@ marks every other value `Unknown` with a reason, and each rule declares what it
 does with an unknown (the table in shell-ast.md). The hand-written splitters
 are gone. A recall oracle replays real commands against the git/gh calls the
 shim recorded them running, and its floor may only rise. `git worktree add`
-outside `~/.clud/tmp-wt` (or `/grind`'s directory) is now refused, since the
+outside `~/.clud/worktrees` (or `/grind`'s directory) is now refused, since the
 same parse makes that guard unbypassable too.
 
 **Why tree-sitter.** It is error-tolerant: bad input yields `ERROR` nodes,

@@ -1,10 +1,10 @@
-//! Issue #1485: the clud-owned root for agent worktrees, `~/.clud/tmp-wt/`.
+//! Issue #1485: the clud-owned root for agent worktrees, `~/.clud/worktrees/`.
 //!
 //! A **sibling** of `~/.clud/tmp` (the `session_tmp` root), never a child, so
 //! the 72 h mtime sweep cannot see a worktree by construction: an old mtime is
 //! not evidence that a checkout's work landed. Worktrees here are named
-//! `<repo>-wt-<suffix>` (so `reconcile::has_nonempty_suffix` keeps matching)
-//! and are reclaimed only by the repo-worktree verdict (DD-122/DD-123/DD-124).
+//! `<repo>-wt-<name>` by [`worktree_path_in`], the one constructor of paths
+//! under the root (#1962), and are reclaimed only by the repo-worktree verdict (DD-122/DD-123/DD-124).
 //! The root itself is never a removal target: nothing in clud deletes it, and
 //! `git worktree remove` only removes the child it is given.
 //!
@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Directory name under the clud home (`~/.clud`).
-pub const WORKTREE_ROOT_DIR_NAME: &str = "tmp-wt";
+pub const WORKTREE_ROOT_DIR_NAME: &str = "worktrees";
 
 /// Grace before a clean, commit-free worktree under the root counts as
 /// abandoned (#1485 rule "abandoned-empty").
@@ -33,29 +33,29 @@ pub const DEFAULT_WARN_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 /// root full of build trees. Exhausting it reports `Unknown`, never `Under`.
 pub const SIZE_SCAN_ENTRY_BUDGET: usize = 500_000;
 
-/// `<home>/.clud/tmp-wt`. Pure, for tests and for callers holding a home.
+/// `<home>/.clud/worktrees`. Pure, for tests and for callers holding a home.
 pub fn worktree_root_for(home: &Path) -> PathBuf {
     home.join(".clud").join(WORKTREE_ROOT_DIR_NAME)
 }
 
-/// `~/.clud/tmp-wt` without creating it; `None` with no home dir. Resolves
+/// `~/.clud/worktrees` without creating it; `None` with no home dir. Resolves
 /// home exactly like [`super::session_tmp::session_tmp_dir`], so the two
 /// roots are always siblings.
 pub fn worktree_root() -> Option<PathBuf> {
     Some(worktree_root_for(&crate::home::user_home()?))
 }
 
-/// Create `<home>/.clud/tmp-wt` idempotently.
+/// Create `<home>/.clud/worktrees` idempotently.
 pub fn ensure_worktree_root_at(home: &Path) -> std::io::Result<PathBuf> {
     let root = worktree_root_for(home);
     fs::create_dir_all(&root)?;
     Ok(root)
 }
 
-/// Create `~/.clud/tmp-wt` idempotently. Called at session launch and at
+/// Create `~/.clud/worktrees` idempotently. Called at session launch and at
 /// daemon GC-worker start; failure is non-fatal (agents fall back to the
 /// sibling layout they used before). A no-op under `cfg(test)` so unit
-/// tests never create the real `~/.clud/tmp-wt`; they use
+/// tests never create the real `~/.clud/worktrees`; they use
 /// [`ensure_worktree_root_at`] with a tempdir.
 pub fn ensure_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
@@ -64,27 +64,47 @@ pub fn ensure_worktree_root() -> Option<PathBuf> {
     ensure_worktree_root_at(&crate::home::user_home()?).ok()
 }
 
-/// The infix between the repo slug and the suffix, shared with
-/// `gc/reconcile.rs`'s `{repo_name}-wt-` matcher.
-pub const WT_INFIX: &str = "-wt-";
-
 /// Upper bound on collision ordinals (`-2`, `-3`, ...). Reaching it means
 /// something is creating names in a loop, not a legitimate collision.
 const MAX_ORDINAL: u32 = 10_000;
 
-/// Issue #1486: reserve a fresh `~/.clud/tmp-wt/<slug>-wt-<suffix>` and
+/// The one constructor of a path under the worktree root (#1962): every
+/// worktree is `<root>/<repo>-wt-<name>`, `-<ordinal>` appended from 2 on,
+/// e.g. `clud-wt-1962`, `clud-wt-PR1234`, `clud-wt-1962-2`.
+///
+/// Both parts become plain path components ([`plain_component`]). A `name`
+/// that already starts with `<repo>-wt-` (or `<repo>-`, or `wt-`) is not
+/// prefixed twice. An empty `name` gives the repo alone.
+pub fn worktree_path_in(root: &Path, repo: &str, name: &str, ordinal: u32) -> PathBuf {
+    let repo = plain_component(repo);
+    let name = name.trim();
+    let name = name.strip_prefix(&format!("{repo}-")).unwrap_or(name);
+    let name = name.strip_prefix("wt-").unwrap_or(name);
+    let mut dir = if name.is_empty() {
+        repo
+    } else {
+        format!("{repo}-wt-{}", plain_component(name))
+    };
+    if ordinal > 1 {
+        dir.push_str(&format!("-{ordinal}"));
+    }
+    root.join(dir)
+}
+
+/// Issue #1486: reserve a fresh `~/.clud/worktrees/<repo>-wt-<name>` and
 /// return it. See [`alloc_wt_path_in`].
 pub fn alloc_wt_path(slug: &str, suffix: &str) -> std::io::Result<PathBuf> {
-    let root = worktree_root()
-        .ok_or_else(|| std::io::Error::other("no home directory; cannot resolve ~/.clud/tmp-wt"))?;
+    let root = worktree_root().ok_or_else(|| {
+        std::io::Error::other("no home directory; cannot resolve ~/.clud/worktrees")
+    })?;
     alloc_wt_path_in(&root, slug, suffix)
 }
 
-/// Reserve a fresh `<root>/<slug>-wt-<suffix>` directory and return its path,
-/// which **exists on return**. On a collision it tries
-/// `<slug>-wt-<suffix>-2`, `-3`, ... in order. Each attempt is one
-/// `create_dir`, which fails if the name exists, so two concurrent callers
-/// never receive the same path, and a path a caller prints is always real.
+/// Reserve a fresh [`worktree_path_in`] directory and return its path,
+/// which **exists on return**. On a collision it tries ordinal 2, 3, ... in
+/// order. Each attempt is one `create_dir`, which fails if the name exists,
+/// so two concurrent callers never receive the same path, and a path a
+/// caller prints is always real.
 ///
 /// `slug` and `suffix` must each be one non-empty path component with no
 /// separator and no character Windows rejects; otherwise `InvalidInput`, and
@@ -93,14 +113,8 @@ pub fn alloc_wt_path_in(root: &Path, slug: &str, suffix: &str) -> std::io::Resul
     validate_component("slug", slug)?;
     validate_component("suffix", suffix)?;
     fs::create_dir_all(root)?;
-    let base = format!("{slug}{WT_INFIX}{suffix}");
     for ordinal in 1..=MAX_ORDINAL {
-        let name = if ordinal == 1 {
-            base.clone()
-        } else {
-            format!("{base}-{ordinal}")
-        };
-        let candidate = root.join(name);
+        let candidate = worktree_path_in(root, slug, suffix, ordinal);
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -108,9 +122,41 @@ pub fn alloc_wt_path_in(root: &Path, slug: &str, suffix: &str) -> std::io::Resul
         }
     }
     Err(std::io::Error::other(format!(
-        "no free ordinal for {base} under {} after {MAX_ORDINAL} attempts",
-        root.display()
+        "no free ordinal for {} after {MAX_ORDINAL} attempts",
+        worktree_path_in(root, slug, suffix, 1).display()
     )))
+}
+
+/// The first free [`worktree_path_in`], for a message to suggest. Unlike
+/// [`alloc_wt_path_in`] it creates nothing, so the name is a suggestion,
+/// not a reservation.
+pub fn suggest_wt_path_in(root: &Path, repo: &str, name: &str) -> PathBuf {
+    (1..=MAX_ORDINAL)
+        .map(|ordinal| worktree_path_in(root, repo, name, ordinal))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or_else(|| worktree_path_in(root, repo, name, 1))
+}
+
+/// `value` as one plain path component: whitespace, separators and the
+/// characters Windows rejects become `-`; an empty result becomes `work`.
+pub fn plain_component(value: &str) -> String {
+    let plain: String = value
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || is_forbidden_char(c) {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let plain = plain.trim_matches('-');
+    if plain.is_empty() || plain == "." || plain == ".." {
+        "work".to_string()
+    } else {
+        plain.to_string()
+    }
 }
 
 /// Separators, and the characters Windows rejects in a file name.

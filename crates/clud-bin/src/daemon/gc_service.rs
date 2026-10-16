@@ -25,6 +25,7 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
 mod extern_repo;
 mod filesystem;
+mod legacy_worktree_root;
 mod list_state;
 mod repo_worktree;
 pub(crate) mod repo_worktree_cli;
@@ -414,7 +415,7 @@ fn run_worker_loop(
 ) {
     let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
-    // Issue #1485: create ~/.clud/tmp-wt at daemon start (no-op in tests).
+    // Issue #1485: create ~/.clud/worktrees at daemon start (no-op in tests).
     let _ = crate::gc::worktree_root::ensure_worktree_root();
     let Some(tick_cadence) = config.tick_cadence else {
         // No periodic tick in this mode, so the startup probe below is the
@@ -859,14 +860,14 @@ fn repo_worktree_mode_from_env() -> ReclaimMode {
 struct RepoWorktreeGcConfig {
     mode: ReclaimMode,
     delete_remote: bool,
-    /// #1485: `~/.clud/tmp-wt`, whose children seed the probe and alone
+    /// #1485: `~/.clud/worktrees`, whose children seed the probe and alone
     /// qualify for the abandoned-empty rule. `None` in tests.
     wt_root: Option<PathBuf>,
 }
 
 /// #1485: the production worktree root. `None` under `cfg(test)`, so no
 /// unit test can probe (let alone reclaim) the developer's real
-/// `~/.clud/tmp-wt`; tests inject a tempdir root instead.
+/// `~/.clud/worktrees`; tests inject a tempdir root instead.
 fn production_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
         None
@@ -983,6 +984,7 @@ fn spawn_repo_worktree_probe(
         .spawn(move || {
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
             let procs = repo_worktree_probe::collect_process_cwds();
+            migrate_legacy_worktree_root(&live_cwds, &procs);
             let rows = repo_worktree_probe::probe_repos(
                 &repo_roots,
                 &live_cwds,
@@ -990,7 +992,7 @@ fn spawn_repo_worktree_probe(
                 wt_root.as_deref(),
             );
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
-            // Issue #1610: size tmp-wt here, off the launch path, so the
+            // Issue #1610: size worktrees here, off the launch path, so the
             // launch banner only reads the cached result.
             refresh_worktree_size_cache(wt_root.as_deref());
         });
@@ -999,7 +1001,26 @@ fn spawn_repo_worktree_probe(
     }
 }
 
-/// Issue #1610: bounded `check_tree_size` walk of `tmp-wt`, cached for the
+/// #1962: move what is left under the old `~/.clud/tmp-wt` into
+/// `~/.clud/worktrees`. Production only, and never without a process
+/// snapshot: without one, nothing shows which entries are in use.
+fn migrate_legacy_worktree_root(
+    live_cwds: &[PathBuf],
+    procs: &repo_worktree_reclaim::ProcessCwdSnapshot,
+) {
+    if cfg!(test) || !procs.available {
+        return;
+    }
+    let Some(home) = crate::home::user_home() else {
+        return;
+    };
+    let busy: Vec<PathBuf> = live_cwds.iter().chain(&procs.cwds).cloned().collect();
+    for line in legacy_worktree_root::migrate(&home, &busy) {
+        eprintln!("[clud] gc: {line}");
+    }
+}
+
+/// Issue #1610: bounded `check_tree_size` walk of `worktrees`, cached for the
 /// launch banner. Best effort; errors are ignored. Warn-only: nothing is
 /// deleted for size.
 fn refresh_worktree_size_cache(wt_root: Option<&std::path::Path>) {

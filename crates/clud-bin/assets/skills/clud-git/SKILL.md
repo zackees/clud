@@ -19,7 +19,7 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 
 ## Three hard rules
 
-1. **Worktrees live in clud's worktree root.** Create every worktree at `~/.clud/tmp-wt/<repo>-wt-<name>/`, where the daemon reclaims it once the work lands. clud's command hook refuses `git worktree add` anywhere else (the only other allowed place is `/grind`'s own `<repo>/.clud/grind/worktrees/`), however the command is spelled (#1962). A worktree inside the repo is never reclaimed and gets walked by linters and builds.
+1. **Worktrees live in clud's worktree root.** Create every worktree at `~/.clud/worktrees/<repo>-wt-<name>/`, where the daemon reclaims it once the work lands. `<name>` is the issue number, or `PR<num>` for a pull request: `clud-wt-1962`, `clud-wt-PR1234`. If you pick another spot, the refusal names the exact command to run instead. clud's command hook refuses `git worktree add` anywhere else (the only other allowed place is `/grind`'s own `<repo>/.clud/grind/worktrees/`), however the command is spelled (#1962). A worktree inside the repo is never reclaimed and gets walked by linters and builds.
 2. **Process audit before destructive removal.** Windows file locks routinely cause `git worktree remove` to fail with `Permission denied` / `Access is denied`. Always audit which processes hold the directory before resorting to `--force`, then prefer `"$CLUD_EXE" trash` over `rm -rf` retry loops.
 3. **Never blind-loop `rm -rf`.** A `rm -rf` retry loop hides the actual problem (a process holding a file open) instead of fixing it. Audit, stop the specific offender, OR quarantine via `"$CLUD_EXE" trash`.
 
@@ -27,7 +27,7 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 
 1. **Sync main.** `git fetch origin main` so the new worktree starts from current main, not stale local state.
 2. **Stale worktree prune.** `git worktree prune` to clear git's view of any worktrees deleted on disk without proper removal.
-3. **Create in the worktree root.** `git worktree add -b <branch> ~/.clud/tmp-wt/<repo>-wt-<name> origin/main` (see hard rule 1). `<repo>` is the repository's directory name and `<name>` is freely chosen — convention is `<slice-or-feature>-<issue-number>` so leftover dirs are searchable.
+3. **Create in the worktree root.** `git worktree add -b <branch> ~/.clud/worktrees/<repo>-wt-<name> origin/main` (see hard rule 1). `<repo>` is the repository's directory name and `<name>` is freely chosen — convention is `<slice-or-feature>-<issue-number>` so leftover dirs are searchable.
 4. **RED -> GREEN inside the worktree.** All edits, lint, tests, and commits happen inside the worktree path. Never edit the main checkout for worktree-scoped work.
 
 ### Rust target directory for sequential work
@@ -72,7 +72,7 @@ When the user reports "my shell appears stuck" or `git` commands hang on a Windo
 | Symptom | Fix |
 |---|---|
 | `git worktree remove` → "Access is denied" | Process audit → stop specific holders → retry. If still failing → `"$CLUD_EXE" trash`. |
-| 10+ leftover dirs under `.claude/worktrees/` (made before #1962) or `~/.clud/tmp-wt/` | Batch `git worktree remove --force` for each git-tracked one, then `"$CLUD_EXE" trash` for the orphan dirs. Delete the merged branches with `git branch -D` afterward. |
+| 10+ leftover dirs under `.claude/worktrees/` (made before #1962) or `~/.clud/worktrees/` | Batch `git worktree remove --force` for each git-tracked one, then `"$CLUD_EXE" trash` for the orphan dirs. Delete the merged branches with `git branch -D` afterward. |
 | "Shells appear stuck" after a teardown | Bash cwd is anchored on a deleted dir. Cd to absolute path. PowerShell tracks cwd independently and is usually the safer escape. |
 | Local branch list cluttered with old feature branches | `git branch --merged main \| grep feat/` to find merged ones; `git branch -D` to delete. Non-merged branches need explicit `git branch -D` after confirming the work landed via squash. |
 
@@ -87,7 +87,7 @@ When called from `/clud-fix-quick`, `/clud-issue-triage`, or any other skill:
 
 ## Hard rules summary
 
-1. **Create worktrees only under `~/.clud/tmp-wt/`.**
+1. **Create worktrees only under `~/.clud/worktrees/`.**
 2. **Process audit before destructive removal.**
 3. **`"$CLUD_EXE" trash` is the documented Windows fallback, not `rm -rf` retry loops.**
 4. **RED -> GREEN** for any code edits made inside a worktree.

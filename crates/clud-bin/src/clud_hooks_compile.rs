@@ -116,7 +116,7 @@ pub const GUARDED_TOOLS: &[&str] = &[
 ];
 
 /// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude
-/// Code's own worktrees are built under `~/.clud/tmp-wt` instead of
+/// Code's own worktrees are built under `~/.clud/worktrees` instead of
 /// `.claude/worktrees/` (`claude_worktree_hook`). Passed only to a Claude
 /// Code that knows these events (2.1.50+); older ones ignored a settings
 /// document that named an unknown event, which would also drop the guards.

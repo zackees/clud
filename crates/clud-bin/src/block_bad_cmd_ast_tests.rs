@@ -182,10 +182,10 @@ fn clones_landing_in_the_extern_directory_are_allowed_however_spelled() {
     });
 }
 
-// ---- Worktrees belong in clud's worktree root (`~/.clud/tmp-wt`), where
+// ---- Worktrees belong in clud's worktree root (`~/.clud/worktrees`), where
 // the daemon reclaims them, or in /grind's own feature-worktree directory.
 
-const WT_ROOT: &str = "/home/u/.clud/tmp-wt";
+const WT_ROOT: &str = "/home/u/.clud/worktrees";
 
 #[test]
 fn worktree_add_outside_the_worktree_root_is_denied_however_spelled() {
@@ -222,12 +222,12 @@ fn worktree_add_under_the_worktree_root_or_grind_dir_is_allowed() {
     temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
         for (command, path) in [
             (
-                "git worktree add /home/u/.clud/tmp-wt/clud-wt-1962 -b feat origin/main",
-                "/home/u/.clud/tmp-wt/clud-wt-1962",
+                "git worktree add /home/u/.clud/worktrees/clud-wt-1962 -b feat origin/main",
+                "/home/u/.clud/worktrees/clud-wt-1962",
             ),
             (
-                "git -C /repo worktree add ../home/u/.clud/tmp-wt/repo-wt-7",
-                "/home/u/.clud/tmp-wt/repo-wt-7",
+                "git -C /repo worktree add ../home/u/.clud/worktrees/repo-wt-7",
+                "/home/u/.clud/worktrees/repo-wt-7",
             ),
             (
                 "git worktree add .clud/grind/worktrees/feature -b grind/meta-1 origin/main",
@@ -247,6 +247,98 @@ fn worktree_add_under_the_worktree_root_or_grind_dir_is_allowed() {
             );
         }
     });
+}
+
+/// The refusal for `command` run from `cwd`, in repo `/repo`.
+fn root_refusal(command: &str, cwd: &str, root: &str) -> String {
+    let mut reason = None;
+    temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+        reason = evaluate_with(command, cwd, Some("/repo"), Some(root)).reason;
+    });
+    reason.unwrap_or_else(|| panic!("`{command}` should be denied"))
+}
+
+#[test]
+fn the_refusal_hands_over_the_command_rewritten_into_the_worktree_root() {
+    // Everything but the destination is kept as typed. Without a branch
+    // argument git names the new branch after the folder, so the rewrite
+    // keeps that name with `-b`.
+    for (command, cwd, rewritten) in [
+        (
+            "git worktree add ../repo-wt-feat -b feat",
+            "/repo",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-feat -b feat",
+        ),
+        (
+            "git worktree add /tmp/wt -b feat origin/main",
+            "/repo",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-wt -b feat origin/main",
+        ),
+        (
+            "git worktree add ../elsewhere",
+            "/repo",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-elsewhere -b elsewhere",
+        ),
+        (
+            "git worktree add ../hotfix main",
+            "/repo",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-hotfix main",
+        ),
+        (
+            "git worktree add --detach /scratch/wt HEAD~1",
+            "/repo",
+            "git worktree add --detach /home/u/.clud/worktrees/repo-wt-wt HEAD~1",
+        ),
+        (
+            "git -C /repo worktree add /tmp/wt -b feat",
+            "/repo",
+            "git -C /repo worktree add /home/u/.clud/worktrees/repo-wt-wt -b feat",
+        ),
+        (
+            "git worktree add 'my wt' -b feat",
+            "/repo",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-my-wt -b feat",
+        ),
+        // Run from elsewhere, the rewrite still runs in the repo.
+        (
+            "cd /repo && git worktree add ../x -b x",
+            "/elsewhere",
+            "git -C /repo worktree add /home/u/.clud/worktrees/repo-wt-x -b x",
+        ),
+    ] {
+        let reason = root_refusal(command, cwd, WT_ROOT);
+        assert!(
+            reason.contains(&format!("`{rewritten}`")),
+            "{command}: expected `{rewritten}` in: {reason}"
+        );
+    }
+}
+
+#[test]
+fn an_added_branch_flag_comes_with_the_command_for_an_existing_branch() {
+    let reason = root_refusal("git worktree add ../elsewhere", "/repo", WT_ROOT);
+    assert!(
+        reason.contains("`git worktree add /home/u/.clud/worktrees/repo-wt-elsewhere elsewhere`"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn the_rewritten_destination_skips_names_already_taken() {
+    let root = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("repo-wt-feat")).unwrap();
+    let root_text = crate::path_norm::display_slash(root.path());
+    let reason = root_refusal("git worktree add /tmp/feat -b feat", "/repo", &root_text);
+    assert!(
+        reason.contains(&format!(
+            "`git worktree add {root_text}/repo-wt-feat-2 -b feat`"
+        )),
+        "{reason}"
+    );
+    assert!(
+        !root.path().join("repo-wt-feat-2").exists(),
+        "the hook only names the path; it never creates it"
+    );
 }
 
 #[test]

@@ -34,7 +34,7 @@ fn gc_delete_remote_branches_is_off_unless_literally_true() {
     assert_eq!(seeded["gc"]["delete_remote_branches"], json!(false));
 }
 
-/// #1485: the tmp-wt size warning threshold defaults to 50 GiB, `0`
+/// #1485: the worktrees size warning threshold defaults to 50 GiB, `0`
 /// disables it, and a malformed value falls back to the default.
 #[test]
 fn worktrees_warn_bytes_defaults_and_parses() {
@@ -78,7 +78,7 @@ fn tmp_warn_bytes_defaults_and_parses() {
         (json!({"tmp": {"warn_bytes": 1234}}), 1234),
         (json!({"tmp": {"warn_bytes": "9"}}), DEFAULT_TMP_WARN_BYTES),
         (json!({"tmp": {"warn_bytes": -1}}), DEFAULT_TMP_WARN_BYTES),
-        // The tmp-wt setting must not leak into the tmp one.
+        // The worktrees setting must not leak into the tmp one.
         (
             json!({"worktrees": {"warn_bytes": 7}}),
             DEFAULT_TMP_WARN_BYTES,

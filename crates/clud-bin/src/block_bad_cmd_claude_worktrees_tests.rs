@@ -24,7 +24,7 @@ fn denied(verdict: Option<String>, what: &str) {
     let reason = verdict.unwrap_or_else(|| panic!("{what} should be denied"));
     assert!(reason.contains(RULE_ID), "{what}: {reason}");
     assert!(
-        reason.contains("~/.clud/tmp-wt"),
+        reason.contains("~/.clud/worktrees"),
         "names the sanctioned place: {reason}"
     );
 }
@@ -114,7 +114,7 @@ fn file_tools_writing_there_are_denied() {
 }
 
 /// Claude Code's own worktrees (`Agent` isolation, `EnterWorktree`) are not
-/// refused: clud's `WorktreeCreate` hook builds them under `~/.clud/tmp-wt`
+/// refused: clud's `WorktreeCreate` hook builds them under `~/.clud/worktrees`
 /// instead of `.claude/worktrees/`.
 #[test]
 fn claude_code_worktree_tools_are_allowed_because_they_are_relocated() {
@@ -135,8 +135,8 @@ fn reads_cleanup_and_other_places_are_allowed() {
             "cat .claude/worktrees/bridge-61-handoff.md",
             "git worktree remove --force .claude/worktrees/agent-1",
             "safe-rm -r .claude/worktrees/scratch",
-            "mv .claude/worktrees/feat /home/u/.clud/tmp-wt/repo-wt-feat",
-            "git worktree add /home/u/.clud/tmp-wt/repo-wt-feat -b feat",
+            "mv .claude/worktrees/feat /home/u/.clud/worktrees/repo-wt-feat",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-feat -b feat",
             "mkdir -p .claude/agents/x",
             "echo hi > notes/worktrees.md",
             "mkdir \"$UNKNOWN_DIR\"",
@@ -203,4 +203,42 @@ fn the_override_allows_one_call() {
             );
         },
     );
+}
+
+#[test]
+fn a_worktree_add_there_is_handed_the_command_rewritten_into_the_worktree_root() {
+    let root = Path::new("/home/u/.clud/worktrees");
+    for (command, rewritten) in [
+        (
+            "git worktree add .claude/worktrees/feat -b feat origin/main",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-feat -b feat origin/main",
+        ),
+        (
+            "git worktree add /repo/.claude/worktrees/agent-7",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-agent-7 -b agent-7",
+        ),
+        // The home directory's `.claude` belongs to no repo; the repo is
+        // the one the command runs in.
+        (
+            "git worktree add ~/.claude/worktrees/x -b x",
+            "git worktree add /home/u/.clud/worktrees/repo-wt-x -b x",
+        ),
+    ] {
+        let mut verdict = None;
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            verdict = super::block_bad_cmd_claude_worktrees::reason_in(
+                "Bash",
+                None,
+                command,
+                ShellDialect::Posix,
+                Path::new("/repo"),
+                Some(root),
+            );
+        });
+        let reason = verdict.unwrap_or_else(|| panic!("{command} should be denied"));
+        assert!(
+            reason.contains(&format!("`{rewritten}`")),
+            "{command}: expected `{rewritten}` in: {reason}"
+        );
+    }
 }

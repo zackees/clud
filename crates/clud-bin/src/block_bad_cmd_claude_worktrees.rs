@@ -4,7 +4,7 @@
 //! took the directory as a place to drop notes and checkouts of their own.
 //! Nothing reclaims it, and a checkout inside the repo is walked by every
 //! linter and build. clud's `WorktreeCreate` hook now builds Claude Code's
-//! worktrees under `~/.clud/tmp-wt` (see `claude_worktree_hook.rs`), so this
+//! worktrees under `~/.clud/worktrees` (see `claude_worktree_hook.rs`), so this
 //! guard refuses everything else that would create the directory or a new
 //! entry in it: shell commands (`mkdir`, `touch`, `cp`/`mv`, `tee`, an output
 //! redirect, `git worktree add`, `git clone`), read from the evaluated syntax
@@ -17,6 +17,7 @@
 //! or moving entries out) writes nothing there and is never refused. A
 //! target whose value is only known at run time is not judged.
 
+use super::block_bad_cmd_shell::parse_command_with_home;
 use super::*;
 use crate::shell_ast::{Invocation, Value as Word};
 
@@ -33,11 +34,34 @@ pub(super) fn reason(
     dialect: ShellDialect,
     cwd: &Path,
 ) -> Option<String> {
+    let root = crate::gc::worktree_root::worktree_root();
+    reason_in(
+        tool_name,
+        tool_input,
+        command,
+        dialect,
+        cwd,
+        root.as_deref(),
+    )
+}
+
+/// [`reason`] with clud's worktree root given explicitly; a refused
+/// `git worktree add` is handed the same command rewritten to land there.
+pub(super) fn reason_in(
+    tool_name: &str,
+    tool_input: Option<&Value>,
+    command: &str,
+    dialect: ShellDialect,
+    cwd: &Path,
+    root: Option<&Path>,
+) -> Option<String> {
     let base = cwd.to_string_lossy();
-    let target = if FILE_TOOLS.contains(&tool_name) {
-        file_tool_target(tool_input?, &base).filter(|path| is_forbidden(path))
+    let (target, rewrite) = if FILE_TOOLS.contains(&tool_name) {
+        file_tool_target(tool_input?, &base)
+            .filter(|path| is_forbidden(path))
+            .map(|path| (path, None))
     } else if block_bad_cmd_gate::gates_tool(tool_name) && !command.trim().is_empty() {
-        shell_target(command, dialect, cwd)
+        shell_target(command, dialect, cwd, root)
     } else {
         None
     }?;
@@ -47,7 +71,8 @@ pub(super) fn reason(
         ));
         return None;
     }
-    Some(refusal(&target))
+    let advice = rewrite.map(|rewrite| rewrite.advice()).unwrap_or_default();
+    Some(refusal(&target) + &advice)
 }
 
 fn refusal(target: &str) -> String {
@@ -55,7 +80,7 @@ fn refusal(target: &str) -> String {
         "[{RULE_ID}] `{target}` is inside `.claude/worktrees/`, which is not a place for work: \
          nothing there is ever reclaimed, and a checkout inside the repo is walked by every \
          linter and build. Use a worktree only when the work needs one (#1971); then create it \
-         with `git worktree add ~/.clud/tmp-wt/<repo>-wt-<name> -b <branch>` (Claude Code's own \
+         with `git worktree add ~/.clud/worktrees/<repo>-wt-<name> -b <branch>` (Claude Code's own \
          isolated agents are placed there automatically). Put notes and scratch files in the \
          session scratchpad. To write there anyway for this one call, set the real environment \
          variable {BAD_CMD_OVERRIDE_ENV}=\"{RULE_ID}:<your reason>\"."
@@ -69,17 +94,51 @@ fn file_tool_target(input: &Value, cwd: &str) -> Option<String> {
     Some(crate::shell_ast::join_path(cwd, path))
 }
 
-/// The first path a command would create inside `.claude/worktrees/`.
-fn shell_target(command: &str, dialect: ShellDialect, cwd: &Path) -> Option<String> {
-    let script = parse_command(command, dialect, Some(cwd));
+/// The first path a command would create inside `.claude/worktrees/`, and,
+/// when it is a `git worktree add`, the same command rewritten to land in
+/// clud's worktree `root`. `~` is pinned to the home that `root` lives in.
+fn shell_target(
+    command: &str,
+    dialect: ShellDialect,
+    cwd: &Path,
+    root: Option<&Path>,
+) -> Option<(String, Option<WorktreeAddRewrite>)> {
+    let home = root.and_then(Path::parent).and_then(Path::parent);
+    let script = parse_command_with_home(command, dialect, Some(cwd), home);
     let fallback = cwd.to_string_lossy();
     script.invocations.iter().find_map(|invocation| {
         let base = invocation.cwd.as_literal().unwrap_or(&fallback);
-        created_paths(invocation, cwd)
+        let target = created_paths(invocation, cwd)
             .into_iter()
             .map(|path| crate::shell_ast::join_path(base, &path))
-            .find(|path| is_forbidden(path))
+            .find(|path| is_forbidden(path))?;
+        let rewrite = root.and_then(|root| {
+            let repo = repo_name(&target, base, home);
+            rewrite_worktree_add(invocation, Some(cwd), root, &repo)
+        });
+        Some((target, rewrite))
     })
+}
+
+/// The repo a `.claude/worktrees` path belongs to: the directory holding
+/// `.claude`, unless that is the home directory (whose `.claude` belongs to
+/// no repo), in which case the directory the command runs in.
+fn repo_name(target: &str, run_in: &str, home: Option<&Path>) -> String {
+    let parts: Vec<&str> = target.split(['/', '\\']).collect();
+    let owner = parts
+        .windows(2)
+        .position(|pair| pair[0] == ".claude" && pair[1] == "worktrees")
+        .filter(|at| *at > 0)
+        .map(|at| &parts[..at]);
+    let in_home =
+        owner.is_some_and(|owner| home.is_some_and(|home| Path::new(&owner.join("/")) == home));
+    match owner.and_then(|owner| owner.last()) {
+        Some(name) if !in_home && !name.is_empty() => (*name).to_string(),
+        _ => Path::new(run_in)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
 }
 
 /// Paths `invocation` would create or write, as written (relative paths

@@ -1,9 +1,9 @@
-//! Issue #1610: launch-banner warning when `~/.clud/tmp-wt` exceeds
+//! Issue #1610: launch-banner warning when `~/.clud/worktrees` exceeds
 //! `worktrees.warn_bytes`, without walking the tree on the launch path.
 //!
 //! The daemon's repo-worktree probe thread calls [`refresh_cache`], which
 //! runs the bounded [`check_tree_size`] walk and writes the result to
-//! `~/.clud/tmp-wt-size.json` (beside `tmp-wt`). The launch path calls
+//! `~/.clud/worktrees-size.json` (beside `worktrees`). The launch path calls
 //! [`launch_warning`], which reads only that small file plus the settings
 //! file: no walk, no daemon round trip. A missing, corrupt, stale or
 //! future-dated cache shows nothing. Warn-only: nothing is ever deleted for
@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::gc::worktree_root::{check_tree_size, worktree_root_for, SizeCheck};
 
-/// File name of the cache, a sibling of `tmp-wt` under `~/.clud`.
-pub const CACHE_FILE_NAME: &str = "tmp-wt-size.json";
+/// File name of the cache, a sibling of `worktrees` under `~/.clud`.
+pub const CACHE_FILE_NAME: &str = "worktrees-size.json";
 
 /// File name of the `~/.clud/tmp` size cache, a sibling of `tmp` (#1327).
 pub const TMP_CACHE_FILE_NAME: &str = "tmp-size.json";
@@ -152,7 +152,7 @@ pub fn tmp_cache_path_for(home: &Path) -> PathBuf {
     tmp.parent().unwrap_or(&tmp).join(TMP_CACHE_FILE_NAME)
 }
 
-/// Cache path for a worktree root: `<root>/../tmp-wt-size.json`.
+/// Cache path for a worktree root: `<root>/../worktrees-size.json`.
 pub fn cache_path_for(wt_root: &Path) -> PathBuf {
     wt_root.parent().unwrap_or(wt_root).join(CACHE_FILE_NAME)
 }

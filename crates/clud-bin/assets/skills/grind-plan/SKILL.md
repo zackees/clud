@@ -21,9 +21,9 @@ later, one goal at a time.
    prompt's "Base branch": `<main>` for a bug-stage goal, the feature branch
    for a feature-stage goal.
    - Parallel mode: `git -C <repo> fetch origin <base>`, then
-     `git -C <repo> worktree add ~/.clud/tmp-wt/<repo-name>-wt-<id> -b <branch> origin/<base>`
+     `git -C <repo> worktree add ~/.clud/worktrees/<repo-name>-wt-<id> -b <branch> origin/<base>`
      (reuse it if it exists; an older `<repo>-wt-<id>` sibling is reused
-     too). The checkout is that worktree. `~/.clud/tmp-wt/` is clud's
+     too). The checkout is that worktree. `~/.clud/worktrees/` is clud's
      worktree root: the daemon reclaims a worktree there once its PR is
      squash-merged, or after 24 h if it was never used, and never on age
      alone.

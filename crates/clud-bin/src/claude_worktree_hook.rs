@@ -4,7 +4,7 @@
 //! `isolation: "worktree"` subagents in `<repo>/.claude/worktrees/<name>`,
 //! unless a `WorktreeCreate` hook (Claude Code 2.1.50+) creates them instead.
 //! clud registers this handler (see `clud_hooks_compile::worktree_hooks_fragment`),
-//! so they land at `~/.clud/tmp-wt/<repo>-wt-<name>`, where the daemon
+//! so they land at `~/.clud/worktrees/<repo>-wt-<name>`, where the daemon
 //! reclaims them once their work lands, and `.claude/worktrees/` is never
 //! created. Behavior otherwise mirrors Claude Code's own: a new branch
 //! `worktree-<name>` from `origin/<default>`, or from `HEAD` when the
@@ -174,7 +174,7 @@ fn free_branch(repo: &Path, name: &str) -> Result<String, String> {
 
 fn create(request: &CreateRequest) -> Result<PathBuf, String> {
     let root = crate::gc::worktree_root::worktree_root()
-        .ok_or("no home directory, so no ~/.clud/tmp-wt")?;
+        .ok_or("no home directory, so no ~/.clud/worktrees")?;
     let repo = crate::worktrees::locate_main_repo_root_from(&request.cwd)?;
     create_in(request, &root, base_ref_from(&settings_documents(&repo)))
 }
@@ -194,7 +194,7 @@ pub(crate) fn create_in(
     );
     let name = sanitize_component(&request.name);
     let path = crate::gc::worktree_root::alloc_wt_path_in(root, &slug, &name)
-        .map_err(|error| format!("cannot reserve a worktree under ~/.clud/tmp-wt: {error}"))?;
+        .map_err(|error| format!("cannot reserve a worktree under ~/.clud/worktrees: {error}"))?;
     let branch = free_branch(&repo, &name)?;
     let base = base_commit(request, &repo, base);
     let target = path.to_string_lossy().into_owned();
@@ -221,9 +221,8 @@ pub fn run_create(stdin: &str) -> i32 {
 /// Handle `WorktreeRemove` for a worktree clud created.
 pub fn run_remove(stdin: &str) -> i32 {
     let outcome = parse_remove(stdin).and_then(|path| {
-        let root = crate::gc::worktree_root::worktree_root()
-            .ok_or("no home directory, so no worktree root")?;
-        if !crate::extern_root::is_within_any(&path, &[root]) {
+        let home = crate::home::user_home().ok_or("no home directory, so no worktree root")?;
+        if !removable(&path, &home) {
             return Err(format!(
                 "{} is not under clud's worktree root; leaving it alone",
                 path.display()
@@ -241,6 +240,17 @@ pub fn run_remove(stdin: &str) -> i32 {
             1
         }
     }
+}
+
+/// Whether `path` is one of clud's worktrees: under `~/.clud/worktrees`, or
+/// under the old `~/.clud/tmp-wt` that the daemon is still moving entries
+/// out of (#1962).
+fn removable(path: &Path, home: &Path) -> bool {
+    let roots = [
+        crate::gc::worktree_root::worktree_root_for(home),
+        home.join(".clud").join("tmp-wt"),
+    ];
+    crate::extern_root::is_within_any(path, &roots)
 }
 
 #[cfg(test)]

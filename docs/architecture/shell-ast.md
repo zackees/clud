@@ -113,9 +113,9 @@ Pathological input fails open, as the scanner always has:
 ### Worktree location guards
 
 Worktrees are discouraged in general (#1971); when one is needed it lives in
-clud's worktree root, `~/.clud/tmp-wt`, where the daemon reclaims it.
+clud's worktree root, `~/.clud/worktrees`, where the daemon reclaims it.
 
-- **`git worktree add`** must land under `~/.clud/tmp-wt` or `/grind`'s
+- **`git worktree add`** must land under `~/.clud/worktrees` or `/grind`'s
   `<repo>/.clud/grind/worktrees/`. Anything else is refused with the
   sanctioned path, overridable for one call with
   `CLUD_BAD_CMD_OVERRIDE="git-worktree-add-outside-worktree-root:<reason>"`.
@@ -127,11 +127,23 @@ clud's worktree root, `~/.clud/tmp-wt`, where the daemon reclaims it.
   (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`). Work inside an existing
   checkout there stays allowed, and so does cleanup. Override id:
   `claude-worktrees-dir`.
+- **Every refused `git worktree add`, under either guard, comes with the
+  command to run instead** (`rewrite_worktree_add`). The rewrite keeps every
+  word as typed except the destination, which becomes the first free
+  `~/.clud/worktrees/<repo>-wt-<folder>`. The guard only checks which names are
+  taken; it creates nothing. If the command ran after a `cd`, the rewrite
+  adds `-C <dir>`. If it named no branch, git would have used one named
+  after the folder, so the rewrite adds `-b <folder>`, plus the form for
+  when that branch already exists. A refused agent retries once instead of
+  working out the path. A symlinked `.claude/worktrees` was rejected:
+  Claude Code refuses to create worktrees through one, tools that follow
+  links would walk the checkout again, and cleanup would leave a dangling
+  link in the repo.
 - **Claude Code's own worktrees** (`--worktree`, `EnterWorktree`,
   `isolation: "worktree"` subagents) are relocated, not refused: on Claude
   Code 2.1.50+ clud registers `WorktreeCreate`/`WorktreeRemove` lines
   (`clud_hooks_compile::worktree_hooks_fragment`) whose handler
-  (`claude_worktree_hook.rs`) builds `~/.clud/tmp-wt/<repo>-wt-<name>` on a
+  (`claude_worktree_hook.rs`) builds `~/.clud/worktrees/<repo>-wt-<name>` on a
   `worktree-<name>` branch from `origin/<default>` (or `HEAD` under
   `worktree.baseRef: "head"`), and removes only worktrees under that root,
   never with `--force`. Older clients get no line: before 2.1.101 an
