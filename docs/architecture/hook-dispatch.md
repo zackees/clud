@@ -299,7 +299,11 @@ shell server (`mcp__*`), or a Codex session would bypass the guard entirely
 and `.codex/hooks.json` register `clud-cmd-scan` with `matcher: "*"`. The scan
 self-selects the shell dialect internally, so a non-shell tool call is a cheap
 no-op. (clud's own compiled dispatch already uses `*` — see below — so this only
-matters for the bare lines a user or repo installs by hand.)
+matters for the bare lines a user or repo installs by hand.) Codex sessions
+get the same coverage: the session-flag `hooks.PreToolUse` override clud passes
+to Codex uses `matcher="*"` (`CODEX_HOOK_MATCHER` in `command/builder.rs`,
+#1954). Rules keyed on Claude tool names (`Write`, `Agent`, …) still see only
+Claude's names; Codex's own names for those tools are not mapped yet.
 
 Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
 user installed, and the `--event PreToolUse` line clud compiles — and a declared
@@ -358,8 +362,10 @@ loops), so every Codex global launch setup also runs
 - Opt out with `"hooks": {"codex_global_cmd_scan": false}` in
   `~/.clud/settings.json`; removing the entry by hand without that switch
   gets it reinstalled on the next launch.
-- A clud-launched Codex session sees both hooks, so a Bash call is scanned
-  twice. The verdicts agree; the repeated-call guard counts each call twice.
+- A clud-launched Codex session sees both hooks (both match `*` since
+  #1954), so each guarded call is scanned twice. The verdicts agree; the
+  repeated-call guard counts each call twice. The session hook still guards
+  a user who opted out of the global entry.
 
 Rationale: [DD-171](../DESIGN_DECISIONS.md#dd-171-codex-gets-a-global-clud-cmd-scan-hook-written-to-its-user-config).
 

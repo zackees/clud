@@ -315,6 +315,13 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             workflow: workflow.clone(),
             json: *json,
         }),
+        args::Command::Doctor => {
+            if !args.passthrough.is_empty() {
+                eprintln!("doctor accepts no passthrough arguments");
+                return Some(2);
+            }
+            clud::doctor::run()
+        }
         args::Command::DshUpdate => {
             if !args.passthrough.is_empty() {
                 eprintln!("dsh-update accepts no passthrough arguments");

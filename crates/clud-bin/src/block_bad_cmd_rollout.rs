@@ -74,6 +74,7 @@ struct FileMigration {
 
 pub fn run_startup_checks(auto_fix_hooks: bool) {
     ensure_helper_on_session_path();
+    crate::hook_handshake::export_for_session();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
 

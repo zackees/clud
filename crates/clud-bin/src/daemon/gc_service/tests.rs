@@ -1,6 +1,5 @@
 use super::extern_repo::PurgeClass;
 use super::*;
-use crate::gc::ENV_DATA_DB;
 use std::ffi::OsString;
 use std::fs;
 use std::sync::Mutex;
@@ -11,8 +10,8 @@ mod parallel;
 mod policy;
 use policy::{restore_env_var, spawn_test_worker};
 
-// ENV_DATA_DB is process-global; serialize so two test threads
-// never race to open the same redb file concurrently.
+// Serializes the tests in this module that share process-global state
+// (env vars such as the GC tick and purge settings).
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn spawn_test_worker_with_tick(
@@ -23,14 +22,18 @@ fn spawn_test_worker_with_tick(
     std::sync::MutexGuard<'static, ()>,
 ) {
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prior_db = std::env::var_os(ENV_DATA_DB);
-    let prior_tick = std::env::var_os(ENV_GC_TICK_SECS);
-    std::env::set_var(ENV_DATA_DB, db_path);
-    std::env::set_var(ENV_GC_TICK_SECS, tick_secs);
-    let tx = spawn_registry_worker();
-    restore_env_var(ENV_GC_TICK_SECS, prior_tick);
-    restore_env_var(ENV_DATA_DB, prior_db);
-    let tx = tx.unwrap();
+    // Bind the worker to this test's file directly: a process-global
+    // `CLUD_DATA_DB` set here can be swapped by any other test thread
+    // between the set and the open ("Database already open").
+    let registry = Registry::open_at(db_path).expect("open registry");
+    let tx = spawn_registry_worker_with_live_cwds_and_cadence(
+        registry,
+        Arc::new(Vec::<PathBuf>::new),
+        gc_tick_cadence_from_raw(Some(tick_secs)),
+        None,
+        None,
+    )
+    .expect("spawn registry worker");
     (tx, guard)
 }
 
