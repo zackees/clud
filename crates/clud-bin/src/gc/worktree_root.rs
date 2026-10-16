@@ -38,6 +38,15 @@ pub fn worktree_root_for(home: &Path) -> PathBuf {
     home.join(".clud").join(WORKTREE_ROOT_DIR_NAME)
 }
 
+/// `<home>/.clud/tmp-wt`, the root's old name (#1962). The daemon moves its
+/// entries into [`worktree_root_for`]; nothing new is created there.
+pub fn legacy_worktree_root_for(home: &Path) -> PathBuf {
+    home.join(".clud").join(LEGACY_WORKTREE_ROOT_DIR_NAME)
+}
+
+/// The root's old directory name under `~/.clud`.
+const LEGACY_WORKTREE_ROOT_DIR_NAME: &str = "tmp-wt";
+
 /// `~/.clud/worktrees` without creating it; `None` with no home dir. Resolves
 /// home exactly like [`super::session_tmp::session_tmp_dir`], so the two
 /// roots are always siblings.

@@ -33,7 +33,7 @@ fn repo(base: &Path) -> PathBuf {
 }
 
 fn legacy(home: &Path) -> PathBuf {
-    home.join(".clud").join(LEGACY_DIR_NAME)
+    crate::gc::worktree_root::legacy_worktree_root_for(home)
 }
 
 fn new_root(home: &Path) -> PathBuf {

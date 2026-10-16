@@ -14,13 +14,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// The old root's directory name under `~/.clud`.
-pub(super) const LEGACY_DIR_NAME: &str = "tmp-wt";
-
 /// Move what can be moved from `<home>/.clud/tmp-wt` into the worktree
 /// root. Returns one log line per entry handled.
 pub(super) fn migrate(home: &Path, live_cwds: &[PathBuf]) -> Vec<String> {
-    let legacy = home.join(".clud").join(LEGACY_DIR_NAME);
+    let legacy = crate::gc::worktree_root::legacy_worktree_root_for(home);
     let Ok(entries) = std::fs::read_dir(&legacy) else {
         return Vec::new();
     };

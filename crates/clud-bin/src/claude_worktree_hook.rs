@@ -248,7 +248,7 @@ pub fn run_remove(stdin: &str) -> i32 {
 fn removable(path: &Path, home: &Path) -> bool {
     let roots = [
         crate::gc::worktree_root::worktree_root_for(home),
-        home.join(".clud").join("tmp-wt"),
+        crate::gc::worktree_root::legacy_worktree_root_for(home),
     ];
     crate::extern_root::is_within_any(path, &roots)
 }
