@@ -6887,3 +6887,42 @@ reaches zero by itself. An allowlist for tests: tests were 18% of the debt,
 and host-gated tests are exactly the code a Linux-only run never compiles.
 Facade files beside the selector that are allowed to `cfg`: that would be
 a second selector.
+
+## DD-173: a session control takes consent only from places an agent cannot write
+
+**Context.** Agents created git worktrees hundreds of times a week, each a
+cold Rust `target/`, often right after the user said "no worktrees". The
+creator was usually a subagent, which never sees the user's prompt: it sees
+only the brief the main agent writes, and the constraint gets dropped (#1984).
+Instructions alone cannot hold such a rule; it needs enforcement.
+
+**Decision.** Worktree creation is refused unless the session opted in, and
+consent comes only from sources the agent cannot write: the user's prompt
+(the `UserPromptSubmit` payload, which carries only what the user typed or
+pasted), the launch environment (`CLUD_ALLOW_WORKTREES`, or `--worktree`),
+or an active `/grind` run. The prompt hook stores consent in a daemon
+dictionary keyed by the payload `session_id`, which subagent payloads share
+with their parent. An unanswerable lookup refuses, and the rule has no
+`CLUD_BAD_CMD_OVERRIDE` id.
+
+**Alternatives rejected.**
+- *Match "worktree" anywhere in the conversation.* The transcript's user
+  entries include task notifications and compaction summaries, and "no
+  worktrees" contains the word. In three observed sessions a keyword match
+  would have unlocked exactly where the user said no.
+- *Edit a `permissions.deny` rule in a settings file per prompt.* Settings
+  files are shared by every session on the checkout, so one session's yes
+  would unlock its neighbours; a Bash rule also misses `git -C … worktree add`
+  and cannot see `Agent`'s `isolation`.
+- *Key on `CLUD_CHECKOUT_SESSION_ID`.* Unset in several launch modes, and a
+  nested launch can inherit a parent's stale value.
+- *A per-session file (the `grind_facts` pattern).* Works and needs no daemon,
+  but the user chose one dictionary in the daemon that later controls share
+  and that clud can display. Its costs are named: a restart forgets consent
+  (safe direction), and a down daemon refuses.
+- *An agent override.* Any escape the agent can set, it will set once refused.
+
+**Consequences.** Concurrent sessions on one checkout can no longer fall back
+to a worktree on their own; they wait or ask. Codex, with no prompt event
+mapped, gets consent from the environment only. See
+[session-controls.md](architecture/session-controls.md).

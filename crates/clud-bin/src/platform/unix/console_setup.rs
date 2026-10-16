@@ -18,6 +18,12 @@ impl OutputConsoleModes for StdConsole {
 /// drop. Holds nothing on POSIX.
 pub struct ConsoleVtGuard {}
 
+/// Empty, but present: shared code ends the guard's scope with an explicit
+/// `drop`, which must mean the same on every host (Windows restores modes).
+impl Drop for ConsoleVtGuard {
+    fn drop(&mut self) {}
+}
+
 /// No-op on POSIX.
 pub fn enable_console_vt_input() -> ConsoleVtGuard {
     ConsoleVtGuard {}

@@ -353,6 +353,13 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return crate::claude_worktree_hook::run_remove(&read_stdin_bounded().text);
     }
 
+    // #1984: the user's prompt may allow worktrees for this session. Records
+    // consent only; never denies and never prints, so it runs ahead of the
+    // tool-call machinery below.
+    if event == crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT {
+        return crate::worktree_consent::handle_prompt(&read_stdin_bounded().text);
+    }
+
     // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
     // command check below is skipped. It exists because a stale rm shim
     // (e.g. after rebuilding `target/debug/clud`) makes the identity
@@ -569,6 +576,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    // #1984: `EnterWorktree` and worktree-isolated agents need the user's
+    // consent; Bash `git worktree add` is checked after the command parse.
+    if event == PRE_TOOL_USE_EVENT
+        && crate::worktree_consent::tool_creates_worktree(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+        )
+    {
+        if let Some(reason) = crate::worktree_consent::refusal(payload.session_id.as_deref()) {
+            append_log(&format!("WORKTREE-CONSENT-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud] {reason}");
+            return 2;
+        }
+    }
+
     // `/grind` role caps: a capped agent's shell call must fit its role.
     if event == PRE_TOOL_USE_EVENT {
         if let Some(reason) = grind_caps_reason(&payload) {
@@ -731,6 +754,17 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     }
     for warning in &evaluation.warnings {
         eprintln!("{warning}");
+    }
+
+    // #1984: a `git worktree add` that passed the location guards still
+    // needs the user's consent for this session.
+    if evaluation.reason.is_none()
+        && evaluation
+            .git_path_captures
+            .iter()
+            .any(|capture| capture.kind == GIT_WORKTREE_ADD_CAPTURE_KIND)
+    {
+        evaluation.reason = crate::worktree_consent::refusal(payload.session_id.as_deref());
     }
 
     // #967 Phase 1: session cwd pinning. Runs after the command rules so a
@@ -1047,7 +1081,7 @@ fn checkout_claim_denial(payload: &HookPayloadView, target: &Path) -> Option<Str
         .or_else(|| payload.session_id.clone());
     match crate::daemon::claimed_by_other(&state_dir, target, session.as_deref()) {
         Ok(Some(holder)) => Some(format!(
-            "checkout is claimed by session {} ({}{}); use a new worktree or wait",
+            "checkout is claimed by session {} ({}{}); wait for it, or ask the user to allow a worktree",
             holder.session_id,
             holder.tool,
             holder.run.map_or_else(String::new, |run| format!(" {run}"))
@@ -3729,6 +3763,7 @@ mod tests {
             "ScheduleWakeup",
             "Monitor",
             "Agent",
+            "EnterWorktree",
             "Workflow",
             "AskUserQuestion",
             "Write",
@@ -3750,6 +3785,7 @@ mod tests {
                 // The wait-loop refusal scans `tool_input.command`, which
                 // Monitor carries as well as Bash.
                 || tool == "Monitor"
+                || crate::worktree_consent::tool_creates_worktree(tool, None)
                 || block_bad_cmd_grind_caps::tool_reason(
                     block_bad_cmd_grind_caps::PLANNER,
                     tool,

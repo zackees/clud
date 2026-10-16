@@ -25,6 +25,7 @@ mod process_utils;
 mod rp_broker;
 mod runtime_config;
 mod server;
+mod session_flags;
 mod session_state_sweep;
 mod session_tmp_sweep;
 mod sessions;
@@ -58,6 +59,7 @@ pub use http::{
     dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info,
     read_dashboard_port, DashboardInfo,
 };
+pub use session_flags::{session_flag_get, session_flag_set};
 /// `types` is private; re-export just the state-dir env-var name so
 /// `gc::delete_audit` (#893) resolves the same variable without a second
 /// definition of the string.

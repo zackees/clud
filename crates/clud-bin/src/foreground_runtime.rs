@@ -4099,6 +4099,8 @@ pub(crate) mod tests {
             .map(|e| e.to_string())
             .collect();
         expected.insert("PreToolUse".to_string());
+        // #1984: the user's prompt may allow worktrees for the session.
+        expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
         assert_eq!(
             hooks
                 .keys()

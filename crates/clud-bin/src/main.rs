@@ -73,6 +73,11 @@ fn run(mut args: args::Args) {
         if args.unsafe_mode {
             std::env::set_var(runner::UNSAFE_MODE_ENV, "1");
         }
+        // #1984: `--worktree` asks for a worktree before any prompt exists;
+        // the flag is the user's consent, carried to every hook.
+        if clud::worktree_consent::launch_args_ask_for_worktree(&args.passthrough) {
+            std::env::set_var(clud::worktree_consent::ALLOW_ENV, "1");
+        }
     }
     init_foreground_process(&args);
     if let Some(code) = dispatch_maintenance(&args) {
