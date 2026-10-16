@@ -4433,9 +4433,13 @@ mod tests {
             // guard must see through it.
             "tap gh pr checks 528 --watch",
         ] {
-            let reason = evaluate_command(command, None, false, &[])
-                .reason
-                .unwrap_or_else(|| panic!("{command} should be denied"));
+            // The shim marker is process-global and other tests set it; hold
+            // it at "unshimmed" under the env lock so they cannot race this.
+            let mut reason = None;
+            temp_env(crate::shim_registry::GH_ACTIVE_KEY, "0", || {
+                reason = evaluate_command(command, None, false, &[]).reason;
+            });
+            let reason = reason.unwrap_or_else(|| panic!("{command} should be denied"));
             assert!(
                 reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
                 "{reason}"
@@ -4596,20 +4600,26 @@ mod tests {
         // Regression pin for the explicit gate-on path (mirrors the
         // always-on wrapper's default behavior exercised by
         // blocks_native_github_pr_watchers above).
-        let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
-            "gh pr checks 528 --watch",
-            None,
-            false,
-            &[],
-            &[],
-            ShellDialect::Posix,
-            None,
-            None,
-            true,  // pr_wait_fail_fast_enabled
-            true,  // rust_use_soldr
-            false, // force_rm_resolver
-        );
+        let mut evaluation = None;
+        temp_env(crate::shim_registry::GH_ACTIVE_KEY, "0", || {
+            evaluation = Some(
+                evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+                    "gh pr checks 528 --watch",
+                    None,
+                    false,
+                    &[],
+                    &[],
+                    ShellDialect::Posix,
+                    None,
+                    None,
+                    true,  // pr_wait_fail_fast_enabled
+                    true,  // rust_use_soldr
+                    false, // force_rm_resolver
+                ),
+            );
+        });
         let reason = evaluation
+            .expect("evaluated")
             .reason
             .expect("gate on should deny the raw watch command");
         assert!(reason.contains("pr_merge_watch.py"));
