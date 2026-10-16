@@ -6783,3 +6783,31 @@ running the shell.
 (it only migrates and normalizes an existing `~/.codex/hooks.json`), so these
 rules do not run there. A script written by the Write tool and run later by
 a variable path is not read.
+
+## DD-171: Codex gets a global `clud-cmd-scan` hook written to its user config
+
+**Context.** clud's rule is to compile hooks into launch arguments and never
+write them into a user's config ([hook-dispatch.md](architecture/hook-dispatch.md#delivery-compiled-into-cli-args-not-written-to-files)).
+That guards only sessions clud launches. Claude Code users get the scanner
+globally; Codex users did not, and the #1972 audit found ~1,300 hand-written
+wait loops in bare `codex` sessions that no hook saw.
+
+**Decision.** Every Codex global launch setup ensures one `matcher: "*"`
+`clud-cmd-scan` PreToolUse entry in `~/.codex/hooks.json` and seeds its
+`hooks.state` trusted hash in `~/.codex/config.toml`
+(`codex_cmd_scan_install.rs`). It reuses `codex_hook_normalize`'s lock and
+safety rules: create if missing, preserve everything else, never duplicate
+an existing `clud-cmd-scan` handler, never overwrite a trust entry, leave a
+malformed file alone. `hooks.codex_global_cmd_scan: false` in clud's
+settings file turns it off. This supersedes DD-169's "Not covered: Codex
+sessions" note.
+
+**Why seed trust.** Codex ignores an untrusted file hook, so an entry without
+its hash would be dead weight. Trust is seeded only for clud's own exact
+handler, the same thing the `-c` path already does for its session-flag hook.
+
+**Rejected.** A wrapper `codex` shim: it misses IDE and app sessions and
+fights the user's PATH. Documenting Codex as unguarded: the audit shows the
+loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
+session whose user opted out of the global entry or whose files are malformed,
+at the cost of scanning a Bash call twice.

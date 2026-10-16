@@ -206,7 +206,7 @@ fn is_exact_int(value: &Value, expected: u64) -> bool {
     matches!(value, Value::Number(_)) && value.as_u64() == Some(expected)
 }
 
-fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
+pub(crate) fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -226,7 +226,7 @@ fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
 /// RAII guard for the cross-process `~/.clud/settings.lock` lock. The OS
 /// releases the advisory lock when the file handle drops or the process
 /// exits, so Drop intentionally does nothing; we just keep `File` alive.
-struct LockGuard {
+pub(crate) struct LockGuard {
     _file: File,
 }
 
