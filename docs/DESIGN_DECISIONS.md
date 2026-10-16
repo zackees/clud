@@ -6860,3 +6860,35 @@ fights the user's PATH. Documenting Codex as unguarded: the audit shows the
 loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
 session whose user opted out of the global entry or whose files are malformed,
 at the cost of scanning a Bash call twice.
+
+
+## DD-172: safe-rm trashes HOME files and tool data dirs outside the roots
+
+**Context (#1956, #1957).** The creation ledger records only `safe-mktemp`. A
+file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
+`.desktop` entry, a wrong Claude Code memory file) was refused, so agents
+overwrote it in place or left a manual cleanup list for the user.
+
+**Decision.** Outside the roots, a single file or symlink is trashed only
+strictly inside a tool or app data dir (`~/.claude`, `~/.codex`, `~/.cache`,
+`~/.local/share`), and a directory is trashed only strictly inside a tool
+data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
+(`~/Documents` and the other XDG user dirs) and a credentials/settings
+denylist are refused outright, as is any directory containing a denylisted
+path. Home itself stays refused.
+
+**Why.** A single file is bounded, recoverable from the trash for 72 hours,
+and audited. A recursive delete is not bounded: one wrong `-r` under home can
+take a project or years of documents, so directories stay limited to dirs
+that hold regenerable tool data. Keys, credentials and settings are not
+recoverable in the way that matters: a deleted key is a lockout, and a
+deleted clud settings file silently drops the user's overrides.
+
+**Rejected.** Any single file under home (the first cut of this rule: it
+reached the source files of every other repo under `~/dev`, which no
+#1956/#1957 case needs). Every subfolder of home (the owner's first proposal: one wrong
+`safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
+trees are copied there). Extending the ledger to every Write/Edit/redirect
+(more plumbing, and still misses files from earlier sessions). A slug-matched
+exception for only the current project's memory dir (#1957's first draft,
+superseded once `~/.claude` became deletable).
