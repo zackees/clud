@@ -394,14 +394,8 @@ pub fn start_foreground_presence(
     let thread = thread::Builder::new()
         .name("clud-checkout-presence".to_string())
         .spawn(move || {
-            maintain_presence(
-                stream,
-                state_dir,
-                checkout,
-                occupant,
-                thread_stop,
-                interrupted,
-            )
+            let end = maintain_presence(stream, &state_dir, &checkout, &occupant, &thread_stop);
+            report_presence_end(end, &interrupted);
         })?;
     Ok(Some(ForegroundCheckoutPresence {
         stop,
@@ -580,14 +574,39 @@ fn release_claim(state_dir: &Path, checkout: CheckoutKey, yes: bool) -> io::Resu
     Ok(())
 }
 
+/// Why the presence thread stopped.
+#[derive(Debug)]
+enum PresenceEnd {
+    /// The session is shutting down.
+    Stopped,
+    /// Another session obtained this session's claim while the daemon was away.
+    ClaimLost(io::Error),
+    /// Reconnecting cannot succeed for the life of this process (#1981).
+    Disabled(io::Error),
+}
+
+fn report_presence_end(end: PresenceEnd, interrupted: &AtomicBool) {
+    match end {
+        PresenceEnd::Stopped => {}
+        PresenceEnd::ClaimLost(error) => {
+            eprintln!("[clud] checkout claim lost after daemon restart: {error}; stopping this session");
+            interrupted.store(true, Ordering::SeqCst);
+        }
+        PresenceEnd::Disabled(error) => {
+            eprintln!(
+                "[clud] checkout presence disabled: {error}; restart the session to re-register"
+            );
+        }
+    }
+}
+
 fn maintain_presence(
     mut stream: TcpStream,
-    state_dir: PathBuf,
-    checkout: CheckoutKey,
-    occupant: CheckoutOccupant,
-    stop: Arc<AtomicBool>,
-    interrupted: Arc<AtomicBool>,
-) {
+    state_dir: &Path,
+    checkout: &CheckoutKey,
+    occupant: &CheckoutOccupant,
+    stop: &AtomicBool,
+) -> PresenceEnd {
     while !stop.load(Ordering::SeqCst) {
         let _ = stream.set_read_timeout(Some(PRESENCE_POLL_INTERVAL));
         let mut byte = [0u8; 1];
@@ -603,27 +622,19 @@ fn maintain_presence(
             _ => {}
         }
         let reconnected = reconnect_with_backoff(
-            &stop,
-            || reconnect_presence(&state_dir, &checkout, &occupant),
+            stop,
+            || reconnect_presence(state_dir, checkout, occupant),
             thread::sleep,
             presence_jitter,
         );
         match reconnected {
             Ok(PresenceReconnect::Connected(next)) => stream = next,
-            Ok(PresenceReconnect::ClaimLost(error)) => {
-                eprintln!("[clud] checkout claim lost after daemon restart: {error}; stopping this session");
-                interrupted.store(true, Ordering::SeqCst);
-                return;
-            }
-            Err(ReconnectEnd::Permanent(error)) => {
-                eprintln!(
-                    "[clud] checkout presence disabled: {error}; restart the session to re-register"
-                );
-                return;
-            }
-            Err(ReconnectEnd::Stopped) => return,
+            Ok(PresenceReconnect::ClaimLost(error)) => return PresenceEnd::ClaimLost(error),
+            Err(ReconnectEnd::Permanent(error)) => return PresenceEnd::Disabled(error),
+            Err(ReconnectEnd::Stopped) => return PresenceEnd::Stopped,
         }
     }
+    PresenceEnd::Stopped
 }
 
 /// Longest wait between presence reconnect attempts (#1981).
@@ -1039,5 +1050,76 @@ mod tests {
         );
         assert!(matches!(result, Err(ReconnectEnd::Permanent(_))));
         assert_eq!(attempts, 1);
+    }
+
+    /// #1981 upgrade scenario, end to end through the presence thread: the
+    /// session holds a live presence connection, the daemon is replaced by a
+    /// newer build, and the thread must disable presence after exactly one
+    /// probe of the new daemon instead of probing it twice a second forever.
+    #[test]
+    fn presence_thread_disables_itself_when_a_newer_daemon_replaces_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_daemon = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(old_daemon.local_addr().unwrap()).unwrap();
+        let (old_connection, _) = old_daemon.accept().unwrap();
+
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+        let state_dir = tmp.path().to_path_buf();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let presence = thread::spawn(move || {
+            let end = maintain_presence(
+                client,
+                &state_dir,
+                &checkout("/repo"),
+                &occupant("old"),
+                &thread_stop,
+            );
+            ended_tx.send(end).unwrap();
+        });
+
+        // The upgrade: a newer daemon publishes itself, the old one goes away.
+        let new_daemon = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let info = newer_daemon_info(new_daemon.local_addr().unwrap().port());
+        super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
+        drop(old_connection);
+        drop(old_daemon);
+
+        let end = ended_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                stop.store(true, Ordering::SeqCst);
+                panic!("presence thread kept retrying against a newer daemon")
+            });
+        presence.join().unwrap();
+        assert!(
+            matches!(end, PresenceEnd::Disabled(ref error)
+                if super::super::client::is_incompatible_daemon_error(error)),
+            "{end:?}"
+        );
+
+        // The thread has exited, so it costs nothing from here on. Before the
+        // fix it reconnected every 500 ms: count the new daemon's probes over
+        // a few of those intervals to prove only the one attempt happened.
+        thread::sleep(PRESENCE_POLL_INTERVAL * 4);
+        new_daemon.set_nonblocking(true).unwrap();
+        let probes = std::iter::from_fn(|| new_daemon.accept().ok()).count();
+        assert_eq!(probes, 1, "the new daemon was probed {probes} times");
+    }
+
+    #[test]
+    fn only_a_lost_claim_interrupts_the_session() {
+        let interrupted = AtomicBool::new(false);
+        report_presence_end(PresenceEnd::Stopped, &interrupted);
+        report_presence_end(
+            PresenceEnd::Disabled(io::Error::other("newer daemon")),
+            &interrupted,
+        );
+        assert!(!interrupted.load(Ordering::SeqCst));
+        report_presence_end(
+            PresenceEnd::ClaimLost(io::Error::from(io::ErrorKind::AlreadyExists)),
+            &interrupted,
+        );
+        assert!(interrupted.load(Ordering::SeqCst));
     }
 }
