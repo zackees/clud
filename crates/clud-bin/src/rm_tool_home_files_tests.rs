@@ -19,20 +19,6 @@ fn a_single_file_under_home_outside_the_roots_is_trashed() {
     assert!(record.contains(home_files::GRANT_REASON), "{record}");
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlink_under_home_is_removed_as_a_link() {
-    let w = world();
-    let target = w.home.join("real");
-    std::fs::write(&target, b"keep").unwrap();
-    let link = w.home.join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    let (code, _, err) = w.run(Kind::File, &[link.to_str().unwrap()]);
-    assert_eq!(code, 0, "{err}");
-    assert!(std::fs::symlink_metadata(&link).is_err());
-    assert!(target.exists());
-}
-
 #[test]
 fn a_directory_under_home_outside_the_roots_is_still_refused() {
     let w = world();

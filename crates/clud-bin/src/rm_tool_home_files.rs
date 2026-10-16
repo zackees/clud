@@ -66,14 +66,10 @@ pub fn denied(rel: &Path) -> Option<&'static str> {
 }
 
 /// Whether `path` (canonical parent + final name, existing) may be deleted
-/// as a single file under `home`. `Ok(false)` means the rule does not
-/// apply (so the caller keeps its own refusal); `Err` is a denylist refusal.
-pub fn check(
-    path: &Path,
-    meta: &std::fs::Metadata,
-    home: Option<&Path>,
-    owner: Option<u32>,
-) -> Result<bool, String> {
+/// as a single file under `home` (ownership is the caller's check).
+/// `Ok(false)` means the rule does not apply (so the caller keeps its own
+/// refusal); `Err` is a denylist refusal.
+pub fn check(path: &Path, meta: &std::fs::Metadata, home: Option<&Path>) -> Result<bool, String> {
     let is_symlink = meta.file_type().is_symlink();
     if !is_symlink && !meta.is_file() {
         return Ok(false);
@@ -94,19 +90,5 @@ pub fn check(
              it"
         ));
     }
-    if !owned_by(meta, owner) {
-        return Ok(false);
-    }
     Ok(true)
-}
-
-#[cfg(unix)]
-fn owned_by(meta: &std::fs::Metadata, owner: Option<u32>) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    owner.is_none_or(|uid| meta.uid() == uid)
-}
-
-#[cfg(not(unix))]
-fn owned_by(_: &std::fs::Metadata, _: Option<u32>) -> bool {
-    true
 }

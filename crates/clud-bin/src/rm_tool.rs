@@ -454,10 +454,12 @@ impl Roots {
         home: Option<&Path>,
     ) -> Option<Result<PathBuf, String>> {
         let meta = std::fs::symlink_metadata(path).ok()?;
-        match home_files::check(path, &meta, home, self.owner_uid()) {
+        match home_files::check(path, &meta, home) {
             Ok(false) => None,
             Err(refusal) => Some(Err(refusal)),
             Ok(true) => {
+                let home = crate::path_norm::canonicalize_plain(home?).ok()?;
+                self.check_owned_under("your home directory", &home, path).ok()?;
                 self.ledger_grants
                     .insert(path.to_path_buf(), home_files::GRANT_REASON.into());
                 Some(Ok(path
