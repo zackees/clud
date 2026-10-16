@@ -299,7 +299,11 @@ shell server (`mcp__*`), or a Codex session would bypass the guard entirely
 and `.codex/hooks.json` register `clud-cmd-scan` with `matcher: "*"`. The scan
 self-selects the shell dialect internally, so a non-shell tool call is a cheap
 no-op. (clud's own compiled dispatch already uses `*` — see below — so this only
-matters for the bare lines a user or repo installs by hand.)
+matters for the bare lines a user or repo installs by hand.) Codex sessions
+get the same coverage: the session-flag `hooks.PreToolUse` override clud passes
+to Codex uses `matcher="*"` (`CODEX_HOOK_MATCHER` in `command/builder.rs`,
+#1954). Rules keyed on Claude tool names (`Write`, `Agent`, …) still see only
+Claude's names; Codex's own names for those tools are not mapped yet.
 
 Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
 user installed, and the `--event PreToolUse` line clud compiles — and a declared
