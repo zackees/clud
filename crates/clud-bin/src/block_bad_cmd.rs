@@ -3457,6 +3457,18 @@ fn accepted_override_reason(rule_id: &str) -> Option<String> {
 /// JSON rather than the previous prose line so the trail is greppable and
 /// countable — "how often was this rule overridden, and by whom" should not
 /// require parsing English.
+/// Record that this hook build differs from the session's launcher and the
+/// call is relayed to it (#1954).
+pub fn log_hook_skew(launcher: &Path, own: &str, expected: &str) {
+    let event = serde_json::json!({
+        "event": "HOOK-SKEW",
+        "launcher": launcher.display().to_string(),
+        "hook_build": own,
+        "launcher_build": expected,
+    });
+    append_log(&event.to_string());
+}
+
 fn log_override_attempt(rule_id: &str, outcome: &OverrideOutcome) {
     if matches!(outcome, OverrideOutcome::NotAttempted) {
         return;

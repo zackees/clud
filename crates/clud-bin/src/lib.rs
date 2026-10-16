@@ -67,6 +67,7 @@ pub mod grind_facts;
 pub mod grind_reconcile;
 pub mod harness_picker;
 pub mod home;
+pub mod hook_handshake;
 pub mod hook_health;
 pub mod hook_trust;
 pub mod job_orphan_reaper;

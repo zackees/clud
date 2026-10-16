@@ -917,6 +917,7 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
   resolution checks, shared by both hook entrypoints.
+- `hook_handshake.rs` — the hook build handshake (#1954): startup exports the launcher path and build fingerprint; `multicall::run_cmd_scan` relays a skewed `clud-cmd-scan` to `<launcher> __cmd-scan` and logs `HOOK-SKEW`; decision is `decide` over injected `Facts`; tests in `hook_handshake_tests.rs`; see [launch-setup.md](../../../docs/architecture/launch-setup.md).
 - `multicall.rs` — argv[0] dispatch, the first thing `main` does (#1551,
   DD-121): `clud-cmd-scan`/`clud-block-bad-cmd` → `block_bad_cmd::run`,
   `clud-shim` and every `shim_registry::SHIMS` name → `shim_main::run`, plus the

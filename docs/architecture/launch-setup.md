@@ -106,6 +106,16 @@ and `clud-block-bad-cmd` hook commands to `clud-cmd-scan`, an argv[0] alias of
 PATH (DD-121). Non-exact user hook commands are left
 alone.
 
+Because that command is resolved from PATH, a stale or foreign
+`clud-cmd-scan` earlier on PATH would run an old rule set. Startup therefore
+exports the launcher's identity (`CLUD_HOOK_LAUNCHER`, its absolute path, and
+`CLUD_HOOK_BUILD`, its version plus binary size; `hook_handshake.rs`). Each
+hook run compares that with its own build. On a mismatch it logs a
+`HOOK-SKEW` event to the hook log and relays the call, stdio unchanged, to
+`<launcher> __cmd-scan` with `CLUD_HOOK_RELAYED=1`, so a relayed run never
+relays again (#1954). With no identity in the environment, or a launcher that
+no longer exists, the hook evaluates locally as before.
+
 Provider/harness precedence and the shared typed selector are documented in
 [launch-targets.md](launch-targets.md).
 
