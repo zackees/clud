@@ -27,7 +27,6 @@ from tests import process
 from ._daemon_helpers import (
     kill_process_only,
     managed_env,
-    wait_for_pids_to_exit,
 )
 
 pytestmark = pytest.mark.integration
@@ -114,6 +113,21 @@ def _drain_stderr(session: process.Popen, lines: list[str], seconds: float) -> N
         lines.append(line)
 
 
+def _wait_until_dead(pid: int, timeout: float = 15.0) -> None:
+    """Gone or a zombie. A detached daemon killed inside a container whose
+    PID 1 does not reap stays a zombie, which a bare `kill(pid, 0)` still
+    reports as alive."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"daemon pid {pid} still running after kill")
+
+
 def _cpu_seconds(pid: int) -> float:
     times = psutil.Process(pid).cpu_times()
     return times.user + times.system
@@ -170,7 +184,7 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
             encoding="utf-8",
         )
         kill_process_only(old_daemon_pid)
-        wait_for_pids_to_exit([old_daemon_pid], timeout=15)
+        _wait_until_dead(old_daemon_pid)
 
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and not any(_NOTE in line for line in stderr):
