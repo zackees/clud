@@ -459,7 +459,8 @@ impl Roots {
             Err(refusal) => Some(Err(refusal)),
             Ok(true) => {
                 let home = crate::path_norm::canonicalize_plain(home?).ok()?;
-                self.check_owned_under("your home directory", &home, path).ok()?;
+                self.check_owned_under("your home directory", &home, path)
+                    .ok()?;
                 self.ledger_grants
                     .insert(path.to_path_buf(), home_files::GRANT_REASON.into());
                 Some(Ok(path
