@@ -554,7 +554,9 @@ def process_identity_is_alive(pid: int, start_time: int) -> bool:
     """
     try:
         process = psutil.Process(pid)
-        if not process.is_running():
+        # psutil's is_running() is true for a zombie, which has exited and only
+        # awaits reaping. clud treats that as dead (#1981), and so must teardown.
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
             return False
         if start_time <= 0:
             raise ValueError("process identity requires a positive start time")
