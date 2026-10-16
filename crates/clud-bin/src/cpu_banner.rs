@@ -145,6 +145,21 @@ const _: () = assert!(REBUILD_QUIET_PCT < RELATIVE_HOST_FRACTION * 100.0);
 /// Consecutive quiet rebuilds before backing off one step.
 const REBUILD_QUIET_WALKS_BEFORE_BACKOFF: u32 = 2;
 
+/// Most `/proc` handles sysinfo may keep open across refreshes in this
+/// process. Its Linux default is half the fd limit, one per indexed process,
+/// so the sampler's periodic full-table walk pinned thousands of handles to
+/// other processes' procfs entries for the session's lifetime (#1981).
+const SYSINFO_OPEN_FILES_LIMIT: usize = 64;
+
+/// Apply [`SYSINFO_OPEN_FILES_LIMIT`] once, before the first refresh. A no-op
+/// off Linux.
+fn bound_sysinfo_open_files() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        sysinfo::set_open_files_limit(SYSINFO_OPEN_FILES_LIMIT);
+    });
+}
+
 /// Backoff state for the subtree rebuild (issue #709).
 ///
 /// Same shape as `console_title::KeeperCadence`, and split out as a pure state
@@ -539,6 +554,7 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn new() -> Self {
+        bound_sysinfo_open_files();
         Self {
             system: System::new(),
             started_at: Instant::now(),
