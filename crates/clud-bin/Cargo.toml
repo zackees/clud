@@ -96,7 +96,7 @@ toml_edit = "0.25.11"
 # Issue #447: pure-Rust zip extraction for the vendored Git Bash bundle.
 # `deflate` is the only compression method present in git-bash-bin.zip;
 # disabling default features avoids pulling bzip2/zstd C deps.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"
