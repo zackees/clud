@@ -1,6 +1,6 @@
 use super::*;
 
-fn args(list: &[&str]) -> Vec<String> {
+pub(crate) fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
@@ -12,15 +12,15 @@ fn msys_drive_paths_normalize_without_touching_unc_paths() {
     assert_eq!(msys_drive_path("/home/user"), None);
 }
 
-struct World {
+pub(crate) struct World {
     _tmp: tempfile::TempDir,
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     trash: PathBuf,
     audit: PathBuf,
-    home: PathBuf,
+    pub(crate) home: PathBuf,
 }
 
-fn world() -> World {
+pub(crate) fn world() -> World {
     let tmp = tempfile::tempdir().unwrap();
     let base = crate::path_norm::canonicalize_plain(tmp.path()).unwrap();
     let root = base.join("repo");
@@ -38,7 +38,7 @@ fn world() -> World {
 }
 
 impl World {
-    fn ctx(&self) -> Context {
+    pub(crate) fn ctx(&self) -> Context {
         Context {
             cwd: self.root.clone(),
             home: Some(self.home.clone()),
@@ -51,11 +51,11 @@ impl World {
         }
     }
 
-    fn roots(&self) -> Roots {
+    pub(crate) fn roots(&self) -> Roots {
         Roots::fixed(vec![self.root.clone()], true)
     }
 
-    fn run(&self, kind: Kind, list: &[&str]) -> (i32, String, String) {
+    pub(crate) fn run(&self, kind: Kind, list: &[&str]) -> (i32, String, String) {
         let options = parse_args(&args(list)).unwrap().unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run_with(
@@ -73,13 +73,13 @@ impl World {
         )
     }
 
-    fn entries(&self) -> Vec<PathBuf> {
+    pub(crate) fn entries(&self) -> Vec<PathBuf> {
         std::fs::read_dir(&self.trash)
             .map(|d| d.filter_map(Result::ok).map(|e| e.path()).collect())
             .unwrap_or_default()
     }
 
-    fn audit_records(&self) -> Vec<serde_json::Value> {
+    pub(crate) fn audit_records(&self) -> Vec<serde_json::Value> {
         std::fs::read_dir(&self.audit)
             .map(|d| {
                 d.filter_map(Result::ok)
@@ -214,44 +214,6 @@ fn refuses_roots_home_outside_and_git_metadata() {
     .contains("outside the allowed roots"));
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlinked_parent_that_leaves_the_roots_is_refused_and_a_final_link_is_removed_as_a_link() {
-    let w = world();
-    let outside = w.home.parent().unwrap().join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("keep"), b"precious").unwrap();
-    std::os::unix::fs::symlink(&outside, w.root.join("escape")).unwrap();
-    let (code, _, err) = w.run(Kind::File, &["escape/keep"]);
-    assert_eq!(code, 1);
-    assert!(err.contains("outside"), "{err}");
-    assert!(outside.join("keep").exists());
-    // `safe-rm escape` would follow nothing: the link is not a directory.
-    let (code, _, err) = w.run(Kind::Dir, &["escape"]);
-    assert_eq!(code, 1);
-    assert!(err.contains("not a directory"), "{err}");
-    // `safe-rm escape` trashes the link itself; the target survives.
-    let (code, out, err) = w.run(Kind::File, &["escape"]);
-    assert_eq!(code, 0, "{err}");
-    assert!(out.is_empty(), "{out}");
-    assert!(std::fs::symlink_metadata(w.root.join("escape")).is_err());
-    assert!(outside.join("keep").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn a_symlinked_parent_into_git_metadata_is_refused() {
-    let w = world();
-    let git = w.root.join(".git");
-    std::fs::create_dir_all(&git).unwrap();
-    std::fs::write(git.join("config"), b"keep").unwrap();
-    std::os::unix::fs::symlink(&git, w.root.join("link")).unwrap();
-    let (code, _, err) = w.run(Kind::File, &["--purge", "link/config"]);
-    assert_eq!(code, 1);
-    assert!(err.contains("git metadata"), "{err}");
-    assert!(git.join("config").exists());
-}
-
 #[test]
 fn trash_by_default_keeps_paths_relative_to_their_root_with_a_manifest() {
     let w = world();
@@ -276,11 +238,14 @@ fn trash_by_default_keeps_paths_relative_to_their_root_with_a_manifest() {
         serde_json::from_slice(&std::fs::read(entry.join(TRASH_MANIFEST)).unwrap()).unwrap();
     assert_eq!(manifest["command"], "safe-rm");
     let expected_origin = w.root.join("build").display().to_string();
-    #[cfg(windows)]
-    let expected_origin = expected_origin
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&expected_origin)
-        .to_string();
+    let expected_origin = if crate::platform::host::WINDOWS {
+        expected_origin
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&expected_origin)
+            .to_string()
+    } else {
+        expected_origin
+    };
     assert_eq!(manifest["items"][0]["origin"], expected_origin);
     // safe-rm on a file, into a second entry.
     let (code, _, _) = w.run(Kind::File, &["notes.txt"]);
@@ -416,23 +381,6 @@ fn session_roots_are_the_checkout_and_the_session_temp_dir() {
     assert_eq!(roots[0], w.root);
 }
 
-#[cfg(unix)]
-#[test]
-fn cross_volume_copy_keeps_symlinks_as_links() {
-    let w = world();
-    let src = w.root.join("tree");
-    std::fs::create_dir_all(src.join("d")).unwrap();
-    std::fs::write(src.join("d/f"), b"f").unwrap();
-    std::os::unix::fs::symlink("/etc/hostname", src.join("link")).unwrap();
-    let dest = w.home.join("copy");
-    copy_nofollow(&src, &dest).unwrap();
-    assert_eq!(std::fs::read(dest.join("d/f")).unwrap(), b"f");
-    assert!(std::fs::symlink_metadata(dest.join("link"))
-        .unwrap()
-        .file_type()
-        .is_symlink());
-}
-
 /// A repo at `w.root` with one commit, and a sibling worktree `wt-x` outside
 /// the roots, holding a read-only build tree (#1573).
 fn world_with_worktree() -> (World, PathBuf) {
@@ -456,12 +404,8 @@ fn world_with_worktree() -> (World, PathBuf) {
     let target = wt.join("target/debug");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("artifact"), b"sealed").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for dir in [&target, &wt.join("target")] {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        }
+    for dir in [&target, &wt.join("target")] {
+        crate::platform::rm_tool::seal_dir_for_test(dir);
     }
     (w, crate::path_norm::canonicalize_plain(&wt).unwrap())
 }
@@ -608,13 +552,13 @@ fn an_unrelated_directory_or_repo_beside_the_root_is_refused() {
 // The "system temp" here is a directory the test creates inside the world, so
 // no test reads or deletes anything in the real /tmp beyond its own tempdir.
 
-struct TempWorld {
-    w: World,
-    temp: PathBuf,
-    outside: PathBuf,
+pub(crate) struct TempWorld {
+    pub(crate) w: World,
+    pub(crate) temp: PathBuf,
+    pub(crate) outside: PathBuf,
 }
 
-fn temp_world() -> TempWorld {
+pub(crate) fn temp_world() -> TempWorld {
     let w = world();
     let base = w.root.parent().unwrap().to_path_buf();
     let temp = base.join("systmp");
@@ -627,11 +571,11 @@ fn temp_world() -> TempWorld {
 }
 
 impl TempWorld {
-    fn roots(&self) -> Roots {
+    pub(crate) fn roots(&self) -> Roots {
         Roots::fixed(vec![self.w.root.clone()], true).with_temp_roots(vec![self.temp.clone()])
     }
 
-    fn run_with_roots(&self, mut roots: Roots, list: &[&str]) -> (i32, String, String) {
+    pub(crate) fn run_with_roots(&self, mut roots: Roots, list: &[&str]) -> (i32, String, String) {
         let options = parse_args(&args(list)).unwrap().unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run_with(
@@ -649,11 +593,11 @@ impl TempWorld {
         )
     }
 
-    fn run(&self, list: &[&str]) -> (i32, String, String) {
+    pub(crate) fn run(&self, list: &[&str]) -> (i32, String, String) {
         self.run_with_roots(self.roots(), list)
     }
 
-    fn t(&self, rel: &str) -> String {
+    pub(crate) fn t(&self, rel: &str) -> String {
         self.temp.join(rel).to_string_lossy().into_owned()
     }
 }
@@ -712,42 +656,6 @@ fn dot_dot_out_of_the_system_temp_dir_is_judged_by_its_target() {
     assert!(tw.outside.join("keep").exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlink_escape_from_the_system_temp_dir_is_refused_and_the_link_removed_as_a_link() {
-    let tw = temp_world();
-    std::os::unix::fs::symlink(&tw.outside, tw.temp.join("link")).unwrap();
-    let (code, _, err) = tw.run(&["--purge", &tw.t("link/keep")]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("outside"), "{err}");
-    assert!(tw.outside.join("keep").exists());
-    // The link itself goes; its target stays.
-    let (code, _, err) = tw.run(&["--purge", &tw.t("link")]);
-    assert_eq!(code, 0, "{err}");
-    assert!(std::fs::symlink_metadata(tw.temp.join("link")).is_err());
-    assert!(tw.outside.join("keep").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn a_temp_entry_owned_by_another_user_is_refused() {
-    let tw = temp_world();
-    std::fs::create_dir_all(tw.temp.join("theirs/sub")).unwrap();
-    std::fs::write(tw.temp.join("theirs/sub/f"), b"x").unwrap();
-    // SAFETY: geteuid has no preconditions.
-    let me = unsafe { libc::geteuid() };
-    let other = me.wrapping_add(1);
-    let roots = || tw.roots().with_temp_owner(other);
-    let (code, _, err) = tw.run_with_roots(roots(), &["-r", "--purge", &tw.t("theirs")]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("not owned by you"), "{err}");
-    // A path below an entry owned by someone else is refused too.
-    let (code, _, err) = tw.run_with_roots(roots(), &["--purge", &tw.t("theirs/sub/f")]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("not owned by you"), "{err}");
-    assert!(tw.temp.join("theirs/sub/f").exists());
-}
-
 #[test]
 fn temp_root_candidates_follow_the_platform_and_env() {
     let unix_env = |key: &str| match key {
@@ -798,7 +706,7 @@ fn temp_root_candidates_follow_the_platform_and_env() {
 // "shm" is a directory the test creates inside the world standing in for
 // /dev/shm; no test touches the real /dev/shm.
 
-fn shm_world() -> (TempWorld, PathBuf) {
+pub(crate) fn shm_world() -> (TempWorld, PathBuf) {
     let tw = temp_world();
     let shm = tw.w.root.parent().unwrap().join("shm");
     std::fs::create_dir_all(shm.join("wild-review/out")).unwrap();
@@ -806,7 +714,7 @@ fn shm_world() -> (TempWorld, PathBuf) {
     (tw, shm)
 }
 
-fn shm_roots(tw: &TempWorld, shm: &Path) -> Roots {
+pub(crate) fn shm_roots(tw: &TempWorld, shm: &Path) -> Roots {
     Roots::fixed(vec![tw.w.root.clone()], true)
         .with_temp_roots(vec![tw.temp.clone(), shm.to_path_buf()])
         .with_ram_roots(vec![shm.to_path_buf()])
@@ -865,39 +773,9 @@ fn a_disk_backed_temp_root_still_trashes() {
     assert_eq!(tw.w.entries().len(), 1, "a disk temp entry is trashed");
 }
 
-#[cfg(unix)]
-#[test]
-fn ram_backed_temp_roots_keep_the_ownership_and_symlink_rules() {
-    let (tw, shm) = shm_world();
-    // SAFETY: geteuid has no preconditions.
-    let other = unsafe { libc::geteuid() }.wrapping_add(1);
-    let target = shm.join("wild-review").to_string_lossy().into_owned();
-    let roots = shm_roots(&tw, &shm).with_temp_owner(other);
-    let (code, _, err) = tw.run_with_roots(roots, &["-r", &target]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("not owned by you"), "{err}");
-    assert!(shm.join("wild-review/out/a.o").exists());
-    // A link out of the shm root is judged by its target.
-    std::os::unix::fs::symlink(&tw.outside, shm.join("link")).unwrap();
-    let escape = shm.join("link/keep").to_string_lossy().into_owned();
-    let (code, _, err) = tw.run_with_roots(shm_roots(&tw, &shm), &[&escape]);
-    assert_eq!(code, 1, "{err}");
-    assert!(tw.outside.join("keep").exists());
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn ram_backing_is_detected_from_the_filesystem_type() {
-    // /proc is procfs, never tmpfs; a missing path is not RAM-backed.
-    assert!(!is_ram_backed(Path::new("/proc")));
-    assert!(!is_ram_backed(Path::new("/definitely/not/here")));
-}
-
 // ---------- #1666: creation ledger consult ----------
 
 use crate::gc::CreatedEntry;
-#[cfg(unix)]
-use crate::gc::CreatedKind;
 
 #[derive(Debug)]
 struct FakeLedger(Result<Vec<CreatedEntry>, String>);
@@ -908,23 +786,7 @@ impl ledger::CreationLedger for FakeLedger {
     }
 }
 
-#[cfg(unix)]
-fn recorded(path: &Path, kind: CreatedKind) -> CreatedEntry {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::symlink_metadata(path).unwrap();
-    CreatedEntry {
-        session_id: "session-1".into(),
-        path: path.display().to_string(),
-        kind,
-        role: "agent".into(),
-        created_unix: 1,
-        dev: Some(meta.dev()),
-        ino: Some(meta.ino()),
-        uid: Some(meta.uid()),
-    }
-}
-
-fn run_ledger(
+pub(crate) fn run_ledger(
     w: &World,
     rows: Result<Vec<CreatedEntry>, String>,
     list: &[&str],
@@ -945,85 +807,6 @@ fn run_ledger(
         String::from_utf8(out).unwrap(),
         String::from_utf8(err).unwrap(),
     )
-}
-
-#[cfg(unix)]
-#[test]
-fn ledger_recorded_directory_outside_the_roots_is_removed_wholesale() {
-    let w = world();
-    let out = w.home.parent().unwrap().join("elsewhere").join("out");
-    std::fs::create_dir_all(out.join("a")).unwrap();
-    std::fs::write(out.join("a").join("b.txt"), "x").unwrap();
-    let rows = Ok(vec![recorded(&out, CreatedKind::Dir)]);
-    let (code, _, err) = run_ledger(&w, rows, &["-r", out.to_str().unwrap()]);
-    assert_eq!(code, 0, "{err}");
-    assert!(!out.exists());
-    let records = w.audit_records();
-    let reason = records[0]["paths"][0]["reason"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(reason.contains("creation ledger"), "{records:?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn ledger_pre_existing_sibling_of_a_recorded_file_is_refused() {
-    let w = world();
-    let docs = w.home.parent().unwrap().join("docs");
-    std::fs::create_dir_all(&docs).unwrap();
-    let report = docs.join("report.md");
-    let other = docs.join("other.md");
-    std::fs::write(&report, "mine").unwrap();
-    std::fs::write(&other, "theirs").unwrap();
-    let rows = vec![recorded(&report, CreatedKind::File)];
-    let (code, _, err) = run_ledger(&w, Ok(rows.clone()), &[other.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(err.contains("not created by this session"), "{err}");
-    assert!(other.exists());
-    let (code, _, err) = run_ledger(&w, Ok(rows), &[report.to_str().unwrap()]);
-    assert_eq!(code, 0, "{err}");
-    assert!(!report.exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn ledger_recorded_path_swapped_for_a_symlink_is_refused_and_the_target_untouched() {
-    let w = world();
-    let base = w.home.parent().unwrap().to_path_buf();
-    let victim = base.join("victim");
-    std::fs::create_dir_all(&victim).unwrap();
-    std::fs::write(victim.join("keep.txt"), "keep").unwrap();
-    let out = base.join("out");
-    std::fs::create_dir_all(&out).unwrap();
-    let rows = vec![recorded(&out, CreatedKind::Dir)];
-    std::fs::remove_dir(&out).unwrap();
-    std::os::unix::fs::symlink(&victim, &out).unwrap();
-
-    let (code, _, err) = run_ledger(&w, Ok(rows.clone()), &["-r", out.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(err.contains("symlink"), "{err}");
-    let inside = out.join("keep.txt");
-    let (code, _, err) = run_ledger(&w, Ok(rows), &[inside.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(err.contains("not created by this session"), "{err}");
-    assert!(victim.join("keep.txt").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn ledger_recorded_path_with_a_different_inode_is_refused() {
-    let w = world();
-    let base = w.home.parent().unwrap().to_path_buf();
-    let out = base.join("out");
-    std::fs::create_dir_all(&out).unwrap();
-    let rows = vec![recorded(&out, CreatedKind::Dir)];
-    // Keep the old inode alive so the new directory cannot reuse it.
-    std::fs::rename(&out, base.join("out-old")).unwrap();
-    std::fs::create_dir_all(&out).unwrap();
-    let (code, _, err) = run_ledger(&w, Ok(rows), &["-r", out.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(err.contains("replaced"), "{err}");
-    assert!(out.exists());
 }
 
 #[test]
@@ -1059,7 +842,7 @@ fn daemon_ledger_without_a_running_daemon_is_unavailable() {
 // ---------- #1668: human-set extra roots ----------
 
 #[path = "rm_tool_extra_roots_tests.rs"]
-mod extra_roots_tests;
+pub(crate) mod extra_roots_tests;
 
 /// A `.venv` is disposable wherever it lives: safe-rm moves it to the trash
 /// even outside every root, with the reason in the audit record.

@@ -148,6 +148,8 @@ clud's worktree root, `~/.clud/worktrees`, where the daemon reclaims it.
   `worktree.baseRef: "head"`), and removes only worktrees under that root,
   never with `--force`. Older clients get no line: before 2.1.101 an
   unrecognized hook event voided the whole settings document.
+- **Whether** a worktree may be created at all is the user's call per
+  session: see [session-controls.md](session-controls.md).
 
 ## Testing
 

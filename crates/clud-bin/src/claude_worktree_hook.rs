@@ -206,6 +206,16 @@ pub(crate) fn create_in(
 /// Handle `WorktreeCreate`: print the new worktree's path, exit 0; or
 /// explain on stderr and exit 1, which fails the creation.
 pub fn run_create(stdin: &str) -> i32 {
+    // #1984: every Claude Code worktree (`EnterWorktree`, worktree-isolated
+    // agents, `--worktree`) is built here, so this is the backstop for the
+    // user's consent; a non-zero exit fails the creation.
+    let session = serde_json::from_str::<Value>(stdin)
+        .ok()
+        .and_then(|payload| payload.get("session_id")?.as_str().map(str::to_string));
+    if let Some(reason) = crate::worktree_consent::refusal(session.as_deref()) {
+        eprintln!("[clud worktree] {reason}");
+        return 1;
+    }
     match parse_create(stdin).and_then(|request| create(&request)) {
         Ok(path) => {
             println!("{}", path.display());

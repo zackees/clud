@@ -2,19 +2,15 @@
 //! drain, daemon survival, subprocess capture lifetime, and the wedge
 //! watchdog. Test IDs are `reaper::<module>::<test_name>`.
 //!
-//! Platform gates stay as the inner `#![cfg(windows)]` attribute at the
-//! top of each Windows-only file, so the harness compiles the same set of
-//! tests on every lane.
+//! Host-only modules live in the category's host boundary, `platform/`
+//! (#1953): Windows-only files under `platform/windows/` and Unix-only code
+//! under `platform/unix/`. Their test IDs gain a `platform::<host>::` segment.
 
 mod daemon_spawn_hygiene;
 mod fixture_ids;
 mod orphan_reap;
-mod reaper_batch_drain_windows;
-mod reaper_daemon_survival_windows;
+mod platform;
 mod reaper_orphan_sweep_survival;
-mod subprocess_capture_lifecycle_windows;
-mod tool_shell_lifecycle_windows;
-mod wedge_watchdog_e2e;
 
 /// These tests run host-wide sweeps that reap any CLUD-tagged process with a
 /// dead originator. libtest runs them on parallel threads, and one test's

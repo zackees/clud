@@ -1158,7 +1158,7 @@ mod resize_tests {
 
     #[test]
     fn session_runtime_resize_updates_pty_master_size() {
-        let argv: Vec<String> = if cfg!(windows) {
+        let argv: Vec<String> = if crate::platform::host::WINDOWS {
             vec![
                 "cmd.exe".into(),
                 "/c".into(),

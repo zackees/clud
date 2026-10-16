@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use running_process::pty::NativePtyProcess;
-use running_process::pty::PtySize;
 
 use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
@@ -32,38 +31,7 @@ use session_stdin::{
 /// `SIGWINCH`/`Event::Resize`. On POSIX the library's implementation does the
 /// right thing, so delegate. Issue #31, theory T2.
 pub fn resize_pty(process: &NativePtyProcess, rows: u16, cols: u16) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        let guard = process
-            .handles
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        if let Some(handles) = guard.as_ref() {
-            handles
-                .master
-                .resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| io::Error::other(e.to_string()))?;
-        }
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        // PtySize is used on Windows only; silence unused-import warnings.
-        let _ = PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        process
-            .resize_impl(rows, cols)
-            .map_err(|e| io::Error::other(e.to_string()))
-    }
+    crate::platform::session::resize_pty(process, rows, cols)
 }
 
 /// Counts of F3 events observed in a stream chunk.
@@ -639,7 +607,7 @@ pub fn mintty_without_console() -> bool {
     let term = std::env::var("TERM").ok();
     let msystem = std::env::var("MSYSTEM").ok();
     looks_like_mintty_without_console(
-        cfg!(windows),
+        crate::platform::host::WINDOWS,
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
         term.as_deref(),
@@ -899,39 +867,7 @@ where
 /// redraw lag — imperceptible in practice. See the plan file for the
 /// deferred zero-latency variant.
 fn spawn_os_resize_watcher(resize_tx: std::sync::mpsc::Sender<(u16, u16)>) {
-    #[cfg(unix)]
-    {
-        use signal_hook::consts::signal::SIGWINCH;
-        use signal_hook::iterator::Signals;
-        std::thread::spawn(move || {
-            let Ok(mut signals) = Signals::new([SIGWINCH]) else {
-                return;
-            };
-            for _ in signals.forever() {
-                if let Ok((cols, rows)) = crossterm::terminal::size() {
-                    if resize_tx.send((rows, cols)).is_err() {
-                        break; // pump exited
-                    }
-                }
-            }
-        });
-    }
-    #[cfg(windows)]
-    {
-        std::thread::spawn(move || {
-            let mut last: Option<(u16, u16)> = None;
-            while let Ok((cols, rows)) = crossterm::terminal::size() {
-                let now = (rows, cols);
-                if Some(now) != last {
-                    if resize_tx.send(now).is_err() {
-                        break; // pump exited
-                    }
-                    last = Some(now);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-        });
-    }
+    crate::platform::session::spawn_os_resize_watcher(resize_tx);
 }
 
 /// Inner pump entry that takes an explicit resize receiver. Tests use this
@@ -1082,7 +1018,7 @@ const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 /// in-memory reader — nothing would ever answer, and the child never runs.
 /// POSIX PTYs send no such query.
 fn should_answer_cursor_queries(interactive_real_stdin: bool) -> bool {
-    cfg!(windows) && !interactive_real_stdin
+    crate::platform::host::WINDOWS && !interactive_real_stdin
 }
 
 /// Environment switch that forces the pump's verbose trace on (#1310).

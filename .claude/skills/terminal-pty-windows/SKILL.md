@@ -62,7 +62,7 @@ Read that first. This page lists only what differs on Windows.
 
 ## Files to read first
 
-- `crates/clud-bin/src/console_input.rs`: `spawn_console_input_reader`
+- `crates/clud-bin/src/platform/windows/console_input.rs`: `spawn_console_input_reader`
   (`:81`), surrogate pairing, and the Shift+Enter / Ctrl+V policies.
 - `crates/clud-bin/src/console_setup.rs`: `ConsoleVtGuard` (`:110`) and
   `enable_console_vt_input` (`:140`).

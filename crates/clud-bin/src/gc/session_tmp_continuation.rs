@@ -915,26 +915,7 @@ fn remove_allowing_read_only_parent(path: &Path, directory: bool) -> io::Result<
     }
 }
 
-#[cfg(unix)]
-fn make_owner_writable(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = fs::symlink_metadata(dir) else {
-        return false;
-    };
-    if !meta.is_dir() {
-        return false;
-    }
-    let mode = meta.permissions().mode();
-    if mode & 0o300 == 0o300 {
-        return false;
-    }
-    fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o300)).is_ok()
-}
-
-#[cfg(not(unix))]
-fn make_owner_writable(_dir: &Path) -> bool {
-    false
-}
+use crate::platform::session_tmp_continuation::make_owner_writable;
 
 /// The whole sweep is a durable queue, not a one-shot walk. A candidate that
 /// uses up this tick's allowance goes to the back so later candidates still
@@ -1262,8 +1243,8 @@ pub(super) struct ScanCursor {
 /// into a different deletion target on resume.
 mod path_serde {
     use super::*;
+    use crate::platform::session_tmp_continuation::{bytes_path, path_bytes};
     use serde::{Deserializer, Serializer};
-    use std::ffi::OsString;
 
     pub fn serialize<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1283,40 +1264,6 @@ mod path_serde {
             .decode(encoded)
             .map_err(serde::de::Error::custom)?;
         bytes_path(&bytes).map_err(serde::de::Error::custom)
-    }
-
-    #[cfg(unix)]
-    fn path_bytes(path: &Path) -> Vec<u8> {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
-    }
-
-    #[cfg(windows)]
-    fn path_bytes(path: &Path) -> Vec<u8> {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect()
-    }
-
-    #[cfg(unix)]
-    fn bytes_path(bytes: &[u8]) -> Result<PathBuf, &'static str> {
-        use std::os::unix::ffi::OsStringExt;
-        Ok(OsString::from_vec(bytes.to_vec()).into())
-    }
-
-    #[cfg(windows)]
-    fn bytes_path(bytes: &[u8]) -> Result<PathBuf, &'static str> {
-        use std::os::windows::ffi::OsStringExt;
-        if bytes.len() & 1 != 0 {
-            return Err("odd number of UTF-16 path bytes");
-        }
-        let words = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        Ok(OsString::from_wide(&words).into())
     }
 }
 
@@ -1564,16 +1511,16 @@ mod tests {
         assert_eq!(reloaded.apparent_bytes(), 6);
     }
 
-    #[cfg(unix)]
     #[test]
     fn cursor_preserves_non_utf8_path_across_reload() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
-        let root = temp
-            .path()
-            .join(OsString::from_vec(b"candidate-\xff".to_vec()));
+        let root = temp.path().join(
+            crate::platform::gc_test_fs::os_string_from_bytes(b"candidate-\xff".to_vec()).unwrap(),
+        );
         // APFS may reject invalid UTF-8 names even though PathBuf can carry
         // them; serialization does not need a real directory on disk.
         let cursor_path = temp.path().join("cursor.json");
@@ -1734,10 +1681,12 @@ mod tests {
         assert!(!work_path.exists(), "finished queue should be retired");
     }
 
-    #[cfg(unix)]
     #[test]
     #[ignore = "large local stress fixture; run explicitly before the #1260 PR"]
     fn more_than_200k_entries_eventually_reclaim_without_starving_later_sibling() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
         let wide = root.join("a-wide");
@@ -1900,10 +1849,11 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn replaced_directory_symlink_cannot_reach_outside_file() {
-        use std::os::unix::fs::symlink;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
@@ -1916,7 +1866,7 @@ mod tests {
         let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
         filetime::set_file_mtime(&outside_file, filetime::FileTime::from_system_time(old)).unwrap();
         let queued_dir = root.join("queued");
-        symlink(&outside, &queued_dir).unwrap();
+        crate::platform::gc_test_fs::symlink(&outside, &queued_dir).unwrap();
         let mut state = WorkState::new(&root, now);
         state.queue = VecDeque::from([WorkItem::Explore {
             path: queued_dir,
@@ -2177,10 +2127,11 @@ mod tests {
         assert!(failing.exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn unreadable_entry_metadata_is_retried_after_permission_recovers() {
-        use std::os::unix::fs::PermissionsExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
@@ -2191,15 +2142,15 @@ mod tests {
         let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
         filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(old)).unwrap();
         let work_path = temp.path().join("work.json");
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o400)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&root, 0o400).unwrap();
         if fs::symlink_metadata(&file).is_ok() {
             // A root-runner can bypass this permission bit; it cannot
             // exercise the intended failure reliably.
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::platform::gc_test_fs::set_mode(&root, 0o700).unwrap();
             return;
         }
         let first = sweep_tick_at(&root, &work_path, now, false, 10).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&root, 0o700).unwrap();
         assert!(first.failures > 0);
         assert!(first.pending > 0, "failed entry must stay queued");
         for _ in 0..10 {
@@ -2214,10 +2165,11 @@ mod tests {
         assert!(!file.exists(), "permission recovery must unblock deletion");
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_scan_backs_off_without_losing_candidate() {
-        use std::os::unix::fs::PermissionsExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
@@ -2239,14 +2191,14 @@ mod tests {
         }]);
         let work_path = temp.path().join("work.json");
         state.save(&work_path).unwrap();
-        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o000)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&candidate, 0o000).unwrap();
         if fs::read_dir(&candidate).is_ok() {
-            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::platform::gc_test_fs::set_mode(&candidate, 0o700).unwrap();
             return;
         }
         let first = sweep_tick_at(&root, &work_path, now, false, 10).unwrap();
         let immediate = sweep_tick_at(&root, &work_path, now, false, 10).unwrap();
-        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&candidate, 0o700).unwrap();
         assert!(first.failures > 0);
         assert_eq!(
             immediate.failures, 0,
@@ -2302,7 +2254,6 @@ mod tests {
     // starts when the queue is empty, so no session that went stale after the
     // pass began was ever evaluated: 1084 of 1184 session dirs were >72h old.
 
-    #[cfg(unix)]
     fn backdate(path: &Path, now: SystemTime) {
         let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
@@ -2334,10 +2285,11 @@ mod tests {
         assert!(!work_path.exists(), "the pass must retire");
     }
 
-    #[cfg(unix)]
     #[test]
     fn persistently_failing_candidate_is_spared_and_a_new_pass_reaches_later_stale_sessions() {
-        use std::os::unix::fs::PermissionsExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
@@ -2366,9 +2318,9 @@ mod tests {
         fs::write(&later_file, b"old").unwrap();
         backdate(&later_file, now);
         backdate(&later, now);
-        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&sealed, 0o000).unwrap();
         if fs::read_dir(&sealed).is_ok() {
-            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::platform::gc_test_fs::set_mode(&sealed, 0o700).unwrap();
             return; // root bypasses the permission bit
         }
         let mut abandoned = 0;
@@ -2380,7 +2332,7 @@ mod tests {
                 break;
             }
         }
-        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&sealed, 0o700).unwrap();
         assert!(abandoned >= 1, "the failing item must be given up on");
         assert!(kept.exists(), "giving up on an item spares it");
         assert!(
@@ -2389,10 +2341,11 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn read_only_directory_inside_stale_candidate_is_removed() {
-        use std::os::unix::fs::PermissionsExt;
+        if !crate::platform::host::UNIX {
+            return;
+        }
 
         let temp = tempdir().unwrap();
         let root = temp.path().join("tmp");
@@ -2406,7 +2359,7 @@ mod tests {
             backdate(path, now);
         }
         // Go's module cache and sealed cargo outputs are 0555 trees.
-        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&sealed, 0o555).unwrap();
         let work_path = temp.path().join("state/work.json");
         for step in 0..20u64 {
             let at = now + Duration::from_secs(step * 61 * 60);
@@ -2420,7 +2373,7 @@ mod tests {
             }
         }
         if sealed.exists() {
-            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::platform::gc_test_fs::set_mode(&sealed, 0o700).unwrap();
         }
         assert!(
             !candidate.exists(),

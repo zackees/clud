@@ -188,7 +188,7 @@ pub struct Roots {
     pub extra_root_warnings: Vec<String>,
     /// Paths allowed only by an extra root (a subset of `ledger_grants`).
     extra_grants: BTreeMap<PathBuf, String>,
-    session_grants: Vec<session_grants::SessionGrant>,
+    pub(crate) session_grants: Vec<session_grants::SessionGrant>,
 }
 
 impl Roots {
@@ -289,19 +289,12 @@ impl Roots {
     }
 
     /// The uid entries must belong to on Unix; `None` elsewhere.
-    #[cfg(unix)]
     fn owner_uid(&self) -> Option<u32> {
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        Some(
-            self.temp_owner
-                .unwrap_or_else(|| unsafe { libc::geteuid() }),
-        )
-    }
-
-    #[cfg(not(unix))]
-    fn owner_uid(&self) -> Option<u32> {
-        let _ = self.temp_owner;
-        None
+        if crate::platform::host::UNIX {
+            self.temp_owner.or_else(effective_uid)
+        } else {
+            None
+        }
     }
 
     /// These roots plus `temp` as system temp directories (#1622).
@@ -499,9 +492,7 @@ impl Roots {
     /// another user's entry directly in it, but not a file inside a directory
     /// someone left writable, so safe-rm checks ownership itself. Windows has
     /// no equivalent: `%TEMP%` is per-user under the profile, so no check.
-    #[cfg(unix)]
     fn check_owned_under(&self, what: &str, temp: &Path, path: &Path) -> Result<(), String> {
-        use std::os::unix::fs::MetadataExt;
         let Some(me) = self.owner_uid() else {
             return Ok(());
         };
@@ -512,7 +503,7 @@ impl Roots {
         for part in rest.components() {
             current.push(part);
             match std::fs::symlink_metadata(&current) {
-                Ok(meta) if meta.uid() != me => {
+                Ok(meta) if crate::platform::rm_tool::file_owner(&meta) != Some(me) => {
                     return Err(format!(
                         "is under {what} {} but {} is not owned by you",
                         temp.display(),
@@ -523,11 +514,6 @@ impl Roots {
                 Err(_) => break,
             }
         }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn check_owned_under(&self, _what: &str, _temp: &Path, _path: &Path) -> Result<(), String> {
         Ok(())
     }
 
@@ -741,10 +727,11 @@ pub fn resolve(
     if matches!(last, Some("." | "..")) {
         return Err("does not name a file or directory (`.` or `..`); name it directly".into());
     }
-    #[cfg(windows)]
-    let native = msys_drive_path(raw).unwrap_or_else(|| raw.to_owned());
-    #[cfg(not(windows))]
-    let native = raw.to_owned();
+    let native = if crate::platform::host::WINDOWS {
+        msys_drive_path(raw).unwrap_or_else(|| raw.to_owned())
+    } else {
+        raw.to_owned()
+    };
     let absolute = if Path::new(&native).is_absolute() {
         PathBuf::from(&native)
     } else {
@@ -831,7 +818,6 @@ fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-#[cfg(any(test, windows))]
 pub(crate) fn msys_drive_path(raw: &str) -> Option<String> {
     let normalized = crate::path_norm::slash_separators(raw);
     let bytes = normalized.as_bytes();
@@ -851,38 +837,8 @@ pub(crate) fn msys_drive_path(raw: &str) -> Option<String> {
     Some(format!("{drive}:{suffix}"))
 }
 
-#[cfg(target_os = "linux")]
 fn reject_mounts(target: &Path) -> Result<(), String> {
-    let Ok(mounts) = std::fs::read_to_string("/proc/self/mountinfo") else {
-        return Ok(());
-    };
-    for line in mounts.lines() {
-        let Some(field) = line.split_whitespace().nth(4) else {
-            continue;
-        };
-        let mount = field
-            .replace("\\040", " ")
-            .replace("\\011", "\t")
-            .replace("\\012", "\n")
-            .replace("\\134", "\\");
-        if Path::new(&mount).starts_with(target) {
-            return Err(format!("contains the mount point {mount}"));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn reject_mounts(target: &Path) -> Result<(), String> {
-    if crate::rm_guard::windows_reparse_tree(target)? {
-        return Err("contains a junction or other reparse point".into());
-    }
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "linux", windows)))]
-fn reject_mounts(_: &Path) -> Result<(), String> {
-    Ok(())
+    crate::platform::rm_tool::reject_mounts(target)
 }
 
 /// Whether `target` is, or contains, a git-tracked path.
@@ -974,15 +930,8 @@ pub fn session_id_from_env() -> Option<String> {
         .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
 }
 
-#[cfg(unix)]
 fn effective_uid() -> Option<u32> {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    Some(unsafe { libc::geteuid() })
-}
-
-#[cfg(not(unix))]
-fn effective_uid() -> Option<u32> {
-    None
+    crate::platform::rm_tool::effective_uid()
 }
 
 /// One path's outcome, for output and the audit record.
@@ -1168,8 +1117,11 @@ pub fn run_with(
         // RAM-backed temp roots are always purged (#1659).
         let purge_it = options.purge || roots.is_ram_root(&target.root);
         let shown = target.path.display().to_string();
-        #[cfg(windows)]
-        let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
+        let shown = if crate::platform::host::WINDOWS {
+            shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string()
+        } else {
+            shown
+        };
         let outcome = if options.dry_run {
             Outcome {
                 path: shown.clone(),
@@ -1310,26 +1262,15 @@ pub(crate) fn make_writable(path: &Path) {
     }
     let mut permissions = meta.permissions();
     if meta.is_dir() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            permissions.set_mode(permissions.mode() | 0o700);
-        }
-        // Windows has no mode bits: this only clears FILE_ATTRIBUTE_READONLY.
-        #[cfg(not(unix))]
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
+        crate::platform::rm_tool::make_dir_permissions_writable(&mut permissions);
         let _ = std::fs::set_permissions(path, permissions);
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 make_writable(&entry.path());
             }
         }
-    } else if cfg!(windows) && permissions.readonly() {
-        #[cfg(not(unix))]
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        let _ = std::fs::set_permissions(path, permissions);
+    } else {
+        crate::platform::rm_tool::make_file_writable(path, permissions);
     }
 }
 
@@ -1349,7 +1290,9 @@ fn purge(target: &Target) -> Result<(), String> {
 /// needs `remove_dir`, which removes the link, never its target).
 pub fn remove_link_or_file(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
-        Err(error) if cfg!(windows) => std::fs::remove_dir(path).map_err(|_| error),
+        Err(error) if crate::platform::host::WINDOWS => {
+            std::fs::remove_dir(path).map_err(|_| error)
+        }
         other => other,
     }
 }
@@ -1442,18 +1385,11 @@ fn move_into_trash(source: &Path, dest: &Path) -> Result<(), String> {
     }
 }
 
-fn copy_nofollow(source: &Path, dest: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_nofollow(source: &Path, dest: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(source)?;
     if meta.file_type().is_symlink() {
         let link = std::fs::read_link(source)?;
-        #[cfg(unix)]
-        return std::os::unix::fs::symlink(link, dest);
-        #[cfg(windows)]
-        return if std::fs::metadata(source).is_ok_and(|m| m.is_dir()) {
-            std::os::windows::fs::symlink_dir(link, dest)
-        } else {
-            std::os::windows::fs::symlink_file(link, dest)
-        };
+        return crate::platform::rm_tool::copy_symlink(source, link, dest);
     }
     if meta.is_dir() {
         std::fs::create_dir_all(dest)?;
@@ -1680,7 +1616,7 @@ pub(crate) fn temp_root_candidates(
 fn system_temp_roots(home: Option<&Path>) -> Vec<PathBuf> {
     let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty());
     let mut out: Vec<PathBuf> = Vec::new();
-    for candidate in temp_root_candidates(cfg!(windows), &env) {
+    for candidate in temp_root_candidates(crate::platform::host::WINDOWS, &env) {
         let Ok(root) = crate::path_norm::canonicalize_plain(&candidate) else {
             continue;
         };
@@ -1691,8 +1627,8 @@ fn system_temp_roots(home: Option<&Path>) -> Vec<PathBuf> {
             if home.starts_with(&root) {
                 continue;
             }
-            let allowed_under_home =
-                cfg!(windows) && root.starts_with(home.join("AppData").join("Local"));
+            let allowed_under_home = crate::platform::host::WINDOWS
+                && root.starts_with(home.join("AppData").join("Local"));
             if root.starts_with(home) && !allowed_under_home {
                 continue;
             }
@@ -1706,29 +1642,8 @@ fn system_temp_roots(home: Option<&Path>) -> Vec<PathBuf> {
 
 /// Whether `path` is on tmpfs or ramfs (#1659). Linux only; elsewhere no
 /// temp root counts as RAM-backed, so its entries are trashed as before.
-#[cfg(target_os = "linux")]
 fn is_ram_backed(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    const TMPFS_MAGIC: i64 = 0x0102_1994;
-    const RAMFS_MAGIC: i64 = 0x8584_58f6;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: an all-zero statfs is a valid value for this plain C struct.
-    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c` is NUL-terminated and `buf` is a writable statfs that
-    // outlives the call.
-    if unsafe { libc::statfs(c.as_ptr(), &mut buf) } != 0 {
-        return false;
-    }
-    #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-    let kind = buf.f_type as i64;
-    kind == TMPFS_MAGIC || kind == RAMFS_MAGIC
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_ram_backed(_: &Path) -> bool {
-    false
+    crate::platform::rm_tool::is_ram_backed(path)
 }
 
 #[path = "rm_tool_clone.rs"]
@@ -1744,8 +1659,8 @@ pub mod extra_roots;
 pub mod home_files;
 
 #[path = "rm_tool_session_grants.rs"]
-mod session_grants;
+pub(crate) mod session_grants;
 
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]
-mod tests;
+pub(crate) mod tests;

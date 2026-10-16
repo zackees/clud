@@ -23,7 +23,7 @@ pub fn should_register_drop_target(args: &Args) -> bool {
     if args.dry_run {
         return false;
     }
-    cfg!(windows)
+    crate::platform::host::WINDOWS
 }
 
 /// Whether a failed drop-target registration is worth a line on stderr.
@@ -58,68 +58,13 @@ pub fn should_report_registration_failure(error: &dnd::console_drop_target::Regi
 /// registration hiccup never aborts the launch path.
 pub fn try_register_console_drop_target_subprocess(
 ) -> Option<dnd::console_drop_target::ConsoleDropTargetGuard> {
-    #[cfg(not(windows))]
-    {
-        None
-    }
-    #[cfg(windows)]
-    {
-        use dnd::console_drop_target::{register_console_drop_target, RefreshConfig};
-        let injector = dnd::injectors::subprocess_console_injector();
-        match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
-            Ok(guard) => Some(guard),
-            Err(e) => {
-                if should_report_registration_failure(&e) {
-                    eprintln!("[clud] note: console drag-drop unavailable: {}", e);
-                }
-                None
-            }
-        }
-    }
+    crate::platform::startup::try_register_console_drop_target_subprocess()
 }
 
 /// PTY-mode IDropTarget registration. The injector writes into a
 /// channel; the pump drains it each iteration and forwards into the
-/// PTY master.
-#[cfg(windows)]
-pub fn try_register_console_drop_target_pty() -> (
-    Option<dnd::console_drop_target::ConsoleDropTargetGuard>,
-    Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-) {
-    use dnd::console_drop_target::{register_console_drop_target, RefreshConfig};
-    use std::sync::{mpsc, Arc, Mutex};
-
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-
-    // Adapter `Write` impl: each `write_all` from the OLE callback
-    // becomes a `Vec<u8>` chunk in the channel. Send failure means the
-    // pump exited (receiver dropped) — silently drop the bytes.
-    struct ChannelWriter(mpsc::Sender<Vec<u8>>);
-    impl std::io::Write for ChannelWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = buf.len();
-            let _ = self.0.send(buf.to_vec());
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let writer: Box<dyn std::io::Write + Send> = Box::new(ChannelWriter(tx));
-    let master = Arc::new(Mutex::new(writer));
-    let injector = dnd::injectors::pty_master_injector(master);
-
-    match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
-        Ok(guard) => (Some(guard), Some(rx)),
-        Err(e) => {
-            if should_report_registration_failure(&e) {
-                eprintln!("[clud] note: console drag-drop unavailable: {}", e);
-            }
-            (None, None)
-        }
-    }
-}
+/// PTY master. Always `(None, None)` off Windows.
+pub use crate::platform::startup::try_register_console_drop_target_pty;
 
 /// RAII guard for the session-registry row. On Drop, briefly re-acquires
 /// the cross-process lock, opens the redb file, removes our row, and
@@ -216,151 +161,9 @@ pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
     }) {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);
     }
-    install_windows_ctrl_event_probe();
-    install_unix_termination_probe(&interrupted);
+    crate::platform::startup::install_windows_ctrl_event_probe();
+    crate::platform::startup::install_unix_termination_probe(&interrupted);
     interrupted
-}
-
-/// Issue #517: install clud's own handler for `SIGTERM` / `SIGHUP` /
-/// `SIGQUIT` — three signals the unmodified `ctrlc` crate never touches
-/// (its `termination` feature, which would add `SIGTERM`/`SIGHUP`, is not
-/// enabled). Without this, `SIGHUP` (controlling terminal closed) and
-/// `SIGQUIT` (Ctrl+\\) kill the process under the OS default disposition
-/// before any clud code runs, and `SIGTERM` (e.g. `docker stop`) is
-/// likewise unobserved.
-///
-/// Deliberately mirrors [`install_windows_ctrl_event_probe`]'s "record the
-/// specific kind, then flip the same flag `ctrlc` flips for Ctrl+C" shape
-/// — but the mechanism differs because Unix has no OS-level handler
-/// chaining the way `SetConsoleCtrlHandler` does. Rather than replacing
-/// `ctrlc`'s installed `SIGINT` handler (which a second raw `sigaction`
-/// call would silently clobber), this claims three signals `ctrlc` never
-/// registers at all, so there is nothing to chain to and no vendoring of
-/// `ctrlc` is required.
-///
-/// Uses `signal_hook::iterator::Signals` — the same pattern already used
-/// for `SIGWINCH` in `session.rs` — which delivers signals to a plain
-/// background thread via a self-pipe rather than running our code inside
-/// actual signal-handler context, so no `unsafe`/async-signal-safety
-/// reasoning is needed here (unlike the Windows probe above, which must
-/// run inside the OS console-handler thread).
-///
-/// Behavior change to be aware of: once this is installed, clud no
-/// longer *dies* on `SIGTERM`/`SIGHUP`/`SIGQUIT` — it sets `interrupted`,
-/// same as Ctrl+C, which is only honored by code paths that poll it. A
-/// path that never checks `interrupted` will now ignore these signals
-/// entirely rather than being killed by them, until whatever sent the
-/// signal escalates (e.g. `docker stop`'s SIGKILL after its grace
-/// window). This is the intended trade — "observe and decide" instead of
-/// "die immediately" — but is worth knowing before assuming a hung
-/// process will always respond to a bare SIGTERM.
-#[cfg(unix)]
-fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
-    use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
-    use signal_hook::iterator::Signals;
-
-    let mut signals = match Signals::new([SIGTERM, SIGHUP, SIGQUIT]) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "[clud] warning: failed to install SIGTERM/SIGHUP/SIGQUIT handler: {}",
-                e
-            );
-            return;
-        }
-    };
-    let flag = Arc::clone(interrupted);
-    std::thread::spawn(move || {
-        use std::sync::atomic::Ordering;
-        for sig in signals.forever() {
-            crate::ctrl_c_track::record_observed();
-            crate::ctrl_c_track::record_event_kind(unix_termination_signal_kind(sig));
-            flag.store(true, Ordering::SeqCst);
-        }
-    });
-}
-
-/// Pure `signal number -> CtrlEventKind` mapping for the three signals
-/// [`install_unix_termination_probe`] registers. Factored out so the
-/// mapping is unit-testable without spawning a thread or sending a real
-/// signal (the integration test in `tests/integration/signals/ctrlc_signal_kinds.rs` covers
-/// the end-to-end real-signal path).
-#[cfg(unix)]
-fn unix_termination_signal_kind(sig: i32) -> crate::ctrl_c_track::CtrlEventKind {
-    use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
-    match sig {
-        SIGTERM => crate::ctrl_c_track::CtrlEventKind::Term,
-        SIGHUP => crate::ctrl_c_track::CtrlEventKind::Hup,
-        SIGQUIT => crate::ctrl_c_track::CtrlEventKind::Quit,
-        _ => crate::ctrl_c_track::CtrlEventKind::Unknown,
-    }
-}
-
-#[cfg(not(unix))]
-fn install_unix_termination_probe(_interrupted: &Arc<AtomicBool>) {
-    // SIGTERM/SIGHUP/SIGQUIT don't exist on Windows; the console-control
-    // probe above already covers the equivalent close/logoff/shutdown
-    // events.
-}
-
-/// Install a `SetConsoleCtrlHandler` probe whose only job is to record
-/// **which** console-control event the OS delivered — `CTRL_C_EVENT`
-/// vs `CTRL_BREAK_EVENT` vs `CTRL_CLOSE_EVENT` etc. — so the dashboard
-/// can tell a real Ctrl+C keypress apart from a
-/// `GenerateConsoleCtrlEvent` broadcast made by some descendant in the
-/// process tree.
-///
-/// The probe is installed **after** the `ctrlc` crate's handler. Windows
-/// dispatches console-control handlers in **reverse order of
-/// registration** (most recently installed first), so our probe fires
-/// first, stamps the kind into [`crate::ctrl_c_track::record_event_kind`],
-/// and returns `FALSE` to fall through to the `ctrlc` handler, which
-/// preserves existing behavior (stamp the observation timestamp + flip
-/// the interrupted flag).
-///
-/// No-op on non-Windows builds — the kind isn't ambiguous there, and
-/// the `signal-hook` integration in the `ctrlc` crate already knows
-/// which signal it caught.
-#[cfg(windows)]
-fn install_windows_ctrl_event_probe() {
-    use windows::Win32::System::Console::SetConsoleCtrlHandler;
-    use windows_core::BOOL;
-
-    // The probe MUST be `unsafe extern "system" fn` and MUST be stateless
-    // (no closure captures), because the Win32 ABI calls it on an OS-
-    // managed thread with no Rust context. All communication with the
-    // rest of the process goes through the atomics in `ctrl_c_track`.
-    //
-    // We always return `FALSE` so the next handler in the chain (the
-    // `ctrlc` crate's handler, registered earlier) gets a chance to
-    // run. Returning `TRUE` here would short-circuit the chain and
-    // prevent `ctrlc`'s `record_observed` + interrupted-flag work.
-    unsafe extern "system" fn probe(ctrl_type: u32) -> BOOL {
-        crate::ctrl_c_track::record_event_kind(crate::ctrl_c_track::CtrlEventKind::from_raw(
-            ctrl_type,
-        ));
-        // `BOOL(0)` == FALSE — keep walking the handler chain.
-        BOOL(0)
-    }
-
-    // SAFETY: `SetConsoleCtrlHandler` is documented as safe to call from
-    // any thread at any time. `probe` is a `'static` function pointer
-    // with the correct ABI, and we pass `TRUE` to add (not remove).
-    let res = unsafe { SetConsoleCtrlHandler(Some(probe), true) };
-    if let Err(e) = res {
-        eprintln!(
-            "[clud] warning: failed to install Windows ctrl-event probe: {}",
-            e
-        );
-    }
-}
-
-#[cfg(not(windows))]
-fn install_windows_ctrl_event_probe() {
-    // The probe needs `SetConsoleCtrlHandler`, which only exists on
-    // Windows. On Unix the `ctrlc` crate's `signal-hook` backend
-    // already disambiguates SIGINT from SIGTERM, so leaving the
-    // event-kind field as `None` is the correct, honest answer.
 }
 
 /// Outcome of a single press through [`run_ctrl_c_handler`]. The Windows
@@ -431,8 +234,9 @@ pub(crate) fn run_ctrl_c_handler(
     // *before* this handler runs (it can be CtrlC, CtrlBreak, ...), so
     // stamping CtrlC here unconditionally would silently overwrite a
     // more specific Windows event with the wrong one.
-    #[cfg(not(windows))]
-    crate::ctrl_c_track::record_event_kind(crate::ctrl_c_track::CtrlEventKind::CtrlC);
+    if !crate::platform::host::WINDOWS {
+        crate::ctrl_c_track::record_event_kind(crate::ctrl_c_track::CtrlEventKind::CtrlC);
+    }
 
     let prior_ms = record_observed_returning_prior();
     let elapsed_ms = if prior_ms == 0 {
@@ -588,27 +392,8 @@ mod tests {
     #[test]
     fn main_default_invocation_requests_registration_on_windows() {
         let args = args_from(&["clud", "-p", "hi"]);
-        let want = cfg!(windows);
+        let want = crate::platform::host::WINDOWS;
         assert_eq!(should_register_drop_target(&args), want);
-    }
-
-    /// Issue #79 B3: registration failure (any `RegisterError` variant)
-    /// must NOT abort the launch path. The `try_register_console_drop_target_*`
-    /// helpers swallow errors and return `None` so the launch proceeds.
-    ///
-    /// On Windows we exercise this against the real
-    /// `register_console_drop_target` — in a unit-test process there is
-    /// typically no console window, so the registration returns
-    /// `ConsoleWindowUnavailable`, exactly the failure variant we want
-    /// to confirm is non-fatal.
-    #[cfg(windows)]
-    #[test]
-    fn main_registration_failure_does_not_abort_launch() {
-        // Subprocess injector — does no work synchronously; the OLE
-        // failure on the worker thread is what we care about. Whether
-        // it succeeds or fails, the function must return Option<Guard>
-        // (never panic, never abort the process).
-        let _result = super::try_register_console_drop_target_subprocess();
     }
 
     /// Reset the `ctrl_c_track` statics + relevant env vars so each
@@ -641,7 +426,7 @@ mod tests {
         // emit closure receives a different marker. To exercise the
         // Exit branch on every platform, prime the timestamp first
         // and then drive the press that lands inside the window.
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             // Prime: this swallows the first press on Windows.
             let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         }
@@ -682,7 +467,7 @@ mod tests {
         reset_handler_state();
         let interrupted = AtomicBool::new(false);
 
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             // Prime: swallow the first soft press on Windows.
             let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         }
@@ -714,223 +499,6 @@ mod tests {
     // ---------------------------------------------------------------
     // Issue #377: double-Ctrl+C guard handler behavior.
     // ---------------------------------------------------------------
-
-    /// Windows: the first press in a fresh window is a soft interrupt.
-    /// The interrupted flag does NOT flip, the press classification is
-    /// recorded as `FirstSoft`, and the user-facing warning fires.
-    #[cfg(windows)]
-    #[test]
-    fn first_press_on_windows_is_soft_interrupt() {
-        use std::cell::Cell;
-        use std::sync::atomic::Ordering;
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        let interrupted = AtomicBool::new(false);
-        let warning: Cell<Option<String>> = Cell::new(None);
-
-        let decision = super::run_ctrl_c_handler(
-            false,
-            true,
-            &interrupted,
-            |_| {},
-            |msg| warning.set(Some(msg.to_string())),
-        );
-
-        assert!(
-            matches!(decision, super::CtrlCDecision::FirstSoft { .. }),
-            "first press on Windows must be classified FirstSoft"
-        );
-        assert!(
-            !interrupted.load(Ordering::SeqCst),
-            "first press on Windows MUST NOT flip interrupted"
-        );
-        let msg = warning.into_inner().expect("warning emitted");
-        assert!(
-            msg.contains("press again"),
-            "warning must tell the user to press again, got: {msg}"
-        );
-        assert_eq!(
-            crate::ctrl_c_track::observed_press_kind(),
-            Some(crate::ctrl_c_track::CtrlPressKind::FirstSoft)
-        );
-    }
-
-    /// Windows: a second press inside the rapid-succession window
-    /// flips the interrupted flag and stamps `SecondExit`.
-    #[cfg(windows)]
-    #[test]
-    fn second_press_within_window_exits_on_windows() {
-        use std::sync::atomic::Ordering;
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        let interrupted = AtomicBool::new(false);
-
-        // First press — soft.
-        let first = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
-        assert!(!interrupted.load(Ordering::SeqCst));
-
-        // Second press immediately after — well inside the default
-        // 1500ms window.
-        let second = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(
-            matches!(second, super::CtrlCDecision::Exit),
-            "second press inside window must Exit"
-        );
-        assert!(
-            interrupted.load(Ordering::SeqCst),
-            "second press inside window MUST flip interrupted"
-        );
-        assert_eq!(
-            crate::ctrl_c_track::observed_press_kind(),
-            Some(crate::ctrl_c_track::CtrlPressKind::SecondExit)
-        );
-    }
-
-    /// Windows: two presses spaced beyond the window — the second
-    /// press is treated as a fresh first press, NOT as Exit. Drives
-    /// the env-var override down to a 50ms window so the test can
-    /// sleep past it without slowing the suite.
-    #[cfg(windows)]
-    #[test]
-    fn two_presses_outside_window_both_soft_on_windows() {
-        use std::sync::atomic::Ordering;
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        // Smallest accepted window. Sleeping 120ms reliably passes it
-        // even on coarse-grained Windows timers.
-        std::env::set_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS, "50");
-        let interrupted = AtomicBool::new(false);
-
-        let first = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
-
-        std::thread::sleep(std::time::Duration::from_millis(120));
-
-        let second = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(
-            matches!(second, super::CtrlCDecision::FirstSoft { .. }),
-            "press past the window must reset to FirstSoft, got {second:?}"
-        );
-        assert!(
-            !interrupted.load(Ordering::SeqCst),
-            "no Exit means interrupted MUST remain false"
-        );
-        std::env::remove_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS);
-    }
-
-    /// Windows: the opt-out env var (`CLUD_NO_DOUBLE_CTRL_C=1`)
-    /// disables the guard entirely, so the very first press exits
-    /// like the pre-#377 behavior.
-    #[cfg(windows)]
-    #[test]
-    fn opt_out_env_var_makes_first_press_exit_on_windows() {
-        use std::sync::atomic::Ordering;
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        std::env::set_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP, "1");
-
-        let interrupted = AtomicBool::new(false);
-        let decision = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(
-            matches!(decision, super::CtrlCDecision::Exit),
-            "with the guard disabled, the first press must Exit"
-        );
-        assert!(
-            interrupted.load(Ordering::SeqCst),
-            "with the guard disabled, the first press MUST flip interrupted"
-        );
-        std::env::remove_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP);
-    }
-
-    /// Non-Windows: the guard is not engaged. A single press exits,
-    /// matching the documented "non-Windows behavior is intentionally
-    /// unchanged" line in the acceptance criteria.
-    #[cfg(not(windows))]
-    #[test]
-    fn first_press_on_non_windows_exits() {
-        use std::sync::atomic::Ordering;
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        let interrupted = AtomicBool::new(false);
-
-        let decision = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert!(
-            matches!(decision, super::CtrlCDecision::Exit),
-            "non-Windows: a single press must Exit"
-        );
-        assert!(
-            interrupted.load(Ordering::SeqCst),
-            "non-Windows: a single press MUST flip interrupted"
-        );
-    }
-
-    /// Issue #517: on Unix, every press through `run_ctrl_c_handler` is
-    /// unambiguously SIGINT (ctrlc's `termination` feature is off, so
-    /// nothing else routes through this closure) and must stamp
-    /// `CtrlEventKind::CtrlC` so the dashboard's `ctrl_event_kind` field
-    /// is populated on Unix the same way the Windows probe populates it.
-    #[cfg(not(windows))]
-    #[test]
-    fn ctrl_c_press_on_non_windows_records_ctrl_c_event_kind() {
-        let _guard = crate::ctrl_c_track::test_state_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_handler_state();
-        let interrupted = AtomicBool::new(false);
-
-        assert_eq!(crate::ctrl_c_track::observed_event_kind(), None);
-        let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
-        assert_eq!(
-            crate::ctrl_c_track::observed_event_kind(),
-            Some(crate::ctrl_c_track::CtrlEventKind::CtrlC),
-            "SIGINT press must stamp CtrlEventKind::CtrlC on Unix"
-        );
-    }
-
-    /// Issue #517: the SIGTERM/SIGHUP/SIGQUIT -> CtrlEventKind mapping
-    /// used by the Unix termination probe.
-    #[cfg(unix)]
-    #[test]
-    fn unix_termination_signal_kind_maps_known_signals() {
-        use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
-        assert_eq!(
-            super::unix_termination_signal_kind(SIGTERM),
-            crate::ctrl_c_track::CtrlEventKind::Term
-        );
-        assert_eq!(
-            super::unix_termination_signal_kind(SIGHUP),
-            crate::ctrl_c_track::CtrlEventKind::Hup
-        );
-        assert_eq!(
-            super::unix_termination_signal_kind(SIGQUIT),
-            crate::ctrl_c_track::CtrlEventKind::Quit
-        );
-    }
-
-    /// Any signal number outside the registered set (which should never
-    /// happen in practice, since `Signals::new` only ever delivers what
-    /// it was constructed with) must funnel into `Unknown` rather than
-    /// panicking — matches the same defensive default as
-    /// `CtrlEventKind::from_raw`.
-    #[cfg(unix)]
-    #[test]
-    fn unix_termination_signal_kind_maps_unknown_signal_to_unknown() {
-        assert_eq!(
-            super::unix_termination_signal_kind(9999),
-            crate::ctrl_c_track::CtrlEventKind::Unknown
-        );
-    }
 
     /// Non-interactive (scripts, CI, piped stdin) MUST keep the
     /// single-press exit semantics on every platform — Python

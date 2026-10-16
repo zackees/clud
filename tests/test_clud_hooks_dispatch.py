@@ -390,3 +390,36 @@ def test_a_cd_into_an_extern_repo_moves_containment_with_it(tmp_path: Path) -> N
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_declared_user_prompt_submit_hook_still_runs(tmp_path: Path) -> None:
+    # #1984: clud's own UserPromptSubmit line (worktree consent) shares the
+    # dispatcher command with a repo's declared one; the repo's hook must still
+    # run, and an ordinary prompt must print nothing into the conversation.
+    repo = _make_repo(
+        tmp_path,
+        {
+            "UserPromptSubmit": [
+                {
+                    "command": _python_hook(
+                        tmp_path / "block_prompt.py",
+                        "import sys\nprint('prompt blocked by repo', file=sys.stderr)\n"
+                        "sys.exit(2)\n",
+                    ),
+                }
+            ]
+        },
+    )
+    payload = {"session_id": "s-1984", "cwd": str(repo), "prompt": "fix the bug"}
+    blocked = _run(tmp_path, payload=payload, argv_extra=["--event", "UserPromptSubmit"])
+    assert blocked.returncode == 2, blocked.stdout + blocked.stderr
+    assert "prompt blocked by repo" in blocked.stdout + blocked.stderr
+
+    plain = _make_repo(tmp_path / "plain", {})
+    quiet = _run(
+        tmp_path,
+        payload={**payload, "cwd": str(plain)},
+        argv_extra=["--event", "UserPromptSubmit"],
+    )
+    assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+    assert quiet.stdout == ""

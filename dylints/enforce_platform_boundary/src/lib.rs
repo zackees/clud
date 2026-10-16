@@ -4,9 +4,7 @@ extern crate rustc_ast;
 extern crate rustc_errors;
 extern crate rustc_span;
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{LazyLock, Mutex};
 
 use rustc_ast::token::TokenKind;
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
@@ -19,7 +17,8 @@ use rustc_span::{FileName, RemapPathScopeComponents, Span};
 dylint_linting::declare_pre_expansion_lint! {
     /// ### What it does
     ///
-    /// Denies host-platform selection outside `crates/clud-bin/src/platform/`:
+    /// Denies host-platform selection outside a platform boundary
+    /// (`<crate>/src/platform/`, or a `platform/` directory in a test suite):
     /// host keys (`windows`, `unix`, `target_os`, ...) in `#[cfg]`,
     /// `#[cfg_attr]`, `cfg!`, `cfg_if!` and `cfg_select!`, and paths into
     /// native API crates (`libc`, `windows_sys`, ...).
@@ -29,12 +28,13 @@ dylint_linting::declare_pre_expansion_lint! {
     /// Host branches scattered through business logic are invisible to a
     /// late lint run on any other host. This is the boundary soldr, zccache
     /// and fbuild enforce (#1946). The pass runs before expansion, so
-    /// inactive branches count too. Existing debt is admitted only by the
-    /// per-file counts in `baseline.txt`; one occurrence more than its count
-    /// fails, so the baseline can only shrink.
+    /// inactive branches count too, and it has no baseline or allowlist
+    /// (#1953): the selector `platform/mod.rs` and the concrete trees under
+    /// it (`windows/`, `unix/`, `linux/`, `macos/`) are the only places a
+    /// host may be named.
     pub ENFORCE_PLATFORM_BOUNDARY,
     Deny,
-    "confine host-platform selection and native APIs to crates/clud-bin/src/platform"
+    "confine host-platform selection and native APIs to a platform boundary"
 }
 
 const HOST_KEYS: &[&str] = &[
@@ -51,11 +51,7 @@ const HOST_KEYS: &[&str] = &[
     "target_vendor",
 ];
 const NATIVE_ROOTS: &[&str] = &["libc", "mach2", "nix", "winapi", "windows", "windows_sys"];
-const BOUNDARY: &str = "crates/clud-bin/src/platform/";
-const BASELINE_TEXT: &str = include_str!("baseline.txt");
-/// Prints every in-scope occurrence to stderr instead of enforcing, to
-/// regenerate `baseline.txt` (see `dylints/README.md`). Never commit `true`.
-const DUMP: bool = false;
+const CONCRETE_TREES: &[&str] = &["windows", "unix", "linux", "macos"];
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -67,67 +63,54 @@ enum Kind {
 impl Kind {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::AttrCfg => "attr_cfg",
-            Self::CfgMacro => "cfg_macro",
-            Self::NativeImport => "native_import",
+            Self::AttrCfg => "attr cfg",
+            Self::CfgMacro => "cfg macro",
+            Self::NativeImport => "native import",
         }
     }
 }
 
-type Key = (String, String, String);
-
-fn parse_baseline(text: &str) -> HashMap<Key, u32> {
-    let mut counts = HashMap::new();
-    for line in text
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        let fields: Vec<&str> = line.split('\t').collect();
-        if let [path, kind, normalized, count] = fields[..] {
-            let count = count.parse().expect("baseline count must be an integer");
-            let key = (
-                (*path).to_owned(),
-                (*kind).to_owned(),
-                (*normalized).to_owned(),
-            );
-            counts.insert(key, count);
-        }
-    }
-    counts
-}
-
-static BASELINE: LazyLock<HashMap<Key, u32>> = LazyLock::new(|| parse_baseline(BASELINE_TEXT));
-static COUNTS: LazyLock<Mutex<HashMap<Key, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static PROCESS_IDENTITY: LazyLock<String> = LazyLock::new(|| {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{nonce:x}", std::process::id())
-});
-
-/// Counts one more occurrence of `key` and reports whether it is over the
-/// baseline's admitted count.
-fn exceeds_baseline(
-    baseline: &HashMap<Key, u32>,
-    counts: &mut HashMap<Key, u32>,
-    key: &Key,
-) -> bool {
-    let seen = counts.entry(key.clone()).or_insert(0);
-    *seen += 1;
-    *seen > baseline.get(key).copied().unwrap_or(0)
-}
-
-/// The repo-relative path of an in-scope file, or `None` for the boundary
-/// itself and anything outside `crates/` and `testbins/`.
-fn scoped_path(filename: &str) -> Option<String> {
+/// The repo-relative path of a file under `crates/` or `testbins/`, taken
+/// from the last such component so a checkout's own parent directories
+/// cannot shift it.
+fn repo_relative(filename: &str) -> Option<String> {
     let normalized = filename.replace('\\', "/");
-    let path = ["crates/", "testbins/"]
+    ["crates/", "testbins/"]
         .iter()
-        .filter_map(|marker| normalized.rfind(marker).map(|i| &normalized[i..]))
-        .min_by_key(|p| std::cmp::Reverse(p.len()))?
-        .to_owned();
-    (!path.starts_with(BOUNDARY)).then_some(path)
+        .filter_map(|marker| {
+            normalized
+                .rfind(marker)
+                .filter(|&i| i == 0 || normalized[..i].ends_with('/'))
+                .map(|i| &normalized[i..])
+        })
+        .min_by_key(|path| path.len())
+        .map(str::to_owned)
+}
+
+/// Whether `path` (repo-relative) is inside a platform boundary: the
+/// selector `platform/mod.rs` or a concrete host tree under it.
+///
+/// A crate's boundary is `src/platform/`, directly under `src`. A test
+/// suite may hold one at any depth under `tests/`, so a test category can
+/// keep its host-specific cases next to its neutral ones. Any other file in
+/// a `platform/` directory is a facade and must stay neutral.
+fn is_boundary(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    let [_root @ ("crates" | "testbins"), _crate, area @ ("src" | "tests"), rest @ ..] = &parts[..]
+    else {
+        return false;
+    };
+    let Some(index) = rest.iter().position(|part| *part == "platform") else {
+        return false;
+    };
+    if *area == "src" && index != 0 {
+        return false;
+    }
+    match &rest[index + 1..] {
+        ["mod.rs"] => true,
+        [tree, _, ..] => CONCRETE_TREES.contains(tree),
+        _ => false,
+    }
 }
 
 fn source_filename(context: &EarlyContext<'_>, span: Span) -> String {
@@ -147,26 +130,16 @@ fn source_filename(context: &EarlyContext<'_>, span: Span) -> String {
 }
 
 fn record(context: &EarlyContext<'_>, span: Span, kind: Kind, normalized: &str) {
-    let Some(path) = scoped_path(&source_filename(context, span)) else {
+    let Some(path) = repo_relative(&source_filename(context, span)) else {
         return;
     };
-    if DUMP {
-        eprintln!(
-            "CLUD_PLATFORM_BOUNDARY\t{}\t{path}\t{}\t{normalized}",
-            *PROCESS_IDENTITY,
-            kind.as_str()
-        );
-        return;
-    }
-    let key = (path, kind.as_str().to_owned(), normalized.to_owned());
-    let mut counts = COUNTS.lock().expect("platform boundary counter poisoned");
-    if !exceeds_baseline(&BASELINE, &mut counts, &key) {
+    if is_boundary(&path) {
         return;
     }
     let message = format!(
-        "{} `{normalized}` is outside {BOUNDARY}; move the host-specific code behind \
-         the platform boundary (#1946)",
-        kind.as_str().replace('_', " ")
+        "{} `{normalized}` is outside a platform boundary; move the host-specific code \
+         into `platform/{{windows,unix}}/` behind a neutral API (#1953)",
+        kind.as_str()
     );
     context.opt_span_lint(
         ENFORCE_PLATFORM_BOUNDARY,
@@ -322,58 +295,48 @@ impl EarlyLintPass for EnforcePlatformBoundary {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{is_boundary, repo_relative};
 
-    fn key() -> Key {
-        (
-            "crates/clud-bin/src/example.rs".to_owned(),
-            "attr_cfg".to_owned(),
-            "windows".to_owned(),
-        )
+    #[test]
+    fn selector_and_concrete_trees_are_the_boundary() {
+        assert!(is_boundary("crates/clud-bin/src/platform/mod.rs"));
+        assert!(is_boundary(
+            "crates/clud-bin/src/platform/windows/subprocess.rs"
+        ));
+        assert!(is_boundary("crates/clud-bin/src/platform/unix/dnd/mod.rs"));
+        assert!(is_boundary(
+            "testbins/probe-dll/src/platform/windows/lib.rs"
+        ));
+        assert!(is_boundary(
+            "crates/clud-bin/tests/integration/reaper/platform/windows/x.rs"
+        ));
+        assert!(is_boundary("crates/tap/tests/platform/unix/cli.rs"));
     }
 
     #[test]
-    fn occurrence_past_the_baseline_count_is_reported() {
-        let baseline = HashMap::from([(key(), 1)]);
-        let mut counts = HashMap::new();
-        assert!(!exceeds_baseline(&baseline, &mut counts, &key()));
-        assert!(exceeds_baseline(&baseline, &mut counts, &key()));
+    fn everything_else_is_outside_the_boundary() {
+        // Ordinary sources, and facade files beside the selector.
+        assert!(!is_boundary("crates/clud-bin/src/subprocess.rs"));
+        assert!(!is_boundary("crates/clud-bin/src/platform/host.rs"));
+        assert!(!is_boundary("crates/clud-bin/src/platform/windows.rs"));
+        // A crate gets one boundary, directly under `src`.
+        assert!(!is_boundary(
+            "crates/clud-bin/src/daemon/platform/windows/x.rs"
+        ));
+        assert!(!is_boundary("crates/clud-bin/src/platform/other/x.rs"));
+        assert!(!is_boundary("dylints/x/src/platform/windows/x.rs"));
     }
 
     #[test]
-    fn unlisted_occurrence_is_reported() {
-        let mut counts = HashMap::new();
-        assert!(exceeds_baseline(&HashMap::new(), &mut counts, &key()));
-    }
-
-    #[test]
-    fn baseline_rows_parse_with_counts() {
-        let parsed =
-            parse_baseline("# header\ncrates/clud-bin/src/example.rs\tattr_cfg\twindows\t3\n");
-        assert_eq!(parsed.get(&key()), Some(&3));
-    }
-
-    #[test]
-    fn boundary_and_out_of_scope_files_are_exempt() {
-        assert_eq!(scoped_path("/w/crates/clud-bin/src/platform/unix.rs"), None);
-        assert_eq!(scoped_path("/w/dylints/x/src/lib.rs"), None);
+    fn paths_resolve_relative_to_the_repo_on_every_host() {
         assert_eq!(
-            scoped_path(r"C:\w\crates\clud-bin\src\pty.rs").as_deref(),
+            repo_relative(r"C:\w\crates\clud-bin\src\pty.rs").as_deref(),
             Some("crates/clud-bin/src/pty.rs")
         );
         assert_eq!(
-            scoped_path("/w/testbins/mock-agent/src/main.rs").as_deref(),
+            repo_relative("/w/testbins/mock-agent/src/main.rs").as_deref(),
             Some("testbins/mock-agent/src/main.rs")
         );
-    }
-
-    #[test]
-    fn committed_baseline_parses() {
-        let rows = BASELINE_TEXT
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .count();
-        assert_eq!(parse_baseline(BASELINE_TEXT).len(), rows);
-        assert!(!DUMP, "DUMP mode must never be committed");
+        assert_eq!(repo_relative("/w/dylints/x/src/lib.rs"), None);
     }
 }

@@ -1243,7 +1243,7 @@ round-trip, because the lever is Git-for-Windows-specific.
 `WINELOADERNOEXEC` is a variable Git for Windows *consults*, not one it
 documents as an API, so a change on their side would silently stop suppressing
 completions and the tax would quietly return. The guardrail is therefore
-`tests/integration/cli/shell_completion_guard.rs`, which asserts the observed **function count**
+`tests/integration/cli/platform/windows/shell_completion_guard.rs`, which asserts the observed **function count**
 of a real login shell rather than merely that the variable is set — an
 env-var-presence assertion would keep passing through exactly the regression it
 is meant to catch. The variable is deliberately not set off Windows, where Wine
@@ -6925,3 +6925,79 @@ parse error keeps an old settings file from disarming its other rules.
 refresh). Rewriting the user's settings file to drop the key (clud does not
 edit settings it did not write). Failing the launch on a pin (too harsh for a
 value that is now simply unused).
+
+## DD-174: the platform boundary has no exceptions
+
+**Context.** #1946 added `enforce_platform_boundary`, the pre-expansion lint
+soldr, zccache and fbuild use to confine host selection to one module. It
+landed with fbuild's model: a `baseline.txt` that admitted the 1054 existing
+occurrences in 159 files by per-file count. A count is a ratchet, not a
+boundary. Each file could keep its host branches indefinitely, and a new
+branch could replace a removed one in the same file without anyone noticing.
+
+**Decision.** #1953 moved every occurrence behind a boundary and deleted the
+baseline, the count machinery, and the harvest mode. The lint has no
+allowlist. A host may be named only in a `platform/mod.rs` selector or a
+concrete `windows/`, `unix/`, `linux/` or `macos/` tree under it: a crate's
+`src/platform/`, or a `platform/` directory in a test suite. Tests get no
+exception. Host-specific tests live in the concrete tree they exercise.
+
+**Why.** soldr and zccache start from zero, and that is the property that
+makes the single-host Dylint run trustworthy. Any exception class becomes
+the place new debt hides. A boundary module is enough under the one-binary
+rule (DD-121); a separate crate would add a workspace member and buy nothing.
+
+**Rejected.** Keeping the baseline and shrinking it over time: it never
+reaches zero by itself. An allowlist for tests: tests were 18% of the debt,
+and host-gated tests are exactly the code a Linux-only run never compiles.
+Facade files beside the selector that are allowed to `cfg`: that would be
+a second selector.
+
+## DD-175: a session control takes consent only from the user's own channels
+
+**Context.** Agents created git worktrees hundreds of times a week, each a
+cold Rust `target/`, often right after the user said "no worktrees". The
+creator was usually a subagent, which never sees the user's prompt: it sees
+only the brief the main agent writes, and the constraint gets dropped (#1984).
+Instructions alone cannot hold such a rule; it needs enforcement.
+
+**Decision.** Worktree creation is refused unless the session opted in, and
+consent comes only from the user's own channels, never from anything an
+agent does in its normal work: the user's prompt
+(the `UserPromptSubmit` payload, which carries only what the user typed or
+pasted), the launch environment (`CLUD_ALLOW_WORKTREES`, or `--worktree`),
+or an active `/grind` run. The prompt hook stores consent in a daemon
+dictionary keyed by the payload `session_id`, which subagent payloads share
+with their parent. An unanswerable lookup refuses, and the rule has no
+`CLUD_BAD_CMD_OVERRIDE` id.
+
+**Alternatives rejected.**
+- *Match "worktree" anywhere in the conversation.* The transcript's user
+  entries include task notifications and compaction summaries, and "no
+  worktrees" contains the word. In three observed sessions a keyword match
+  would have unlocked exactly where the user said no.
+- *Edit a `permissions.deny` rule in a settings file per prompt.* Settings
+  files are shared by every session on the checkout, so one session's yes
+  would unlock its neighbours; a Bash rule also misses `git -C … worktree add`
+  and cannot see `Agent`'s `isolation`.
+- *Key on `CLUD_CHECKOUT_SESSION_ID`.* Unset in several launch modes, and a
+  nested launch can inherit a parent's stale value.
+- *A per-session file (the `grind_facts` pattern).* Works and needs no daemon,
+  but the user chose one dictionary in the daemon that later controls share
+  and that clud can display. Its costs are named: a restart forgets consent
+  (safe direction), and a down daemon refuses.
+- *An agent override.* Any escape the agent can set, it will set once refused.
+
+**Not a security boundary.** The agent runs as the same user, so a
+determined one could still reach the daemon's loopback port, set
+`CLUD_ALLOW_ALL_CMDS`, or write `/grind` run facts. The control stops the
+observed failure, an agent that forgets or never saw the user's "no"; it does
+not contain an adversarial one. Only sessions clud launched with the prompt
+hook are gated (`CLUD_WORKTREE_GATE=1`): a plain `claude` or Codex session
+that runs `clud-cmd-scan` from a committed or global hook config could never
+record consent, so it is left as it was.
+
+**Consequences.** Concurrent sessions on one checkout can no longer fall back
+to a worktree on their own; they wait or ask. Codex, with no prompt event
+mapped, gets consent from the environment only. See
+[session-controls.md](architecture/session-controls.md).

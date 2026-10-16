@@ -132,21 +132,16 @@ fn with_deleted_executable(
 /// Linux only: `/proc/<pid>/exe` names a removed file with a ` (deleted)`
 /// suffix. macOS and Windows have no cheap equivalent and report `false`.
 fn daemon_executable_deleted(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
+    if crate::platform::host::LINUX {
         std::fs::read_link(format!("/proc/{pid}/exe"))
             .map(|target| exe_link_is_deleted(&target.to_string_lossy()))
             .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
+    } else {
         false
     }
 }
 
 // Read only by the Linux `/proc/<pid>/exe` probe above (and its tests).
-#[cfg(any(target_os = "linux", test))]
 fn exe_link_is_deleted(link_target: &str) -> bool {
     link_target.ends_with(" (deleted)")
 }

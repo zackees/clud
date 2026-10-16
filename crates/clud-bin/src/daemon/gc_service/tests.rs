@@ -1508,17 +1508,18 @@ fn trash_reaper_drops_row_whose_path_is_gone() {
 /// #1672: a trash entry holding a read-only tree (sealed build output) was
 /// "reaped" on every tick and never removed. The reaper now makes it
 /// writable first, as safe-rm's own purge does (#1573).
-#[cfg(unix)]
 #[test]
 fn trash_reaper_removes_read_only_trees() {
-    use std::os::unix::fs::PermissionsExt;
+    if !crate::platform::host::UNIX {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::open_at(&dir.path().join("trash-ro.redb")).unwrap();
     let entry = dir.path().join("20260101T000000Z-123456");
     let sealed = entry.join("target").join("debug");
     std::fs::create_dir_all(&sealed).unwrap();
     std::fs::write(sealed.join("app"), b"bin").unwrap();
-    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o555)).unwrap();
+    crate::platform::gc_test_fs::set_mode(&sealed, 0o555).unwrap();
     registry
         .insert_if_new(&InsertInput {
             kind: "trash".to_string(),
@@ -1532,7 +1533,7 @@ fn trash_reaper_removes_read_only_trees() {
 
     let (removed, failed) = reap_trash_entries(&registry).unwrap();
     if entry.exists() {
-        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::gc_test_fs::set_mode(&sealed, 0o755).unwrap();
     }
 
     assert_eq!((removed, failed), (1, 0));

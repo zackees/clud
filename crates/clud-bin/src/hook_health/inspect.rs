@@ -470,7 +470,7 @@ pub(in crate::hook_health) fn read_json_hooks(
 }
 
 pub(in crate::hook_health) fn warn_on_powershell_exit_code_risk(summary: &mut FrontendHookSummary) {
-    if !cfg!(target_os = "windows") {
+    if !crate::platform::host::WINDOWS {
         return;
     }
     let mut risky_sources = BTreeSet::new();
@@ -491,7 +491,7 @@ pub(in crate::hook_health) fn warn_on_powershell_exit_code_risk(summary: &mut Fr
 }
 
 fn warn_on_claude_windows_stdin_bug(summary: &mut FrontendHookSummary) {
-    if !cfg!(target_os = "windows") || summary.hooks.is_empty() {
+    if !crate::platform::host::WINDOWS || summary.hooks.is_empty() {
         return;
     }
 

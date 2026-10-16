@@ -19,6 +19,7 @@
 //! covered by `set -u` from Phase 2 instead.
 
 mod decision;
+mod platform;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -138,7 +139,7 @@ fn real(path: PathBuf) -> PathBuf {
 /// and this is the whole of what it needs. `USERPROFILE` first on Windows,
 /// where `HOME` is often absent or points somewhere else entirely.
 fn home_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
+    if platform::host::WINDOWS {
         if let Some(profile) = std::env::var_os("USERPROFILE") {
             return Some(PathBuf::from(profile));
         }

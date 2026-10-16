@@ -152,12 +152,9 @@ fn quoted_current_exe() -> String {
 }
 
 fn quote_exe(exe: &str) -> String {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         format!("& '{}'", exe.replace('\'', "''"))
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         format!("'{}'", exe.replace('\'', "'\\''"))
     }
 }
@@ -298,13 +295,14 @@ mod tests {
 
     #[test]
     fn executable_path_is_shell_quoted_without_interpolation() {
-        #[cfg(windows)]
-        assert_eq!(
-            quote_exe("C:\\odd$path`name\\clud.exe"),
-            "& 'C:\\odd$path`name\\clud.exe'"
-        );
-        #[cfg(not(windows))]
-        assert_eq!(quote_exe("/tmp/odd'path/clud"), "'/tmp/odd'\\''path/clud'");
+        if crate::platform::host::WINDOWS {
+            assert_eq!(
+                quote_exe("C:\\odd$path`name\\clud.exe"),
+                "& 'C:\\odd$path`name\\clud.exe'"
+            );
+        } else {
+            assert_eq!(quote_exe("/tmp/odd'path/clud"), "'/tmp/odd'\\''path/clud'");
+        }
     }
 
     #[test]

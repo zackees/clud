@@ -39,7 +39,9 @@ pub mod codex_translate;
 pub mod codex_upstream;
 pub mod command;
 pub mod config;
-pub mod console_input;
+/// The Windows native terminal-input adapter (`platform/windows/console_input.rs`);
+/// an empty module on Unix, where stdin is a byte stream.
+pub use platform::console_input;
 pub mod console_setup;
 pub mod console_surrogates;
 pub mod console_title;
@@ -88,6 +90,7 @@ pub mod optimize;
 pub mod orphan_reaper;
 pub mod paste_image;
 pub mod path_norm;
+pub mod platform;
 pub mod preference;
 pub mod process_identity;
 pub mod process_scan;
@@ -158,6 +161,7 @@ pub mod webterm;
 pub mod wedge_watchdog;
 pub mod win_creation_flags;
 pub mod workspace_trust;
+pub mod worktree_consent;
 pub mod worktrees;
 
 pub mod deletion_policy;

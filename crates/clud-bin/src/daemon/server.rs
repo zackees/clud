@@ -34,6 +34,9 @@ use super::paths::{
 use super::proc_sampler::{spawn_proc_sampler, ProcSamplerHandle, DEFAULT_SAMPLE_INTERVAL_MS};
 use super::process_utils::{identity_is_alive, signal_process_tree_as};
 use super::runtime_config::{DaemonRuntimeConfig, TestExpiryReason, TestRuntimeActivity};
+use super::session_flags::{
+    handle_session_flag_connection, SessionFlagRegistry, SessionFlagRequest,
+};
 use super::sessions::list_live_session_cwds;
 use super::types::{
     unix_millis_now, CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcReply,
@@ -235,6 +238,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let client_leases = ClientLeaseRegistry::default();
     let checkout_claims = CheckoutClaimRegistry::new(Duration::from_secs(2));
+    let session_flags = SessionFlagRegistry::default();
     let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     // #933: a daemon's base environment is the OS/login environment, not the
@@ -328,6 +332,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let proc_sampler = proc_sampler.clone();
                 let client_leases = client_leases.clone();
                 let checkout_claims = checkout_claims.clone();
+                let session_flags = session_flags.clone();
                 let activity = activity.clone();
                 let api_lifecycle = Arc::clone(&api_lifecycle);
                 thread::spawn(move || {
@@ -343,6 +348,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                             proc_sampler: &proc_sampler,
                             client_leases: &client_leases,
                             checkout_claims: &checkout_claims,
+                            session_flags: &session_flags,
                             activity: &activity,
                             api_lifecycle: &api_lifecycle,
                         },
@@ -470,6 +476,7 @@ struct TcpConnectionServices<'a> {
     proc_sampler: &'a ProcSamplerHandle,
     client_leases: &'a ClientLeaseRegistry,
     checkout_claims: &'a CheckoutClaimRegistry,
+    session_flags: &'a SessionFlagRegistry,
     activity: &'a DaemonActivity,
     api_lifecycle: &'a Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 }
@@ -485,6 +492,9 @@ fn handle_daemon_connection(
     }
     if let Ok(request) = serde_json::from_str::<CheckoutRequest>(&line) {
         return handle_checkout_connection(&mut stream, reader, services.checkout_claims, request);
+    }
+    if let Ok(request) = serde_json::from_str::<SessionFlagRequest>(&line) {
+        return handle_session_flag_connection(&mut stream, services.session_flags, request);
     }
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
     let request_id = daemon_events::request_id();

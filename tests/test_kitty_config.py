@@ -12,6 +12,9 @@ CONFIG = (
 SMOKE = Path(__file__).resolve().parents[1] / "ci/kitty_windows_smoke.ps1"
 SEMANTICS = Path(__file__).resolve().parents[1] / "ci/kitty_terminal_semantics.ps1"
 MOCK_AGENT = Path(__file__).resolve().parents[1] / "testbins/mock-agent/src/main.rs"
+MOCK_AGENT_WINDOWS_STDIN = (
+    Path(__file__).resolve().parents[1] / "testbins/mock-agent/src/platform/windows/stdin_mode.rs"
+)
 
 
 def test_font_uses_only_faces_bundled_with_wezterm() -> None:
@@ -161,8 +164,10 @@ def test_windows_terminal_semantics_run_inside_reused_installed_gui() -> None:
 
 def test_windows_mock_reads_conpty_replies_without_line_buffering() -> None:
     mock = MOCK_AGENT.read_text(encoding="utf-8")
-    assert "#[cfg(windows)]\nfn set_stdin_raw_if_tty()" in mock
-    raw_mode = mock.split("#[cfg(windows)]\nfn set_stdin_raw_if_tty()", 1)[1]
+    # #1953: the Windows raw-mode half lives behind the mock's platform boundary.
+    windows = MOCK_AGENT_WINDOWS_STDIN.read_text(encoding="utf-8")
+    assert "pub fn set_stdin_raw_if_tty()" in windows
+    raw_mode = windows.split("pub fn set_stdin_raw_if_tty()", 1)[1]
     assert (
         "!(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)"
         in raw_mode

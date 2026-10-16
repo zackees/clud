@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use super::activation::{self, ActivationPlan};
 use super::catalog::{Arch, Flavor, MediaType, Os, ResolvedAsset};
 use super::entry::InstallIntent;
+use crate::platform::host;
+use crate::platform::self_install as fs_host;
 
 const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WHEEL_BYTES: u64 = 384 * 1024 * 1024;
@@ -42,23 +44,15 @@ enum Source {
 struct Fingerprint {
     len: u64,
     modified: Option<std::time::SystemTime>,
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
+    identity: fs_host::FileIdentity,
 }
 
 impl Fingerprint {
     fn of(metadata: &fs::Metadata) -> Self {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
         Self {
             len: metadata.len(),
             modified: metadata.modified().ok(),
-            #[cfg(unix)]
-            dev: metadata.dev(),
-            #[cfg(unix)]
-            ino: metadata.ino(),
+            identity: fs_host::file_identity(metadata),
         }
     }
 }
@@ -158,16 +152,14 @@ impl InstallPlan {
 pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     let parent = plan.destination.parent().ok_or("missing install parent")?;
     inspect_destination(&plan.destination, false)?;
-    #[cfg(unix)]
-    create_private_dirs(parent)?;
-    #[cfg(windows)]
-    fs::create_dir_all(parent).map_err(|error| format!("create user bin: {error}"))?;
+    fs_host::create_install_dir(parent)?;
     inspect_destination(&plan.destination, false)?;
     let lock_path = parent.join(".clud-install.lock");
-    #[cfg(windows)]
-    if let Ok(meta) = fs::symlink_metadata(&lock_path) {
-        if windows_reparse(&meta) {
-            return Err("installer lock is a reparse point".into());
+    if host::WINDOWS {
+        if let Ok(meta) = fs::symlink_metadata(&lock_path) {
+            if fs_host::is_reparse_point(&meta) {
+                return Err("installer lock is a reparse point".into());
+            }
         }
     }
     let mut lock_options = OpenOptions::new();
@@ -176,11 +168,7 @@ pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
         .write(true)
         .create(true)
         .truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        lock_options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
+    fs_host::restrict_lock_options(&mut lock_options);
     let lock = lock_options
         .open(&lock_path)
         .map_err(|error| format!("open install lock: {error}"))?;
@@ -188,15 +176,10 @@ pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     if !lock_meta.is_file() {
         return Err("installer lock is not a regular file".into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if lock_meta.uid() != unsafe { libc::geteuid() } || lock_meta.nlink() != 1 {
-            return Err("installer lock is not exclusively owned by this user".into());
-        }
+    if !fs_host::owned_exclusively(&lock_meta) {
+        return Err("installer lock is not exclusively owned by this user".into());
     }
-    #[cfg(windows)]
-    if windows_reparse(&lock_meta) {
+    if fs_host::is_reparse_point(&lock_meta) {
         return Err("installer lock is a reparse point".into());
     }
     lock.lock_exclusive()
@@ -212,7 +195,7 @@ pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     } else if plan.replacement.is_some() {
         return Err("installed executable disappeared after consent".into());
     }
-    let suffix = if cfg!(windows) { ".exe" } else { ".bin" };
+    let suffix = if host::WINDOWS { ".exe" } else { ".bin" };
     let mut stage = tempfile::Builder::new()
         .prefix(".clud-install-")
         .suffix(suffix)
@@ -282,79 +265,20 @@ pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
 }
 
 fn approved_destination() -> Result<PathBuf, String> {
-    #[cfg(windows)]
-    {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .or_else(|| crate::home::user_home().map(|home| home.join("AppData/Local")))
-            .ok_or("cannot locate per-user local app data")?;
-        if !local.is_absolute() {
-            return Err("per-user local app data must be absolute".into());
-        }
-        Ok(local.join("Programs/clud/bin/clud.exe"))
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("HOME is unavailable")?;
-        if !home.is_absolute() {
-            return Err("HOME must be absolute".into());
-        }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        for directory in [home.join(".local/bin"), home.join("bin")] {
-            let on_path = std::env::split_paths(&path).any(|entry| entry == directory);
-            if !on_path {
-                continue;
-            }
-            if let Ok(meta) = fs::symlink_metadata(&directory) {
-                use std::os::unix::fs::MetadataExt;
-                if meta.is_dir()
-                    && !meta.file_type().is_symlink()
-                    && meta.uid() == unsafe { libc::geteuid() }
-                    && meta.mode() & 0o022 == 0
-                {
-                    return Ok(directory.join("clud"));
-                }
-            }
-        }
-        Ok(home.join(".local/bin/clud"))
-    }
+    fs_host::approved_destination()
 }
 
-#[cfg(unix)]
-pub(super) fn create_private_dirs(parent: &Path) -> Result<(), String> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut missing = Vec::new();
-    let mut current = Some(parent);
-    while let Some(directory) = current {
-        match fs::symlink_metadata(directory) {
-            Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(directory.to_path_buf());
-                current = directory.parent();
-            }
-            Err(error) => return Err(format!("inspect {}: {error}", directory.display())),
-        }
-    }
-    for directory in missing.iter().rev() {
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(directory)
-            .map_err(|error| {
-                format!("create private directory {}: {error}", directory.display())
-            })?;
-    }
-    Ok(())
-}
-
-pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), String> {
+pub(crate) fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), String> {
     let parent = destination.parent().ok_or("missing install directory")?;
-    #[cfg(unix)]
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is unavailable")?;
+    let home = if host::UNIX {
+        Some(
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or("HOME is unavailable")?,
+        )
+    } else {
+        None
+    };
     let mut path = PathBuf::new();
     for part in parent.components() {
         path.push(part);
@@ -362,18 +286,15 @@ pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Re
             if meta.file_type().is_symlink() || !meta.is_dir() {
                 return Err(format!("unsafe install directory: {}", path.display()));
             }
-            #[cfg(unix)]
-            if path.starts_with(&home) {
-                use std::os::unix::fs::MetadataExt;
-                if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 {
-                    return Err(format!(
-                        "install directory is not exclusively user-controlled: {}",
-                        path.display()
-                    ));
-                }
+            if home.as_ref().is_some_and(|home| path.starts_with(home))
+                && !fs_host::user_controlled_dir(&meta)
+            {
+                return Err(format!(
+                    "install directory is not exclusively user-controlled: {}",
+                    path.display()
+                ));
             }
-            #[cfg(windows)]
-            if windows_reparse(&meta) {
+            if fs_host::is_reparse_point(&meta) {
                 return Err(format!(
                     "reparse-point install directory: {}",
                     path.display()
@@ -385,15 +306,10 @@ pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Re
         if !meta.is_file() || meta.file_type().is_symlink() {
             return Err("installed path is not an owned regular file".into());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 {
-                return Err("installed executable is not exclusively owned by this user".into());
-            }
+        if !fs_host::owned_exclusively(&meta) {
+            return Err("installed executable is not exclusively owned by this user".into());
         }
-        #[cfg(windows)]
-        if windows_reparse(&meta) {
+        if fs_host::is_reparse_point(&meta) {
             return Err("installed executable is a reparse point".into());
         }
         if probe_version {
@@ -404,12 +320,6 @@ pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Re
         }
     }
     Ok(())
-}
-
-#[cfg(windows)]
-pub(super) fn windows_reparse(meta: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    meta.file_attributes() & 0x400 != 0
 }
 
 fn hash_path(path: &Path, limit: u64) -> Result<(String, u64), String> {
@@ -440,9 +350,9 @@ fn hash_reader(reader: &mut impl Read, limit: u64) -> Result<(String, u64), Stri
 }
 
 fn current_os() -> Os {
-    if cfg!(windows) {
+    if host::WINDOWS {
         Os::Windows
-    } else if cfg!(target_os = "macos") {
+    } else if host::MACOS {
         Os::Darwin
     } else {
         Os::Linux
@@ -450,7 +360,7 @@ fn current_os() -> Os {
 }
 
 fn current_arch() -> Arch {
-    if cfg!(target_arch = "aarch64") {
+    if host::AARCH64 {
         Arch::Aarch64
     } else {
         Arch::X86_64
@@ -761,18 +671,10 @@ fn extract_wheel(wheel: File, target: &mut File, asset: &ResolvedAsset) -> Resul
 }
 
 fn make_executable(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| error.to_string())?;
-    }
-    #[cfg(windows)]
-    let _ = path;
-    Ok(())
+    fs_host::make_executable(path)
 }
 
-fn recover(destination: &Path) -> Result<(), String> {
+pub(crate) fn recover(destination: &Path) -> Result<(), String> {
     let backup = destination.with_extension("clud-backup");
     let metadata = match fs::symlink_metadata(&backup) {
         Ok(metadata) => metadata,
@@ -782,15 +684,10 @@ fn recover(destination: &Path) -> Result<(), String> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("installer backup is not a regular file".into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1 {
-            return Err("installer backup is not exclusively owned by this user".into());
-        }
+    if !fs_host::owned_exclusively(&metadata) {
+        return Err("installer backup is not exclusively owned by this user".into());
     }
-    #[cfg(windows)]
-    if windows_reparse(&metadata) {
+    if fs_host::is_reparse_point(&metadata) {
         return Err("installer backup is a reparse point".into());
     }
     let mut file = File::open(&backup).map_err(|error| error.to_string())?;
@@ -799,8 +696,7 @@ fn recover(destination: &Path) -> Result<(), String> {
     if destination.exists() && run_version(destination).is_ok() {
         fs::remove_file(&backup).map_err(|error| format!("clear old backup: {error}"))?;
     } else {
-        #[cfg(windows)]
-        if destination.exists() {
+        if host::WINDOWS && destination.exists() {
             fs::remove_file(destination).map_err(|error| error.to_string())?;
         }
         fs::rename(&backup, destination).map_err(|error| format!("restore prior clud: {error}"))?;
@@ -822,10 +718,11 @@ fn commit(destination: &Path, stage: &Path, version: &str, digest: &str) -> Resu
         make_executable(&backup)?;
         saved.sync_all().map_err(|error| error.to_string())?;
         drop(saved);
-        #[cfg(windows)]
-        if let Err(error) = fs::remove_file(destination) {
-            let _ = fs::remove_file(&backup);
-            return Err(format!("prior clud is in use; it was preserved: {error}"));
+        if host::WINDOWS {
+            if let Err(error) = fs::remove_file(destination) {
+                let _ = fs::remove_file(&backup);
+                return Err(format!("prior clud is in use; it was preserved: {error}"));
+            }
         }
     }
     if let Err(error) = fs::rename(stage, destination) {
@@ -847,8 +744,9 @@ fn commit(destination: &Path, stage: &Path, version: &str, digest: &str) -> Resu
         .and_then(|()| verify_version(destination, version));
     if let Err(error) = verified {
         if backup.exists() {
-            #[cfg(windows)]
-            fs::remove_file(destination).map_err(|failure| failure.to_string())?;
+            if host::WINDOWS {
+                fs::remove_file(destination).map_err(|failure| failure.to_string())?;
+            }
             fs::rename(&backup, destination).map_err(|failure| failure.to_string())?;
         } else {
             fs::remove_file(destination).map_err(|failure| failure.to_string())?;
@@ -926,22 +824,6 @@ mod tests {
         assert!(
             validate_native_header(&mut file, Os::Linux, Arch::X86_64, Flavor::Native).is_err()
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_destination_and_backup_are_rejected_without_following_them() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let other = dir.path().join("other");
-        fs::write(&other, b"owned bytes").unwrap();
-        let destination = dir.path().join("clud");
-        symlink(&other, &destination).unwrap();
-        assert!(inspect_destination(&destination, false).is_err());
-        fs::remove_file(&destination).unwrap();
-        symlink(&other, destination.with_extension("clud-backup")).unwrap();
-        assert!(recover(&destination).is_err());
-        assert_eq!(fs::read(&other).unwrap(), b"owned bytes");
     }
 
     #[test]

@@ -425,7 +425,11 @@ fn dashboard_state_surfaces_api_sessions_as_nonattachable_rows() {
 }
 
 fn http_test_mock_agent() -> std::path::PathBuf {
-    let extension = if cfg!(windows) { ".exe" } else { "" };
+    let extension = if crate::platform::host::WINDOWS {
+        ".exe"
+    } else {
+        ""
+    };
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {

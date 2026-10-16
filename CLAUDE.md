@@ -75,6 +75,7 @@ crates/                    → see crates/README.md
       command/             → see crates/clud-bin/src/command/README.md
       daemon/              → see crates/clud-bin/src/daemon/README.md
       dnd/                 → see crates/clud-bin/src/dnd/README.md
+      platform/            → see crates/clud-bin/src/platform/README.md (the only place a host is named)
       self_install/        → see crates/clud-bin/src/self_install/README.md
       test_runtime/        → see crates/clud-bin/src/test_runtime/README.md
       toast/               → see crates/clud-bin/src/toast/README.md
@@ -237,6 +238,17 @@ why. The shim modules are exempt. For a name outside clud's control (a
 distro package, a container image, the pre-clud `install`), mark the line
 `python-name-lint: allow`, or put `python-name-lint: allow-next-line` above
 a line that ends in a `\` continuation.
+
+### Host-specific code: `platform/` only
+
+Name a host (`#[cfg(windows)]`, `cfg!(unix)`, `target_os`, ...) or a native
+API crate (`libc`, `windows_sys`, ...) only inside a platform boundary: a
+crate's `src/platform/mod.rs` selector or its `windows/`/`unix/` trees.
+Everywhere else, call `crate::platform::<area>` and branch on
+`crate::platform::host::*`. The `enforce_platform_boundary` Dylint lint has
+no baseline, no allowlist and no test exemption
+([platform-boundary.md](docs/architecture/platform-boundary.md),
+[DD-174](docs/DESIGN_DECISIONS.md#dd-174-the-platform-boundary-has-no-exceptions)).
 
 ### Home directory: `home::user_home` only
 

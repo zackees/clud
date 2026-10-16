@@ -4,8 +4,7 @@
 //! `diagnostics::<module>::<test_name>`.
 
 mod crash_report;
-mod runtime_cache_hop_windows;
+mod platform;
 mod symbols;
 mod telemetry_endpoint;
 mod tier_refresh_probe;
-mod win32_hooking_probe;

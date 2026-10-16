@@ -162,6 +162,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &pinned,
         &Ambient {
             subagent_model: Some("deepseek-v4-pro".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(slot_wire(&admitted.slots.subagent), Some("deepseek-v4-pro"));
@@ -172,6 +173,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &pinned,
         &Ambient {
             subagent_model: Some("deepseek-flash".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(slot_wire(&refused.slots.subagent), Some("deepseek-v4-pro"));
@@ -183,6 +185,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &free,
         &Ambient {
             subagent_model: Some("some/ambient-model".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(unconstrained.allowlist, Vec::<String>::new());
@@ -1102,4 +1105,24 @@ fn the_deepseek_native_route_names_its_environment_credential() {
         None,
         "dsh's credential is the environment, not clud's vault"
     );
+}
+
+#[test]
+fn the_direct_test_upstream_needs_the_integration_gate() {
+    // #1984: an end-to-end test points `clud --openrouter` at a scripted
+    // local model; nothing else may move a direct route's upstream.
+    let env = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect::<Vec<_>>()
+    };
+    let url = "http://127.0.0.1:9/api";
+    let gated = Ambient::from_child_env(&env(&[
+        ("CLUD_INTEGRATION_TESTS", "1"),
+        (TEST_DIRECT_UPSTREAM_ENV, url),
+    ]));
+    assert_eq!(gated.direct_upstream_url.as_deref(), Some(url));
+    let ungated = Ambient::from_child_env(&env(&[(TEST_DIRECT_UPSTREAM_ENV, url)]));
+    assert_eq!(ungated.direct_upstream_url, None);
 }

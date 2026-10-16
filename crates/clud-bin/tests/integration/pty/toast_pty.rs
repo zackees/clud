@@ -21,7 +21,7 @@ use clud::toast::{Severity, Toast, ToastEvent, ToastHub};
 use running_process::pty::NativePtyProcess;
 
 const ROWS: u16 = 24;
-const COLS: u16 = 100;
+pub(crate) const COLS: u16 = 100;
 
 struct NoHooks;
 
@@ -59,7 +59,7 @@ impl Write for Capture {
 /// A child that prints a marker, stays alive long enough for the toast to be
 /// drawn and to expire, then prints a second marker and exits.
 fn marker_child() -> Vec<String> {
-    if cfg!(windows) {
+    if clud::platform::host::WINDOWS {
         vec![
             "cmd.exe".into(),
             "/c".into(),
@@ -76,7 +76,7 @@ fn marker_child() -> Vec<String> {
 
 /// The child writes nothing during the HUD's appearance, fade, and expiry.
 fn quiet_child() -> Vec<String> {
-    if cfg!(windows) {
+    if clud::platform::host::WINDOWS {
         vec![
             "cmd.exe".into(),
             "/c".into(),
@@ -92,7 +92,7 @@ fn quiet_child() -> Vec<String> {
 }
 
 /// Run `argv` through the composited pump and return everything written.
-fn run_composited(
+pub(crate) fn run_composited(
     argv: Vec<String>,
     hub: Arc<ToastHub>,
     tier: ToastTier,
@@ -135,13 +135,13 @@ fn graphics_commands(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn replay(bytes: &[u8]) -> vt100::Parser {
+pub(crate) fn replay(bytes: &[u8]) -> vt100::Parser {
     let mut parser = vt100::Parser::new(ROWS, COLS, 0);
     parser.process(bytes);
     parser
 }
 
-fn expiring(text: &str, ttl: Duration) -> ToastEvent {
+pub(crate) fn expiring(text: &str, ttl: Duration) -> ToastEvent {
     ToastEvent::Show(
         Toast::new("cpu", text, Severity::Warn, std::time::Instant::now()).expiring_after(ttl),
     )
@@ -245,45 +245,4 @@ fn title_fallback_pushes_and_pops_the_terminal_title() {
     let pop = text.find("\x1b[23;0t").expect("title stack pop on expiry");
     assert!(push < set && set < pop, "push, set, pop order: {text:?}");
     assert!(replay(&bytes).screen().contents().contains("child-done"));
-}
-
-/// Text-cell tier on the alternate screen: the toast is painted as cells,
-/// then repainted from the shadow on expiry, so the final screen is exactly
-/// what the child drew.
-#[cfg(unix)]
-#[test]
-fn text_tier_restores_the_alternate_screen_exactly_after_expiry() {
-    require_pty_or_skip!("text_tier_restores_the_alternate_screen_exactly_after_expiry");
-    let script =
-        "printf '\\033[?1049h\\033[1;1H\\033[32mheader\\033[0m\\033[1;60Hright-side-text'; \
-                  sleep 1; printf '\\033[1;85HZZZ\\033[6;1Hbody'; sleep 3; printf '\\033[8;1Hdone'";
-    let hub = ToastHub::new();
-    hub.publish(expiring("toast-cells-e2e", Duration::from_millis(2500)));
-    let bytes = run_composited(
-        vec!["/bin/sh".into(), "-c".into(), script.into()],
-        hub,
-        ToastTier::TextCells,
-        Fallback::None,
-    );
-    assert!(
-        String::from_utf8_lossy(&bytes).contains("toast-cells-e2e"),
-        "the toast was never drawn"
-    );
-    let screen = replay(&bytes);
-    let contents = screen.screen().contents();
-    assert!(
-        !contents.contains("toast-cells-e2e"),
-        "toast cells left behind: {contents:?}"
-    );
-    let top: String = screen.screen().rows(0, COLS).next().unwrap();
-    assert!(top.starts_with("header"), "{top:?}");
-    assert!(top.contains("right-side-text"), "{top:?}");
-    assert!(
-        top.contains("ZZZ"),
-        "child write under the toast lost: {top:?}"
-    );
-    assert!(
-        contents.contains("body") && contents.contains("done"),
-        "{contents:?}"
-    );
 }

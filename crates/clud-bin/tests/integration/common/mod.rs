@@ -24,7 +24,11 @@ use serde_json::Value;
 /// builds into `target/debug/`. Picking the freshest avoids serving a stale
 /// pre-change binary to tests.
 pub fn mock_agent_path() -> PathBuf {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let ext = if clud::platform::host::WINDOWS {
+        ".exe"
+    } else {
+        ""
+    };
     let file_name = format!("mock-agent{}", ext);
 
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
@@ -42,13 +46,13 @@ pub fn mock_agent_path() -> PathBuf {
     let by_triple = |triple: &str| target_dir.join(triple).join("debug").join(&file_name);
     let default = target_dir.join("debug").join(&file_name);
 
-    let mut candidates: Vec<PathBuf> = if cfg!(windows) {
+    let mut candidates: Vec<PathBuf> = if clud::platform::host::WINDOWS {
         vec![
             by_triple("x86_64-pc-windows-msvc"),
             by_triple("aarch64-pc-windows-msvc"),
             default.clone(),
         ]
-    } else if cfg!(target_os = "macos") {
+    } else if clud::platform::host::MACOS {
         vec![
             by_triple("aarch64-apple-darwin"),
             by_triple("x86_64-apple-darwin"),
@@ -172,7 +176,7 @@ pub fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 /// child reads as CR; escape sequences survive byte-for-byte once the child
 /// is in VT input mode (#1310). Tests compare against this, not `sent`.
 pub fn through_pty_input(sent: &[u8]) -> Vec<u8> {
-    if cfg!(windows) {
+    if clud::platform::host::WINDOWS {
         sent.iter()
             .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
             .collect()
@@ -286,7 +290,7 @@ pub fn pty_canary_diagnostic() -> String {
 fn canary_result() -> &'static Result<(), String> {
     static CACHED: OnceLock<Result<(), String>> = OnceLock::new();
     CACHED.get_or_init(|| {
-        let argv: Vec<String> = if cfg!(windows) {
+        let argv: Vec<String> = if clud::platform::host::WINDOWS {
             vec!["cmd.exe".into(), "/c".into(), "echo clud_canary".into()]
         } else {
             vec!["/bin/sh".into(), "-c".into(), "echo clud_canary".into()]

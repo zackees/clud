@@ -530,6 +530,17 @@ impl ForegroundRuntime {
                 "1".to_string(),
             ));
         }
+        // #1984: this launch registers the prompt hook that records worktree
+        // consent, so its hooks enforce it. Sessions clud did not launch this
+        // way never see the marker and are not gated.
+        // A nested launch decides afresh, like the unsafe marker.
+        env.retain(|(key, _)| key != crate::worktree_consent::GATE_ENV);
+        if plan.effective_harness().settings_surface().accepts_hooks() && !plan.unsafe_mode {
+            env.push((
+                crate::worktree_consent::GATE_ENV.to_string(),
+                "1".to_string(),
+            ));
+        }
         // #967 Phase 3b: carry roots the hook cannot rediscover -- `--add-dir`
         // targets and `permissions.additionalDirectories` appear in no hook
         // payload.
@@ -602,7 +613,7 @@ impl ForegroundRuntime {
                 injection.session_pid,
                 &injection.state_dir,
                 chain.as_deref(),
-                cfg!(windows),
+                crate::platform::host::WINDOWS,
             ) else {
                 return false;
             };
@@ -654,7 +665,7 @@ impl ForegroundRuntime {
             &state_dir,
             route,
             recovery.as_deref(),
-            cfg!(windows),
+            crate::platform::host::WINDOWS,
         ) else {
             eprintln!(
                 "[clud] note: session history hooks skipped: clud's path cannot be quoted safely"
@@ -1779,8 +1790,8 @@ fn remove_user_settings_argument(command: &mut Vec<String>) {
     }
 }
 
-fn env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+pub(crate) fn env_key_eq(left: &str, right: &str) -> bool {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -1834,7 +1845,7 @@ impl SpawnAdapter<NativePtyProcess> for NativePtyAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
     use crate::command::LaunchPlan;
@@ -1858,7 +1869,7 @@ mod tests {
         }
     }
 
-    fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
+    pub(crate) fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         LaunchPlan {
             unsafe_mode: false,
             command: vec![harness.executable_name().to_string()],
@@ -1907,7 +1918,7 @@ mod tests {
         assert!(lookup(runtime.env(), "CLUD_ROUTE_CONTEXT").is_some());
     }
 
-    fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pub(crate) fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         env.iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
@@ -2734,46 +2745,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(&error, BridgeError::AnthropicCompatCredentials));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_overlay_treats_environment_keys_case_insensitively() {
-        let base = vec![
-            ("anthropic_api_key".to_string(), "ambient-key".to_string()),
-            ("Anthropic_Base_Url".to_string(), "old-url".to_string()),
-            ("anthropic_auth_token".to_string(), "old-token".to_string()),
-            ("api_timeout_ms".to_string(), "custom-timeout".to_string()),
-            (
-                "claude_code_disable_nonessential_traffic".to_string(),
-                "custom-traffic".to_string(),
-            ),
-        ];
-        let runtime =
-            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Claude), base).unwrap();
-        let env = runtime.env();
-        assert_eq!(lookup(env, "ANTHROPIC_API_KEY"), None);
-        assert_eq!(lookup(env, "ANTHROPIC_BASE_URL"), runtime.base_url());
-        assert_eq!(lookup(env, "ANTHROPIC_AUTH_TOKEN"), runtime.bearer_token());
-        assert_eq!(lookup(env, "api_timeout_ms"), Some("custom-timeout"));
-        assert_eq!(
-            lookup(env, "claude_code_disable_nonessential_traffic"),
-            None
-        );
-        assert_eq!(
-            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some("1")
-        );
-        assert_eq!(
-            lookup(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
-            Some("1050000")
-        );
-        assert_eq!(
-            env.iter()
-                .filter(|(key, _)| env_key_eq(key, "API_TIMEOUT_MS"))
-                .count(),
-            1
-        );
     }
 
     type RecordedEnvironment = Vec<(String, String)>;
@@ -4139,6 +4110,8 @@ mod tests {
             .map(|e| e.to_string())
             .collect();
         expected.insert("PreToolUse".to_string());
+        // #1984: the user's prompt may allow worktrees for the session.
+        expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
         assert_eq!(
             hooks
                 .keys()
@@ -4437,6 +4410,30 @@ mod tests {
 
         assert_eq!(settings_argument(&runtime), None);
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    #[test]
+    fn only_a_launch_that_registers_the_prompt_hook_gates_worktrees() {
+        // #1984: consent can only be recorded where clud's UserPromptSubmit
+        // line is registered; everywhere else the gate must stay off, and an
+        // inherited marker must not leak into a launch that has no prompt hook.
+        let gate = crate::worktree_consent::GATE_ENV;
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let inherited = vec![(gate.to_string(), "1".to_string())];
+
+        let claude = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        let runtime = ForegroundRuntime::start(&claude, Vec::new()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), Some("1"));
+
+        let mut unsafe_launch = claude.clone();
+        unsafe_launch.unsafe_mode = true;
+        let runtime = ForegroundRuntime::start(&unsafe_launch, inherited.clone()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
+
+        let codex = plan_in(ModelProvider::Codex, Backend::Codex, repo.path());
+        let runtime = ForegroundRuntime::start(&codex, inherited).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
     }
 
     // ── #1189: Claude status-line injection ────────────────────────────────
