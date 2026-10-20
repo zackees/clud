@@ -270,7 +270,9 @@ jobs:
       # could not have had.
       - name: Verify Windows wheel has no MinGW runtime imports
         if: ${{ contains(inputs.target, 'windows') && (inputs.bundle || inputs.wheel-artifact != '') }}
-        run: '"$VENV_PY" -m ci.check_windows_wheel --dist-dir dist/'
+        run: >
+          "$VENV_PY" -m ci.check_windows_wheel --dist-dir dist/
+          ${{ inputs.profile == 'release' && '--no-debug-symbols' || '' }}
 
       - name: Pack bundle
         if: ${{ inputs.bundle }}
