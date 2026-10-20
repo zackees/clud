@@ -591,6 +591,7 @@ dependencies = [
  "regex",
  "rodio",
  "running-process",
+ "same-file",
  "serde",
  "serde_json",
  "serde_yaml",
