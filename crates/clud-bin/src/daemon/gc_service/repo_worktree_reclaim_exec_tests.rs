@@ -124,3 +124,26 @@ fn reservation_rows_take_no_lock() {
         assert!(locks.map.lock().unwrap().is_empty());
     });
 }
+
+#[test]
+fn shared_cli_and_daemon_executor_spares_container_bound_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("precious"), "work").unwrap();
+    let job = job(&tmp.path().to_string_lossy(), &source.to_string_lossy());
+    let result = run_reclaim_with_guard(
+        &job,
+        &|_| panic!("a bound source must be spared before Git or network probes"),
+        &|| ProcessCwdSnapshot {
+            available: true,
+            cwds: Vec::new(),
+        },
+        &|_, _| Some("pinned: container bind references source tree"),
+    );
+    assert_eq!(
+        result,
+        ReclaimOutcome::Spared("pinned: container bind references source tree".into())
+    );
+    assert!(source.join("precious").exists());
+}

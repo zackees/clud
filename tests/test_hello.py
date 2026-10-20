@@ -1198,8 +1198,9 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert data["model_selection"]["model_source"] == "catalog_default"
     assert data["model_selection"]["effort_source"] == "catalog_default"
     assert data["command"][model_index + 1] == "clud-claude-codex-sol"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
     assert not any("terra" in arg or arg == "medium" for arg in data["command"])
 
 
@@ -1243,7 +1244,8 @@ def test_saved_codex_profile_overrides_sol_low_default(tmp_path: Path, harness: 
         assert 'model_reasoning_effort="high"' in data["command"]
     else:
         assert "clud-claude-codex-terra" in data["command"]
-        assert data["command"][data["command"].index("--effort") + 1] == "high"
+        settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+        assert settings["effortLevel"] == "high"
 
 
 def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> None:
@@ -1252,8 +1254,9 @@ def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> No
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["model_selection"]["effort"] == "low"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
 
 
 def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
@@ -1279,8 +1282,9 @@ def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
     assert data["model_selection"]["wire_model"] == "gpt-6-sol"
     model_index = data["command"].index("--model")
     assert data["command"][model_index + 1] == "clud-claude-codex-sol"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
 
 
 def test_dry_run_uses_global_harness_and_cli_can_override_it(tmp_path: Path) -> None:
@@ -2202,3 +2206,16 @@ def test_video_dry_run_loads_plugin_only_for_that_session() -> None:
 
     plain = _run("--dry-run", "-p", "hello")
     assert "--plugin-dir" not in json.loads(plain.stdout)["command"]
+
+
+def test_openrouter_deepseek_effort_works_without_claude_effort_flag() -> None:
+    result = _run(
+        "--dry-run", "--openrouter", "--model", "deepseek/deepseek-v4.1-flash",
+        "--effort", "low", "-p", "hello",
+    )
+    assert result.returncode == 0, result.stderr
+    command = json.loads(result.stdout)["command"]
+    assert "--effort" not in command
+    assert command[command.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings["effortLevel"] == "low"

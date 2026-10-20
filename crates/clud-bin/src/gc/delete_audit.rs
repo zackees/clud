@@ -19,8 +19,9 @@
 //! Synchronous append is deliberate, unlike the reaper log's buffering
 //! ([`crate::reap_log`]): deletions here are rare (daily sweeps), while a
 //! crash mid-deletion is exactly when the line matters most, so per-line
-//! flush cost buys durability where it counts. All errors are swallowed —
-//! auditing must never block or fail the sweep itself.
+//! flush cost buys durability where it counts. Cache sweeps retain
+//! best-effort logging. Source-tree removals use `record_required` and refuse
+//! to proceed if their audit record cannot be written and synced (#1790).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -34,7 +35,8 @@ pub const AUDIT_LOG_FILE: &str = "gc-audit.jsonl";
 
 /// Resolve `<state-dir>/gc-audit.jsonl`, honoring [`ENV_STATE_DIR`] the same
 /// way `daemon::paths::default_state_dir` does. `None` when no home dir can
-/// be resolved (headless/misconfigured env) — the sweep then runs unaudited.
+/// be resolved (headless/misconfigured env). Required source-removal audits
+/// refuse to proceed in that case.
 pub fn audit_log_path() -> Option<PathBuf> {
     let state_dir = match std::env::var(ENV_STATE_DIR) {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
@@ -64,6 +66,39 @@ pub fn record(site: &str, path: &Path, rule: &str) {
         return;
     };
     record_at(&log_path, site, path, rule);
+}
+
+/// Required audit for source-tree reclamation (#1790). Refuse the action
+/// if its evidence cannot be persisted; best-effort cache sweeps use `record`.
+pub(crate) fn record_required(site: &str, path: &Path, rule: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    let Some(log_path) = TEST_AUDIT_LOG.with(|cell| cell.borrow().clone()) else {
+        return Ok(());
+    };
+    #[cfg(not(test))]
+    let log_path = audit_log_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "GC audit path unavailable")
+    })?;
+    record_required_at(&log_path, site, path, rule)
+}
+
+fn record_required_at(log_path: &Path, site: &str, path: &Path, rule: &str) -> std::io::Result<()> {
+    let line = serde_json::json!({
+        "ts_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+        "event": "delete",
+        "site": site,
+        "path": path,
+        "rule": rule,
+    });
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    file.write_all(format!("{line}\n").as_bytes())?;
+    file.sync_data()
 }
 
 /// Testable core of [`record`] — appends one JSONL line synchronously.
@@ -158,6 +193,30 @@ mod tests {
         assert!(parsed["path"].as_str().unwrap().ends_with("target"));
         assert_eq!(parsed["rule"], "stale>14d");
         assert!(parsed["ts_ms"].as_u64().is_some());
+    }
+
+    #[test]
+    fn source_deletion_audit_must_be_durable_or_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("audit.jsonl");
+        record_required_at(
+            &log,
+            "gc.entry-delete",
+            Path::new("source"),
+            "verified clean",
+        )
+        .unwrap();
+        let data: Value = serde_json::from_str(fs::read_to_string(log).unwrap().trim()).unwrap();
+        assert_eq!(data["rule"], "verified clean");
+        let blocker = tmp.path().join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        assert!(record_required_at(
+            &blocker.join("audit"),
+            "gc.entry-delete",
+            tmp.path(),
+            "rule"
+        )
+        .is_err());
     }
 
     #[test]

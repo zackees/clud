@@ -237,17 +237,22 @@ accepted work.
 
 ## Harness application
 
+The launch plan retains the normalized `--effort` selection internally. Before
+spawning Claude, the runtime moves `low`, `medium`, `high`, and `xhigh` to the
+merged settings document and removes the flag, supporting clients that predate
+that CLI option. Dry runs render the same conversion. `max` retains its session
+flag because Claude settings do not accept it.
+
 - Native Claude receives its normalized wire model through `--model` and an
-  explicit effort through Claude Code's `--effort` session flag.
+  explicit ordinary effort through launch-scoped `effortLevel` settings.
 - Native Codex receives the wire model through `-m` and effort through
   the documented `model_reasoning_effort` config override.
 - Codex through Claude emits a registered `clud-claude-codex-*` discovery ID
-  and carries ordinary effort through Claude Code's independent `--effort`
-  session flag. The bridge still accepts `wire@effort` as a compatibility
+  and carries ordinary effort through launch-scoped `effortLevel` settings. The bridge still accepts `wire@effort` as a compatibility
   input; only the provider wire ID reaches OpenAI.
 - Direct DeepSeek keeps its reviewed no-override 1m child profile. Effort
-  defaults to the catalog's `low` and travels on Claude Code's `--effort`
-  session flag — an initial value, never a pinned `CLAUDE_CODE_EFFORT_LEVEL`,
+  defaults to the catalog's `low` and travels through launch-scoped
+  `effortLevel` settings — an initial value, never a pinned `CLAUDE_CODE_EFFORT_LEVEL`,
   so `/effort` stays live (DD-059). Explicit model, effort, and context
   selections replace only their corresponding child-profile values.
 - Direct OpenRouter uses the Claude harness with
