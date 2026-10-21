@@ -58,7 +58,10 @@ pub fn says_yes(prompt: &str) -> bool {
 
 fn consent_decision(prompt: &str) -> Option<bool> {
     let lower = prompt.to_lowercase();
-    lower.split(['.', '!', '?', ';', '\n']).rev().find_map(clause_decision)
+    lower
+        .split(['.', '!', '?', ';', '\n'])
+        .rev()
+        .find_map(clause_decision)
 }
 
 fn clause_decision(clause: &str) -> Option<bool> {
@@ -78,9 +81,13 @@ fn clause_decision(clause: &str) -> Option<bool> {
         if before.iter().chain(after).any(|word| is_negation(word)) {
             return Some(false);
         }
-        (before.iter().any(|word| ALLOW_BEFORE.contains(&word.as_str()))
-            || after.iter().any(|word| ALLOW_AFTER.contains(&word.as_str())))
-            .then_some(true)
+        (before
+            .iter()
+            .any(|word| ALLOW_BEFORE.contains(&word.as_str()))
+            || after
+                .iter()
+                .any(|word| ALLOW_AFTER.contains(&word.as_str())))
+        .then_some(true)
     })
 }
 
