@@ -295,6 +295,34 @@ is **an error**, not a fallback — there is no read-only path in v1
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc/cli.rs`).
 
+## Cached Rust target sizes (#1687)
+
+`clud gc list --targets` groups the conventional `target/` directories of
+known repository checkouts by repository. `--json` emits the snapshot's
+`checked_unix`, `stale`, `truncated`, and `rows` fields; each row names its
+repository, worktree, target path, byte count, and measurement status.
+This reporting path also works with `--no-daemon`: it reads the last snapshot
+without starting a daemon, running git, or walking a checkout.
+
+The existing `clud-gc-repo-worktree-probe` background thread discovers the
+checkouts and refreshes `target-sizes.json` in the daemon state directory.
+The scan shares a 200,000-entry budget across the snapshot and caps the
+snapshot at 2,000 worktrees and 4 MiB. Truncation and exhausted budgets are explicit.
+Root and nested symlinks are not followed. Counts are apparent file lengths,
+not physical disk usage; hardlinks in different trees may count twice.
+Only conventional per-checkout `target/` paths are included; an external
+`CARGO_TARGET_DIR` is not attributed to a checkout.
+
+Missing directories, incomplete scans and read errors have a null byte count,
+not a misleading zero. A timestamp older than six hours or more than five
+minutes in the future is marked stale. A missing snapshot produces an empty
+report; a corrupt snapshot reports an error. When repository probing is
+disabled, the saved report remains available but stops refreshing.
+
+Reporting neither registers deletion candidates nor changes the target sweep
+or worktree-reclamation verdicts. `gc::target_size_cache` owns the cache and
+reporting contract.
+
 ## Repo worktrees: squash-aware verdict (#1591) and reclaim (#1603)
 
 Sibling worktrees such as `~/dev/clud2-wt-<issue>` match none of the tracked

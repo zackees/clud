@@ -25,6 +25,7 @@ mod scanner;
 pub mod session_state;
 pub mod session_tmp;
 mod session_tmp_continuation;
+pub mod target_size_cache;
 pub mod target_sweep;
 pub mod uv_cache;
 #[cfg(test)]
