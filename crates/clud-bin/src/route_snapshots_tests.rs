@@ -78,6 +78,8 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         failover_allow_metered: false,
         allowed_models: Vec::new(),
         provider_only: Vec::new(),
+        zdr: false,
+        no_data_collection: false,
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
         route: None,

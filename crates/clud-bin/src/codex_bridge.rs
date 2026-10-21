@@ -245,10 +245,7 @@ impl UnifiedGatewayConfig {
             serde_json::from_slice(body).ok()?;
         document.insert(
             "provider".to_string(),
-            serde_json::json!({
-                "only": routing.only,
-                "allow_fallbacks": routing.allow_fallbacks,
-            }),
+            serde_json::to_value(routing).expect("routing contains only JSON values"),
         );
         serde_json::to_vec(&serde_json::Value::Object(document)).ok()
     }
@@ -4518,6 +4515,28 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    #[test]
+    fn unified_gateway_injects_the_complete_openrouter_privacy_policy() {
+        let policy = crate::route_plan::ProviderRouting {
+            only: Vec::new(),
+            allow_fallbacks: true,
+            zdr: true,
+            data_collection: Some("deny".to_string()),
+        };
+        let gateway =
+            UnifiedGatewayConfig::new(None, false).with_upstream_routing(Some(policy.clone()));
+        let request = br#"{"messages":[],"provider":{"zdr":false},"top_k":5}"#;
+        let bytes = gateway
+            .routed_body(ModelProvider::OpenRouter, request)
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["provider"], serde_json::to_value(policy).unwrap());
+        assert_eq!(body["top_k"], 5);
+        assert!(gateway
+            .routed_body(ModelProvider::Claude, request)
+            .is_none());
+    }
 
     /// Read timeout for the test client.
     ///

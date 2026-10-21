@@ -296,6 +296,10 @@ pub struct EffortPolicy {
 pub struct ProviderRouting {
     pub only: Vec<String>,
     pub allow_fallbacks: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zdr: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
 }
 
 /// Whether a launch check is meaningful for a route, and why not when it is
@@ -749,20 +753,15 @@ fn provider_only_verdict(route: &ResolvedRoute) -> CheckVerdict {
     let backend = route.backend;
     let openrouter = route.provider == ModelProvider::OpenRouter;
     let applicability = if route.upstream_routing.is_none() {
-        Applicability::NotApplicable("no --provider-only slugs on this launch".to_string())
-    } else if matches!(
-        backend,
-        RouteBackend::CodexBridge | RouteBackend::DeepSeekNative
-    ) {
+        Applicability::NotApplicable("no OpenRouter routing flags on this launch".to_string())
+    } else if !openrouter || !matches!(backend, RouteBackend::Direct | RouteBackend::Unified) {
         Applicability::Unsupported(
-            "--provider-only applies only to an OpenRouter launch clud routes".to_string(),
+            "--provider-only, --zdr and --no-data-collection apply only to an OpenRouter \
+             launch clud routes"
+                .to_string(),
         )
-    } else if openrouter {
-        Applicability::Applies
     } else {
-        Applicability::NotApplicable(
-            "only OpenRouter publishes an upstream routing object".to_string(),
-        )
+        Applicability::Applies
     };
     let refusal = match &applicability {
         Applicability::Unsupported(reason) => Some(reason.clone()),
@@ -1048,7 +1047,7 @@ pub fn resolve_with_catalog(
                     )
                 }),
         },
-        upstream_routing: provider_routing(provider, &plan.provider_only),
+        upstream_routing: provider_routing(plan),
         timeout_ms: match backend {
             RouteBackend::Direct => DIRECT_TIMEOUT_MS.parse().ok(),
             RouteBackend::Unified | RouteBackend::CodexBridge => BRIDGE_TIMEOUT_MS.parse().ok(),
@@ -1412,17 +1411,19 @@ pub fn render_dsh(route: &ResolvedRoute) -> DshRender {
 
 /// OpenRouter's upstream routing object, when the launch asked for one.
 /// Validation of the slugs themselves stays where the refusal is printed.
-fn provider_routing(provider: ModelProvider, slugs: &[String]) -> Option<ProviderRouting> {
+pub(crate) fn provider_routing(plan: &LaunchPlan) -> Option<ProviderRouting> {
+    let slugs = &plan.provider_only;
     // The route records what the launch *asked* for, so a launch check can
     // classify it on every backend. Only OpenRouter can receive the object,
     // and the `provider_only` check refuses the rest before they launch.
-    let _ = provider;
-    if slugs.is_empty() {
+    if slugs.is_empty() && !plan.zdr && !plan.no_data_collection {
         return None;
     }
     Some(ProviderRouting {
         only: slugs.to_vec(),
-        allow_fallbacks: false,
+        allow_fallbacks: slugs.is_empty(),
+        zdr: plan.zdr,
+        data_collection: plan.no_data_collection.then(|| "deny".to_string()),
     })
 }
 

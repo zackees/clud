@@ -139,6 +139,14 @@ pub struct Args {
     #[arg(long = "provider-only", value_name = "PROVIDER", action = ArgAction::Append)]
     pub provider_only: Vec<String>,
 
+    /// OpenRouter only: restrict routing to zero-data-retention endpoints.
+    #[arg(long)]
+    pub zdr: bool,
+
+    /// OpenRouter only: exclude endpoints that collect request data.
+    #[arg(long)]
+    pub no_data_collection: bool,
+
     /// Reasoning effort, kept independent from the selected model.
     #[arg(long = "effort")]
     pub effort: Option<String>,
@@ -1683,6 +1691,8 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     let value_flags: &[&str] = SPLITTER_VALUE_FLAGS;
     let short_value_flags: &[&str] = SPLITTER_SHORT_VALUE_FLAGS;
     let bool_flags: &[&str] = &[
+        "--zdr",
+        "--no-data-collection",
         "--installer",
         "--install-current",
         "--continue",
