@@ -49,29 +49,52 @@ fn wait_for_terminal(process: &NativePtyProcess) -> ProcessIdentity {
         }) {
             return terminal.identity();
         }
-        assert!(Instant::now() < deadline, "no opened cmd.exe: {}", String::from_utf8_lossy(&output));
+        assert!(
+            Instant::now() < deadline,
+            "no opened cmd.exe: {}",
+            String::from_utf8_lossy(&output)
+        );
     }
 }
 
-#[test]
-fn start_cmd_survives_pty_close_and_foreground_cleanup() {
-    require_pty_or_skip!("start_cmd_survives_pty_close_and_foreground_cleanup");
+fn check_started_terminal(request: &str) {
     let temp = tempfile::tempdir().unwrap();
-    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(running_process::DAEMON_MARKER_ENV_VAR))
+        .collect();
     let overrides = clud::shell::nounset::env_overrides_at(temp.path(), false, None);
     let originator = format!("CLUD:{}", std::process::id());
     for (key, value) in overrides.into_iter().chain([
-        ("CLUD_EXE".to_string(), crate::exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud")).display().to_string()),
-        (running_process::ORIGINATOR_ENV_VAR.to_string(), originator),
+        (
+            "CLUD_EXE".to_string(),
+            crate::exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud"))
+                .display()
+                .to_string(),
+        ),
+        (
+            running_process::ORIGINATOR_ENV_VAR.to_string(),
+            originator,
+        ),
         ("MSYS2_ARG_CONV_EXCL".to_string(), "*".to_string()),
     ]) {
         env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
         env.push((key, value));
     }
     let process = NativePtyProcess::new(
-        vec![git_bash().display().to_string(), "--noprofile".into(), "--norc".into(), "-c".into(), "start cmd.exe; printf 'START_REQUESTED\\n'; read -r".into()],
-        None, Some(env), 24, 80, None,
-    ).unwrap();
+        vec![
+            git_bash().display().to_string(),
+            "--noprofile".into(),
+            "--norc".into(),
+            "-c".into(),
+            format!("start {request}; printf 'START_REQUESTED\\n'; read -r"),
+        ],
+        None,
+        Some(env),
+        24,
+        80,
+        None,
+    )
+    .unwrap();
     process.set_echo(false);
     let mut fixture = Fixture {
         process,
@@ -79,16 +102,40 @@ fn start_cmd_survives_pty_close_and_foreground_cleanup() {
         terminal: None,
     };
     fixture.process.start_impl().unwrap();
-    fixture.tracker.as_ref().unwrap().register_backend(fixture.process.pid().unwrap().unwrap(), "bash.exe");
+    fixture.tracker.as_ref().unwrap().register_backend(
+        fixture.process.pid().unwrap().unwrap(),
+        "bash.exe",
+    );
     let terminal = wait_for_terminal(&fixture.process);
     fixture.terminal = Some(terminal);
     fixture.process.close_impl().unwrap();
     drop(fixture.tracker.take());
-    assert!(terminal.is_live(), "explicitly opened Command Prompt died with clud cleanup");
-    let facts = clud::reaper_facts::collect_host_facts(&[terminal.pid], &Default::default(), Vec::new());
+    assert!(
+        terminal.is_live(),
+        "explicitly opened Command Prompt died with clud cleanup"
+    );
+    let facts = clud::reaper_facts::collect_host_facts(
+        &[terminal.pid],
+        &Default::default(),
+        Vec::new(),
+    );
     // The explicit launch must also declare persistence for later orphan sweeps.
     let scan = clud::process_scan::scan_env("CLUD");
     assert!(scan.declared_daemons.contains(&terminal.pid));
-    let facts = clud::reaper_facts::FactsSnapshot { declared_daemons: scan.declared_daemons, ..facts };
-    assert_eq!(clud::reaper_facts::spare_signal(&facts, terminal.pid, "cmd.exe"), Some(clud::reaper_facts::SpareReason::DeclaredDaemon));
+    let facts = clud::reaper_facts::FactsSnapshot {
+        declared_daemons: scan.declared_daemons,
+        ..facts
+    };
+    assert_eq!(
+        clud::reaper_facts::spare_signal(&facts, terminal.pid, "cmd.exe"),
+        Some(clud::reaper_facts::SpareReason::DeclaredDaemon)
+    );
+}
+
+#[test]
+fn start_cmd_survives_pty_close_and_foreground_cleanup() {
+    require_pty_or_skip!("start_cmd_survives_pty_close_and_foreground_cleanup");
+    for request in ["cmd", "cmd.exe"] {
+        check_started_terminal(request);
+    }
 }
