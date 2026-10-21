@@ -40,15 +40,31 @@ pub(super) fn collect_live_lock_paths() -> HashSet<String> {
 /// Filesystem-only half of removing one tracked entry. Used by both
 /// the synchronous path (`DeleteById`) and the parallel purge pool
 /// (`PurgeJob`). Safe to call from any thread — does not touch redb.
-pub(super) fn remove_entry_filesystem(entry: &TrackedEntry) -> Result<(), String> {
+pub(super) fn remove_entry_filesystem(entry: &TrackedEntry, evidence: &str) -> Result<(), String> {
+    remove_entry_filesystem_with_git(entry, evidence, &worktrees::run_git)
+}
+
+fn remove_entry_filesystem_with_git<F>(
+    entry: &TrackedEntry,
+    evidence: &str,
+    git: &F,
+) -> Result<(), String>
+where
+    F: Fn(&Path, &[&str]) -> Result<String, String>,
+{
     // Audit before acting (#893): the entry path is user data by definition
     // (it is in the registry), so the line names the kind that authorized it.
-    crate::gc::delete_audit::record("gc.entry-delete", Path::new(&entry.path), &entry.kind);
+    crate::gc::delete_audit::record_required(
+        "gc.entry-delete",
+        Path::new(&entry.path),
+        &format!("kind={} registry_id={} {evidence}", entry.kind, entry.id),
+    )
+    .map_err(|error| format!("refusing unaudited deletion: {error}"))?;
     if entry.kind == "worktree" {
         let main_root = entry.repo_root.clone().unwrap_or_else(|| ".".to_string());
-        let _ =
-            worktrees::remove_worktree_path(Path::new(&main_root), Path::new(&entry.path), true)?;
-        Ok(())
+        // Git is the final independent dirty-tree guard. Never force or
+        // fall back to recursive deletion after Git refuses the removal.
+        git(Path::new(&main_root), &["worktree", "remove", &entry.path]).map(|_| ())
     } else if entry.kind == "trash" {
         std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())
     } else {
@@ -69,7 +85,7 @@ pub(super) fn remove_entry_and_delete_row(
     registry: &Registry,
     entry: &TrackedEntry,
 ) -> Result<(), String> {
-    remove_entry_filesystem(entry)?;
+    remove_entry_filesystem(entry, "explicit DeleteById; live-session guard passed")?;
     registry.delete(entry.id).map_err(|e| e.to_string())
 }
 
@@ -148,4 +164,65 @@ pub(super) fn reap_unregistered_rm_trash(trash_root: &Path, now: std::time::Syst
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gc::delete_audit::{StateDirGuard, AUDIT_LOG_FILE};
+    use crate::gc::InsertInput;
+
+    #[test]
+    fn git_refusal_never_falls_back_to_recursive_source_deletion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("new-work"), "changed after probe").unwrap();
+        let entry = TrackedEntry {
+            id: 1,
+            kind: "worktree".into(),
+            path: source.to_string_lossy().into_owned(),
+            repo_root: Some(tmp.path().to_string_lossy().into_owned()),
+            branch: None,
+            agent_id: None,
+            created_unix: 0,
+        };
+        let result = remove_entry_filesystem_with_git(
+            &entry,
+            "verified before concurrent edit",
+            &|_, args| {
+                assert_eq!(args, &["worktree", "remove", entry.path.as_str()]);
+                Err("worktree became dirty".into())
+            },
+        );
+        assert_eq!(result, Err("worktree became dirty".into()));
+        assert!(source.join("new-work").exists());
+    }
+
+    #[test]
+    fn failed_required_audit_preserves_source_and_registry_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(state.join(AUDIT_LOG_FILE)).unwrap();
+        let _guard = StateDirGuard::set(&state);
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("work"), "unpushed").unwrap();
+        let registry = Registry::open_at(&tmp.path().join("registry.redb")).unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "extern-repo".into(),
+                path: source.to_string_lossy().into_owned(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                now_unix: 0,
+            })
+            .unwrap();
+        let entry = registry.list(None).unwrap().pop().unwrap();
+        let error = remove_entry_and_delete_row(&registry, &entry).unwrap_err();
+        assert!(error.contains("refusing unaudited deletion"));
+        assert!(source.join("work").exists());
+        assert_eq!(registry.list(None).unwrap().len(), 1);
+    }
 }

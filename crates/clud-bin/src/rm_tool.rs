@@ -816,7 +816,7 @@ pub fn resolve(
 
 /// `path` with its deepest existing ancestor canonicalized and the missing
 /// components re-appended, so it compares against the canonical roots.
-fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     let mut tail = Vec::new();
     let mut ancestor = path;
     loop {
