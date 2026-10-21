@@ -1,6 +1,5 @@
 use super::extern_repo::PurgeClass;
 use super::*;
-use crate::gc::ENV_DATA_DB;
 use std::ffi::OsString;
 use std::fs;
 use std::sync::Mutex;
@@ -11,8 +10,8 @@ mod parallel;
 mod policy;
 use policy::{restore_env_var, spawn_test_worker};
 
-// ENV_DATA_DB is process-global; serialize so two test threads
-// never race to open the same redb file concurrently.
+// Serializes the tests in this module that share process-global state
+// (env vars such as the GC tick and purge settings).
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn spawn_test_worker_with_tick(
@@ -23,14 +22,18 @@ fn spawn_test_worker_with_tick(
     std::sync::MutexGuard<'static, ()>,
 ) {
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prior_db = std::env::var_os(ENV_DATA_DB);
-    let prior_tick = std::env::var_os(ENV_GC_TICK_SECS);
-    std::env::set_var(ENV_DATA_DB, db_path);
-    std::env::set_var(ENV_GC_TICK_SECS, tick_secs);
-    let tx = spawn_registry_worker();
-    restore_env_var(ENV_GC_TICK_SECS, prior_tick);
-    restore_env_var(ENV_DATA_DB, prior_db);
-    let tx = tx.unwrap();
+    // Bind the worker to this test's file directly: a process-global
+    // `CLUD_DATA_DB` set here can be swapped by any other test thread
+    // between the set and the open ("Database already open").
+    let registry = Registry::open_at(db_path).expect("open registry");
+    let tx = spawn_registry_worker_with_live_cwds_and_cadence(
+        registry,
+        Arc::new(Vec::<PathBuf>::new),
+        gc_tick_cadence_from_raw(Some(tick_secs)),
+        None,
+        None,
+    )
+    .expect("spawn registry worker");
     (tx, guard)
 }
 
@@ -651,7 +654,7 @@ fn purge_skips_entry_that_is_ancestor_of_live_session_cwd() {
 }
 
 #[test]
-fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
+fn periodic_tick_spares_unverified_source_when_free_space_low() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("periodic-purge.redb");
     let registry = Registry::open_at(&db_path).unwrap();
@@ -708,12 +711,9 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
             },
         },
     );
-    // The two seeded entries — one worktree, one sibling clone — are both
-    // old enough and both under a low-space root, so the tick must dispatch
-    // exactly two jobs. Asserting this separately keeps the wait below
-    // honest: without it, a tick that dispatched nothing would "satisfy"
-    // zero completions and the teardown assertions would be vacuous.
-    assert_eq!(dispatched, 2, "tick should dispatch both stale entries");
+    // #1790: the unverified sibling clone has no cached Git verdict and
+    // must survive disk pressure. Only the worktree is dispatched.
+    assert_eq!(dispatched, 1, "unverified sibling must not be dispatched");
 
     // Outside the worker loop the test plays the role of the
     // registry-writer thread: apply the pool's completion callbacks to redb
@@ -728,10 +728,16 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         Duration::from_secs(30),
     );
 
-    assert!(registry.list(Some(WORKTREE_KIND)).unwrap().is_empty());
-    assert!(registry.list(Some(SIBLING_CLONE_KIND)).unwrap().is_empty());
-    assert!(!old_path.exists());
-    assert!(!old_sibling.exists());
+    assert_eq!(registry.list(Some(WORKTREE_KIND)).unwrap().len(), 1);
+    assert_eq!(registry.list(Some(SIBLING_CLONE_KIND)).unwrap().len(), 1);
+    assert!(
+        old_path.exists(),
+        "unverified worktree must survive disk pressure"
+    );
+    assert!(
+        old_sibling.exists(),
+        "unverified nested contents must survive"
+    );
 }
 
 #[test]
@@ -905,6 +911,20 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
     let db_path = dir.path().join("extern-purge.redb");
     let repo = dir.path().join("extern");
     fs::create_dir_all(&repo).unwrap();
+    // Real, fully pushed source: the positive reclaim case must remain
+    // possible after unknown container directories become pinned (#1790).
+    let git = |cwd: &Path, args: &[&str]| crate::worktrees::run_git(cwd, args).unwrap();
+    git(dir.path(), &["init", "--bare", "upstream.git"]);
+    git(&repo, &["init", "--initial-branch=main"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "test"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    git(&repo, &["config", "core.hooksPath", ""]);
+    fs::write(repo.join("source.txt"), "published source").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "published"]);
+    git(&repo, &["remote", "add", "origin", "../upstream.git"]);
+    git(&repo, &["push", "-u", "origin", "main"]);
 
     let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
 
@@ -1207,10 +1227,13 @@ fn a_stale_reclaimable_verdict_does_not_authorize_a_delete() {
     );
     assert!(repo.exists());
 
-    // With a zero window it is idle and not a git checkout, so the verdict
-    // authorizes the delete and the re-check does not veto it.
+    // #1790: a non-checkout remains unverified even with a zero idle window;
+    // its nested contents must never be deleted on mtime alone.
     let _age0 = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
-    assert_eq!(reverify_before_delete(&entry), None);
+    assert_eq!(
+        reverify_before_delete(&entry),
+        Some("pinned: not a verified git checkout")
+    );
 }
 
 /// End-to-end guard for the same hazard: the *pool* must apply the re-check,
@@ -1288,17 +1311,27 @@ fn the_purge_pool_refuses_a_delete_the_recheck_vetoes() {
 
 /// Other kinds have no probe verdict and are unaffected by the re-check.
 #[test]
-fn reverify_only_applies_to_extern_repo_rows() {
+fn tracked_worktree_reverification_checks_source_references() {
+    let tmp = tempfile::tempdir().unwrap();
     let entry = TrackedEntry {
         id: 1,
         kind: WORKTREE_KIND.to_string(),
-        path: "/nonexistent/whatever".to_string(),
+        path: tmp.path().to_string_lossy().into_owned(),
         repo_root: None,
         branch: None,
         agent_id: None,
         created_unix: 0,
     };
-    assert_eq!(reverify_before_delete(&entry), None);
+    assert_eq!(
+        reverify_before_delete_with(&entry, &|_| Some(
+            "pinned: container bind references source tree"
+        )),
+        Some("pinned: container bind references source tree")
+    );
+    assert_eq!(
+        reverify_before_delete_with(&entry, &|_| None),
+        Some("pinned: not a verified git checkout")
+    );
 }
 
 /// A second probe must not stack on top of one already running: it would

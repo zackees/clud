@@ -5573,6 +5573,30 @@ Connection: close
         );
     }
 
+    #[test]
+    fn sol_6_1_picker_and_wire_ids_reach_codex_without_a_launch_pin() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let catalog = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert!(catalog.contains("clud-claude-codex-sol-6-1"), "{catalog}");
+        for selector in ["gpt-6.1-sol", "codex-sol-6.1", "clud-claude-codex-sol-6-1"] {
+            let body = PROBE_BODY.replace("claude-x", &format!("{selector}@high"));
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+            );
+            assert_eq!(status(&response), 200, "{selector}: {response}");
+            let captured = upstream.requests().pop().unwrap();
+            let sent: serde_json::Value = serde_json::from_str(captured_body(&captured)).unwrap();
+            assert_eq!(sent["model"], "gpt-6.1-sol");
+            assert_eq!(sent["reasoning"]["effort"], "high");
+        }
+        assert_eq!(upstream.requests().len(), 3);
+    }
+
     /// Issue #1022: an uncataloged full ID the user pinned at launch reaches
     /// upstream verbatim.
     ///
@@ -6229,6 +6253,7 @@ Connection: close
                 "clud-claude-codex-sol",
                 "clud-claude-codex-terra",
                 "clud-claude-codex-luna",
+                "clud-claude-codex-sol-6-1",
                 "clud-claude-deepseek-v4-pro-0813",
                 "clud-claude-deepseek-flash",
             ],
@@ -6242,6 +6267,7 @@ Connection: close
                 "Codex Sol (OpenAI)",
                 "Codex Terra (OpenAI)",
                 "Codex Luna (OpenAI)",
+                "Codex Sol 6.1 (OpenAI)",
                 "DeepSeek V4 Pro 0813",
                 "DeepSeek V4.1 Flash",
             ]
@@ -6302,7 +6328,7 @@ Connection: close
         clippy::cognitive_complexity,
         reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
     )]
-    fn unified_routes_all_five_ids_with_provider_credential_isolation() {
+    fn unified_routes_all_six_ids_with_provider_credential_isolation() {
         let codex = FakeResponses::start();
         let claude = FakeResponses::start();
         let deepseek = FakeResponses::start();
@@ -6329,6 +6355,7 @@ Connection: close
             "clud-claude-codex-sol",
             "clud-claude-codex-terra",
             "clud-claude-codex-luna",
+            "clud-claude-codex-sol-6-1",
             "clud-claude-deepseek-v4-pro-0813",
             "clud-claude-deepseek-flash",
         ] {
@@ -6355,11 +6382,11 @@ Connection: close
         assert!(!claude_request.contains("clud-test-upstream-key"));
 
         let codex_requests = codex.requests();
-        assert_eq!(codex_requests.len(), 3);
+        assert_eq!(codex_requests.len(), 4);
         for (raw, wire_id) in
             codex_requests
                 .iter()
-                .zip(["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna"])
+                .zip(["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-6.1-sol"])
         {
             assert!(raw.starts_with("POST /v1/responses "));
             assert!(raw.contains(wire_id), "{raw}");
@@ -8301,13 +8328,30 @@ Connection: close
             "listener shutdown must tear down a queued socket: {queued_result:?}"
         );
         bridge.shutdown().unwrap();
-        assert!(TcpStream::connect(addr).is_err());
 
-        let addr_after_drop = {
+        // Probing a released ephemeral port is racy: a test running in
+        // parallel can bind it, so the connect succeeds (#1929). Prove drop
+        // closes the listener through a socket it had already accepted.
+        let mut held = {
             let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
-            bridge.socket_addr()
+            TcpStream::connect(bridge.socket_addr()).unwrap()
         };
-        assert!(TcpStream::connect(addr_after_drop).is_err());
+        // macOS refuses setsockopt with EINVAL once the peer has already
+        // closed the socket; the read below still observes the close.
+        let _ = held.set_read_timeout(Some(Duration::from_secs(5)));
+        let held_result = held.read(&mut byte);
+        assert!(
+            matches!(held_result, Ok(0))
+                || held_result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                    )
+                }),
+            "dropping the bridge must close its sockets: {held_result:?}"
+        );
     }
 
     #[test]

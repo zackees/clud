@@ -905,6 +905,30 @@ fn unsafe_launch_omits_clud_deletion_instructions_for_both_harnesses() {
         .any(|value| value.contains("keep my instructions")));
 }
 
+#[test]
+fn codex_config_long_form_developer_instructions_are_merged() {
+    for passthrough in [
+        &["--config", "developer_instructions=\"be terse\""][..],
+        &["--config=developer_instructions=\"be terse\""][..],
+    ] {
+        let mut raw = vec!["clud", "--codex", "--"];
+        raw.extend_from_slice(passthrough);
+        let p = plan(&raw);
+        let overrides: Vec<&String> = p
+            .command
+            .iter()
+            .filter(|arg| arg.contains("developer_instructions"))
+            .collect();
+        assert_eq!(overrides.len(), 1, "{passthrough:?}: {overrides:?}");
+        let merged = codex_config_values(&p)
+            .into_iter()
+            .find(|value| value.starts_with("developer_instructions="))
+            .expect("clud's developer_instructions override");
+        assert!(merged.contains("be terse"), "{merged}");
+        assert!(merged.len() > "developer_instructions=\"be terse\"".len() + 40);
+    }
+}
+
 /// (DD-086). `cargo test` may or may not have a terminal, so ask.
 fn console_launch_mode() -> LaunchMode {
     if crate::session::terminals_are_interactive() {

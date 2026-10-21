@@ -376,6 +376,13 @@ fn deepseek_harness_accepts_model_only_when_clud_routes_the_model() {
 }
 
 #[test]
+fn doctor_is_a_dispatched_subcommand() {
+    let args = parse(&["clud", "doctor"]);
+    assert!(matches!(args.command, Some(Command::Doctor)));
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
 fn dsh_update_is_a_dispatched_subcommand() {
     let args = parse(&["clud", "dsh-update"]);
     assert!(matches!(args.command, Some(Command::DshUpdate)));
@@ -1006,6 +1013,31 @@ fn bare_resume_gives_registered_builtins_precedence_over_optional_session_value(
     let short = parse(&["clud", "--codex", "-r", "do", "README.md"]);
     assert_eq!(short.resume, Some(None));
     assert!(matches!(short.command, Some(Command::Do { .. })));
+}
+
+#[test]
+fn inline_key_split_survives_value_named_like_subcommand() {
+    let args = parse(&[
+        "clud",
+        "--name",
+        "test",
+        "--deepseek=sk-0123456789abcdefghij",
+    ]);
+    assert!(args.deepseek);
+    assert_eq!(args.session_name.as_deref(), Some("test"));
+    assert!(args.passthrough.is_empty(), "{:?}", args.passthrough);
+}
+
+#[test]
+fn bare_resume_does_not_swallow_following_flag() {
+    let long = parse(&["clud", "--resume", "--model", "opus"]);
+    assert_eq!(long.resume, Some(None));
+    assert_eq!(long.model.as_deref(), Some("opus"));
+    assert!(long.passthrough.is_empty(), "{:?}", long.passthrough);
+    let short = parse(&["clud", "-r", "-p", "hi"]);
+    assert_eq!(short.resume, Some(None));
+    assert_eq!(short.prompt.as_deref(), Some("hi"));
+    assert!(short.passthrough.is_empty(), "{:?}", short.passthrough);
 }
 
 #[test]

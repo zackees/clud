@@ -32,6 +32,11 @@ fn identity(root: &Path) {
     run_git(root, &["config", "user.name", "t"]);
     run_git(root, &["config", "commit.gpgsign", "false"]);
     run_git(root, &["config", "core.hooksPath", ""]);
+    // A commit may start auto-maintenance as a detached process (git 2.46+)
+    // that is still inside a worktree when the reclaim runs, so it is spared
+    // as "process inside" and the test flakes.
+    run_git(root, &["config", "maintenance.auto", "false"]);
+    run_git(root, &["config", "gc.auto", "0"]);
 }
 
 fn commit_file(dir: &Path, name: &str, body: &str, msg: &str) {
@@ -326,7 +331,7 @@ fn observe_mode_never_dispatches() {
     assert!(wt.exists());
 }
 
-/// Issue #1485: worktrees under a (tempdir) `tmp-wt` root are probed even
+/// Issue #1485: worktrees under a (tempdir) `worktrees` root are probed even
 /// when their repo was never visited, a squash-merged one and an
 /// abandoned-empty one past the 24 h grace are reclaimed, a fresh empty one
 /// is spared as `grace`, a dirty sibling survives, and the root itself is
@@ -351,7 +356,7 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
     );
     identity(&repo);
 
-    // A fake clud home: `<home>/.clud/tmp-wt`, never the real one.
+    // A fake clud home: `<home>/.clud/worktrees`, never the real one.
     let wt_root = crate::gc::worktree_root::ensure_worktree_root_at(&root.join("home")).unwrap();
     let merged = wt_root.join("repo-wt-merged");
     let empty_old = wt_root.join("repo-wt-empty-old");
@@ -381,7 +386,7 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
     )
     .unwrap();
 
-    // No record_repo_visit: the tmp-wt children alone seed the probe.
+    // No record_repo_visit: the worktrees children alone seed the probe.
     let registry = Registry::open_at(&root.join("gc.redb")).unwrap();
     let pool_tx = spawn_purge_pool(2);
     let (completion_tx, rx) = mpsc::channel::<RegistryMsg>();
@@ -446,12 +451,12 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
     }
     assert!(
         wt_root.is_dir(),
-        "the tmp-wt root is never a removal target"
+        "the worktrees root is never a removal target"
     );
 }
 
 /// Issue #1486: an `alloc_wt_path` reservation nobody used is an empty,
-/// non-git `tmp-wt` child. Past the 24 h grace a real tick removes it as
+/// non-git `worktrees` child. Past the 24 h grace a real tick removes it as
 /// `reserved-unused`; a fresh one is spared as `grace`; an old one that holds
 /// a file is spared as `not empty` and never deleted; and one that gains a
 /// file between the probe and the delete is spared by the pool's re-check.

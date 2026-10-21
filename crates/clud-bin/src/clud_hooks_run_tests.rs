@@ -255,9 +255,16 @@ fn a_hook_that_overruns_its_timeout_fails_open() {
     let root = tmp.path();
     let body = "import time\ntime.sleep(30)\n";
 
-    let outcome = run(&[entry(python_hook(root, "slow.py", body), 1)], root, "{}");
+    let started = std::time::Instant::now();
+    let outcome = run(&[entry(python_hook(root, "slow.py", body), 2)], root, "{}");
+    let elapsed = started.elapsed();
 
     assert_eq!(outcome.deny_reason, None, "a slow guard is not a wall");
+    // #1908: the timeout is one budget, not one for draining plus one for waiting.
+    assert!(
+        elapsed < std::time::Duration::from_millis(3500),
+        "{elapsed:?}"
+    );
     assert!(
         outcome
             .log_messages

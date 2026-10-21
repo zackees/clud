@@ -36,7 +36,11 @@ def _workflow_text() -> str:
 
 
 def test_dylint_stack_versions_stay_in_lockstep() -> None:
-    assert [p.name for p in LINT_DIRS] == ["ban_dirs_home_dir", "ban_manual_slash_normalize"]
+    assert [p.name for p in LINT_DIRS] == [
+        "ban_dirs_home_dir",
+        "ban_manual_slash_normalize",
+        "enforce_platform_boundary",
+    ]
     for lint_dir in LINT_DIRS:
         assert not (lint_dir / "rust-toolchain.toml").exists(), lint_dir
         assert (lint_dir / "rust-toolchain").exists(), lint_dir

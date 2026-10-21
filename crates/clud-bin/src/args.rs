@@ -550,6 +550,10 @@ pub enum Command {
     CodexUpdate,
     /// Install or confirm DeepSeek Harness in clud's private npm prefix.
     DshUpdate,
+    /// Report hook and alias health: stale or retired aliases in clud's own
+    /// alias dirs, a foreign `clud-cmd-scan` first on PATH, and the hook
+    /// matcher's tool coverage (#1954). Exits 1 when anything is wrong.
+    Doctor,
     /// Run a CI job locally under bosn and show only the verdict and the
     /// failing steps' diagnostics (#1839).
     Ci {
@@ -858,7 +862,7 @@ pub enum Command {
             value_parser = clap::value_parser!(bool),
         )]
         use_soldr_shims: bool,
-        /// soldr release version to install and persist.
+        /// Ignored with a warning: soldr cannot be pinned and always follows latest.
         #[arg(long = "soldr-version", default_value = "latest")]
         soldr_version: String,
     },
@@ -1437,6 +1441,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "models",
     "codex-update",
     "dsh-update",
+    "doctor",
     "ci",
     "codex-auth",
     "deepseek-auth",
@@ -1549,23 +1554,37 @@ fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
 /// registered subcommands precedence by spelling a bare resume as an explicit
 /// empty value for clap, then normalize that empty value back to `Some(None)`.
 /// A session actually named like a subcommand remains addressable with
-/// `--resume=<session>`.
+/// `--resume=<session>`. A following flag (`--resume --model opus`) is never a
+/// session id either, so it gets the same treatment; otherwise the splitter
+/// would take the flag as resume's value (#1899).
 fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     let mut normalized = raw.to_vec();
+    let mut skip_value = false;
     for i in 1..raw.len() {
         let arg = raw[i].as_str();
+        let consumes_next = takes_next_value(arg) && !matches!(arg, "--resume" | "-r");
+        if std::mem::replace(&mut skip_value, consumes_next) {
+            continue;
+        }
         if arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg) {
             break;
         }
         if matches!(arg, "--resume" | "-r")
-            && raw
-                .get(i + 1)
-                .is_some_and(|next| TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str()))
+            && raw.get(i + 1).is_some_and(|next| {
+                TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str())
+                    || (next.starts_with('-') && next.len() > 1)
+            })
         {
             normalized[i] = "--resume=".to_string();
         }
     }
     normalized
+}
+
+/// True when `arg` is a clud value flag spelled without `=`, so the next token
+/// is its value rather than a flag or subcommand.
+fn takes_next_value(arg: &str) -> bool {
+    SPLITTER_VALUE_FLAGS.contains(&arg) || SPLITTER_SHORT_VALUE_FLAGS.contains(&arg)
 }
 
 /// Provider flags that accept an inline API key.
@@ -1581,9 +1600,14 @@ const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrout
 fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
     let mut normalized = Vec::with_capacity(raw.len() + 1);
     let mut in_clud_flags = true;
+    let mut skip_value = false;
     for (index, arg) in raw.iter().enumerate() {
-        if index > 0 && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str())) {
+        // A value flag's value (`--name test`) is never a subcommand (#1900).
+        let is_value = std::mem::replace(&mut skip_value, in_clud_flags && takes_next_value(arg));
+        if index > 0 && !is_value && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str()))
+        {
             in_clud_flags = false;
+            skip_value = false;
         }
         let assignment = arg.split_once('=').filter(|(flag, _)| {
             in_clud_flags && index > 0 && INLINE_KEY_PROVIDER_FLAGS.contains(flag)

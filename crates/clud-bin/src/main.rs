@@ -315,6 +315,13 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             workflow: workflow.clone(),
             json: *json,
         }),
+        args::Command::Doctor => {
+            if !args.passthrough.is_empty() {
+                eprintln!("doctor accepts no passthrough arguments");
+                return Some(2);
+            }
+            clud::doctor::run()
+        }
         args::Command::DshUpdate => {
             if !args.passthrough.is_empty() {
                 eprintln!("dsh-update accepts no passthrough arguments");
@@ -1766,7 +1773,7 @@ fn emit_launch_notices(args: &args::Args, launch_target: backend::ResolvedLaunch
         eprintln!("{notice}");
     }
 
-    // Issue #1610: tmp-wt size warning from the daemon's cached walk. Reads
+    // Issue #1610: worktrees size warning from the daemon's cached walk. Reads
     // one small file; no walk, no daemon round trip, silent on any failure.
     if let Some(line) = gc::worktree_size_cache::launch_warning() {
         eprintln!("{line}");

@@ -1,208 +1,57 @@
+//! The scanner's view of a command: parsed and evaluated by `shell_ast`
+//! (#1962). Rules read [`Invocation`]s; nothing here splits text by hand.
+
 use super::*;
+use crate::shell_ast::{self, BaseEnv, Dialect, Invocation, Script};
 
-pub(super) fn split_pipeline_groups(command_text: &str, dialect: ShellDialect) -> Vec<Vec<String>> {
-    let chars = command_text.chars().collect::<Vec<_>>();
-    let mut groups = Vec::new();
-    let mut group = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    let mut i = 0usize;
-
-    let push_stage = |buf: &mut String, group: &mut Vec<String>| {
-        let stage = buf.trim();
-        if !stage.is_empty() {
-            group.push(stage.to_string());
-        }
-        buf.clear();
-    };
-    let push_group = |group: &mut Vec<String>, groups: &mut Vec<Vec<String>>| {
-        if !group.is_empty() {
-            groups.push(std::mem::take(group));
-        }
-    };
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if let Some(q) = quote {
-            buf.push(ch);
-            if q != '\'' && is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-                buf.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if ch == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            buf.push(ch);
-            i += 1;
-            continue;
-        }
-        if is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-            buf.push(ch);
-            buf.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if ch == '#' && dialect != ShellDialect::Cmd && is_shell_comment_start(&chars, i) {
-            while i < chars.len() && !matches!(chars[i], '\r' | '\n') {
-                i += 1;
-            }
-            continue;
-        }
-
-        let double_amp = ch == '&' && i + 1 < chars.len() && chars[i + 1] == '&';
-        let double_pipe = ch == '|' && i + 1 < chars.len() && chars[i + 1] == '|';
-        if ch == '|' && !double_pipe {
-            push_stage(&mut buf, &mut group);
-            i += 1;
-            continue;
-        }
-        if matches!(ch, ';' | '\r' | '\n') || double_amp || double_pipe {
-            push_stage(&mut buf, &mut group);
-            push_group(&mut group, &mut groups);
-            i += if double_amp || double_pipe { 2 } else { 1 };
-            continue;
-        }
-        buf.push(ch);
-        i += 1;
+fn ast_dialect(dialect: ShellDialect) -> Dialect {
+    match dialect {
+        ShellDialect::Posix => Dialect::Posix,
+        ShellDialect::PowerShell => Dialect::PowerShell,
+        ShellDialect::Cmd => Dialect::Cmd,
     }
-    push_stage(&mut buf, &mut group);
-    push_group(&mut group, &mut groups);
-    groups
 }
 
-pub(super) fn split_shell_segments(command_text: &str, dialect: ShellDialect) -> Vec<String> {
-    let chars = command_text.chars().collect::<Vec<_>>();
-    let mut segments = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    let mut loop_header_paren_depth = 0usize;
-    let mut i = 0usize;
-    while i < chars.len() {
-        let ch = chars[i];
-        if let Some(q) = quote {
-            buf.push(ch);
-            if q != '\'' && is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-                buf.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if ch == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            buf.push(ch);
-            i += 1;
-            continue;
-        }
-        if is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-            buf.push(ch);
-            buf.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if loop_header_paren_depth > 0 {
-            buf.push(ch);
-            if ch == '(' {
-                loop_header_paren_depth += 1;
-            } else if ch == ')' {
-                loop_header_paren_depth -= 1;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == '(' && buf.trim().eq_ignore_ascii_case("for") {
-            loop_header_paren_depth = 1;
-            buf.push(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '#' && dialect != ShellDialect::Cmd && is_shell_comment_start(&chars, i) {
-            while i < chars.len() && !matches!(chars[i], '\r' | '\n') {
-                i += 1;
-            }
-            continue;
-        }
-
-        let is_double_amp = ch == '&' && i + 1 < chars.len() && chars[i + 1] == '&';
-        let is_double_pipe = ch == '|' && i + 1 < chars.len() && chars[i + 1] == '|';
-        if matches!(ch, ';' | '|' | '\r' | '\n') || is_double_amp {
-            let segment = buf.trim();
-            if !segment.is_empty() {
-                segments.push(segment.to_string());
-            }
-            buf.clear();
-            i += if is_double_amp || is_double_pipe {
-                2
-            } else {
-                1
-            };
-            continue;
-        }
-
-        buf.push(ch);
-        i += 1;
-    }
-
-    let segment = buf.trim();
-    if !segment.is_empty() {
-        segments.push(segment.to_string());
-    }
-    segments
+/// Parse and evaluate `text` as `dialect` would run it from `cwd`, starting
+/// from this process's environment (the hook inherits the agent shell's).
+pub(super) fn parse_command(text: &str, dialect: ShellDialect, cwd: Option<&Path>) -> Script {
+    parse_command_with_home(text, dialect, cwd, None)
 }
 
-pub(super) fn is_shell_comment_start(chars: &[char], index: usize) -> bool {
-    index == 0
-        || chars[index - 1].is_whitespace()
-        || matches!(chars[index - 1], ';' | '|' | '&' | '(' | ')')
+/// [`parse_command`] with `~` / `$HOME` / `%USERPROFILE%` pinned to `home`.
+pub(super) fn parse_command_with_home(
+    text: &str,
+    dialect: ShellDialect,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+) -> Script {
+    let mut base = BaseEnv::from_process(cwd.unwrap_or_else(|| Path::new("")));
+    if let Some(home) = home {
+        let home = home.to_string_lossy().into_owned();
+        base = base
+            .with_var("HOME", home.clone())
+            .with_var("USERPROFILE", home);
+    }
+    shell_ast::parse(text, ast_dialect(dialect), &base)
 }
 
-pub(super) fn is_shell_escape(ch: char, dialect: ShellDialect) -> bool {
-    matches!(
-        (ch, dialect),
-        ('\\', ShellDialect::Posix) | ('`', ShellDialect::PowerShell) | ('^', ShellDialect::Cmd)
-    )
+/// The words rules match for one command: its argv text with the
+/// transparent launchers `env`, `command` and `exec` removed. Unknown words
+/// read as their source text (`$X`, `$(cmd)`), which is what the rules saw
+/// before #1962 and what their messages quote. Empty when a launcher's
+/// options cannot be read.
+pub(super) fn rule_words(invocation: &Invocation) -> Vec<String> {
+    unwrap_transparent_wrappers(&invocation.argv()).unwrap_or_default()
 }
 
-pub(super) fn tokenize(segment: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    for ch in segment.chars() {
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            } else {
-                buf.push(ch);
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        if ch.is_whitespace() {
-            if !buf.is_empty() {
-                words.push(std::mem::take(&mut buf));
-            }
-            continue;
-        }
-        buf.push(ch);
-    }
-    if !buf.is_empty() {
-        words.push(buf);
-    }
-    words
+/// `env -S 'a b'` / `--split-string=...`: env splits the string itself, with
+/// shell-like quoting, before running it.
+pub(super) fn split_env_string(text: &str) -> Vec<String> {
+    parse_command(text, ShellDialect::Posix, None)
+        .invocations
+        .first()
+        .map(Invocation::argv)
+        .unwrap_or_default()
 }
 
 pub(super) fn program_name(word: &str) -> String {
@@ -210,20 +59,6 @@ pub(super) fn program_name(word: &str) -> String {
     crate::path_norm::file_stem_any_separator(cleaned)
         .unwrap_or_default()
         .to_ascii_lowercase()
-}
-
-pub(super) fn command_words(segment: &str) -> Vec<String> {
-    let mut words = tokenize(segment);
-    while words
-        .first()
-        .is_some_and(|word| ["&", "call"].contains(&word.as_str()))
-    {
-        words.remove(0);
-    }
-    while words.first().is_some_and(|word| is_env_assignment(word)) {
-        words.remove(0);
-    }
-    unwrap_transparent_wrappers(&words).unwrap_or_default()
 }
 
 pub(super) fn is_env_assignment(word: &str) -> bool {
@@ -274,170 +109,6 @@ pub(super) fn resolve_uv_run_tool(words: &[String]) -> Option<String> {
         }
     }
     words.get(i).cloned()
-}
-
-pub(super) fn nested_shell_command(
-    words: &[String],
-    current_dialect: ShellDialect,
-) -> Option<(String, ShellDialect)> {
-    let first = program_name(words.first()?);
-    if !contains_str(SHELL_WRAPPERS, &first) {
-        return None;
-    }
-    if first == "eval" {
-        if words.len() > 1 {
-            return Some((words[1..].join(" "), current_dialect));
-        }
-        return None;
-    }
-    if first == "cmd" {
-        for (i, word) in words.iter().enumerate().skip(1) {
-            if ["/c", "/k", "/r"].contains(&word.to_ascii_lowercase().as_str())
-                && i + 1 < words.len()
-            {
-                return Some((words[i + 1..].join(" "), ShellDialect::Cmd));
-            }
-        }
-        return None;
-    }
-    if first == "powershell" || first == "pwsh" {
-        for (i, word) in words.iter().enumerate().skip(1) {
-            if ["-command", "-c", "/c"].contains(&word.to_ascii_lowercase().as_str())
-                && i + 1 < words.len()
-            {
-                return Some((words[i + 1..].join(" "), ShellDialect::PowerShell));
-            }
-        }
-        return None;
-    }
-
-    for (i, word) in words.iter().enumerate().skip(1) {
-        let option = word.to_ascii_lowercase();
-        let option = option.trim_start_matches('-');
-        if option.contains('c') && i + 1 < words.len() {
-            return Some((words[i + 1..].join(" "), ShellDialect::Posix));
-        }
-    }
-    None
-}
-
-/// POSIX shells that execute a script passed via `-c`. Broader than
-/// [`SHELL_WRAPPERS`] because #1082 must also reach `dash`/`ksh` (and the
-/// busybox multiplexers), which are not among the dialect-selecting wrappers.
-pub(super) const POSIX_C_SHELLS: &[&str] =
-    &["bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "busybox"];
-
-/// Extract the script text passed to a POSIX shell via `-c`, first unwrapping
-/// leading launchers (`uv run …`, `busybox`, `find … -exec … \;`). Returns
-/// only the script operand (word after `-c`), so the caller can run the rm
-/// resolver against it — the recursion in [`nested_shell_command`] reaches the
-/// denylist path but never the rm-variable resolver, which is exactly the
-/// #1082 bypass (`dash -c 'rm -rf "$V"/'` and friends sailed through).
-pub(super) fn posix_c_shell_script(words: &[String]) -> Option<String> {
-    let unwrapped = strip_command_launchers(words);
-    let words: &[String] = unwrapped.as_deref().unwrap_or(words);
-    let first = program_name(words.first()?);
-    // `busybox sh -c …` invokes the applet named by the *next* word; a bare
-    // `busybox -c` is not a shell invocation.
-    if first == "busybox" {
-        return None;
-    }
-    if !contains_str(POSIX_C_SHELLS, &first) {
-        return None;
-    }
-    for (i, word) in words.iter().enumerate().skip(1) {
-        // Stop at the script operand; anything before `-c` is a shell option.
-        let option = word.to_ascii_lowercase();
-        let option = option.trim_start_matches('-');
-        if word.starts_with('-') && option.contains('c') && i + 1 < words.len() {
-            return Some(words[i + 1].clone());
-        }
-    }
-    None
-}
-
-/// Peel leading command launchers so [`posix_c_shell_script`] sees the real
-/// shell head. Handles `busybox <applet …>`, `uv run [opts] <cmd …>`, and
-/// `find … -exec <cmd …> \;`/`+`. Returns `None` when a launcher is present
-/// but its wrapped command cannot be located.
-fn strip_command_launchers(words: &[String]) -> Option<Vec<String>> {
-    let mut current = words.to_vec();
-    for _ in 0..8 {
-        let first = program_name(current.first()?);
-        match first.as_str() {
-            "busybox" => {
-                // `busybox sh -c …` → `sh -c …`.
-                current = current.get(1..)?.to_vec();
-                if current.is_empty() {
-                    return None;
-                }
-            }
-            "uv" if current.get(1).map(String::as_str) == Some("run") => {
-                current = uv_run_remaining(&current)?;
-            }
-            "find" => {
-                current = find_exec_command(&current)?;
-            }
-            _ => return Some(current),
-        }
-    }
-    None
-}
-
-/// The argv `uv run [options] -- <cmd> [args]` ultimately launches. Mirrors
-/// [`resolve_uv_run_tool`]'s option-skipping but returns the whole remaining
-/// slice rather than only the tool word. `--script <file>` runs a file, not a
-/// shell head we can extract, so it yields `None`.
-fn uv_run_remaining(words: &[String]) -> Option<Vec<String>> {
-    let mut i = 2usize;
-    while i < words.len() {
-        let word = &words[i];
-        if word == "--" {
-            i += 1;
-            break;
-        }
-        if word == "--script" || word.starts_with("--script=") {
-            return None;
-        }
-        if !word.starts_with('-') {
-            break;
-        }
-        let consumes_value = (!word.contains('=') && contains_str(UV_RUN_OPTIONS_WITH_VALUE, word))
-            || contains_str(UV_RUN_SHORT_OPTIONS_WITH_VALUE, word);
-        if consumes_value {
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    let rest = words.get(i..)?.to_vec();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
-}
-
-/// The command `find … -exec <cmd …> ;`/`+` would run, as a word slice. The
-/// terminator (`;`, an escaped `\;`, or `+`) and everything after it are
-/// dropped.
-fn find_exec_command(words: &[String]) -> Option<Vec<String>> {
-    let mut i = 1usize;
-    while i < words.len() {
-        if matches!(words[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
-            let start = i + 1;
-            let mut j = start;
-            while j < words.len() && !matches!(words[j].as_str(), ";" | "\\;" | "+") {
-                j += 1;
-            }
-            if j > start {
-                return Some(words[start..j].to_vec());
-            }
-            return None;
-        }
-        i += 1;
-    }
-    None
 }
 
 pub(super) fn python_rust_hybrid_root(cwd: Option<&Path>) -> Option<PathBuf> {

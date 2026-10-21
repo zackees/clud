@@ -226,3 +226,71 @@ fn deletion_safety_fragment_denies_file_tool_edits_of_the_user_settings_file() {
         "{deny:?}"
     );
 }
+
+#[test]
+fn deletion_safety_fragment_routes_every_guarded_tool_to_the_dispatcher() {
+    // #1949: the /loop first-round stop guard never fired in a launch whose
+    // only clud matcher was `Bash`, because the harness filters by matcher
+    // before the hook runs. The same filter hid every other non-Bash rule.
+    let fragment = deletion_safety_fragment();
+    let entries = fragment["hooks"]["PreToolUse"].as_array().unwrap();
+    let matcher = regex::Regex::new(&format!(
+        "^(?:{})$",
+        entries[0]["matcher"].as_str().unwrap()
+    ))
+    .unwrap();
+    for tool in GUARDED_TOOLS {
+        assert!(matcher.is_match(tool), "{tool} must reach the dispatcher");
+    }
+    for tool in ["Read", "Grep", "Glob", "WebFetch"] {
+        assert!(!matcher.is_match(tool), "{tool} has no rule");
+    }
+    assert_eq!(entries[0]["hooks"][0]["command"], DISPATCHER_BINARY);
+}
+
+/// The PreToolUse commands a harness runs for `tool`, filtering entries by
+/// matcher the way Claude Code does: empty or `*` matches every tool,
+/// anything else is an anchored regex over the tool name.
+fn harness_commands_for_tool(settings: &Value, tool: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for entry in settings["hooks"]["PreToolUse"].as_array().unwrap() {
+        let matcher = entry["matcher"].as_str().unwrap_or("");
+        let matches = matcher.is_empty()
+            || matcher == "*"
+            || regex::Regex::new(&format!("^(?:{matcher})$"))
+                .unwrap()
+                .is_match(tool);
+        if !matches {
+            continue;
+        }
+        for hook in entry["hooks"].as_array().unwrap() {
+            commands.push(hook["command"].as_str().unwrap().to_string());
+        }
+    }
+    commands
+}
+
+#[test]
+fn a_repo_without_a_catch_all_matcher_still_routes_guarded_tools_to_the_dispatcher() {
+    // #1954: unit tests of each rule could not see the harness's matcher
+    // filter. Merge clud's fragment into repo settings that register only a
+    // Bash guard, as most repos do, and filter as the harness would.
+    let mut settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "repo-guard" }]
+            }]
+        }
+    });
+    merge_hook_settings(&mut settings, &deletion_safety_fragment()).unwrap();
+    // The /loop stop, a grind planner's Write, a grind Agent spawn.
+    for tool in ["ScheduleWakeup", "Write", "Agent", "Bash"] {
+        let commands = harness_commands_for_tool(&settings, tool);
+        assert!(
+            commands.iter().any(|c| c == DISPATCHER_BINARY),
+            "{tool} never reaches {DISPATCHER_BINARY}: {commands:?}"
+        );
+    }
+    assert!(harness_commands_for_tool(&settings, "Read").is_empty());
+}

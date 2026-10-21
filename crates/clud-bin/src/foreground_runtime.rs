@@ -280,6 +280,7 @@ impl ForegroundRuntime {
         // the launch-context record can tell an ambient value from ours.
         let ambient = env.clone();
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
+        runtime.apply_initial_effort(plan)?;
         runtime.apply_attribution(plan)?;
         runtime.apply_session_history(plan);
         if plan.effective_harness() == Backend::Claude && !cfg!(test) {
@@ -618,6 +619,21 @@ impl ForegroundRuntime {
         self.merge_launch_settings(plan, compose)
     }
 
+    /// Settings work on Claude clients that predate the `--effort` flag.
+    /// Unlike an environment override, this leaves interactive effort editable.
+    fn apply_initial_effort(&mut self, plan: &LaunchPlan) -> Result<(), BridgeError> {
+        if plan.effective_harness() != Backend::Claude {
+            return Ok(());
+        }
+        let Some(effort) = settings_effort(&plan.command) else {
+            return Ok(());
+        };
+        self.merge_launch_settings(plan, |document| {
+            document["effortLevel"] = serde_json::json!(effort);
+            true
+        })
+    }
+
     /// Apply the plan's commit/PR attribution choice (#1317) to this
     /// launch's Claude settings. clud hides Claude Code's attribution unless
     /// the launch opted in; keys the user's own `--settings` set are kept.
@@ -758,6 +774,7 @@ impl ForegroundRuntime {
             if settings.replaces_user_argument {
                 remove_user_settings_argument(&mut command);
             }
+            remove_settings_effort(&mut command);
             command.insert(1, settings.value.clone());
             command.insert(1, "--settings".to_string());
         }
@@ -1542,6 +1559,17 @@ fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
     crate::clud_hooks_compile::claude_settings_fragment(&hooks, cwd_changed_supported)
 }
 
+/// Whether this launch's client takes clud's `WorktreeCreate` hook: a harness
+/// whose settings surface accepts hooks, on Claude Code 2.1.50 or newer.
+fn claude_takes_worktree_hooks(plan: &LaunchPlan) -> bool {
+    // Unit tests never probe whatever `claude` the machine has installed.
+    !cfg!(test)
+        && plan.effective_harness().settings_surface().accepts_hooks()
+        && plan.command.first().is_some_and(|binary| {
+            crate::backend_bootstrap::probe_claude_worktree_hooks_support(binary.as_ref())
+        })
+}
+
 /// Hand `generated` to Claude as a launch-scoped `--settings` source.
 ///
 /// When the user supplied their own `--settings`, clud merges into *their*
@@ -1557,13 +1585,29 @@ fn compose_launch_settings(
 
 fn compose_launch_settings_document(
     plan: &LaunchPlan,
+    settings: serde_json::Value,
+) -> Result<(serde_json::Value, bool), BridgeError> {
+    compose_launch_settings_document_with(plan, settings, claude_takes_worktree_hooks(plan))
+}
+
+/// [`compose_launch_settings_document`] with the worktree-hook decision
+/// made by the caller, so tests need not probe a real client.
+fn compose_launch_settings_document_with(
+    plan: &LaunchPlan,
     mut settings: serde_json::Value,
+    worktree_hooks: bool,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
     if !plan.unsafe_mode {
         let safety = crate::clud_hooks_compile::deletion_safety_fragment();
         crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
             .map_err(BridgeError::Settings)?;
         merge_deletion_denies(&mut settings, &safety)?;
+    }
+    // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
+    if worktree_hooks {
+        let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();
+        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &worktrees)
+            .map_err(BridgeError::Settings)?;
     }
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return Ok((settings, false));
@@ -1605,12 +1649,31 @@ fn compose_launch_settings_document(
     Ok((user_settings, true))
 }
 
-/// Render the same deletion settings in a dry-run plan without creating a
-/// launch-scoped file or changing the executable plan.
+/// Ordinary effort levels accepted by older Claude settings schemas.
+fn settings_effort(command: &[String]) -> Option<&str> {
+    command.windows(2).find_map(|pair| {
+        (pair[0] == "--effort" && matches!(pair[1].as_str(), "low" | "medium" | "high" | "xhigh"))
+            .then_some(pair[1].as_str())
+    })
+}
+
+fn remove_settings_effort(command: &mut Vec<String>) {
+    if settings_effort(command).is_some() {
+        if let Some(index) = command.iter().position(|arg| arg == "--effort") {
+            command.drain(index..index + 2);
+        }
+    }
+}
+
+/// Render launch settings and effort compatibility without creating a file.
 pub fn dry_run_claude_command(plan: &LaunchPlan) -> Result<Vec<String>, String> {
-    let (settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
+    let (mut settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
         .map_err(|error| error.to_string())?;
+    if let Some(effort) = settings_effort(&plan.command) {
+        settings["effortLevel"] = serde_json::json!(effort);
+    }
     let mut command = plan.command.clone();
+    remove_settings_effort(&mut command);
     remove_user_settings_argument(&mut command);
     command.insert(1, settings.to_string());
     command.insert(1, "--settings".to_string());
@@ -4033,6 +4096,33 @@ mod tests {
     }
 
     #[test]
+    fn older_claude_receives_effort_as_settings_for_every_spawn_mode() {
+        let mut launch = plan(ModelProvider::Claude, Backend::Claude);
+        launch.command = vec!["claude".into(), "--effort".into(), "low".into()];
+        let mut runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+        runtime.apply_initial_effort(&launch).unwrap();
+        let path = settings_argument(&runtime).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(settings["effortLevel"], "low");
+        for mode in [SpawnMode::Subprocess, SpawnMode::Pty] {
+            let adapter = RecordingAdapter::default();
+            runtime
+                .spawn_with(&adapter, mode, launch.command.clone(), None)
+                .unwrap();
+            let calls = adapter.calls.borrow();
+            assert!(!calls[0].1.iter().any(|arg| arg == "--effort"));
+            assert!(calls[0].1.iter().any(|arg| arg == "--settings"));
+        }
+        let dry = dry_run_claude_command(&launch).unwrap();
+        assert!(!dry.iter().any(|arg| arg == "--effort"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&dry[2]).unwrap()["effortLevel"],
+            "low"
+        );
+    }
+
+    #[test]
     fn a_plain_claude_launch_carries_declared_hooks_as_settings() {
         // The ungating: before Phase 2b only bridge routes composed settings,
         // so a plain launch registered nothing.
@@ -4051,6 +4141,28 @@ mod tests {
             "clud-cmd-scan --event Stop"
         );
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_some());
+    }
+
+    /// #1962/#1971: a client that knows `WorktreeCreate` gets clud's line, so
+    /// its worktrees land under `~/.clud/worktrees`; one that does not gets no
+    /// line at all, since an unknown event could void the whole document.
+    #[test]
+    fn worktree_hooks_are_registered_only_when_the_client_takes_them() {
+        let launch = plan(ModelProvider::Claude, Backend::Claude);
+        let (with, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), true).unwrap();
+        assert_eq!(
+            with["hooks"]["WorktreeCreate"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeCreate"
+        );
+        assert_eq!(
+            with["hooks"]["WorktreeRemove"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeRemove"
+        );
+        assert!(with["hooks"]["PreToolUse"].is_array(), "the guards stay");
+        let (without, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), false).unwrap();
+        assert!(without["hooks"].get("WorktreeCreate").is_none());
     }
 
     #[test]

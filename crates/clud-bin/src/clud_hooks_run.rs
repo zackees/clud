@@ -152,12 +152,15 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
         }
     }
 
-    let deadline = Duration::from_secs(entry.timeout_secs);
+    // One deadline covers draining and waiting, so a hung hook is killed
+    // after `timeout_secs`, not twice that (#1908).
+    let deadline = std::time::Instant::now() + Duration::from_secs(entry.timeout_secs);
     let mut stdout = String::new();
     let mut stderr = String::new();
     drain(&process, &mut stdout, &mut stderr, deadline);
 
-    let exit_code = match process.wait(Some(deadline)) {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let exit_code = match process.wait(Some(remaining)) {
         Ok(code) => code,
         Err(error) => {
             let _ = process.kill();
@@ -239,8 +242,12 @@ fn trailing_detail(stderr: &str) -> String {
     }
 }
 
-fn drain(process: &NativeProcess, stdout: &mut String, stderr: &mut String, deadline: Duration) {
-    let started = std::time::Instant::now();
+fn drain(
+    process: &NativeProcess,
+    stdout: &mut String,
+    stderr: &mut String,
+    deadline: std::time::Instant,
+) {
     loop {
         match process.read_stream(
             running_process::StreamKind::Stdout,
@@ -249,7 +256,7 @@ fn drain(process: &NativeProcess, stdout: &mut String, stderr: &mut String, dead
             ReadStatus::Line(bytes) => stdout.push_str(&line_of(&bytes)),
             ReadStatus::Eof => break,
             ReadStatus::Timeout => {
-                if process.returncode().is_some() || started.elapsed() >= deadline {
+                if process.returncode().is_some() || std::time::Instant::now() >= deadline {
                     break;
                 }
             }
@@ -263,7 +270,7 @@ fn drain(process: &NativeProcess, stdout: &mut String, stderr: &mut String, dead
             ReadStatus::Line(bytes) => stderr.push_str(&line_of(&bytes)),
             ReadStatus::Eof => break,
             ReadStatus::Timeout => {
-                if process.returncode().is_some() || started.elapsed() >= deadline {
+                if process.returncode().is_some() || std::time::Instant::now() >= deadline {
                     break;
                 }
             }

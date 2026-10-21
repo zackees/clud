@@ -567,7 +567,7 @@ fn warn_if_clud_cache_oversized() {
     }
 }
 
-/// #1485: warn (stderr, so `--json` stays parseable) when `~/.clud/tmp-wt`
+/// #1485: warn (stderr, so `--json` stays parseable) when `~/.clud/worktrees`
 /// exceeds `worktrees.warn_bytes`. Warn-only: nothing is deleted for size.
 fn warn_if_worktree_root_oversized() {
     use crate::gc::worktree_root::{

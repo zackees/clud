@@ -49,12 +49,12 @@ This skill should not implement fixes or features. If the release is blocked by 
 7. **Tag and push.**
    - `git tag -a <tag> -m "Release <version>"` — **annotated**, not lightweight, so `git describe` works downstream.
    - `git push origin <tag>` — push *just the tag*, not `--tags` (which would push every local tag).
-8. **Locate the triggered run.** Poll `gh run list --workflow=<release-workflow-file> --event=push --limit 5 --json databaseId,headSha,status,url` for up to 30 seconds, looking for a run whose `headSha` matches the tagged commit's SHA. The workflow can take a few seconds to register. If none appears after 30s, surface that — the workflow may not be configured to trigger on this tag pattern.
+8. **Locate the triggered run.** Read `gh run list --workflow=<release-workflow-file> --event=push --limit 5 --json databaseId,headSha,status,url` **once**, looking for a run whose `headSha` matches the tagged commit's SHA. Never poll for it: a loop, a `sleep` before the read, `timeout … bash -c`, a Monitor call, a written script or Python are all hand-written waits that clud's hook refuses (zackees/clud#1972). The workflow can take a few seconds to register, so if the run is not listed yet, report the tag and the workflow's Actions page (`https://github.com/<owner>/<repo>/actions/workflows/<release-workflow-file>`) instead of a run URL, and say the run had not registered at the time of the read. If no run ever appears, the workflow may not be configured to trigger on this tag pattern.
 9. **Report.** Output exactly:
    - Tag pushed: `<tag>` → `<sha>`
    - Workflow run: `<url>` (status: `<queued|in_progress>`)
    - One line on what the workflow will do (build, publish to PyPI/crates.io, attach release artifacts) — pulled from the workflow file's job names, not invented.
-   - Nothing else. Don't `gh run watch` unless the user asked.
+   - Nothing else. Don't follow the run. If the user asked for its result, read it with one `gh run view <id>` in a later turn; never `gh run watch` or a polling loop (for a PR, `"$CLUD_EXE" tool run github/pr_merge_watch.py <PR>` with `run_in_background` is the waiter).
 
 ## Failure modes to avoid
 

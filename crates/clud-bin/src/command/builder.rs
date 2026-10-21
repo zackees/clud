@@ -381,20 +381,25 @@ fn merge_claude_append_prompt(passthrough: &[String], unsafe_mode: bool) -> (Str
 }
 
 fn take_codex_developer_instructions(passthrough: &mut Vec<String>) -> Option<String> {
+    let parse = |value: &str| {
+        value
+            .strip_prefix("developer_instructions=")
+            .and_then(parse_codex_instruction_override)
+    };
     let mut found = None;
     let mut index = 0;
-    while index + 1 < passthrough.len() {
-        if passthrough[index] == "-c" {
-            if let Some(value) = passthrough[index + 1]
-                .strip_prefix("developer_instructions=")
-                .and_then(parse_codex_instruction_override)
-            {
-                found = Some(value);
-                passthrough.drain(index..index + 2);
-                continue;
-            }
+    while index < passthrough.len() {
+        // Codex takes `-c <kv>`, `--config <kv>` and `--config=<kv>` (#1901).
+        let (value, width) = match passthrough[index].as_str() {
+            "-c" | "--config" => (passthrough.get(index + 1).and_then(|v| parse(v)), 2),
+            arg => (arg.strip_prefix("--config=").and_then(parse), 1),
+        };
+        if let Some(value) = value {
+            found = Some(value);
+            passthrough.drain(index..index + width);
+        } else {
+            index += 1;
         }
-        index += 1;
     }
     found
 }
@@ -509,7 +514,8 @@ fn build_launch_plan_for_target_at(
         // Codex resolves session-flag hook trust from the subcommand's config
         // layer. Keep these overrides alongside the exec/resume flags.
         let scan = "clud-cmd-scan";
-        cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"Bash\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
+        let matcher = CODEX_HOOK_MATCHER;
+        cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"{matcher}\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
         cmd.extend(["-c".into(), format!("hooks.state={{\"/<session-flags>/config.toml:pre_tool_use:0:0\"={{trusted_hash=\"{}\"}}}}", codex_hook_hash(scan))]);
         let has_passthrough_instructions = codex_passthrough_instructions.is_some();
         let existing_instructions = if has_passthrough_instructions {
@@ -781,6 +787,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Models { .. })
         | Some(Command::CodexUpdate)
         | Some(Command::DshUpdate)
+        | Some(Command::Doctor)
         | Some(Command::Ci { .. })
         | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
@@ -926,14 +933,13 @@ fn build_launch_plan_for_target_at(
     plan
 }
 
+/// Codex's session-flag PreToolUse matcher: every tool, as this repo's own
+/// `.codex/hooks.json` registers it. A `Bash`-only matcher left every rule
+/// for another tool dead under Codex, as it was under Claude before #1954.
+const CODEX_HOOK_MATCHER: &str = "*";
+
 fn codex_hook_hash(command: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let value = serde_json::json!({
-        "event_name": "pre_tool_use",
-        "hooks": [{"async": false, "command": command, "timeout": 600, "type": "command"}],
-        "matcher": "Bash",
-    });
-    format!("sha256:{:x}", Sha256::digest(value.to_string().as_bytes()))
+    crate::codex_cmd_scan_install::codex_hook_trust_hash(CODEX_HOOK_MATCHER, command, 600)
 }
 
 fn existing_codex_instructions(args: &Args) -> Option<String> {
@@ -1162,11 +1168,11 @@ mod codex_hook_hash_tests {
     fn canonical_hook_hash_golden_vectors() {
         assert_eq!(
             codex_hook_hash("clud-cmd-scan"),
-            "sha256:0b359276e29d1bb5bb14f8a3151259417ee1fe86ed339a80fb57ba3798b2dbc9"
+            "sha256:de4254a10d700c90ae0152fb911cf432a7e284fe4a94659452c1cab80d9f05b3"
         );
         assert_eq!(
             codex_hook_hash("/tmp/clud cmd-scan --event PreToolUse"),
-            "sha256:207fd7661e69092031acc67bd4ee7bc06df7e758faca2fdbed8e9cfe6bf101cc"
+            "sha256:f1e8926650feac924e61dd910ad96a3fc22466eedd26e245743f739989ca27b5"
         );
     }
 }

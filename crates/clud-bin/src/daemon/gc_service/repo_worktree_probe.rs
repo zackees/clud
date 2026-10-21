@@ -50,7 +50,7 @@ pub(crate) struct RepoWorktreeRow {
     /// Directory mtime, standing in for a creation time in `gc list`.
     pub(crate) mtime_unix: i64,
     pub(crate) verdict: RepoWorktreeVerdict,
-    /// Issue #1486: an unclaimed `tmp-wt` child judged by
+    /// Issue #1486: an unclaimed `worktrees` child judged by
     /// [`reserved_dir_verdict`], not a git worktree. `repo_root` is empty
     /// and the executor removes it with `remove_dir`, never git.
     pub(crate) reservation: bool,
@@ -471,7 +471,7 @@ pub(crate) fn probe_repo(
 
 /// Probe every worktree of `repo_root`. `prs` is injected so tests can
 /// exercise both the merged-PR path and the `gh`-unavailable fallback, and
-/// `wt_root` (#1485, production: `~/.clud/tmp-wt`) so tests never read the
+/// `wt_root` (#1485, production: `~/.clud/worktrees`) so tests never read the
 /// real home.
 pub(crate) fn probe_repo_with(
     repo_root: &Path,
@@ -636,7 +636,7 @@ pub(crate) fn probe_repos(
             }
         }
     }
-    // #1486: every tmp-wt child no worktree list claimed is judged as a
+    // #1486: every worktrees child no worktree list claimed is judged as a
     // reservation, so an unused `alloc_wt_path` directory is not leaked.
     if let Some(root) = wt_root {
         let claimed: HashSet<PathBuf> = out.iter().map(|r| canonical(Path::new(&r.path))).collect();
@@ -650,7 +650,7 @@ pub(crate) fn probe_repos(
     out
 }
 
-/// Issue #1486: judge one unclaimed `tmp-wt` child. Pure over the
+/// Issue #1486: judge one unclaimed `worktrees` child. Pure over the
 /// filesystem and the injected process snapshot; runs no git. The #1603
 /// executor calls it again immediately before removing anything.
 pub(crate) fn probe_reservation(

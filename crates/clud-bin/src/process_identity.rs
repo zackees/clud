@@ -32,7 +32,7 @@
 //! case explicitly so a reader can tell "not recorded" from "recorded as 0".
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessStatus, System};
 
 #[cfg(not(windows))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
@@ -86,10 +86,17 @@ impl ProcessIdentity {
 
     /// Read the identity of `pid` out of an already-refreshed snapshot.
     ///
-    /// `None` means no process currently holds that PID.
+    /// `None` means the PID is absent or its process has terminated (including
+    /// an unreaped Unix zombie, which retains its PID and start time).
     pub fn observe_in(system: &System, pid: u32) -> Option<Self> {
         system
             .process(Pid::from_u32(pid))
+            .filter(|process| {
+                !matches!(
+                    process.status(),
+                    ProcessStatus::Zombie | ProcessStatus::Dead
+                )
+            })
             .map(|process| Self::new(pid, process.start_time()))
     }
 
@@ -275,19 +282,24 @@ mod tests {
 
     #[test]
     fn an_exited_process_is_dead_even_while_its_handle_remains_open() {
+        use std::io::Write;
+
         #[cfg(windows)]
         let mut child = std::process::Command::new("cmd")
-            .args(["/C", "exit", "0"])
+            .args(["/C", "set /p token= & exit /b 0"])
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("spawn short-lived Windows child");
         #[cfg(not(windows))]
         let mut child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
+            .args(["-c", "read token; exit 0"])
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("spawn short-lived Unix child");
 
         let identity =
             ProcessIdentity::observe(child.id()).expect("child identity before waiting for exit");
+        child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
         assert!(child.wait().expect("wait for child").success());
         assert!(
             !identity.is_live(),
@@ -295,3 +307,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "platform/process_identity_zombie_tests.rs"]
+mod zombie_tests;

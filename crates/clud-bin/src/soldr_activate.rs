@@ -8,9 +8,10 @@
 //!    user-level `~/.clud/settings.json` under repo-level
 //!    `<repo-root>/.clud/settings.json` (repo wins per-field).
 //! 2. If `rust.install` is `true`, install a missing soldr, upgrade one older
-//!    than the configured minimum (a version setting is a floor, never an
-//!    exact pin: a newer soldr is never downgraded), or periodically refresh
-//!    the rolling latest policy.
+//!    than the `soldr shims` floor, or periodically refresh it to the latest
+//!    release. A soldr version setting (`rust.version`,
+//!    `optimize.rust.soldr_version`) is no longer honored: it is ignored with
+//!    a yellow warning, and the installed soldr is used and kept at latest.
 //! 3. If `rust.use_soldr` is `true`, spawn `soldr shims --json` and
 //!    capture the JSON.
 //! 4. Prepend the JSON's `path_entry` to `PATH` in-process. Every
@@ -27,8 +28,7 @@
 //! On-demand soldr install (zackees/clud#343 + user follow-up): when
 //! `rust.install` is `true` (default) and soldr is missing, this module
 //! attempts to install it via `uv tool install soldr` (preferred) or
-//! `pip install --user soldr` (fallback), honoring the optional
-//! `rust.version` minimum. The install is **best-effort** — a failure
+//! `pip install --user soldr` (fallback). The install is **best-effort** — a failure
 //! engages the same warn-and-continue contract above.
 
 use crate::repo_clud_config::{discover_effective_clud_config, RepoCludConfig};
@@ -107,12 +107,16 @@ pub fn activate_soldr_shims_if_requested() {
 /// [`activate_soldr_shims_if_requested`] but takes the resolved config
 /// directly so tests can stub discovery.
 fn activate_with_config(cfg: &RepoCludConfig) {
-    // First probe: is soldr installed, and is it at least the minimum?
-    // A pin is a floor, never an exact target: a launch must never rewrite
-    // a newer soldr the user installed (it downgraded 0.9.x to a repo's
-    // 0.7.11 pin, which lacks `prepare` and broke the running broker).
+    // soldr cannot be pinned: a stale pin in one repo's settings kept old
+    // soldr protocols alive beside current brokers. Say so, then run the
+    // installed soldr and keep it at latest as if no version were set.
+    if let Some(pin) = pinned_version(cfg.rust.version.as_deref()) {
+        eprintln!("{}", pin_ignored_warning(pin));
+    }
+    // First probe: is soldr installed, and is it at least the shims floor?
+    // A launch never downgrades a newer soldr the user installed.
     let installed = probe_installed_soldr();
-    let minimum = Some(soldr_minimum(cfg.rust.version.as_deref()));
+    let minimum = Some(MIN_SOLDR_SHIMS_VERSION);
     match soldr_action(installed, minimum) {
         SoldrAction::Install if !cfg.rust.install => {
             verbose_eprintln!(
@@ -387,21 +391,28 @@ fn soldr_action(installed: InstalledSoldr, minimum: Option<VersionTriple>) -> So
     }
 }
 
-/// The effective minimum: the configured version, raised to the floor clud
-/// itself needs (`soldr shims`). `None`, `"latest"` and an unparseable
-/// value all mean "just the shims floor".
-fn soldr_minimum(version: Option<&str>) -> VersionTriple {
-    let requested = version.and_then(parse_first_version_triple);
-    requested.map_or(MIN_SOLDR_SHIMS_VERSION, |v| v.max(MIN_SOLDR_SHIMS_VERSION))
+/// A soldr version setting other than empty or `"latest"`: a pin, which
+/// clud no longer honors.
+pub fn pinned_version(version: Option<&str>) -> Option<&str> {
+    version
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("latest"))
 }
 
-/// Once a day, move an unpinned soldr to the newest release. `uv tool
-/// upgrade` only moves forward, so this never downgrades either.
+/// The yellow warning shown when a settings file still pins soldr.
+pub fn pin_ignored_warning(version: &str) -> String {
+    format!(
+        "\x1b[33m[clud] ignoring soldr version pin \"{version}\": soldr can no longer be \
+         pinned. clud uses the installed soldr and upgrades it to the latest release. \
+         Remove `rust.version` / `optimize.rust.soldr_version` from .clud/settings.json, \
+         .clud/settings.local.json or ~/.clud/settings.json.\x1b[0m"
+    )
+}
+
+/// Once a day, move soldr to the newest release. `uv tool upgrade` only
+/// moves forward, so this never downgrades either.
 fn refresh_rolling_latest(cfg: &RepoCludConfig) {
-    if !cfg.rust.install
-        || !is_rolling_latest(cfg.rust.version.as_deref())
-        || !claim_latest_refresh(SystemTime::now())
-    {
+    if !cfg.rust.install || !claim_latest_refresh(SystemTime::now()) {
         return;
     }
     if let Err(reason) = upgrade_soldr_to_latest() {
@@ -409,12 +420,6 @@ fn refresh_rolling_latest(cfg: &RepoCludConfig) {
             "clud: failed to refresh rolling-latest soldr: {reason}; continuing with the installed soldr"
         );
     }
-}
-
-fn is_rolling_latest(version: Option<&str>) -> bool {
-    version
-        .map(str::trim)
-        .is_none_or(|v| v.is_empty() || v.eq_ignore_ascii_case("latest"))
 }
 
 /// Install soldr via `uv tool install` (preferred) or `pip install --user`
@@ -918,15 +923,22 @@ mod tests {
     }
 
     #[test]
-    fn minimum_never_falls_below_the_shims_floor() {
-        assert_eq!(
-            soldr_minimum(Some("0.7.11")),
-            MIN_SOLDR_SHIMS_VERSION,
-            "a pin below the shims floor still needs a soldr that has `shims`"
-        );
-        assert_eq!(soldr_minimum(Some("0.9.27")), VersionTriple(0, 9, 27));
-        assert_eq!(soldr_minimum(None), MIN_SOLDR_SHIMS_VERSION);
-        assert_eq!(soldr_minimum(Some("latest")), MIN_SOLDR_SHIMS_VERSION);
+    fn a_numeric_soldr_version_is_a_pin_and_latest_is_not() {
+        assert_eq!(pinned_version(Some("0.9.27")), Some("0.9.27"));
+        assert_eq!(pinned_version(Some(" 0.7.11 ")), Some("0.7.11"));
+        assert_eq!(pinned_version(Some("latest")), None);
+        assert_eq!(pinned_version(Some("LATEST")), None);
+        assert_eq!(pinned_version(Some("")), None);
+        assert_eq!(pinned_version(None), None);
+    }
+
+    #[test]
+    fn the_pin_warning_is_yellow_and_says_the_pin_is_ignored() {
+        let w = pin_ignored_warning("0.9.27");
+        assert!(w.starts_with("\x1b[33m") && w.ends_with("\x1b[0m"), "{w:?}");
+        assert!(w.contains("\"0.9.27\""), "{w}");
+        assert!(w.contains("can no longer be pinned"), "{w}");
+        assert!(w.contains("latest release"), "{w}");
     }
 
     #[test]

@@ -252,6 +252,15 @@ fn origin_of_accepts_both_section_spellings_and_quotes() {
 }
 
 #[test]
+fn remote_origin_url_skips_valueless_keys_and_bare_remote_headers() {
+    assert_eq!(
+        remote_origin_url("[remote \"origin\"]\n\tmirror\n\turl = https://evil/x.git\n"),
+        Some("https://evil/x.git".to_string())
+    );
+    assert_eq!(remote_origin_url("[remote]\n\turl = https://nope\n"), None);
+}
+
+#[test]
 fn origin_of_follows_a_worktree_gitdir_file() {
     let tmp = TempDir::new().unwrap();
     let root = repo(tmp.path(), "myrepo");
@@ -260,6 +269,32 @@ fn origin_of_follows_a_worktree_gitdir_file() {
     fs::write(
         worktree.join(".git"),
         format!("gitdir: {}", root.join(".git").display()),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".git").join("config"),
+        "[remote \"origin\"]\n\turl = https://example.com/myrepo.git\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        origin_of(&worktree),
+        Some("https://example.com/myrepo.git".to_string())
+    );
+}
+
+#[test]
+fn origin_of_reads_config_through_worktree_commondir() {
+    let tmp = TempDir::new().unwrap();
+    let root = repo(tmp.path(), "myrepo");
+    let wt_git = root.join(".git").join("worktrees").join("wt");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    let worktree = tmp.path().join("wt");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}", wt_git.display()),
     )
     .unwrap();
     fs::write(

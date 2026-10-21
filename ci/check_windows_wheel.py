@@ -293,6 +293,53 @@ def check_wheel(wheel_path: Path) -> list[str]:
     return errors
 
 
+def pe_debug_sections(data: bytes) -> list[str]:
+    """Find embedded DWARF sections, including COFF long section names.
+
+    CodeView references to external PDBs are retained for crash diagnostics;
+    they contain an identifier and path, rather than the debug symbols.
+    """
+    _pe_layout(data)  # Validate the PE headers before reading the section table.
+    coff = struct.unpack_from("<I", data, 0x3C)[0] + 4
+    count = struct.unpack_from("<H", data, coff + 2)[0]
+    symbols, symbol_count = struct.unpack_from("<II", data, coff + 8)
+    strings = symbols + symbol_count * 18
+    optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+    sections = coff + 20 + optional_size
+    found = []
+    for index in range(count):
+        offset = sections + index * 40
+        name = data[offset : offset + 8].rstrip(b"\0")
+        if name.startswith(b"/"):
+            start = strings + int(name[1:])
+            name = data[start : data.index(b"\0", start)]
+        if name.startswith((b".debug", b".zdebug")):
+            found.append(name.decode("ascii"))
+    return found
+
+
+def check_no_debug_symbols(wheel: Path) -> list[str]:
+    """Reject symbol sidecars and embedded DWARF in Windows release wheels."""
+    if "-win_" not in wheel.name:
+        return []
+    errors = []
+    with zipfile.ZipFile(wheel) as archive:
+        for member in archive.namelist():
+            suffix = Path(member).suffix.lower()
+            if suffix in {".pdb", ".dwp", ".debug"}:
+                errors.append(f"{wheel.name}::{member}: debug symbol sidecar is forbidden")
+            if suffix not in {".exe", ".dll"}:
+                continue
+            try:
+                sections = pe_debug_sections(archive.read(member))
+            except (ValueError, struct.error) as error:
+                errors.append(f"{wheel.name}::{member}: failed to parse PE: {error}")
+                continue
+            if sections:
+                errors.append(f"{wheel.name}::{member}: embedded debug sections: {sections}")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify built Windows wheels don't depend on MinGW runtime DLLs"
@@ -303,6 +350,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="check every *.whl in this directory",
+    )
+    parser.add_argument(
+        "--no-debug-symbols", action="store_true",
+        help="reject debug symbols in Windows release wheels",
     )
     args = parser.parse_args(argv)
 
@@ -328,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         print(f"checking {wheel.name}", file=sys.stderr)
         all_errors.extend(check_wheel(wheel))
+        if args.no_debug_symbols:
+            all_errors.extend(check_no_debug_symbols(wheel))
 
     if all_errors:
         print("FAIL: Windows wheel validation found errors:", file=sys.stderr)

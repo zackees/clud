@@ -6085,6 +6085,8 @@ target is already unusable, and only under uv's own locks.
 
 ## DD-149: a configured soldr version is a minimum; a launch never downgrades soldr
 
+*Superseded by [DD-173](#dd-173-soldr-cannot-be-pinned-a-version-setting-is-ignored-with-a-warning): a version setting is now ignored entirely.*
+
 **Context:** DD-014 made a numeric `rust.version` / `optimize.rust.soldr_version`
 an exact pin. `soldr_activate` reconciled it on every launch: whenever the
 installed version differed from the pin it ran
@@ -6690,7 +6692,241 @@ would.
 asymmetry (it is exactly the accidental per-route difference #1852 exists to
 remove); a second gateway-only flag for the same object.
 
-## DD-168: API-key credentials fall back to an owner-only file and the env var
+## DD-168: hand-written waits are refused; a short standalone `sleep` is not
+
+**Context.** One session (#1880) produced four hand-written wait loops; two ran
+for 7 hours. Each invented a completion check on a stand-in (its own process
+line, a word cut off by `tail`, a status string) and nothing made it give up.
+Every wait that used `run_in_background` and the harness's completion
+notification, or a tool with its own deadline, worked. Transcript analysis
+found counted `for i in $(seq …)` loops with `sleep` and chained
+`sleep N && gh run list` (a loop split across turns) as the commonest shapes.
+
+**Decision.** `block_bad_cmd` refuses waiting constructs in shell commands for
+every agent: `while`/`until`/infinite `for`, any loop that sleeps, unbounded
+`tail -f`, `watch`, and a `sleep` chained to a GitHub status read. A single
+`sleep` outside a loop stays **allowed up to 60 s** when nothing in the same
+command polls; longer, `infinity` or a non-literal duration is refused. The
+refusal names the replacement. The only escape is the audited
+`CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`.
+
+**Why 60 s.** A short pause has real uses that are not waits on a stand-in
+(letting a just-started server bind before one `curl`, rate-limit spacing) and
+cannot run away: it ends by itself. Banning it would push agents to
+overrides for harmless commands, eroding the override trail's signal. Above a
+minute a `sleep` is almost always a poll interval or "wait for CI", which is
+exactly what background + notify replaces; a non-literal length cannot be
+judged, so it fails closed. A `sleep` of any length beside a `gh` status read
+is refused, because that pair is one iteration of a poll.
+
+**Rejected.** Teaching a coding rule for loops (the four failures had four
+different bugs). Banning every `sleep` (see above). A `clud wait --file F
+--contains X --timeout` primitive: no need remains — background + notify plus
+`clud ci`, `bosn ci run --wait` and `pr_merge_watch` cover every wait the
+session and the transcript scan found. Allowing bounded `for` loops with
+`sleep`: the bound is routinely hours of iterations.
+
+
+## DD-169: a wrapper, an embedded script or another tool does not launder a wait
+
+**Context.** The #1972 audit of every agent transcript on the dev machine
+found that agents told "never poll" kept writing PR/CI watch loops in forms
+DD-168's scan did not read: `timeout 590 bash -c '<loop>'` (128 distinct
+commands), `timeout 1500 gh run watch` and other wrapped native watchers
+(104), loops written to `watch.sh` by a heredoc or run from a script file
+(19), a `sleep` inside a `case` arm, `python -c 'time.sleep(20)'` as the
+loop's sleep, Python `while True` + `subprocess(gh)` + `time.sleep` polls, and
+the same loops moved into the Monitor tool.
+
+**Decision.** The hand-written-wait scan judges what actually runs:
+
+- **Wrappers are peeled** before every waiter and loop check: `VAR=val`,
+  `timeout`, `nohup`, `env`, `stdbuf`, `nice`, `ionice`, `setsid`, `xargs`,
+  `command`, `exec`, `time`, `builtin` and the gate prefix. A peeled
+  `timeout` still exempts `tail -f` (it has a deadline), but not a loop or a
+  native watcher.
+- **Embedded scripts are scanned recursively**: `bash|sh|zsh|dash … -c`,
+  `eval`, PowerShell `-Command`, `python -c`, and heredoc bodies fed to a
+  shell or Python. Every DD-168 rule applies to them.
+- **Scripts on their way to disk, or on disk, are scanned for PR/CI waits
+  only**: a heredoc written by `cat`/`tee` to a `.sh`/`.py` file (or one with
+  a shell/Python shebang), and a literal script path run as `bash x.sh`,
+  `./x.sh` or `python x.py` (read from the hook's `cwd`, at most 256 KiB).
+  Such a file may be the repository's own script with a harmless retry, so
+  only a loop or sleep beside a GitHub status read, or a native watcher,
+  refuses it.
+- **A sleep in a `case` arm is a sleep**, and so is a loop-free
+  `python -c '…time.sleep(N)…'`. A Python loop that sleeps is a loop that
+  sleeps; triple-quoted strings are data (edit scripts carry code in them).
+- **A native watcher in any loop is refused**, even the gh-shim's canonical
+  `gh pr checks --watch`. Outside a loop, `gh run watch` and an unshimmed
+  `gh pr checks --watch` are refused while `git.pr_wait_fail_fast` is on
+  (its opt-out still allows the bare watch, as before).
+- Every PR/CI refusal names the blessed waiter and how to run it,
+  `clud tool run github/pr_merge_watch.py <PR> [--repo OWNER/NAME]
+  [--timeout SECS]` under `run_in_background`, plus `clud ci` and
+  `bosn ci run --wait`. The audited `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`
+  remains the only escape.
+
+Monitor and PowerShell reach the same scan through `GUARDED_TOOLS` (#1954).
+The regression corpus is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`:
+one real command per audited shape plus legitimate neighbours that must stay
+allowed, run by `block_bad_cmd_wait_scan_tests.rs`.
+
+**Rejected.** Peeling wrappers in the shared `command_words`: it would change
+every other rule (`timeout 60 cargo build` would start tripping the soldr
+rule). Scanning every heredoc body: commit messages and issue bodies quote
+loops. Applying all of DD-168 to script files: a repository's install script
+with `for i in 1 2 3; do …; sleep 2; done` is not an agent's wait. Reading
+script paths that hold `$VAR`, globs or `~`: they cannot be resolved without
+running the shell.
+
+**Not covered.** Codex sessions: clud installs no `cmd-scan` hook into Codex
+(it only migrates and normalizes an existing `~/.codex/hooks.json`), so these
+rules do not run there. A script written by the Write tool and run later by
+a variable path is not read.
+
+## DD-170: the command scanner reads syntax trees and says what it cannot know
+
+**Context.** `block_bad_cmd` read commands with a hand-written splitter and
+tokenizer, then matched rules on word positions. Each rule family grew its own
+partial lexer on top: heredoc stripping, substitution extraction, a
+top-level-segment splitter for `cd`, an offset-preserving heredoc masker for
+the gate, a redirect-aware tokenizer for the settings-file write check, and
+`split_whitespace` over words to look inside `bash -c`. Each was its own
+source of bypasses (#1299, #1305). #1961 measured the result: of 14 ways an agent
+created a worktree or clone, the scanner registered 1, and `git -C <dir> clone`
+walked past the extern-directory guard.
+
+**Decision.** Every command is parsed by a real grammar (`tree-sitter-bash`,
+`tree-sitter-powershell`; a minimal splitter for cmd.exe) and evaluated
+without running anything into one list of invocations, which every rule reads
+(`shell_ast`, [shell-ast.md](architecture/shell-ast.md)). Evaluation resolves
+what is knowable from the text and the base environment, such as assignments,
+`export`, `cd` chains, literal `for` lists and the text of nested shells. It
+marks every other value `Unknown` with a reason, and each rule declares what it
+does with an unknown (the table in shell-ast.md). The hand-written splitters
+are gone. A recall oracle replays real commands against the git/gh calls the
+shim recorded them running, and its floor may only rise. `git worktree add`
+outside `~/.clud/worktrees` (or `/grind`'s directory) is now refused, since the
+same parse makes that guard unbypassable too.
+
+**Why tree-sitter.** It is error-tolerant: bad input yields `ERROR` nodes,
+never a failed parse, so the scanner always has a structure. It covers bash
+and PowerShell behind one API, and its bash grammar is the one Codex CLI's
+command-safety parsing uses. Its parse cost is microseconds; the latency
+budget test holds parse plus evaluation under 5 ms at p99.
+
+**Why evaluate, and only statically.** Most bypasses were values a reader can
+see: `G=git; $G clone`, `R=/x; git -C "$R"`, `cd /repo && git worktree add ..`.
+Running anything to learn a value (`$(…)`, `read`) is never acceptable in a
+pre-execution hook, so those stay `Unknown`, and the runtime shim, which sees
+the real argv, covers what static evaluation cannot.
+
+**Rejected.** Patching each hand-written lexer: the bypasses lived in the
+position-based logic over them, not in one bug. `brush-parser`: bash only, and
+its evaluator is built to execute. `tree-sitter-batch` for cmd.exe: too little
+use to rely on, and cmd expands `%VAR%` when a line is read, which no grammar
+models, so a splitter that does exactly that is more faithful. Treating every
+unknown as a match in every rule: the right answer differs per rule, so it is
+declared per rule.
+
+This supersedes the mentions of `command_words()` in DD-016's override note
+and DD-056's gate note: the gate now reads literal words from the syntax tree
+for the same reason it avoided `command_words`.
+
+## DD-171: Codex gets a global `clud-cmd-scan` hook written to its user config
+
+**Context.** clud's rule is to compile hooks into launch arguments and never
+write them into a user's config ([hook-dispatch.md](architecture/hook-dispatch.md#delivery-compiled-into-cli-args-not-written-to-files)).
+That guards only sessions clud launches. Claude Code users get the scanner
+globally; Codex users did not, and the #1972 audit found ~1,300 hand-written
+wait loops in bare `codex` sessions that no hook saw.
+
+**Decision.** Every Codex global launch setup ensures one `matcher: "*"`
+`clud-cmd-scan` PreToolUse entry in `~/.codex/hooks.json` and seeds its
+`hooks.state` trusted hash in `~/.codex/config.toml`
+(`codex_cmd_scan_install.rs`). It reuses `codex_hook_normalize`'s lock and
+safety rules: create if missing, preserve everything else, never duplicate
+an existing `clud-cmd-scan` handler, never overwrite a trust entry, leave a
+malformed file alone. `hooks.codex_global_cmd_scan: false` in clud's
+settings file turns it off. This supersedes DD-169's "Not covered: Codex
+sessions" note.
+
+**Why seed trust.** Codex ignores an untrusted file hook, so an entry without
+its hash would be dead weight. Trust is seeded only for clud's own exact
+handler, the same thing the `-c` path already does for its session-flag hook.
+
+**Rejected.** A wrapper `codex` shim: it misses IDE and app sessions and
+fights the user's PATH. Documenting Codex as unguarded: the audit shows the
+loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
+session whose user opted out of the global entry or whose files are malformed,
+at the cost of scanning a Bash call twice.
+
+
+## DD-172: safe-rm trashes HOME files and tool data dirs outside the roots
+
+**Context (#1956, #1957).** The creation ledger records only `safe-mktemp`. A
+file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
+`.desktop` entry, a wrong Claude Code memory file) was refused, so agents
+overwrote it in place or left a manual cleanup list for the user.
+
+**Decision.** Outside the roots, a single file or symlink is trashed only
+strictly inside a tool or app data dir (`~/.claude`, `~/.codex`, `~/.cache`,
+`~/.local/share`), and a directory is trashed only strictly inside a tool
+data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
+(`~/Documents` and the other XDG user dirs) and a credentials/settings
+denylist are refused outright, as is any directory containing a denylisted
+path. Home itself stays refused.
+
+**Why.** A single file is bounded, recoverable from the trash for 72 hours,
+and audited. A recursive delete is not bounded: one wrong `-r` under home can
+take a project or years of documents, so directories stay limited to dirs
+that hold regenerable tool data. Keys, credentials and settings are not
+recoverable in the way that matters: a deleted key is a lockout, and a
+deleted clud settings file silently drops the user's overrides.
+
+**Rejected.** Any single file under home (the first cut of this rule: it
+reached the source files of every other repo under `~/dev`, which no
+#1956/#1957 case needs). Every subfolder of home (the owner's first proposal: one wrong
+`safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
+trees are copied there). Extending the ledger to every Write/Edit/redirect
+(more plumbing, and still misses files from earlier sessions). A slug-matched
+exception for only the current project's memory dir (#1957's first draft,
+superseded once `~/.claude` became deletable).
+
+
+## DD-173: soldr cannot be pinned; a version setting is ignored with a warning
+
+**Context.** DD-149 kept `rust.version` / `optimize.rust.soldr_version` as a
+floor. A numeric value still had two effects: it could force an install of
+that version's floor, and it turned off the daily rolling-latest refresh, so a
+repo or user that once wrote a pin stayed on an old soldr indefinitely. Old
+soldr protocols then ran beside current brokers and CI wrappers on a shared
+machine and broke them, the same failure class as stale `bosn==` pins in
+other repos' gate scripts.
+
+**Decision.** clud no longer honors any soldr version setting. When a settings
+layer (`.clud/settings.json`, `.clud/settings.local.json` or ~/.clud/settings.json)
+carries a numeric soldr version, launch prints one yellow warning saying the
+pin is ignored and to remove it, then behaves exactly as if no version were
+set: it uses the installed soldr, installs one if missing, upgrades one below
+the `soldr shims` floor, and refreshes to the latest release daily.
+`clud optimize rust --soldr-version X` prints the same warning and persists
+nothing; neither settings writer emits `soldr_version` any more. A newer soldr
+is still never downgraded.
+
+**Why.** Rolling latest is already the policy everywhere else (DD-120); the
+setting was the last way to opt out of it, and every use of that opt-out seen
+so far was a stale pin nobody remembered writing. A warning rather than a
+parse error keeps an old settings file from disarming its other rules.
+
+**Rejected.** Keeping the floor semantics (a stale floor still froze the
+refresh). Rewriting the user's settings file to drop the key (clud does not
+edit settings it did not write). Failing the launch on a pin (too harsh for a
+value that is now simply unused).
+
+## DD-174: API-key credentials fall back to an owner-only file and the env var
 
 **Context:** zackees/clud#1891. On a headless Linux host (SSH, no desktop
 session) the Secret Service is missing, or its login collection stays locked

@@ -20,7 +20,11 @@ reconnects after a daemon restart and restores its claim. It removes the marker
 on normal exit; a killed process can leave a marker, but no live connection to
 restore it. The daemon delays new claims for two seconds after startup so
 existing clients can restore first. If a restoring client finds another
-session obtained its claim, clud interrupts its agent. The native PreToolUse
+session obtained its claim, clud interrupts its agent. Reconnect attempts back
+off from 0.5 s to a 30 s cap with jitter. A daemon newer than the client
+refuses it until the session restarts, so the client prints `checkout presence
+disabled` once and stops reconnecting; the session keeps running without
+presence (#1981). The native PreToolUse
 hook follows shell `cd`/`pushd` segments and the checkout selected by Git's
 `-C`, `--work-tree`, or standard `.git` directory path options
 before `git switch`, `checkout`, `commit`, `reset`, `stash`,

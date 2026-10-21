@@ -137,19 +137,24 @@ impl FailoverLadder {
         })
     }
 
-    fn rung(name: &str) -> Result<FailoverRung, LadderError> {
+    fn rung(spec: &str) -> Result<FailoverRung, LadderError> {
+        // `--model` accepts `<model>@<effort>`, so a ladder may too. The rung
+        // routes by model only; the suffix must never reach a wire ID (#1903).
+        let (name, _effort) = provider_catalog::split_effort_suffix(spec);
         // Aliases count too: a ladder saved before a provider rename
         // (`deepseek-v4-flash` -> `deepseek-flash`, #1192) must keep naming the
         // provider route instead of being forwarded to Anthropic verbatim.
         let catalog = provider_catalog::model_by_cli_id(name)
             .or_else(|| provider_catalog::model_by_wire_id(name))
             .or_else(|| provider_catalog::model_by_any_id(name));
+        let inferred = provider_catalog::inferred_provider_from_wire(name)
+            .filter(|provider| *provider != ModelProvider::Claude);
         match catalog {
             // A catalog row that is not Claude names a provider namespace clud
             // owns, so the replayed body must carry that row's wire ID.
             Some(entry) if entry.provider != ModelProvider::Claude => {
                 Ok(FailoverRung {
-                    spec: name.to_string(),
+                    spec: spec.to_string(),
                     wire_id: entry.wire_id.to_string(),
                     provider: entry.provider,
                     // The one provider-to-route mapping (#1864). It is total,
@@ -159,11 +164,24 @@ impl FailoverLadder {
                     cost: CostOwner::for_provider(entry.provider),
                 })
             }
+            // An uncataloged ID with a provider's wire prefix (`gpt-5.5`,
+            // `deepseek-v4-flash-0901`) still belongs to that provider, the same
+            // inference `--model` uses (#1902).
+            _ if inferred.is_some() => {
+                let provider = inferred.unwrap_or(ModelProvider::Claude);
+                Ok(FailoverRung {
+                    spec: spec.to_string(),
+                    wire_id: name.to_string(),
+                    provider,
+                    route: crate::route_plan::conversation_route(provider),
+                    cost: CostOwner::for_provider(provider),
+                })
+            }
             // Everything else is an ordinary Claude model ID. Anthropic owns
             // its inventory, so it is forwarded exactly as written rather than
             // checked against a list that ages.
             _ => Ok(FailoverRung {
-                spec: name.to_string(),
+                spec: spec.to_string(),
                 wire_id: name.to_string(),
                 provider: ModelProvider::Claude,
                 route: ConversationRoute::Claude,
@@ -246,6 +264,27 @@ mod tests {
     use super::*;
     use crate::route_health::RouteVerdict;
     use std::time::Duration;
+
+    #[test]
+    fn effort_suffixed_catalog_rung_resolves_to_its_provider() {
+        let ladder = FailoverLadder::parse("codex-terra@high,claude-opus-4-1@max", true).unwrap();
+        let codex = &ladder.rungs()[0];
+        assert_eq!(codex.provider, ModelProvider::Codex);
+        assert_eq!(codex.spec, "codex-terra@high");
+        assert!(!codex.wire_id.contains('@'), "{}", codex.wire_id);
+        assert_eq!(ladder.rungs()[1].wire_id, "claude-opus-4-1");
+    }
+
+    #[test]
+    fn uncataloged_prefixed_wire_ids_keep_their_provider() {
+        let ladder = FailoverLadder::parse("deepseek-v4-flash-0901,gpt-5.5", false).unwrap();
+        let deepseek = &ladder.rungs()[0];
+        assert_eq!(deepseek.provider, ModelProvider::DeepSeek);
+        assert_eq!(deepseek.cost, CostOwner::Metered);
+        assert!(!ladder.withheld_for_consent().is_empty());
+        assert_eq!(ladder.rungs()[1].provider, ModelProvider::Codex);
+        assert_ne!(ladder.rungs()[1].route, ConversationRoute::Claude);
+    }
 
     #[test]
     fn a_catalog_rung_carries_its_provider_wire_id_and_an_unknown_id_stays_claude() {

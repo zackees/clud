@@ -782,3 +782,24 @@ fn the_state_machine_drives_show_then_close_for_a_short_episode() {
         "the live toast refreshes every tick of the episode"
     );
 }
+
+/// #1981: a full-table walk must not leave one open `/proc` handle per host
+/// process behind for the session's lifetime.
+#[test]
+fn sampler_keeps_a_bounded_number_of_procfs_handles() {
+    let mut sampler = Sampler::new();
+    let _ = sampler.tick(std::process::id());
+    // Only Linux exposes per-process procfs handles to count.
+    let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+        return;
+    };
+    let procfs_fds = fds
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter(|target| target.starts_with("/proc"))
+        .count();
+    // Slack covers handles parallel tests hold briefly.
+    assert!(
+        procfs_fds <= SYSINFO_OPEN_FILES_LIMIT + 36,
+        "{procfs_fds} procfs handles open after a full walk"
+    );
+}

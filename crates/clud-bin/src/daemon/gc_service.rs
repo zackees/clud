@@ -25,12 +25,14 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
 mod extern_repo;
 mod filesystem;
+mod legacy_worktree_root;
 mod list_state;
 mod repo_worktree;
 pub(crate) mod repo_worktree_cli;
 mod repo_worktree_probe;
 mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
+mod source_guard;
 
 use super::watch_service as gc_watch_service;
 
@@ -215,7 +217,10 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
         let result = if spared.is_some() {
             Ok(())
         } else {
-            remove_entry_filesystem(&entry)
+            remove_entry_filesystem(
+                &entry,
+                "automatic purge; applicable eligibility and source-use guards passed",
+            )
         };
         let completion = PurgeCompletion {
             id: entry.id,
@@ -230,16 +235,6 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
             .completion_tx
             .send(RegistryMsg::PurgeCompletion(completion));
     }
-}
-
-/// Open the registry and spawn the single worker thread. Returns the
-/// sender every connection thread uses to dispatch GC ops. Caller keeps
-/// the sender alive for the daemon's lifetime; dropping it stops the
-/// worker.
-#[cfg(test)]
-pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<RegistryMsg>> {
-    let registry = Registry::open_default().map_err(std::io::Error::other)?;
-    spawn_registry_worker_with(registry)
 }
 
 pub(super) fn spawn_registry_worker_for_state(
@@ -261,8 +256,7 @@ pub(super) fn spawn_registry_worker_for_state(
     )
 }
 
-/// Same as [`spawn_registry_worker`] but accepts a pre-constructed
-/// `Registry`. Tests use this to bind a worker to an isolated `redb`
+/// Spawns the registry worker on a pre-constructed `Registry`. Tests use this to bind a worker to an isolated `redb`
 /// file without depending on the process-global `CLUD_DATA_DB` env var.
 #[cfg(test)]
 pub(super) fn spawn_registry_worker_with(
@@ -414,7 +408,7 @@ fn run_worker_loop(
 ) {
     let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
-    // Issue #1485: create ~/.clud/tmp-wt at daemon start (no-op in tests).
+    // Issue #1485: create ~/.clud/worktrees at daemon start (no-op in tests).
     let _ = crate::gc::worktree_root::ensure_worktree_root();
     let Some(tick_cadence) = config.tick_cadence else {
         // No periodic tick in this mode, so the startup probe below is the
@@ -572,16 +566,39 @@ fn handle_registry_msg(
 /// Last-moment safety re-check, run on the purge-pool thread. Returns the
 /// spare reason when the entry must NOT be deleted after all.
 ///
-/// Only extern-repo rows carry a probe verdict, and only they can go stale in
-/// a way that costs data: their verdict encodes "no uncommitted or unpushed
-/// work", which a developer can invalidate at any moment. Other kinds have no
-/// such gate and are unchanged.
+/// Extern and sibling clone verdicts encode "no uncommitted or unpushed
+/// work", which a developer can invalidate at any moment. All source kinds,
+/// including legacy worktree rows, also receive fresh source-use checks.
+/// Cache/trash entries keep their existing eligibility policy.
 fn reverify_before_delete(entry: &TrackedEntry) -> Option<&'static str> {
-    if entry.kind != EXTERN_REPO_KIND {
+    reverify_before_delete_with(entry, &source_guard::source_in_use)
+}
+
+fn reverify_before_delete_with(
+    entry: &TrackedEntry,
+    source_probe: &dyn Fn(&Path) -> Option<&'static str>,
+) -> Option<&'static str> {
+    if entry_is_cacheable(entry) {
+        let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
+        if !decision.purge {
+            return Some(decision.reason);
+        }
+    } else if entry.kind == WORKTREE_KIND {
+        let path = Path::new(&entry.path);
+        if let Some(reason) = source_probe(path) {
+            return Some(reason);
+        }
+        let decision = extern_repo::extern_repo_purge_decision(
+            path.is_dir(),
+            true,
+            true,
+            extern_repo::git_work_state(path),
+        );
+        return (!decision.purge).then_some(decision.reason);
+    } else {
         return None;
     }
-    let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
-    (!decision.purge).then_some(decision.reason)
+    source_probe(Path::new(&entry.path))
 }
 
 /// Issue #1603: log one reclaim outcome, free its in-flight slot and, when
@@ -753,8 +770,13 @@ where
     // `RegistryMsg::ExternVerdicts`. Results are therefore one tick behind,
     // which is the trade: a checkout becomes reclaimable on the tick after
     // it is first seen clean, rather than stalling every client op.
-    match registry.list(Some(EXTERN_REPO_KIND)) {
-        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+    match registry.list(None) {
+        Ok(rows) => spawn_extern_probe(
+            rows.into_iter().filter(entry_is_cacheable).collect(),
+            completion_tx,
+            activity,
+            spare_reasons,
+        ),
         Err(err) => eprintln!("[clud] gc tick: extern-repo list failed: {err}"),
     }
     // Issues #1591/#1603: act on the previous snapshot's reclaimable rows,
@@ -828,8 +850,13 @@ fn prime_extern_verdicts(
     spare_reasons: &mut SpareReasons,
     live_cwds_provider: &LiveCwdsProvider,
 ) {
-    match registry.list(Some(EXTERN_REPO_KIND)) {
-        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+    match registry.list(None) {
+        Ok(rows) => spawn_extern_probe(
+            rows.into_iter().filter(entry_is_cacheable).collect(),
+            completion_tx,
+            activity,
+            spare_reasons,
+        ),
         Err(err) => eprintln!("[clud] gc: initial extern-repo list failed: {err}"),
     }
     spawn_repo_worktree_probe(
@@ -859,14 +886,14 @@ fn repo_worktree_mode_from_env() -> ReclaimMode {
 struct RepoWorktreeGcConfig {
     mode: ReclaimMode,
     delete_remote: bool,
-    /// #1485: `~/.clud/tmp-wt`, whose children seed the probe and alone
+    /// #1485: `~/.clud/worktrees`, whose children seed the probe and alone
     /// qualify for the abandoned-empty rule. `None` in tests.
     wt_root: Option<PathBuf>,
 }
 
 /// #1485: the production worktree root. `None` under `cfg(test)`, so no
 /// unit test can probe (let alone reclaim) the developer's real
-/// `~/.clud/tmp-wt`; tests inject a tempdir root instead.
+/// `~/.clud/worktrees`; tests inject a tempdir root instead.
 fn production_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
         None
@@ -983,6 +1010,7 @@ fn spawn_repo_worktree_probe(
         .spawn(move || {
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
             let procs = repo_worktree_probe::collect_process_cwds();
+            migrate_legacy_worktree_root(&live_cwds, &procs);
             let rows = repo_worktree_probe::probe_repos(
                 &repo_roots,
                 &live_cwds,
@@ -990,7 +1018,7 @@ fn spawn_repo_worktree_probe(
                 wt_root.as_deref(),
             );
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
-            // Issue #1610: size tmp-wt here, off the launch path, so the
+            // Issue #1610: size worktrees here, off the launch path, so the
             // launch banner only reads the cached result.
             refresh_worktree_size_cache(wt_root.as_deref());
         });
@@ -999,7 +1027,26 @@ fn spawn_repo_worktree_probe(
     }
 }
 
-/// Issue #1610: bounded `check_tree_size` walk of `tmp-wt`, cached for the
+/// #1962: move what is left under the old `~/.clud/tmp-wt` into
+/// `~/.clud/worktrees`. Production only, and never without a process
+/// snapshot: without one, nothing shows which entries are in use.
+fn migrate_legacy_worktree_root(
+    live_cwds: &[PathBuf],
+    procs: &repo_worktree_reclaim::ProcessCwdSnapshot,
+) {
+    if cfg!(test) || !procs.available {
+        return;
+    }
+    let Some(home) = crate::home::user_home() else {
+        return;
+    };
+    let busy: Vec<PathBuf> = live_cwds.iter().chain(&procs.cwds).cloned().collect();
+    for line in legacy_worktree_root::migrate(&home, &busy) {
+        eprintln!("[clud] gc: {line}");
+    }
+}
+
+/// Issue #1610: bounded `check_tree_size` walk of `worktrees`, cached for the
 /// launch banner. Best effort; errors are ignored. Warn-only: nothing is
 /// deleted for size.
 fn refresh_worktree_size_cache(wt_root: Option<&std::path::Path>) {

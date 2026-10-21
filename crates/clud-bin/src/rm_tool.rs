@@ -41,9 +41,10 @@ pub const ROOTS_ENV: &str = "CLUD_RM_ROOTS";
 pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
 /// Appended to every outside-the-roots refusal (#1659): `--purge` changes
 /// only trash-versus-delete, never where a call may delete.
-const OUTSIDE_HINT: &str = "; --purge does not relax this check. Write scratch data under an \
-     allowed root (the session temp dir) or a system temp dir instead, or ask the user to \
-     remove this path";
+const OUTSIDE_HINT: &str = "; --purge does not relax this check. To quarantine it reversibly \
+     instead, run `clud trash <PATH>` (recoverable from ~/.clud/trash until GC). Write scratch \
+     data under an allowed root (the session temp dir) or a system temp dir instead, or ask the \
+     user to remove this path";
 
 /// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
@@ -371,6 +372,14 @@ impl Roots {
         if self.extra_roots.iter().any(|e| e.root == path) {
             return Err("is a safe_rm.extra_roots extra root itself".into());
         }
+        // A Python virtualenv is disposable wherever it lives: any path at or
+        // under a component named exactly `.venv` may be trashed, rooted at
+        // that `.venv`'s parent. The git, home and mount checks still apply.
+        if let Some(venv) = venv_ancestor(path) {
+            self.ledger_grants
+                .insert(path.to_path_buf(), VENV_REASON.to_string());
+            return Ok(venv.parent().map_or(venv.clone(), Path::to_path_buf));
+        }
         // A linked worktree of an allowed repo may itself be deleted (#1573):
         // git created it for that repo. It stays refused while it is a root.
         if self.worktrees().iter().any(|r| r == path) {
@@ -434,6 +443,33 @@ impl Roots {
             None => format!("is outside the allowed roots ({shown})"),
         };
         Err(refusal + &ledger_clause + OUTSIDE_HINT)
+    }
+
+    /// A path under `home` outside every root (#1956, #1957): a file or
+    /// symlink, or a directory inside a tool data dir. `Some(Ok(parent))`
+    /// allows it, `Some(Err)` is a denylist refusal and `None` leaves the
+    /// caller's refusal standing.
+    fn home_file_grant(
+        &mut self,
+        path: &Path,
+        home: Option<&Path>,
+    ) -> Option<Result<PathBuf, String>> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let is_dir = !meta.file_type().is_symlink() && meta.is_dir();
+        match home_files::check(path, is_dir, home) {
+            Ok(false) => None,
+            Err(refusal) => Some(Err(refusal)),
+            Ok(true) => {
+                let home = crate::path_norm::canonicalize_plain(home?).ok()?;
+                self.check_owned_under("your home directory", &home, path)
+                    .ok()?;
+                self.ledger_grants
+                    .insert(path.to_path_buf(), home_files::GRANT_REASON.into());
+                Some(Ok(path
+                    .parent()
+                    .map_or(path.to_path_buf(), Path::to_path_buf)))
+            }
+        }
     }
 
     fn session_grant_for(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
@@ -637,6 +673,21 @@ impl Roots {
     }
 }
 
+/// Audit reason recorded when a path is allowed only because it is in a `.venv`.
+const VENV_REASON: &str = "inside a .venv virtualenv, which is disposable anywhere";
+
+/// The outermost ancestor-or-self of `path` named exactly `.venv`.
+fn venv_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if component.as_os_str() == ".venv" {
+            return Some(prefix);
+        }
+    }
+    None
+}
+
 fn deepest_containing(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
     roots
         .iter()
@@ -735,7 +786,10 @@ pub fn resolve(
             return Err("is your home directory or one of its ancestors".into());
         }
     }
-    let root = roots.containing(&path)?;
+    let root = match roots.containing(&path) {
+        Ok(root) => root,
+        Err(refusal) => roots.home_file_grant(&path, home).unwrap_or(Err(refusal))?,
+    };
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -762,7 +816,7 @@ pub fn resolve(
 
 /// `path` with its deepest existing ancestor canonicalized and the missing
 /// components re-appended, so it compares against the canonical roots.
-fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     let mut tail = Vec::new();
     let mut ancestor = path;
     loop {
@@ -1685,6 +1739,9 @@ pub mod ledger;
 
 #[path = "rm_tool_extra_roots.rs"]
 pub mod extra_roots;
+
+#[path = "rm_tool_home_files.rs"]
+pub mod home_files;
 
 #[path = "rm_tool_session_grants.rs"]
 mod session_grants;

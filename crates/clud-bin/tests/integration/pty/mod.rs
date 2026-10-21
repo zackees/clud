@@ -3,9 +3,11 @@
 //! are `pty::<module>::<test_name>`. `ci/run_bundle.py` runs each of them in
 //! its own pseudo-terminal.
 
+mod console_wrap;
 mod input_corpus;
 mod pty_behavior;
 mod pty_pump;
+mod screen_fidelity;
 mod shift_enter_dual_reader;
 mod toast_pty;
 mod utf8_codepage;
