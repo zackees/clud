@@ -461,7 +461,7 @@ where
         ),
     }
     .ok();
-    writeln!(err, "{}", spec.prompt()).ok();
+    writeln!(err, "\n{}", spec.prompt()).ok();
     err.flush().ok();
 
     if !read_yes(input) {
@@ -1611,12 +1611,18 @@ ln -sfn releases/0.156.0 "$root/current"
             let (path, prompt) =
                 resolve_with(backend, false, true, "yes\n", &mut host).expect("path");
             assert_eq!(path, installed.to_string_lossy());
-            // stderr is the issue #934 diagnostic followed by the prompt.
-            let expected_prompt =
-                BackendInstallSpec::for_backend(backend, InstallPlatform::Linux).prompt() + "\n";
+            // #2002: one empty line separates diagnostics from the question.
+            let expected_prompt = format!(
+                "\n\n{}\n",
+                BackendInstallSpec::for_backend(backend, InstallPlatform::Linux).prompt()
+            );
             assert!(
                 prompt.ends_with(&expected_prompt),
                 "prompt must be the last thing written, got: {prompt:?}"
+            );
+            assert!(
+                !prompt.contains("\n\n\n"),
+                "prompt must have exactly one separating blank line, got: {prompt:?}"
             );
             assert!(
                 prompt.contains("not found on PATH"),
