@@ -42,14 +42,11 @@ pub(in crate::daemon) struct FrameLane {
 impl FrameLane {
     pub(in crate::daemon) fn cleanup(&self) {
         remove_daemon_identity_file(&self.identity_path);
-        #[cfg(not(windows))]
-        {
-            let _ = std::fs::remove_file(&self.endpoint_path);
-        }
-        #[cfg(windows)]
-        {
+        if crate::platform::host::WINDOWS {
             // Named pipes vanish with their last handle; nothing on disk.
             let _ = &self.endpoint_path;
+        } else {
+            let _ = std::fs::remove_file(&self.endpoint_path);
         }
     }
 }
@@ -180,8 +177,7 @@ pub(super) fn start_frame_lane(
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
 
-    #[cfg(not(windows))]
-    {
+    if !crate::platform::host::WINDOWS {
         // A previous daemon that died uncleanly leaves the socket file
         // behind; binding fails with AddrInUse unless it is removed.
         let _ = std::fs::remove_file(&endpoint_path);

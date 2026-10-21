@@ -9,17 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
-
-#[cfg(unix)]
 use std::time::Instant;
 
-#[cfg(unix)]
 use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode, StreamKind,
 };
 
+use crate::platform::host;
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-#[cfg(unix)]
 const POSIX_LOGIN_ENV_TIMEOUT: Duration = Duration::from_secs(3);
 
 static LOGIN_ENV: OnceLock<LoginEnvironment> = OnceLock::new();
@@ -101,17 +99,10 @@ pub(super) fn snapshot_for_new_session() -> Vec<(String, String)> {
 }
 
 fn materialize() -> io::Result<Vec<(String, String)>> {
-    #[cfg(windows)]
-    {
+    if host::WINDOWS {
         materialize_windows()
-    }
-    #[cfg(unix)]
-    {
+    } else {
         materialize_posix()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Ok(std::env::vars().collect())
     }
 }
 
@@ -122,7 +113,6 @@ fn materialize() -> io::Result<Vec<(String, String)>> {
 /// cannot leak into the base. Those values are instead supplied by the client
 /// overlay when a session is admitted. The static command is important: no
 /// caller-controlled text reaches a shell.
-#[cfg(unix)]
 fn materialize_posix() -> io::Result<Vec<(String, String)>> {
     let shell = login_shell();
     let config = ProcessConfig {
@@ -180,7 +170,6 @@ fn materialize_posix() -> io::Result<Vec<(String, String)>> {
 
 /// Login profiles sometimes print a banner. The static command emits one NUL
 /// before `env -0`, making that arbitrary stdout unambiguously discardable.
-#[cfg(unix)]
 fn after_login_marker(stdout: &[u8]) -> io::Result<&[u8]> {
     let Some(marker) = stdout.iter().position(|byte| *byte == 0) else {
         return Err(io::Error::new(
@@ -191,7 +180,6 @@ fn after_login_marker(stdout: &[u8]) -> io::Result<&[u8]> {
     Ok(&stdout[marker + 1..])
 }
 
-#[cfg(unix)]
 fn login_shell() -> String {
     let candidate = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let path = std::path::Path::new(&candidate);
@@ -202,7 +190,6 @@ fn login_shell() -> String {
     }
 }
 
-#[cfg(unix)]
 fn posix_bootstrap_env(shell: &str) -> Vec<(String, String)> {
     let home = crate::home::user_home()
         .or_else(|| std::env::var_os("HOME").map(Into::into))
@@ -226,7 +213,6 @@ fn posix_bootstrap_env(shell: &str) -> Vec<(String, String)> {
 /// Parse `env -0` output without treating newlines in a value as record
 /// separators. Empty malformed records are ignored, but an output without one
 /// usable key is rejected so callers retain the prior known-good snapshot.
-#[cfg(any(unix, test))]
 fn parse_nul_environment(bytes: &[u8]) -> io::Result<Vec<(String, String)>> {
     let mut entries = Vec::new();
     for record in bytes
@@ -275,23 +261,15 @@ fn replace(entries: &mut Vec<(String, String)>, key: String, value: String) {
 }
 
 fn same_key(left: &str, right: &str) -> bool {
-    #[cfg(windows)]
-    {
+    if host::WINDOWS {
         left.eq_ignore_ascii_case(right)
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         left == right
     }
 }
 
-#[cfg(windows)]
 fn materialize_windows() -> io::Result<Vec<(String, String)>> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    use winreg::RegKey;
-
-    const MACHINE_PATH: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
-    const USER_PATH: &str = r"Environment";
+    use crate::platform::login_env::{read_environment_key, EnvironmentKey};
 
     let mut environment = Vec::new();
     // A normal Windows process has these loader-owned values even when they
@@ -302,10 +280,10 @@ fn materialize_windows() -> io::Result<Vec<(String, String)>> {
             replace(&mut environment, key.to_string(), value);
         }
     }
-    let machine = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(MACHINE_PATH)?;
-    append_registry_values(&mut environment, machine)?;
-    let user = RegKey::predef(HKEY_CURRENT_USER).open_subkey(USER_PATH)?;
-    append_registry_values(&mut environment, user)?;
+    let machine = read_environment_key(EnvironmentKey::Machine)?;
+    append_registry_values(&mut environment, machine);
+    let user = read_environment_key(EnvironmentKey::User)?;
+    append_registry_values(&mut environment, user);
     if environment.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -315,21 +293,10 @@ fn materialize_windows() -> io::Result<Vec<(String, String)>> {
     Ok(environment)
 }
 
-#[cfg(windows)]
-fn append_registry_values(
-    environment: &mut Vec<(String, String)>,
-    key: winreg::RegKey,
-) -> io::Result<()> {
-    use winreg::enums::RegType;
-    use winreg::types::FromRegValue;
-
-    for item in key.enum_values() {
-        let (name, value) = item?;
-        if !matches!(value.vtype, RegType::REG_SZ | RegType::REG_EXPAND_SZ) {
-            continue;
-        }
-        let raw = String::from_reg_value(&value)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+/// Merge one registry key's string values (already read, in registry order)
+/// into `environment`, expanding `%VAR%` references and appending `PATH`.
+fn append_registry_values(environment: &mut Vec<(String, String)>, values: Vec<(String, String)>) {
+    for (name, raw) in values {
         let expanded = expand_windows_variables(&raw, environment);
         if name.eq_ignore_ascii_case("PATH") {
             if let Some(existing) = value_of(environment, "PATH") {
@@ -341,10 +308,8 @@ fn append_registry_values(
             replace(environment, name, expanded);
         }
     }
-    Ok(())
 }
 
-#[cfg(windows)]
 fn value_of<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
     entries
         .iter()
@@ -352,7 +317,6 @@ fn value_of<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-#[cfg(windows)]
 fn expand_windows_variables(value: &str, entries: &[(String, String)]) -> String {
     let mut result = String::new();
     let mut remainder = value;
@@ -410,16 +374,20 @@ mod tests {
         assert!(parse_nul_environment(b"not-an-entry\0").is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn login_marker_discards_profile_banners_without_touching_env_records() {
+        if !host::UNIX {
+            return;
+        }
         let bytes = b"welcome to the shell\n\0PATH=/bin\0";
         assert_eq!(after_login_marker(bytes).unwrap(), b"PATH=/bin\0");
     }
 
-    #[cfg(unix)]
     #[test]
     fn bootstrap_env_is_minimal_and_keeps_the_chosen_shell() {
+        if !host::UNIX {
+            return;
+        }
         let env = posix_bootstrap_env("/bin/bash");
         assert_eq!(
             env.iter().find(|(key, _)| key == "SHELL").unwrap().1,

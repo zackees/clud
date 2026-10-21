@@ -158,9 +158,7 @@ fn codex_catch_all_groups<'a>(
     groups
 }
 
-pub(in crate::hook_health) fn deterministic_repair_actions(
-    report: &HookHealthReport,
-) -> Vec<RepairAction> {
+pub(crate) fn deterministic_repair_actions(report: &HookHealthReport) -> Vec<RepairAction> {
     plan_repairs(report)
         .into_iter()
         .filter(|action| {
@@ -174,7 +172,7 @@ pub(in crate::hook_health) fn deterministic_repair_actions(
         .collect()
 }
 
-pub(in crate::hook_health) fn apply_deterministic_repairs(
+pub(crate) fn apply_deterministic_repairs(
     actions: Vec<RepairAction>,
 ) -> Result<usize, DeterministicRepairError> {
     let mut applied = 0;
@@ -229,7 +227,7 @@ pub(in crate::hook_health) fn apply_deterministic_repairs(
 }
 
 pub(in crate::hook_health) fn hook_command_needs_last_exit_code(command: Option<&str>) -> bool {
-    if !cfg!(target_os = "windows") {
+    if !crate::platform::host::WINDOWS {
         return false;
     }
     let Some(command) = command else {

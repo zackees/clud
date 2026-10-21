@@ -1,4 +1,4 @@
-pub(super) const TARGET_SAMPLE_RATE: u32 = 16_000;
+pub(crate) const TARGET_SAMPLE_RATE: u32 = 16_000;
 /// Recordings shorter than this are treated as accidental — neither
 /// played back nor sent to Whisper. Tuned to ignore key chatter on
 /// terminals that bounce SS3-R press/release within a single frame.

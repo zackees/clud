@@ -13,10 +13,9 @@ pub struct SessionGrant {
     pub reason: String,
     pub session_id: String,
     pub created_unix_ms: u128,
-    #[cfg(unix)]
-    pub device: u64,
-    #[cfg(unix)]
-    pub inode: u64,
+    /// The checkout's `device` / `inode` on Unix; nothing elsewhere.
+    #[serde(flatten)]
+    pub identity: crate::platform::rm_tool::GrantIdentity,
 }
 
 fn file_path(state_dir: &Path, session_id: &str) -> PathBuf {
@@ -35,7 +34,7 @@ fn checkout(root: &Path) -> bool {
 
 fn eligible(root: &Path, launch_roots: &[PathBuf]) -> bool {
     checkout(root)
-        && owned_by_caller(root)
+        && crate::platform::rm_tool::owned_by_caller(root)
         && launch_roots.iter().any(|launch| {
             // `root` is canonical; compare a canonical launch root too, or a
             // symlinked temp prefix (macOS `/var` -> `/private/var`) makes
@@ -51,33 +50,8 @@ fn eligible(root: &Path, launch_roots: &[PathBuf]) -> bool {
         })
 }
 
-#[cfg(unix)]
-fn owned_by_caller(root: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    fs::metadata(root).is_ok_and(|meta| meta.uid() == unsafe { libc::geteuid() })
-}
-
-#[cfg(not(unix))]
-fn owned_by_caller(_root: &Path) -> bool {
-    true
-}
-
-#[cfg(unix)]
-fn identity(root: &Path) -> Result<(u64, u64), String> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(root).map_err(|e| format!("cannot stat checkout: {e}"))?;
-    Ok((meta.dev(), meta.ino()))
-}
-
-#[cfg(unix)]
 fn same_identity(grant: &SessionGrant) -> bool {
-    identity(&grant.root).is_ok_and(|(dev, ino)| dev == grant.device && ino == grant.inode)
-}
-
-#[cfg(not(unix))]
-fn same_identity(grant: &SessionGrant) -> bool {
-    grant.root.is_dir()
+    crate::platform::rm_tool::same_grant_identity(&grant.root, &grant.identity)
 }
 
 /// Record a sibling checkout grant. The reason appears in safe-rm's audit.
@@ -99,8 +73,7 @@ pub fn grant(
     if !eligible(&root, launch_roots) {
         return Err("grant requires a sibling Git checkout beside this session's checkout".into());
     }
-    #[cfg(unix)]
-    let (device, inode) = identity(&root)?;
+    let identity = crate::platform::rm_tool::grant_identity(&root)?;
     let record = SessionGrant {
         root: root.clone(),
         reason: reason.trim().to_owned(),
@@ -109,25 +82,15 @@ pub fn grant(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
-        #[cfg(unix)]
-        device,
-        #[cfg(unix)]
-        inode,
+        identity,
     };
     let path = file_path(state_dir, session_id);
     let dir = path.parent().ok_or("invalid grant path")?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create grant directory: {e}"))?;
-    #[cfg(unix)]
-    let options = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.create(true).append(true).mode(0o600);
-        options
-    };
-    #[cfg(not(unix))]
     let options = {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
+        crate::platform::rm_tool::grant_record_mode(&mut options);
         options
     };
     let mut file = options
@@ -172,4 +135,4 @@ pub fn reason(grant: &SessionGrant) -> String {
 
 #[cfg(test)]
 #[path = "rm_tool_session_grants_tests.rs"]
-mod tests;
+pub(crate) mod tests;

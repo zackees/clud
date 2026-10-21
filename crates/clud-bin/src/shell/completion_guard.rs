@@ -41,7 +41,7 @@
 //! Because the lever is a variable Git for Windows consults rather than one it
 //! documents as an API, a change on their side would silently stop suppressing
 //! completions. The guardrail against that is
-//! `tests/integration/cli/shell_completion_guard.rs`, which asserts the observed **function
+//! `tests/integration/cli/platform/windows/shell_completion_guard.rs`, which asserts the observed **function
 //! count** of a real login shell — not merely that this variable is set.
 
 /// The variable Git for Windows' `/etc/profile.d/git-prompt.sh` consults.
@@ -77,7 +77,7 @@ fn is_truthy(raw: &str) -> bool {
 /// `WINELOADERNOEXEC` is a real Wine variable we should not set on a platform
 /// where Wine may actually be running) and empty when opted out.
 pub fn env_overrides() -> Vec<(String, String)> {
-    env_overrides_for(cfg!(windows), is_opted_out())
+    env_overrides_for(crate::platform::host::WINDOWS, is_opted_out())
 }
 
 /// Test seam — the platform and opt-out decisions are passed in so the policy

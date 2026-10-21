@@ -228,7 +228,7 @@ fn paths_lists_every_root_for_the_cwd_pinning_set() {
 
 #[test]
 fn a_tool_that_names_a_file_reports_it_resolved_against_cwd() {
-    let cwd = if cfg!(windows) {
+    let cwd = if crate::platform::host::WINDOWS {
         PathBuf::from(r"C:\repo")
     } else {
         PathBuf::from("/repo")
@@ -308,7 +308,7 @@ fn a_named_path_wins_over_a_cd_target() {
 
 #[test]
 fn cwd_is_the_fallback_when_a_call_names_nothing_and_goes_nowhere() {
-    let cwd = if cfg!(windows) {
+    let cwd = if crate::platform::host::WINDOWS {
         PathBuf::from(r"C:\repo")
     } else {
         PathBuf::from("/repo")

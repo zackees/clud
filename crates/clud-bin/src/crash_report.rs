@@ -286,7 +286,7 @@ pub fn install_native(role: &str) {
             crash_handler::CrashHandler::attach(crash_handler::make_crash_event(
                 |cc: &crash_handler::CrashContext| {
                     let role = current_role();
-                    let meta = extract_native_meta(cc);
+                    let meta = crate::platform::crash_report::extract_native_meta(cc);
                     let _ = write_native_report(&role, meta);
                     // `Handled(false)` -> continue to default OS behavior
                     // (terminate the process with the original signal /
@@ -309,63 +309,7 @@ pub fn install_native(role: &str) {
     });
 }
 
-#[cfg(target_os = "linux")]
-fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
-    // `signalfd_siginfo` is plain-old-data populated by the kernel.
-    let signo = cc.siginfo.ssi_signo as i32;
-    let addr = cc.siginfo.ssi_addr as usize;
-    NativeCrashMeta {
-        signal_or_exception: Some(signal_name(signo).to_string()),
-        signal_number: Some(signo),
-        exception_code: None,
-        faulting_address: hex_addr(addr),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
-    // mac uses Mach exceptions; `exception` is `Option<ExceptionInfo>`.
-    match &cc.exception {
-        Some(info) => NativeCrashMeta {
-            signal_or_exception: Some(mac_exception_kind_name(info.kind).to_string()),
-            signal_number: Some(info.kind as i32),
-            exception_code: Some(info.code as i64),
-            faulting_address: info
-                .subcode
-                .map(|s| format!("0x{s:x}"))
-                .or_else(|| hex_addr(info.code as usize)),
-        },
-        None => NativeCrashMeta::default(),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
-    // crash-context exposes the exception_code directly so we don't need
-    // to dereference exception_pointers just to read it. The faulting
-    // address still requires reading the ExceptionRecord.
-    let code = cc.exception_code as i64;
-    let addr = unsafe {
-        if cc.exception_pointers.is_null() {
-            0
-        } else {
-            let record = (*cc.exception_pointers).ExceptionRecord;
-            if record.is_null() {
-                0
-            } else {
-                (*record).ExceptionAddress as usize
-            }
-        }
-    };
-    NativeCrashMeta {
-        signal_or_exception: Some(windows_exception_name(code).to_string()),
-        signal_number: None,
-        exception_code: Some(code),
-        faulting_address: hex_addr(addr),
-    }
-}
-
-fn hex_addr(addr: usize) -> Option<String> {
+pub fn hex_addr(addr: usize) -> Option<String> {
     if addr == 0 {
         None
     } else {
@@ -373,8 +317,7 @@ fn hex_addr(addr: usize) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn signal_name(signo: i32) -> &'static str {
+pub fn signal_name(signo: i32) -> &'static str {
     // Linux signal numbers from <bits/signum.h>. Stable.
     match signo {
         4 => "SIGILL",
@@ -386,8 +329,7 @@ fn signal_name(signo: i32) -> &'static str {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn mac_exception_kind_name(kind: u32) -> &'static str {
+pub fn mac_exception_kind_name(kind: u32) -> &'static str {
     // `mach/exception_types.h` — `EXC_*` constants.
     match kind {
         1 => "EXC_BAD_ACCESS",
@@ -407,25 +349,16 @@ fn mac_exception_kind_name(kind: u32) -> &'static str {
     }
 }
 
-#[cfg(target_os = "windows")]
-const EXCEPTION_ACCESS_VIOLATION: i64 = 0xC000_0005_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_IN_PAGE_ERROR: i64 = 0xC000_0006_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_ILLEGAL_INSTRUCTION: i64 = 0xC000_001D_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_INT_DIVIDE_BY_ZERO: i64 = 0xC000_0094_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_ARRAY_BOUNDS_EXCEEDED: i64 = 0xC000_008C_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_BREAKPOINT: i64 = 0x8000_0003_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_PRIV_INSTRUCTION: i64 = 0xC000_0096_u32 as i32 as i64;
-#[cfg(target_os = "windows")]
-const EXCEPTION_STACK_OVERFLOW: i64 = 0xC000_00FD_u32 as i32 as i64;
+pub const EXCEPTION_ACCESS_VIOLATION: i64 = 0xC000_0005_u32 as i32 as i64;
+pub const EXCEPTION_IN_PAGE_ERROR: i64 = 0xC000_0006_u32 as i32 as i64;
+pub const EXCEPTION_ILLEGAL_INSTRUCTION: i64 = 0xC000_001D_u32 as i32 as i64;
+pub const EXCEPTION_INT_DIVIDE_BY_ZERO: i64 = 0xC000_0094_u32 as i32 as i64;
+pub const EXCEPTION_ARRAY_BOUNDS_EXCEEDED: i64 = 0xC000_008C_u32 as i32 as i64;
+pub const EXCEPTION_BREAKPOINT: i64 = 0x8000_0003_u32 as i32 as i64;
+pub const EXCEPTION_PRIV_INSTRUCTION: i64 = 0xC000_0096_u32 as i32 as i64;
+pub const EXCEPTION_STACK_OVERFLOW: i64 = 0xC000_00FD_u32 as i32 as i64;
 
-#[cfg(target_os = "windows")]
-fn windows_exception_name(code: i64) -> &'static str {
+pub fn windows_exception_name(code: i64) -> &'static str {
     // Reference values from `winnt.h` / NTSTATUS. Match via constants
     // because pattern positions only accept constant expressions.
     if code == EXCEPTION_ACCESS_VIOLATION {
@@ -693,7 +626,6 @@ mod tests {
         assert_eq!(hex_addr(0xdead_beef).as_deref(), Some("0xdeadbeef"));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn linux_signal_names_cover_documented_signals() {
         assert_eq!(signal_name(4), "SIGILL");
@@ -705,7 +637,6 @@ mod tests {
         assert_eq!(signal_name(99), "UNKNOWN");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_exception_kind_names_cover_common_exc_constants() {
         assert_eq!(mac_exception_kind_name(1), "EXC_BAD_ACCESS");
@@ -717,7 +648,6 @@ mod tests {
         assert_eq!(mac_exception_kind_name(999), "UNKNOWN");
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn windows_exception_names_cover_common_codes() {
         // The bit pattern reinterpretation matters because NTSTATUS codes
@@ -848,30 +778,32 @@ mod tests {
     /// than fail — the sidecar check would then have nothing to compare and
     /// would quietly accept any DWARF.
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_report_carries_the_build_id_on_a_platform_that_has_one() {
-        let report = CrashReport {
-            version: env!("CARGO_PKG_VERSION"),
-            target: BUILD_TARGET,
-            build_id: crate::build_id::own_build_id(),
-            role: "test".to_string(),
-            kind: "panic",
-            pid: 1,
-            cwd: None,
-            args: Vec::new(),
-            timestamp_unix_ms: 0,
-            panic_location: None,
-            panic_message: None,
-            signal_or_exception: None,
-            signal_number: None,
-            exception_code: None,
-            faulting_address: None,
-            backtrace: String::new(),
-        };
-        let json = serde_json::to_value(&report).expect("serialize");
-        let id = json["build_id"]
-            .as_str()
-            .expect("ELF builds carry a build-id; build.rs asks for one");
-        assert_eq!(id.len(), 40, "sha1 build-id: {id}");
+        // Only Linux (ELF) builds carry a build id.
+        if crate::platform::host::LINUX {
+            let report = CrashReport {
+                version: env!("CARGO_PKG_VERSION"),
+                target: BUILD_TARGET,
+                build_id: crate::build_id::own_build_id(),
+                role: "test".to_string(),
+                kind: "panic",
+                pid: 1,
+                cwd: None,
+                args: Vec::new(),
+                timestamp_unix_ms: 0,
+                panic_location: None,
+                panic_message: None,
+                signal_or_exception: None,
+                signal_number: None,
+                exception_code: None,
+                faulting_address: None,
+                backtrace: String::new(),
+            };
+            let json = serde_json::to_value(&report).expect("serialize");
+            let id = json["build_id"]
+                .as_str()
+                .expect("ELF builds carry a build-id; build.rs asks for one");
+            assert_eq!(id.len(), 40, "sha1 build-id: {id}");
+        }
     }
 }

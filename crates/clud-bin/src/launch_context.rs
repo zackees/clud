@@ -200,7 +200,7 @@ pub fn env_lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str>
     env.iter()
         .rev()
         .find(|(candidate, _)| {
-            if cfg!(windows) {
+            if crate::platform::host::WINDOWS {
                 candidate.eq_ignore_ascii_case(key)
             } else {
                 candidate == key

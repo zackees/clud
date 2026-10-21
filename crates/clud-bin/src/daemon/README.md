@@ -2,6 +2,8 @@
 
 `checkout_claims.rs` owns live checkout presence and exclusive mutation claims
 (see [checkout claims](../../../../docs/architecture/checkout-claims.md)).
+`session_flags.rs` owns the per-session flag dictionary hooks read and write
+(see [session controls](../../../../docs/architecture/session-controls.md)).
 
 Provider/harness metadata travels additively inside each worker's
 `LaunchPlan`; repeat commands pin both resolved choices. See

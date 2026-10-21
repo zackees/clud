@@ -34,6 +34,10 @@ the integration tests.
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
+- [platform/](platform/README.md) - the host-platform boundary (#1953): the
+  only place in this crate that names a host. `mod.rs` selects `windows/` or
+  `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
+  has matching items in both trees. See `docs/architecture/platform-boundary.md`.
 - [server_settings/](server_settings/README.md) - server-side settings (#1192):
   the `assets/server-settings.json` baked into the binary and refreshed from
   `main`, falling back section by section to the last valid value, plus a strict
@@ -286,7 +290,7 @@ CLI surface and backend resolution:
 
 Console and terminal:
 
-- `console_input.rs` - Windows adapter over
+- `console_input.rs` - (now `platform/windows/console_input.rs`, re-exported from `lib.rs`) Windows adapter over
   `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
   #575): runs its own `ReadConsoleInputW` loop so surrogate pairs are joined
   first (#1351), forwards upstream's complete virtual-key translations atomically
@@ -375,7 +379,7 @@ which test tier a change belongs in — lives in
   `cmd.exe -> node.exe` would orphan the real child. `TopologySnapshot` is one
   host walk reused across a whole sweep, and re-verifies `(pid, start_time)`
   for **every** target it kills, descendants included (#688).
-- `job_orphan_reaper.rs` - Windows foreground Job completion-port tracker.
+- `job_orphan_reaper.rs` - foreground Job reap decision model; the Windows completion-port tracker is in `platform/windows/job_orphan_reaper.rs`.
   The runner registers each backend root by PID + start time; a pure role
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
   handoffs, nested detachments, declared daemons, and the unconditional
@@ -728,7 +732,7 @@ Diagnostics and misc:
   hint, and logs the measured signature via `verbose_log`. Wired into
   `runner::run_plan_subprocess` and `runner::run_plan_pty`. No-op on
   non-Windows. E2E probes against real spinning threads live in
-  `tests/integration/reaper/wedge_watchdog_e2e.rs` (ignored; run manually).
+  `tests/integration/reaper/platform/windows/wedge_watchdog_e2e.rs` (ignored; run manually).
   Issue #709: a healthy tick no longer pays for the host-wide thread
   enumeration. `subtree_could_hide_a_hot_thread` compares each process's
   *user-mode* delta against `GATE_USER_PCT_THRESHOLD` first — a thread's user
@@ -911,6 +915,7 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `rm_tool_session_grants.rs` — submodule `rm_tool::session_grants`: explicit session-scoped grants for sibling Git checkouts (#1784), with reasoned audit records and Unix checkout identity checks; tests in `rm_tool_session_grants_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#authorized-sibling-checkouts-1784), [DD-157](../../../docs/DESIGN_DECISIONS.md#dd-157-sibling-checkout-cleanup-uses-an-explicit-session-grant).
 - `block_bad_cmd_claude_worktrees.rs` — refuses creating `.claude/worktrees/` or a new entry in it, in any repo or the home directory, from the shell (read from the syntax tree) or the file tools; work inside an existing checkout there and cleanup stay allowed (#1962, #1971). Tests in `block_bad_cmd_claude_worktrees_tests.rs`.
 - `claude_worktree_hook.rs` — the `WorktreeCreate` / `WorktreeRemove` handlers (`clud-cmd-scan --event WorktreeCreate`): Claude Code's own worktrees are built under `~/.clud/worktrees` instead of `.claude/worktrees/`; registered for Claude Code 2.1.50+ by `clud_hooks_compile::worktree_hooks_fragment`. See [shell-ast.md](../../../docs/architecture/shell-ast.md#worktree-location-guards).
+- `worktree_consent.rs` — #1984: worktree creation needs the user's consent (prompt → daemon session flag, `CLUD_ALLOW_WORKTREES`, `--worktree`, an active `/grind` run); asked by `block_bad_cmd` and the `WorktreeCreate` handler. See [session-controls.md](../../../docs/architecture/session-controls.md).
 - `block_bad_cmd_shell.rs` — the scanner's bridge to `shell_ast` (#1962): `parse_command` (seeded with the hook's environment and the payload cwd) and `rule_words` (argv with only `env`/`command`/`exec` unwrapped); no rule splits command text by hand. Scanner-level tests for capture and the location guards are in `block_bad_cmd_ast_tests.rs`.
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `block_bad_cmd_wait_loop.rs` — the hand-written wait guard (#1880): refuses `while`/`until`, sleeping `for` loops, `tail -f`, `watch` and `sleep` chained to a `gh` status read, naming `run_in_background` as the replacement; tests in `block_bad_cmd_wait_loop_tests.rs`; contract in [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#hand-written-wait-guard-1880), [DD-168](../../../docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not).

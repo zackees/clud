@@ -223,7 +223,7 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
 /// through ConPTY too, so this is the platform's behaviour, not clud's.
 fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<Vec<u8>> {
     let intact = through_pty_input(bytes);
-    if cfg!(windows) && name.starts_with("focus") {
+    if clud::platform::host::WINDOWS && name.starts_with("focus") {
         return match chunking {
             // One write: ConPTY sees the whole report and consumes it.
             Chunking::PerEntry => vec![Vec::new()],

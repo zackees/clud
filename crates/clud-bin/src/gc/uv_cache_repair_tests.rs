@@ -90,7 +90,6 @@ fn archive_defect_flags_only_damage_that_breaks_an_install() {
     assert_eq!(archive_defect(&tmp.path().join("absent")), None);
 }
 
-#[cfg(unix)]
 mod unix {
     use super::*;
     use crate::gc::uv_cache_fixture::{link_exists, wheel, wheel_with_pointer, Entry};
@@ -106,6 +105,9 @@ mod unix {
 
     #[test]
     fn repair_invalidates_only_corrupt_pointers_and_keeps_archives() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let no_dist_info = wheel(&root, "pydantic", "2.13.4", "UZfKIsCOzJxPSTiX");
@@ -139,6 +141,9 @@ mod unix {
 
     #[test]
     fn dry_run_reports_without_touching_anything() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let bad = wheel(&root, "click", "8.4.2", "rSjdBjdBMaYzOqLS");
@@ -152,6 +157,9 @@ mod unix {
 
     #[test]
     fn an_entry_uv_is_filling_is_skipped() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let bad = wheel(&root, "idna", "3.15", "EFeC21fNvyaO7F5i");
@@ -183,6 +191,9 @@ mod unix {
 
     #[test]
     fn a_running_uv_cache_clean_skips_the_whole_pass() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let bad = wheel(&root, "cbor2", "6.1.4", "YhCxU60UQ8nYjHbp");
@@ -200,6 +211,9 @@ mod unix {
 
     #[test]
     fn a_pointer_uv_republished_after_the_scan_is_left_alone() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let bad = wheel(&root, "pyopenssl", "26.4.0", "Z7k5ZDvjpxvvt4zW");
@@ -209,7 +223,7 @@ mod unix {
         // uv refetches into a fresh archive and swaps the link.
         let fresh = wheel(&root, "fresh", "1.0", "FreshArchive0000");
         fs::remove_file(&bad.link).unwrap();
-        std::os::unix::fs::symlink(&fresh.archive, &bad.link).unwrap();
+        crate::platform::gc_test_fs::symlink(&fresh.archive, &bad.link).unwrap();
 
         assert!(!invalidate(&root, &pointer, "missing .dist-info directory"));
         assert!(intact(&bad));
@@ -217,6 +231,9 @@ mod unix {
 
     #[test]
     fn stale_foreign_and_pointerless_links_are_ignored() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         // Archive gone entirely: uv ignores the pointer and refetches itself.
@@ -227,7 +244,7 @@ mod unix {
         let outside = tmp.path().join("outside");
         fs::create_dir_all(outside.join("uvicorn")).unwrap();
         fs::remove_file(&foreign.link).unwrap();
-        std::os::unix::fs::symlink(&outside, &foreign.link).unwrap();
+        crate::platform::gc_test_fs::symlink(&outside, &foreign.link).unwrap();
         // A link with no `.http`/`.rev` is not a pointer uv reads.
         let bare = wheel(&root, "watchfiles", "1.2.0", "xVpxJrU7Vcs6hlER");
         fs::remove_dir_all(&bare.dist_info).unwrap();
@@ -242,6 +259,9 @@ mod unix {
 
     #[test]
     fn a_local_rev_pointer_is_repaired_too() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("uv");
         let bad = wheel_with_pointer(&root, "fastled", "2.0.20", "OeSzUNns2fMjF5oz", "rev");
@@ -253,6 +273,9 @@ mod unix {
 
     #[test]
     fn each_invalidation_is_audited_before_it_happens() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         use crate::gc::delete_audit::{StateDirGuard, AUDIT_LOG_FILE};
         let state = tempdir().unwrap();
         let _guard = StateDirGuard::set(state.path());

@@ -316,9 +316,11 @@ mod tests {
     /// Issue #753: the daemon builds its own child env and historically
     /// drifted from `runner::child_env`. Assert the completion suppression
     /// reaches daemon-launched sessions too, exactly once.
-    #[cfg(windows)]
     #[test]
     fn child_env_suppresses_git_bash_completions() {
+        if !crate::platform::host::WINDOWS {
+            return;
+        }
         use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
 
         let guard = EnvGuard::unset(OPT_OUT_KEY);
@@ -336,9 +338,11 @@ mod tests {
 
     /// The opt-out must reach the daemon path as well, and must not leave a
     /// stale inherited value behind.
-    #[cfg(windows)]
     #[test]
     fn child_env_opt_out_drops_suppression() {
+        if !crate::platform::host::WINDOWS {
+            return;
+        }
         use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
 
         let opt_out = EnvGuard::set(OPT_OUT_KEY, "1");

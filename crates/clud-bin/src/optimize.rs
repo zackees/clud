@@ -629,21 +629,7 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path)
-        .map_err(|error| format!("metadata {}: {error}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .map_err(|error| format!("chmod {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
+use crate::platform::optimize::make_executable;
 
 fn global_bin_dir(home: &Path) -> PathBuf {
     let cargo_home = env::var_os("CARGO_HOME")
@@ -743,7 +729,7 @@ mod tests {
     fn soldr_asset_matches_current_platform() {
         let asset = soldr_asset_for_current_platform("1.2.3").unwrap();
         assert!(asset.file_name.starts_with("soldr-v1.2.3-"), "{asset:?}");
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             assert!(asset.file_name.ends_with(".zip"), "{asset:?}");
             assert_eq!(asset.binary_name, "soldr.exe");
         } else {
@@ -829,7 +815,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             assert_eq!(last, "soldr.exe");
         } else {
             assert_eq!(last, "soldr");

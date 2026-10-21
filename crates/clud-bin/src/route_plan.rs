@@ -96,6 +96,24 @@ pub struct Ambient {
     /// only on a constrained launch and only when the allowlist admits it
     /// (#1257): clud owns the boundary, the user chooses inside it.
     pub subagent_model: Option<String>,
+    /// #1984: a debug-build, integration-test-only replacement for a direct
+    /// route's upstream (`CLUD_TEST_DIRECT_UPSTREAM_URL`), so an end-to-end
+    /// test can point `clud --openrouter` at a scripted local model. Release
+    /// builds and ordinary runs never read it.
+    pub direct_upstream_url: Option<String>,
+}
+
+/// The direct-route test upstream variable; see [`Ambient::direct_upstream_url`].
+pub const TEST_DIRECT_UPSTREAM_ENV: &str = "CLUD_TEST_DIRECT_UPSTREAM_URL";
+
+fn test_direct_upstream(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let enabled =
+        cfg!(debug_assertions) && lookup("CLUD_INTEGRATION_TESTS").as_deref() == Some("1");
+    enabled
+        .then(|| lookup(TEST_DIRECT_UPSTREAM_ENV))
+        .flatten()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
 }
 
 impl Ambient {
@@ -109,6 +127,11 @@ impl Ambient {
                 .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
                 .map(|(_, value)| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            direct_upstream_url: test_direct_upstream(|key| {
+                env.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            }),
         }
     }
 
@@ -119,6 +142,7 @@ impl Ambient {
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            direct_upstream_url: test_direct_upstream(|key| std::env::var(key).ok()),
         }
     }
 }
@@ -374,7 +398,7 @@ impl ScrubKey {
 /// The per-OS rule for whether two environment-variable spellings name the
 /// same variable.
 pub fn os_env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -856,7 +880,10 @@ fn direct_plan(
     BackendPlan {
         upstreams: vec![upstream_for(
             provider,
-            descriptor.anthropic_base_url,
+            ambient
+                .direct_upstream_url
+                .as_deref()
+                .unwrap_or(descriptor.anthropic_base_url),
             CredentialSource::Vault(provider),
         )],
         slots,

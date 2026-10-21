@@ -269,9 +269,11 @@ fn lock_cache_shared(root: &Path) -> Option<HeldLock> {
 }
 
 /// Invalidate one pointer under its uv entry lock. `false` = skipped.
-#[cfg(unix)]
 fn invalidate(root: &Path, pointer: &WheelPointer, why: &str) -> bool {
     use fs4::fs_std::FileExt;
+    if !crate::platform::host::UNIX {
+        return false;
+    }
     let Some(lock) = open_lock(&sibling(&pointer.link, "lock")) else {
         return false;
     };
@@ -300,11 +302,6 @@ fn invalidate(root: &Path, pointer: &WheelPointer, why: &str) -> bool {
         }
     }
     ok
-}
-
-#[cfg(not(unix))]
-fn invalidate(_root: &Path, _pointer: &WheelPointer, _why: &str) -> bool {
-    false
 }
 
 #[cfg(test)]

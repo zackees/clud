@@ -101,18 +101,7 @@ fn session_id() -> Option<String> {
 /// The parent's process name when it costs one small file read (Linux
 /// `/proc/<ppid>/comm`); `None` elsewhere.
 fn parent_name() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let ppid = std::os::unix::process::parent_id();
-        std::fs::read_to_string(format!("/proc/{ppid}/comm"))
-            .ok()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    crate::platform::shim_telemetry::parent_name()
 }
 
 /// Rotate past [`MAX_BYTES`], then append one line. Every error is ignored.

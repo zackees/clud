@@ -369,8 +369,8 @@ wedge watchdog, reaper diagnostics or process tier refresh code, or bump the
 test target (#1726), so the filter is the probe's module path:
 
 ```bash
-soldr cargo test -p clud --test integration reaper::wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
-soldr cargo test -p clud --test integration diagnostics::win32_hooking_probe -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test integration reaper::platform::windows::wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test integration diagnostics::platform::windows::win32_hooking_probe -- --ignored --nocapture --test-threads=1
 soldr cargo test -p clud --test integration diagnostics::tier_refresh_probe -- --ignored --nocapture --test-threads=1
 ```
 
@@ -798,8 +798,8 @@ binary is executed on a different machine:
 
 - `crates/clud-bin/tests/integration/diagnostics/symbols.rs:35` (4 tests)
 - `crates/clud-bin/tests/integration/diagnostics/telemetry_endpoint.rs:33` (4 tests)
-- `crates/clud-bin/tests/integration/signals/ctrlc_signal_kinds.rs:17` (4 tests, unix)
-- `crates/clud-bin/tests/integration/signals/ctrlc_windows_events.rs:30` (1 test, windows)
+- `crates/clud-bin/tests/integration/signals/platform/unix/ctrlc_signal_kinds.rs:15` (4 tests, unix)
+- `crates/clud-bin/tests/integration/signals/platform/windows/ctrlc_windows_events.rs:28` (1 test, windows)
 
 Fix: a shared `common::bin_path("clud")` helper that prefers a runtime
 `CLUD_TEST_BIN_DIR` env var and falls back to the `env!` constant, so local

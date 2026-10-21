@@ -397,17 +397,7 @@ fn record_usage(
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let sequence = TMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?
-    };
-    #[cfg(not(unix))]
-    let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let file = crate::platform::usage_ledger::create_new_private(&tmp)?;
     use std::io::Write;
     let mut file = file;
     file.write_all(bytes)?;

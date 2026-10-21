@@ -183,7 +183,7 @@ pub fn normalize(path: &Path) -> PathBuf {
 #[must_use]
 pub fn normalize_for_key(path: &Path) -> String {
     let mut s = display_slash(&normalize(path));
-    if cfg!(any(windows, target_os = "macos")) {
+    if crate::platform::host::WINDOWS || crate::platform::host::MACOS {
         s.make_ascii_lowercase();
     }
     s
@@ -348,14 +348,7 @@ mod tests {
         std::fs::create_dir_all(real.join("wt")).unwrap();
         // Windows runners may lack the symlink privilege; the deleted-path and
         // separator checks below still run there against the real spelling.
-        #[cfg(unix)]
-        let alias = {
-            let alias = tmp.path().join("alias");
-            std::os::unix::fs::symlink(&real, &alias).unwrap();
-            alias
-        };
-        #[cfg(not(unix))]
-        let alias = real.clone();
+        let alias = crate::platform::path_norm::test_alias(&real, &tmp.path().join("alias"));
         let via_real = real.join("wt");
         let via_alias = alias.join("wt");
         assert!(same_path(&via_real, &via_alias));

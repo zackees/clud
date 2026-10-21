@@ -10,15 +10,15 @@
 
 /// One row of a process snapshot (`CreateToolhelp32Snapshot` on Windows).
 #[derive(Clone, Debug)]
-pub(crate) struct ProcessEntry {
-    pub(crate) pid: u32,
-    pub(crate) parent_pid: u32,
-    pub(crate) exe: String,
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub exe: String,
 }
 
 /// The host decision for the drop-target window walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DropHost {
+pub enum DropHost {
     /// Windows Terminal at `pid` hosts the session. Its visible top-level
     /// windows are what Explorer hover-tests, so clud registers on them.
     WindowsTerminal { pid: u32 },
@@ -56,7 +56,7 @@ const MAX_ANCESTOR_HOPS: usize = 64;
 ///    decides. `WT_SESSION` is inherited by everything a Windows Terminal
 ///    tab starts, including a VS Code launched from it, so the first
 ///    `WindowsTerminal.exe` ancestor is not proof that it hosts clud.
-pub(crate) fn resolve_drop_host(
+pub fn resolve_drop_host(
     env: &dyn Fn(&str) -> Option<String>,
     current_pid: u32,
     processes: impl FnOnce() -> Vec<ProcessEntry>,

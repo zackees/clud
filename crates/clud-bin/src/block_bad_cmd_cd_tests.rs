@@ -10,7 +10,7 @@ use std::fs;
 use tempfile::TempDir;
 
 fn root() -> PathBuf {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         PathBuf::from(r"C:\repo")
     } else {
         PathBuf::from("/repo")
@@ -18,7 +18,7 @@ fn root() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         PathBuf::from(r"C:\Users\dev")
     } else {
         PathBuf::from("/home/dev")
@@ -245,7 +245,7 @@ fn relaxed_allows_in_repo_movement_and_denies_leaving() {
 fn relaxed_allows_movement_between_registered_roots() {
     // Phase 3 widened the pinned set from {parent root} to all registered
     // roots; moving from one root's tree into another's is not an escape.
-    let roots = if cfg!(windows) {
+    let roots = if crate::platform::host::WINDOWS {
         vec![
             PathBuf::from(r"C:\repo"),
             PathBuf::from(r"C:\extern\dep"),
@@ -687,7 +687,7 @@ fn drift_warning_matches_the_policy_it_was_resolved_from() {
 fn drift_warning_judges_against_the_whole_registered_root_set() {
     // The session can legally sit in any registered root's tree; only a cwd
     // outside all of them drifts.
-    let roots = if cfg!(windows) {
+    let roots = if crate::platform::host::WINDOWS {
         vec![PathBuf::from(r"C:\repo"), PathBuf::from(r"C:\extern\dep")]
     } else {
         vec![PathBuf::from("/repo"), PathBuf::from("/extern/dep")]

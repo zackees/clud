@@ -1,0 +1,40 @@
+error: attr cfg `windows` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/outside.rs:6:7
+   |
+LL | #[cfg(windows)]
+   |       ^^^^^^^
+   |
+   = note: `#[deny(enforce_platform_boundary)]` on by default
+
+error: native import `libc` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/outside.rs:9:20
+   |
+LL | pub fn native() -> libc::Int {
+   |                    ^^^^^^^^^
+
+error: cfg macro `unix` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/outside.rs:10:8
+   |
+LL |     if cfg!(unix) {
+   |        ^^^^^^^^^^
+
+error: cfg macro `target_os` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/outside.rs:21:9
+   |
+LL |         assert!(cfg!(target_os = "linux") || true);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: attr cfg `windows` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/platform/facade.rs:2:11
+   |
+LL | #[cfg(not(windows))]
+   |           ^^^^^^^
+
+error: attr cfg `windows` is outside a platform boundary; move the host-specific code into `platform/{windows,unix}/` behind a neutral API (#1953)
+  --> $DIR/crates/fixture/src/daemon/platform/windows/nested.rs:2:7
+   |
+LL | #[cfg(windows)]
+   |       ^^^^^^^
+
+error: aborting due to 6 previous errors
+

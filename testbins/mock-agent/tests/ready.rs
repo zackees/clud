@@ -1,3 +1,5 @@
+mod platform;
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -198,6 +200,6 @@ fn mock_agent_binary() -> PathBuf {
 }
 
 fn exe_file_name(name: &str) -> String {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let ext = if platform::host::WINDOWS { ".exe" } else { "" };
     format!("{name}{ext}")
 }

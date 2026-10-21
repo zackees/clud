@@ -52,7 +52,11 @@ pub fn discover_uv(path_env: &str, state_root: &Path) -> Option<PathBuf> {
 /// Path where the daemon installs its managed `uv`. Used by both the
 /// discovery and the install paths so a single source of truth holds.
 pub fn managed_uv_path(state_root: &Path) -> PathBuf {
-    let bin = if cfg!(windows) { "uv.exe" } else { "uv" };
+    let bin = if crate::platform::host::WINDOWS {
+        "uv.exe"
+    } else {
+        "uv"
+    };
     state_root.join("uv").join(PINNED_UV_VERSION).join(bin)
 }
 
@@ -158,14 +162,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let exe_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        let exe_name = if crate::platform::host::WINDOWS {
+            "uv.exe"
+        } else {
+            "uv"
+        };
         let uv_path = bin.join(exe_name);
         File::create(&uv_path).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&uv_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(&uv_path, 0o755).unwrap();
         let path_env = bin.to_string_lossy().to_string();
         let state_root = tmp.path().join("state");
         let found = discover_uv(&path_env, &state_root);
