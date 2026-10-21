@@ -569,32 +569,43 @@ fn spared_and_failed_batches_refresh_before_the_next_reclaim() {
         let registry = Registry::open_at(&tmp.path().join("gc.redb")).unwrap();
         let mut state = SpareReasons::new();
         let path = tmp.path().join("reservation").to_string_lossy().to_string();
-        state.replace_repo_worktrees(vec![RepoWorktreeRow {
-            path: path.clone(),
-            repo_root: String::new(),
-            branch: None,
-            tip: None,
-            mtime_unix: 0,
-            verdict: RepoWorktreeVerdict {
-                state: RepoWorktreeState::Reclaimable,
-                reason: "reserved-unused".to_string(),
-            },
-            reservation: true,
-        }], 0);
+        state.replace_repo_worktrees(
+            vec![RepoWorktreeRow {
+                path: path.clone(),
+                repo_root: String::new(),
+                branch: None,
+                tip: None,
+                mtime_unix: 0,
+                verdict: RepoWorktreeVerdict {
+                    state: RepoWorktreeState::Reclaimable,
+                    reason: "reserved-unused".to_string(),
+                },
+                reservation: true,
+            }],
+            0,
+        );
         state.begin_repo_reclaim(path.clone());
         assert!(!state.begin_repo_probe());
         apply_repo_worktree_reclaimed(&mut state, &path, &outcome);
         assert!(state.repo_snapshot_needs_refresh());
         let (pool_tx, pool_rx) = mpsc::channel();
         let (completion_tx, completion_rx) = mpsc::channel();
-        assert_eq!(run_repo_worktree_phase(
-            &registry, &pool_tx, &completion_tx, None, &mut state, Vec::new(),
-            RepoWorktreeGcConfig {
-                mode: ReclaimMode::Delete,
-                delete_remote: false,
-                wt_root: None,
-            },
-        ), 0);
+        assert_eq!(
+            run_repo_worktree_phase(
+                &registry,
+                &pool_tx,
+                &completion_tx,
+                None,
+                &mut state,
+                Vec::new(),
+                RepoWorktreeGcConfig {
+                    mode: ReclaimMode::Delete,
+                    delete_remote: false,
+                    wt_root: None,
+                },
+            ),
+            0
+        );
         assert!(matches!(pool_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         apply_repo_snapshot(&completion_rx, &mut state);
         assert!(!state.repo_snapshot_needs_refresh());
