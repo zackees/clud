@@ -13,6 +13,7 @@ pub mod console_input;
 pub mod console_setup;
 pub mod console_title;
 pub mod crash_report;
+pub mod credential_file;
 pub mod ctrl_c_track;
 pub mod dnd;
 pub mod fs_private;

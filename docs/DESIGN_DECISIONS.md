@@ -6926,7 +6926,33 @@ refresh). Rewriting the user's settings file to drop the key (clud does not
 edit settings it did not write). Failing the launch on a pin (too harsh for a
 value that is now simply unused).
 
-## DD-174: the platform boundary has no exceptions
+## DD-174: API-key credentials fall back to an owner-only file and the env var
+
+**Context:** zackees/clud#1891. On a headless Linux host (SSH, no desktop
+session) the Secret Service is missing, or its login collection stays locked
+because unlocking needs a GUI prompter. The native vault then reports
+`Unavailable`, so OpenRouter, Kimi and DeepSeek could not be used at all.
+`OPENROUTER_API_KEY` in the environment was only scrubbed and re-injected from
+the vault, never read.
+
+**Decision:** `NativeSecretStore` is a chain (`credential_chain.rs`): the
+native vault, then an owner-only file at
+`~/.clud/credentials/<service>--<account>.secret` (file `0600`, directory
+`0700`, and a non-owned, symlinked, or broadly readable file is refused), then the descriptor's
+`api_key_env` variable, which is read only and never persisted. A working vault
+always wins, and a vault write removes any file copy so a stale key cannot
+shadow it. The fallback is automatic, and login and status say which backend
+holds the key. DD-082's preflight runs unchanged on whatever the chain returns.
+
+**Rationale:** clud must operate where agents are commonly run: servers,
+containers, CI and SSH sessions. An owner-only file is the same trust model as
+`~/.clud/codex-auth.json` and as gh, aws and npm's fallbacks. Requiring an
+opt-in flag would leave the error the user hit unchanged.
+
+**Rejected.** Shipping keyring auto-unlock or PAM changes (that changes the
+host's auth stack); an opt-in-only file store; persisting an env-var key.
+
+## DD-175: the platform boundary has no exceptions
 
 **Context.** #1946 added `enforce_platform_boundary`, the pre-expansion lint
 soldr, zccache and fbuild use to confine host selection to one module. It
@@ -6953,7 +6979,7 @@ and host-gated tests are exactly the code a Linux-only run never compiles.
 Facade files beside the selector that are allowed to `cfg`: that would be
 a second selector.
 
-## DD-175: a session control takes consent only from the user's own channels
+## DD-176: a session control takes consent only from the user's own channels
 
 **Context.** Agents created git worktrees hundreds of times a week, each a
 cold Rust `target/`, often right after the user said "no worktrees". The
