@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::args::{AuthProvider, AuthSubcommand, CodexAuthSubcommand, DeepseekAuthSubcommand};
 use crate::backend::ModelProvider;
-use crate::provider_auth::{NativeSecretStore, SecretStore};
+use crate::provider_auth::{CredentialBackend, NativeSecretStore, SecretStore};
 use crate::provider_registry::{self, AnthropicCompatProvider};
 
 /// Maps the auth-command's provider selector onto the model-provider space
@@ -229,15 +229,16 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
         AuthProvider::Deepseek | AuthProvider::Kimi | AuthProvider::Openrouter => {
             let descriptor = anthropic_compat_descriptor(provider)
                 .expect("vault-backed auth provider has an Anthropic-compat descriptor");
-            let configured =
-                NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
-                    .and_then(|store| store.get())
-                    .ok()
-                    .flatten()
-                    .is_some();
+            let store =
+                NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account).ok();
+            let configured = store
+                .as_ref()
+                .and_then(|store| store.get().ok().flatten())
+                .is_some();
+            let source = store.map_or(CredentialBackend::NativeVault, |store| store.backend());
             serde_json::json!({
                 "provider": provider.as_str(),
-                "source": "native_vault",
+                "source": source.as_str(),
                 "status": if configured { "configured" } else { "login_required" },
                 "configured": configured,
             })
