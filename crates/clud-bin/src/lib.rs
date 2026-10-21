@@ -89,8 +89,8 @@ pub mod optimize;
 pub mod orphan_reaper;
 pub mod paste_image;
 pub mod path_norm;
-pub mod preference;
 pub mod platform;
+pub mod preference;
 pub mod process_identity;
 pub mod process_scan;
 pub mod process_tree;
@@ -167,4 +167,3 @@ pub mod deletion_rules;
 pub mod rm_guard;
 pub mod rm_tool;
 pub mod safe_mktemp;
-

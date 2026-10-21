@@ -6,7 +6,10 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::Path;
 
 fn insecure() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "credential file is not owner-only")
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "credential file is not owner-only",
+    )
 }
 
 pub fn read(path: &Path) -> io::Result<String> {
@@ -24,7 +27,9 @@ pub fn read(path: &Path) -> io::Result<String> {
     let metadata = file.metadata()?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     let owner = unsafe { libc::geteuid() };
-    if !metadata.is_file() || metadata.uid() != owner || metadata.mode() & 0o077 != 0
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o077 != 0
         || metadata.nlink() != 1
     {
         return Err(insecure());
@@ -35,7 +40,10 @@ pub fn read(path: &Path) -> io::Result<String> {
 }
 
 pub fn create_dir(dir: &Path) -> io::Result<()> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     let metadata = fs::symlink_metadata(dir)?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
@@ -66,7 +74,10 @@ mod tests {
         let file = dir.path().join("key");
         crate::fs_private::write_private_atomic(&file, b"fixture-key").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(read(&file).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            read(&file).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
@@ -76,6 +87,9 @@ mod tests {
         let file = dir.path().join("key");
         crate::fs_private::write_private_atomic(&target, b"fixture-key").unwrap();
         std::os::unix::fs::symlink(&target, &file).unwrap();
-        assert_eq!(read(&file).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            read(&file).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

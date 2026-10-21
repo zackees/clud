@@ -13,10 +13,12 @@ use windows::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    EqualSid, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+    EqualSid, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 struct Descriptor(PSECURITY_DESCRIPTOR);
@@ -24,12 +26,15 @@ struct Descriptor(PSECURITY_DESCRIPTOR);
 impl Drop for Descriptor {
     fn drop(&mut self) {
         // SAFETY: GetSecurityInfo allocates this descriptor with LocalAlloc.
-        unsafe { LocalFree(Some(HLOCAL(self.0.0))) };
+        unsafe { LocalFree(Some(HLOCAL(self.0 .0))) };
     }
 }
 
 fn insecure() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "credential file is not owner-only")
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "credential file is not owner-only",
+    )
 }
 
 pub fn read(path: &Path) -> io::Result<String> {
@@ -38,9 +43,7 @@ pub fn read(path: &Path) -> io::Result<String> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-    {
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
         return Err(insecure());
     }
     verify_acl(&file)?;
@@ -67,7 +70,10 @@ fn verify_acl(file: &File) -> io::Result<()> {
         )
     };
     if status.0 != 0 {
-        return Err(io::Error::other(format!("could not inspect credential ACL: {}", status.0)));
+        return Err(io::Error::other(format!(
+            "could not inspect credential ACL: {}",
+            status.0
+        )));
     }
     let descriptor = Descriptor(raw);
     if !is_current_owner(owner)? {
@@ -77,7 +83,11 @@ fn verify_acl(file: &File) -> io::Result<()> {
         // SAFETY: descriptor is live and the conversion allocates output.
         unsafe {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor.0, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, output, None,
+                descriptor.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                output,
+                None,
             )
         }
     })?;
@@ -113,8 +123,14 @@ fn is_current_owner(owner: PSID) -> io::Result<bool> {
         // SAFETY: storage is aligned and holds at least size bytes. The token
         // and returned TOKEN_USER SID remain live throughout the comparison.
         unsafe {
-            GetTokenInformation(token, TokenUser, Some(storage.as_mut_ptr().cast()), size, &mut size)
-                .map_err(io::Error::other)?;
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(storage.as_mut_ptr().cast()),
+                size,
+                &mut size,
+            )
+            .map_err(io::Error::other)?;
             let user = &*storage.as_ptr().cast::<TOKEN_USER>();
             Ok(EqualSid(owner, user.User.Sid).is_ok())
         }
@@ -146,7 +162,9 @@ mod tests {
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
     };
-    use windows::Win32::Security::{GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION};
+    use windows::Win32::Security::{
+        GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
 
     #[test]
     fn a_written_private_file_is_readable_but_a_broadened_dacl_is_refused() {
@@ -158,8 +176,12 @@ mod tests {
         // SAFETY: the constant SDDL is terminated and raw is a valid output.
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                w!("D:P(A;;FA;;;WD)"), SDDL_REVISION_1, &mut raw, None,
-            ).unwrap();
+                w!("D:P(A;;FA;;;WD)"),
+                SDDL_REVISION_1,
+                &mut raw,
+                None,
+            )
+            .unwrap();
         }
         let descriptor = Descriptor(raw);
         let mut present = windows::core::BOOL::default();
@@ -169,14 +191,22 @@ mod tests {
         // SAFETY: descriptor, path, and output pointers remain valid; this
         // deliberately broadens only the temporary test file's DACL.
         unsafe {
-            GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted).unwrap();
+            GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+                .unwrap();
             let result = SetNamedSecurityInfoW(
-                PCWSTR(wide.as_ptr()), SE_FILE_OBJECT,
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None, None, Some(dacl.cast_const()), None,
+                None,
+                None,
+                Some(dacl.cast_const()),
+                None,
             );
             assert_eq!(result.0, 0);
         }
-        assert_eq!(read(&path).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            read(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

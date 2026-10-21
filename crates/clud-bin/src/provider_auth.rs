@@ -69,8 +69,9 @@ impl fmt::Display for SecretStoreError {
             Self::CleanupFailed => formatter.write_str(
                 "an old fallback credential could not be removed; credential cleanup is incomplete",
             ),
-            Self::InsecureFile => formatter
-                .write_str("the credential file must be a regular file owned by you with owner-only access"),
+            Self::InsecureFile => formatter.write_str(
+                "the credential file must be a regular file owned by you with owner-only access",
+            ),
         }
     }
 }

@@ -120,8 +120,15 @@ fn logout_reports_a_vault_key_that_could_not_be_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let store = chain(LockedVault, &dir, no_env);
     store.set(KEY).unwrap();
-    assert!(store.delete().is_err(), "a locked vault cannot confirm logout");
-    assert_eq!(store.get(), Ok(None), "the fallback copy must still be removed");
+    assert!(
+        store.delete().is_err(),
+        "a locked vault cannot confirm logout"
+    );
+    assert_eq!(
+        store.get(),
+        Ok(None),
+        "the fallback copy must still be removed"
+    );
 }
 
 #[test]
@@ -130,6 +137,8 @@ fn a_vault_write_reports_failure_to_remove_the_fallback_copy() {
     let store = chain(WorkingVault::default(), &dir, no_env);
     // A directory at the fallback pathname makes remove_file fail on every host.
     std::fs::create_dir_all(dir.path().join("credentials").join("openrouter.secret")).unwrap();
-    assert!(store.set(KEY).is_err(), "stale credential cleanup cannot be ignored");
+    assert!(
+        store.set(KEY).is_err(),
+        "stale credential cleanup cannot be ignored"
+    );
 }
-
