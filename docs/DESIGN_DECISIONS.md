@@ -6938,7 +6938,7 @@ the vault, never read.
 **Decision:** `NativeSecretStore` is a chain (`credential_chain.rs`): the
 native vault, then an owner-only file at
 `~/.clud/credentials/<service>--<account>.secret` (file `0600`, directory
-`0700`, and a file other users can read is refused), then the descriptor's
+`0700`, and a non-owned, symlinked, or broadly readable file is refused), then the descriptor's
 `api_key_env` variable, which is read only and never persisted. A working vault
 always wins, and a vault write removes any file copy so a stale key cannot
 shadow it. The fallback is automatic, and login and status say which backend

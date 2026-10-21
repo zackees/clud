@@ -112,7 +112,7 @@ impl<V: SecretStore> SecretStore for FallbackSecretStore<V> {
             Ok(()) => {
                 // A key stored while the vault was locked must not shadow it.
                 if let Some(path) = &self.file {
-                    let _ = remove_file(path);
+                    remove_file(path).map_err(|_| SecretStoreError::CleanupFailed)?;
                 }
                 self.record(CredentialBackend::NativeVault);
                 Ok(())
@@ -132,11 +132,8 @@ impl<V: SecretStore> SecretStore for FallbackSecretStore<V> {
         let Some(path) = &self.file else {
             return vault;
         };
-        remove_file(path)?;
-        match vault {
-            Ok(()) | Err(SecretStoreError::Unavailable) => Ok(()),
-            Err(error) => Err(error),
-        }
+        remove_file(path).map_err(|_| SecretStoreError::CleanupFailed)?;
+        vault
     }
 
     fn backend(&self) -> CredentialBackend {
@@ -147,59 +144,26 @@ impl<V: SecretStore> SecretStore for FallbackSecretStore<V> {
 }
 
 fn read_file(path: &Path) -> Result<Option<String>, SecretStoreError> {
-    match std::fs::read_to_string(path) {
+    match crate::platform::credential_file::read(path) {
         Ok(secret) => {
-            ensure_owner_only(path)?;
             let secret = secret.trim().to_string();
             Ok((!secret.is_empty()).then_some(secret))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(SecretStoreError::InsecureFile)
+        }
         Err(_) => Err(SecretStoreError::Unavailable),
     }
 }
 
-#[cfg(unix)]
-fn ensure_owner_only(path: &Path) -> Result<(), SecretStoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .map_err(|_| SecretStoreError::Unavailable)?
-        .permissions()
-        .mode();
-    if mode & 0o077 == 0 {
-        Ok(())
-    } else {
-        Err(SecretStoreError::InsecureFile)
-    }
-}
-
-// Windows files are written with the owner-only protected DACL by
-// `fs_private`; there is no mode bit to check.
-#[cfg(not(unix))]
-fn ensure_owner_only(_path: &Path) -> Result<(), SecretStoreError> {
-    Ok(())
-}
-
 fn write_file(path: &Path, secret: &str) -> Result<(), SecretStoreError> {
     if let Some(dir) = path.parent() {
-        create_private_dir(dir).map_err(|_| SecretStoreError::Unavailable)?;
+        crate::platform::credential_file::create_dir(dir)
+            .map_err(|_| SecretStoreError::Unavailable)?;
     }
     crate::fs_private::write_private_atomic(path, secret.as_bytes())
         .map_err(|_| SecretStoreError::Unavailable)
-}
-
-#[cfg(unix)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
 }
 
 fn remove_file(path: &Path) -> Result<(), SecretStoreError> {

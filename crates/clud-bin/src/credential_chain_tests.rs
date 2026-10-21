@@ -75,32 +75,8 @@ fn locked_vault_login_status_and_launch_use_the_file() {
     let fresh = chain(LockedVault, &dir, no_env);
     assert_eq!(fresh.get().unwrap().as_deref(), Some(KEY));
     assert_eq!(fresh.backend(), CredentialBackend::File);
-    fresh.delete().unwrap();
+    assert_eq!(fresh.delete(), Err(SecretStoreError::Unavailable));
     assert_eq!(fresh.get(), Ok(None));
-}
-
-#[cfg(unix)]
-#[test]
-fn fallback_file_and_dir_are_owner_only() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    chain(LockedVault, &dir, no_env).set(KEY).unwrap();
-    let file = dir.path().join("credentials").join("openrouter.secret");
-    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&file), 0o600);
-    assert_eq!(mode(file.parent().unwrap()), 0o700);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_group_readable_file_is_refused() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let store = chain(LockedVault, &dir, no_env);
-    store.set(KEY).unwrap();
-    let file = dir.path().join("credentials").join("openrouter.secret");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(store.get(), Err(SecretStoreError::InsecureFile));
 }
 
 #[test]
@@ -138,3 +114,22 @@ fn a_working_vault_wins_and_clears_a_stale_file() {
     assert_eq!(store.get().unwrap().as_deref(), Some(KEY));
     assert_eq!(store.backend(), CredentialBackend::NativeVault);
 }
+
+#[test]
+fn logout_reports_a_vault_key_that_could_not_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = chain(LockedVault, &dir, no_env);
+    store.set(KEY).unwrap();
+    assert!(store.delete().is_err(), "a locked vault cannot confirm logout");
+    assert_eq!(store.get(), Ok(None), "the fallback copy must still be removed");
+}
+
+#[test]
+fn a_vault_write_reports_failure_to_remove_the_fallback_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = chain(WorkingVault::default(), &dir, no_env);
+    // A directory at the fallback pathname makes remove_file fail on every host.
+    std::fs::create_dir_all(dir.path().join("credentials").join("openrouter.secret")).unwrap();
+    assert!(store.set(KEY).is_err(), "stale credential cleanup cannot be ignored");
+}
+

@@ -55,6 +55,8 @@ pub enum SecretStoreError {
     Malformed,
     /// The fallback credential file is readable by other users (#1891).
     InsecureFile,
+    /// A fallback credential copy could not be removed.
+    CleanupFailed,
 }
 
 impl fmt::Display for SecretStoreError {
@@ -64,8 +66,11 @@ impl fmt::Display for SecretStoreError {
             Self::Malformed => {
                 formatter.write_str("API key is malformed; re-enter a key without whitespace")
             }
+            Self::CleanupFailed => formatter.write_str(
+                "an old fallback credential could not be removed; credential cleanup is incomplete",
+            ),
             Self::InsecureFile => formatter
-                .write_str("the credential file is readable by other users; run `chmod 600` on it"),
+                .write_str("the credential file must be a regular file owned by you with owner-only access"),
         }
     }
 }
