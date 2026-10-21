@@ -204,6 +204,11 @@ Entry and orchestration:
   replacement and unified provider-route epoch changes atomic; see
   [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md) and
   [unified-gateway.md](../../../docs/architecture/unified-gateway.md).
+- `route_plan.rs` - the one place a launch's routing is decided: `ResolvedRoute`
+  (backend, upstreams, slots, allowlist, discovery, context, effort, upstream
+  routing, timeout, scrub list, launch checks), the pure resolver, and every
+  backend's renderer. Launch checks run from it before the backend branch. See
+  [route-plan.md](../../../docs/architecture/route-plan.md) (#1852).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before
@@ -225,6 +230,10 @@ Entry and orchestration:
   overlay also pushes `API_TIMEOUT_MS` as a default and the launch names the
   effective value, because this is the one route with no clud process in the
   request path and therefore no byte-idle watchdog (#1263, DD-079).
+- `shell_ast/` - shell commands parsed into syntax trees (tree-sitter bash and
+  PowerShell, a cmd.exe splitter) and evaluated without running anything, for
+  the command scanner (#1962); see [`shell_ast/README.md`](shell_ast/README.md)
+  and [shell-ast.md](../../../docs/architecture/shell-ast.md).
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
@@ -246,6 +255,17 @@ CLI surface and backend resolution:
   `docs/architecture/provider-selection.md`.
 - `harness_picker.rs` - installed Claude/Codex/DeepSeek discovery plus the
   three-second bare-launch selector and its pure choice/countdown model.
+- `home.rs` - the only resolver of the user's home directory
+  (`user_home`; Windows `USERPROFILE` > `HOME` > OS, else `HOME` > OS).
+  Library `home_dir` calls and raw `USERPROFILE` reads are banned elsewhere
+  ([DD-161](../../../docs/DESIGN_DECISIONS.md#dd-161-the-users-home-directory-has-exactly-one-resolver)).
+- `dsh_harness.rs` - DeepSeek Harness managed install (`clud dsh-update`),
+  private Node runtime, child key passthrough, and the OpenRouter `--patch`
+  overlay (#1829). See
+  [`launch-targets.md`](../../../docs/architecture/launch-targets.md#deepseek-harness-install-and-providers).
+- `video.rs` - `clud video`: browser-use/video-use as a session-scoped Claude
+  plugin, never a global skill (#1851). See
+  [`launch-targets.md`](../../../docs/architecture/launch-targets.md#clud-video-video-use-as-a-session-scoped-plugin-1851).
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.
@@ -339,7 +359,9 @@ which test tier a change belongs in — lives in
   (issue #558). A bare PID is not a stable handle: Windows reissues numbers
   promptly, so "the PID is alive" and "that process is alive" are different
   questions. Records written before the field existed carry
-  `UNKNOWN_START_TIME` and fall back to a PID-only comparison.
+  `UNKNOWN_START_TIME` and fall back to a PID-only comparison. Terminated
+  states are not live; the native zombie regression lives under
+  [`platform/`](platform/README.md).
 - `process_scan.rs` - clud's own host **environment** pass on `sysinfo 0.37`
   (#673 Phase 7): `scan_env()` answers both env questions from one snapshot,
   and `DaemonMarkerCache` reads each identity's environment once, ever, over a
@@ -379,13 +401,13 @@ which test tier a change belongs in — lives in
   the daemon. `delete_audit.rs` is the pre-deletion JSONL audit trail
   (`<state>/gc-audit.jsonl`, issue #893) written by every deletion path that can
   touch user data, plus the target-sweep over-match guard. `worktree_root.rs`
-  owns `~/.clud/tmp-wt` (issue #1485), the agent worktree root outside the
+  owns `~/.clud/worktrees` (issue #1485), the agent worktree root outside the
   `session_tmp` sweep, its ordinal allocator `alloc_wt_path` (#1486), plus
   the warn-only `worktrees.warn_bytes` size check; `worktree_size_cache.rs`
   caches that check from the daemon probe for the launch banner (#1610),
   and the same warn-only check for `~/.clud/tmp` behind `tmp.warn_bytes` (#1327),
   and for `~/.clud/cache` behind `cache.warn_bytes` (#1691);
-  see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludtmp-wt-1485).
+  see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludworktrees-1485).
   `uv_cache_repair.rs` invalidates live uv wheel pointers to gutted archives
   under uv's own locks (#1711, DD-148).
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
@@ -564,9 +586,9 @@ which test tier a change belongs in — lives in
   enabling value (DD-056 lists them) in
   the session environment. Unlike the rest of `block_bad_cmd`, it **fails
   closed** — an unreadable or unparseable payload is a denial, since an
-  unverifiable command cannot be allowed. Deliberately does not reuse
-  `command_words`, whose wrapper-unwrapping would let `env tap ...` satisfy the
-  prefix check. Refuses anything it cannot decompose with certainty (command
+  unverifiable command cannot be allowed. Reads each statement's literal words
+  from the syntax tree rather than the scanner's rule words, whose
+  wrapper-unwrapping would let `env tap ...` satisfy the prefix check. Refuses anything it cannot decompose with certainty (command
   substitution, subshells, process substitution, control flow); the cost of
   that is one extra tool call, not a wedged session. See DD-056.
   `classify` (re-exported as `block_bad_cmd::classify_for_gate`) grades a
@@ -664,6 +686,11 @@ Skills and hooks:
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
+- `codex_cmd_scan_install.rs` - issue #1972: Codex global-setup pass that
+  keeps a `matcher: "*"` `clud-cmd-scan` PreToolUse entry in
+  `~/.codex/hooks.json` and its `hooks.state` trust in `~/.codex/config.toml`
+  (same lock; never duplicates, never clobbers malformed files). See
+  [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#global-codex-hook-1972).
 
 Diagnostics and misc:
 
@@ -778,10 +805,18 @@ Diagnostics and misc:
 
 Quick lookup, which file owns a given subcommand:
 
+- `clud doctor` -> `doctor::run`.
 - `clud loop ...` -> `command::build_launch_plan_for_target` (resolved
   provider/harness, prompt, and markers) +
   `loop_spec` (task resolution) + `loop_artifacts` (artifact files) +
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
+- `clud ci [JOB] [--filter RE] [--json]` -> `ci_local::run` (local bosn run with a
+  compact verdict and failing-step diagnostics, #1839).
+- `clud dsh-update` -> `dsh_harness::run_update` (managed DeepSeek Harness
+  install, #1829).
+- `clud video [DIR] [--update]` -> `video.rs` (pinned video-use checkout,
+  plugin wrapper, ffmpeg and ElevenLabs-key preconditions); `command/builder.rs`
+  adds `--plugin-dir` and the seed prompt (#1851).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
   in `daemon/` (dispatched from `daemon::handle_special_command`).
 - `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
@@ -802,7 +837,7 @@ Quick lookup, which file owns a given subcommand:
   `/grind` launch (#1803); the gate keys that exemption on the same
   `args::is_reconcile` predicate. See
   [grind.md](../../../docs/architecture/grind.md#never-losing-issues-in-feature-mode).
-- `clud grind-facts path|clear` -> `grind_facts.rs` (dispatched early in
+- `clud grind-facts path|clear|task|owner` -> `grind_facts.rs` (dispatched early in
   `main.rs`): this session's `/grind` run-facts file,
   `~/.clud/tmp/grind/<session_id>.json`, which the hook's grind caps read by
   the payload's `session_id` (#1337); see
@@ -868,9 +903,16 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `safe_mktemp.rs` — the `safe-mktemp` multicall name (#1667): exclusive `mkdir` of one directory, then the only creation-ledger insert (`gc_client_insert_created`); undoes the `mkdir` if the insert fails, refuses on Windows; tests in `safe_mktemp_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#creation-ledger), [DD-136](../../../docs/DESIGN_DECISIONS.md#dd-136-safe-mktemp-is-the-only-ledger-writer-and-undoes-its-mkdir-when-the-insert-fails).
 - `rm_tool_clone.rs` — submodule of `rm_tool.rs`: whether a clone outside the roots may be removed (#1573), as `verdict` over injected `CloneFacts` (origin match, clean, fully pushed, no stash) plus the git `probe`; rule in [rm-tools.md](../../../docs/architecture/rm-tools.md#location-policy).
 - `rm_tool_extra_roots.rs` — submodule `rm_tool::extra_roots`: the human-set `safe_rm.extra_roots` override (#1668), as `verdict` over injected `EntryFacts` plus `probe`/`load`; the settings reader is `clud_settings::safe_rm_extra_roots_from`; tests in `rm_tool_extra_roots_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#override-safe_rmextra_roots-1668), [DD-137](../../../docs/DESIGN_DECISIONS.md#dd-137-the-safe-rm-root-override-is-user-level-only-and-agents-cannot-write-the-settings-file).
+- `rm_tool_home_files.rs` — submodule `rm_tool::home_files`: paths under `$HOME` outside the roots (#1956, #1957): single files only inside `FILE_ROOTS`, directories only inside `DIR_ROOTS`; `PERSONAL` folders and `DENYLIST` entries refused; tests in `rm_tool_home_files_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#paths-under-home-1956-1957).
 - `rm_tool_session_grants.rs` — submodule `rm_tool::session_grants`: explicit session-scoped grants for sibling Git checkouts (#1784), with reasoned audit records and Unix checkout identity checks; tests in `rm_tool_session_grants_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#authorized-sibling-checkouts-1784), [DD-157](../../../docs/DESIGN_DECISIONS.md#dd-157-sibling-checkout-cleanup-uses-an-explicit-session-grant).
+- `block_bad_cmd_claude_worktrees.rs` — refuses creating `.claude/worktrees/` or a new entry in it, in any repo or the home directory, from the shell (read from the syntax tree) or the file tools; work inside an existing checkout there and cleanup stay allowed (#1962, #1971). Tests in `block_bad_cmd_claude_worktrees_tests.rs`.
+- `claude_worktree_hook.rs` — the `WorktreeCreate` / `WorktreeRemove` handlers (`clud-cmd-scan --event WorktreeCreate`): Claude Code's own worktrees are built under `~/.clud/worktrees` instead of `.claude/worktrees/`; registered for Claude Code 2.1.50+ by `clud_hooks_compile::worktree_hooks_fragment`. See [shell-ast.md](../../../docs/architecture/shell-ast.md#worktree-location-guards).
+- `block_bad_cmd_shell.rs` — the scanner's bridge to `shell_ast` (#1962): `parse_command` (seeded with the hook's environment and the payload cwd) and `rule_words` (argv with only `env`/`command`/`exec` unwrapped); no rule splits command text by hand. Scanner-level tests for capture and the location guards are in `block_bad_cmd_ast_tests.rs`.
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
+- `block_bad_cmd_wait_loop.rs` — the hand-written wait guard (#1880): refuses `while`/`until`, sleeping `for` loops, `tail -f`, `watch` and `sleep` chained to a `gh` status read, naming `run_in_background` as the replacement; tests in `block_bad_cmd_wait_loop_tests.rs`; contract in [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#hand-written-wait-guard-1880), [DD-168](../../../docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not).
+- `block_bad_cmd_wait_scan.rs` — #1972 helpers for the wait guard: peels wrapper programs (`timeout`, `nohup`, `env`, `xargs`, …), extracts `-c`/`eval`/`python -c` payloads, heredoc scripts and literal script files, and judges Python poll loops; tests and the audit corpus runner in `block_bad_cmd_wait_scan_tests.rs` (fixture `../tests/fixtures/wait_loop/corpus.json`); [DD-169](../../../docs/DESIGN_DECISIONS.md#dd-169-a-wrapper-an-embedded-script-or-another-tool-does-not-launder-a-wait).
 - `block_bad_cmd_repeat.rs` — the repeated-identical-call guard (#1674): `decide` over an injected `Streak`, per-session hash-only state under `<state>/repeat-guard/`, fail-open; tests in `block_bad_cmd_repeat_tests.rs`; contract in [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#repeated-call-guard-1674), [DD-140](../../../docs/DESIGN_DECISIONS.md#dd-140-the-repeated-call-guard-denies-call-201-of-an-identical-streak-and-fails-open).
+- `block_bad_cmd_loop_stop.rs` — the `/loop` first-round stop guard (#1949): on a non-Claude route (`CLUD_ROUTE_CONTEXT.model_provider`), refuses `ScheduleWakeup {"stop": true}` once when the transcript shows a `/loop` that never scheduled a wakeup; a repeated stop in the same round, a loop that has scheduled before, or an unreadable transcript all pass. The transcript is read only for that one call. The harness delivers `ScheduleWakeup` only because `clud_hooks_compile::deletion_safety_fragment` lists it in `GUARDED_TOOLS`, the one matcher that names every tool a scanner rule inspects.
 - `block_bad_cmd_rm_override.rs` — refuses any agent shell command that could write `~/.clud/settings.json` or the `safe_rm.extra_roots` key (#1668), before the per-call opt-out.
 - `rm_guard.rs` — catastrophe-floor decisions, canonical operands, and mount
   protection; it contains no removal implementation. In a session,
@@ -879,6 +921,8 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
   resolution checks, shared by both hook entrypoints.
+- `doctor.rs` — `clud doctor` (#1954): reports stale and retired aliases in clud's alias dirs (`inspect_dir`), a foreign first `clud-cmd-scan` on PATH, and the hook matcher coverage; exit 1 on any finding; tests in `doctor_tests.rs`.
+- `hook_handshake.rs` — the hook build handshake (#1954): startup exports the launcher path and build fingerprint; `multicall::run_cmd_scan` relays a skewed `clud-cmd-scan` to `<launcher> __cmd-scan` and logs `HOOK-SKEW`; decision is `decide` over injected `Facts`; tests in `hook_handshake_tests.rs`; see [launch-setup.md](../../../docs/architecture/launch-setup.md).
 - `multicall.rs` — argv[0] dispatch, the first thing `main` does (#1551,
   DD-121): `clud-cmd-scan`/`clud-block-bad-cmd` → `block_bad_cmd::run`,
   `clud-shim` and every `shim_registry::SHIMS` name → `shim_main::run`, plus the

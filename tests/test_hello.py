@@ -621,6 +621,225 @@ def test_grind_is_refused_on_the_codex_harness() -> None:
     assert "requires the Claude harness" in result.stderr
 
 
+def test_openrouter_grind_dry_run_is_one_credential_free_claude_session() -> None:
+    """#1808: `clud --openrouter grind --dry-run` resolves the OpenRouter
+    route onto the Claude harness as one interactive `/grind` session, with
+    the catalog default model, and never reads the vault or the environment's
+    key (this HOME has no stored key, so a vault read would hang or error)."""
+    env_key = "sk-or-v1-" + "fedcba9876543210" * 2
+    url = "https://github.com/zackees/clud/issues/1807"
+    result = _run(
+        "--dry-run",
+        "--openrouter",
+        "grind",
+        url,
+        env_overrides={"OPENROUTER_API_KEY": env_key},
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "openrouter"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "cli"
+    selection = data["model_selection"]
+    assert selection["provider"] == "openrouter"
+    assert selection["wire_model"] == "~anthropic/claude-sonnet-latest"
+    assert selection["model_source"]
+    assert selection["wire_model"] in data["allowed_models"]
+    assert data["command"][-1] == f"/grind {url}"
+    assert "-p" not in data["command"]
+    assert data["iterations"] == 1
+    assert data["loop_markers"] is None
+    assert env_key not in result.stdout
+    assert env_key not in result.stderr
+    assert "sk-" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "needle"),
+    [
+        (
+            ("--openrouter", "--harness", "codex"),
+            "OpenRouter provider cannot use the Codex harness",
+        ),
+        (("--openrouter", "--subprocess"), "requires an interactive PTY"),
+    ],
+)
+def test_openrouter_grind_refuses_unsupported_sessions(argv: tuple[str, ...], needle: str) -> None:
+    """#1808: each refusal exits 2 before any session or vault access.
+    (`--detach` conflicts with `--dry-run` in clap, so its grind refusal is
+    pinned by the Rust unit test instead.)"""
+    result = _run("--dry-run", *argv, "grind", "https://github.com/zackees/clud/issues")
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert result.stdout == ""
+    assert needle in result.stderr
+
+
+def test_a_fresh_openrouter_grind_launch_is_pinned_to_its_resolved_model() -> None:
+    """#1809: with no `--model` and nothing saved, the catalog default is the
+    launch's pin (DD-077), so a direct OpenRouter `/grind` session has gateway
+    discovery off; only an explicit `--model` changes which id is pinned."""
+    url = "https://github.com/zackees/clud/issues/1807"
+    fresh = _run("--dry-run", "--openrouter", "grind", url)
+    assert fresh.returncode == 0, fresh.stderr
+    data = json.loads(fresh.stdout)
+    assert data["model_selection"]["model_source"] == "catalog_default"
+    assert data["allowed_models"] == ["~anthropic/claude-sonnet-latest"]
+    assert data["pinned_from_previous_selection"] is True
+    pinned = _run(
+        "--dry-run", "--openrouter", "--model", "~anthropic/claude-haiku-latest", "grind", url
+    )
+    assert pinned.returncode == 0, pinned.stderr
+    data = json.loads(pinned.stdout)
+    assert data["allowed_models"] == ["~anthropic/claude-haiku-latest"]
+    assert data["pinned_from_previous_selection"] is False
+    assert data["command"][-1] == f"/grind {url}"
+
+
+def test_openrouter_free_ids_are_checked_against_the_offline_catalog() -> None:
+    """#1833: a `:free` id is a cost promise. The embedded catalog proves the
+    nemotron free row is free; an id it cannot prove free is refused before
+    any vault read, request or saved default."""
+    free = _run(
+        "--dry-run", "--openrouter", "--model", "nvidia/nemotron-3-ultra-550b-a55b:free", "-p", "hi"
+    )
+    assert free.returncode == 0, free.stderr
+    assert json.loads(free.stdout)["free_check"] == "free"
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free: free (named on the command line)" in (
+        free.stderr
+    )
+    unknown = _run("--dry-run", "--openrouter", "--model", "acme/not-a-model:free", "-p", "hi")
+    assert unknown.returncode == 2, (unknown.stdout, unknown.stderr)
+    assert unknown.stdout == ""
+    assert "cannot confirm it is free" in unknown.stderr
+    paid = _run(
+        "--dry-run", "--openrouter", "--model", "nvidia/nemotron-3-ultra-550b-a55b", "-p", "hi"
+    )
+    assert paid.returncode == 0, paid.stderr
+    assert json.loads(paid.stdout)["free_check"] == "not_requested"
+    assert "per million input/output tokens (named on the command line)" in paid.stderr
+
+
+def test_provider_only_pins_openrouter_upstream_routing() -> None:
+    """`--provider-only` reaches the plan for a direct OpenRouter launch and is
+    refused everywhere else, or for a malformed slug, before any session."""
+    model = ("--model", "deepseek/deepseek-v4.1-flash")
+    pinned = _run(
+        "--dry-run", "--openrouter", *model, "--provider-only", "parasail/fp8", "-p", "hi"
+    )
+    assert pinned.returncode == 0, pinned.stderr
+    assert json.loads(pinned.stdout)["provider_only"] == ["parasail/fp8"]
+    plain = _run("--dry-run", "--openrouter", *model, "-p", "hi")
+    assert plain.returncode == 0, plain.stderr
+    assert json.loads(plain.stdout)["provider_only"] == []
+    for argv, needle in [
+        (("--provider-only", "parasail/fp8"), "only to an OpenRouter launch"),
+        (("--openrouter", *model, "--provider-only", "Parasail"), "not an OpenRouter provider"),
+    ]:
+        refused = _run("--dry-run", *argv, "-p", "hi")
+        assert refused.returncode == 2, (refused.stdout, refused.stderr)
+        assert refused.stdout == ""
+        assert needle in refused.stderr
+
+
+def test_provider_only_works_on_the_unified_gateway() -> None:
+    """#1863: the gateway owns the request path, so it injects the same object
+    the direct route hands the harness through CLAUDE_CODE_EXTRA_BODY."""
+    unified = _dry_run_route(
+        "--unified",
+        "--model",
+        "openrouter-claude-sonnet",
+        "--provider-only",
+        "parasail/fp8",
+    )["route"]
+    assert unified["backend"] == "unified"
+    assert unified["upstream_routing"] == {
+        "only": ["parasail/fp8"],
+        "allow_fallbacks": False,
+    }
+    # The direct route builds the identical value: one decision, two renderers.
+    direct = _dry_run_route(
+        "--openrouter", "--provider-only", "parasail/fp8"
+    )["route"]
+    assert direct["upstream_routing"] == unified["upstream_routing"]
+    # And where the object cannot be carried, the check says so.
+    bridge = _dry_run_route("--codex")["route"]
+    checks = {check["name"]: check for check in bridge["checks"]}
+    assert checks["provider_only"]["applicability"]["state"] == "not_applicable"
+
+
+def _dry_run_route(*args: str) -> dict:
+    result = _run("--dry-run", *args, "-p", "hi")
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_dry_run_exposes_the_resolved_route() -> None:
+    """#1855: one `route` object carries every routing decision the launch made
+    -- backend, slots, allowlist, context, effort, upstream routing and the
+    launch checks with their verdicts -- so routing is auditable without a
+    paid request."""
+    route = _dry_run_route("--openrouter")["route"]
+    assert route["backend"] == "direct"
+    assert route["provider"] == "openrouter"
+    assert route["slots"]["main"]["wire_id"] == "~anthropic/claude-sonnet-latest"
+    # The catalog's reviewed window for the reviewed Sonnet row.
+    assert route["context"]["max_tokens"] == 1000000
+    assert "per_turn_capability" in route["effort"]
+    assert route["upstream_routing"] is None
+    assert route["timeout_ms"] == 600000
+    assert [check["name"] for check in route["checks"]] == [
+        "request_path_features",
+        "openrouter_free_cost",
+        "provider_only",
+    ]
+    # D21: the request-path features are named, and the direct route says why
+    # they are not offered here.
+    request_path = route["checks"][0]
+    assert request_path["applicability"] == {
+        "state": "not_applicable",
+        "reason": "clud is not in the request path on a direct route",
+    }
+    assert "no clud egress by design" in request_path["verdict"]
+    assert all(check["verdict"] for check in route["checks"])
+    # The upstream is the descriptor's, and the credential it names is an
+    # identifier -- never a key.
+    assert route["upstreams"][0]["base_url"] == "https://openrouter.ai/api"
+    assert route["upstreams"][0]["credential"] == {
+        "source": "vault",
+        "value": "openrouter",
+    }
+
+
+def test_dry_run_route_reflects_a_pin_and_provider_only() -> None:
+    pinned = _dry_run_route(
+        "--openrouter",
+        "--allow-model",
+        "openrouter-claude-sonnet",
+        "--provider-only",
+        "parasail/fp8",
+    )["route"]
+    assert pinned["allowlist"] == ["openrouter-claude-sonnet"]
+    # A pin turns discovery off: clud does not advertise rows the boundary
+    # would then have to be enforced against (DD-054).
+    assert pinned["discovery"]["policy"] == "off"
+    slots = ("main", "opus", "sonnet", "haiku", "fable", "subagent")
+    assert len({pinned["slots"][slot]["wire_id"] for slot in slots}) == 1
+    assert pinned["upstream_routing"] == {"only": ["parasail/fp8"], "allow_fallbacks": False}
+
+
+def test_a_plain_claude_launch_resolves_to_the_native_backend() -> None:
+    """A plain Claude launch has no provider overlay, so it re-derives nothing;
+    the route says so instead of inventing slots it never sets."""
+    route = _dry_run_route("--claude")["route"]
+    assert route["backend"] == "native"
+    assert route["upstreams"] == []
+    assert all(
+        route["slots"][slot] is None
+        for slot in ("main", "opus", "sonnet", "haiku", "fable", "subagent")
+    )
+    assert route["scrub"] == []
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),
@@ -979,8 +1198,9 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert data["model_selection"]["model_source"] == "catalog_default"
     assert data["model_selection"]["effort_source"] == "catalog_default"
     assert data["command"][model_index + 1] == "clud-claude-codex-sol"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
     assert not any("terra" in arg or arg == "medium" for arg in data["command"])
 
 
@@ -1024,7 +1244,8 @@ def test_saved_codex_profile_overrides_sol_low_default(tmp_path: Path, harness: 
         assert 'model_reasoning_effort="high"' in data["command"]
     else:
         assert "clud-claude-codex-terra" in data["command"]
-        assert data["command"][data["command"].index("--effort") + 1] == "high"
+        settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+        assert settings["effortLevel"] == "high"
 
 
 def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> None:
@@ -1033,8 +1254,9 @@ def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> No
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["model_selection"]["effort"] == "low"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
 
 
 def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
@@ -1060,8 +1282,9 @@ def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
     assert data["model_selection"]["wire_model"] == "gpt-6-sol"
     model_index = data["command"].index("--model")
     assert data["command"][model_index + 1] == "clud-claude-codex-sol"
-    effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "low"
+    settings = json.loads(data["command"][data["command"].index("--settings") + 1])
+    assert settings["effortLevel"] == "low"
+    assert "--effort" not in data["command"]
 
 
 def test_dry_run_uses_global_harness_and_cli_can_override_it(tmp_path: Path) -> None:
@@ -1497,6 +1720,8 @@ def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert 'project_doc_fallback_filenames=["CODEX.md"]' in data["command"]
+    # #1847: Codex launches route approvals to Codex auto review.
+    assert 'approvals_reviewer="auto_review"' in data["command"]
 
 
 def test_dry_run_pty_override() -> None:
@@ -1967,3 +2192,30 @@ def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
     assert "matcher `Bash`" in result.stdout
     assert "add Codex project trust" not in result.stdout
     assert not (home / ".codex" / "config.toml").exists()
+
+
+def test_video_dry_run_loads_plugin_only_for_that_session() -> None:
+    """#1851: `clud video` names the video-use plugin wrapper; a plain launch does not."""
+    result = _run("--dry-run", "video", env_overrides={"ELEVENLABS_API_KEY": "canary-1851"})
+    assert result.returncode == 0, result.stderr
+    command = json.loads(result.stdout)["command"]
+    index = command.index("--plugin-dir")
+    assert command[index + 1].replace("\\", "/").endswith(".clud/extern/video-use-plugin")
+    assert command[-1].startswith("/video-use ")
+    assert "canary-1851" not in result.stdout + result.stderr
+
+    plain = _run("--dry-run", "-p", "hello")
+    assert "--plugin-dir" not in json.loads(plain.stdout)["command"]
+
+
+def test_openrouter_deepseek_effort_works_without_claude_effort_flag() -> None:
+    result = _run(
+        "--dry-run", "--openrouter", "--model", "deepseek/deepseek-v4.1-flash",
+        "--effort", "low", "-p", "hello",
+    )
+    assert result.returncode == 0, result.stderr
+    command = json.loads(result.stdout)["command"]
+    assert "--effort" not in command
+    assert command[command.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings["effortLevel"] == "low"

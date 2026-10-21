@@ -1,4 +1,4 @@
-//! Issue #1610: decision table for the launch-banner tmp-wt size warning and
+//! Issue #1610: decision table for the launch-banner worktrees size warning and
 //! the cache round trip. Every test works under a `tempdir`; none touches the
 //! real `~/.clud`.
 
@@ -93,7 +93,7 @@ fn banner_decision_table() {
 
 #[test]
 fn banner_line_names_size_threshold_path_and_setting() {
-    let root = Path::new("/h/.clud/tmp-wt");
+    let root = Path::new("/h/.clud/worktrees");
     let line = banner_line(root, 60 * GIB, 50 * GIB);
     assert!(!line.contains('\n'), "one line: {line}");
     assert!(line.contains("60.0 GiB"), "{line}");
@@ -118,7 +118,7 @@ fn cache_round_trips_and_lives_beside_tmp_wt() {
 #[test]
 fn missing_or_corrupt_cache_reads_as_none() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("tmp-wt-size.json");
+    let path = dir.path().join("worktrees-size.json");
     assert_eq!(read_cache(&path), None);
     std::fs::write(&path, b"{not json").unwrap();
     assert_eq!(read_cache(&path), None);
@@ -130,7 +130,7 @@ fn missing_or_corrupt_cache_reads_as_none() {
 fn launch_warning_reads_cache_only_and_is_failure_silent() {
     let home = tempdir().unwrap();
     let root = crate::gc::worktree_root::worktree_root_for(home.path());
-    // No cache, no settings, no tmp-wt dir: nothing, no panic.
+    // No cache, no settings, no worktrees dir: nothing, no panic.
     assert_eq!(launch_warning_at(home.path(), NOW), None);
     write_cache(
         &cache_path_for(&root),
@@ -218,7 +218,7 @@ fn tmp_refresh_and_launch_warning_round_trip_and_never_delete() {
 
     let line = tmp_launch_warning_at(home.path(), NOW).expect("over cache warns");
     assert!(line.contains("tmp.warn_bytes"), "{line}");
-    // The tmp-wt banner is independent: no tmp-wt cache, no tmp-wt line.
+    // The worktrees banner is independent: no worktrees cache, no worktrees line.
     assert_eq!(launch_warning_at(home.path(), NOW), None);
 
     // A stale cache stays quiet.

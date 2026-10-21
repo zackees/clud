@@ -518,7 +518,7 @@ fn classify_refresh_error_body(status: u16, raw: &[u8]) -> RefreshFailure {
 }
 
 pub fn run(subcommand: &CodexAuthSubcommand, interrupted: &AtomicBool) -> i32 {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         eprintln!("codex-auth: home directory is unavailable");
         return 2;
     };

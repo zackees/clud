@@ -82,6 +82,7 @@ fn run(mut args: args::Args) {
         std::process::exit(code);
     }
     resolve_do_target(&mut args);
+    enter_video_command(&args);
 
     let launch = resolve_launch(&mut args);
     let auto_fix_hooks = resolve_auto_fix_hooks(&args, launch);
@@ -108,6 +109,7 @@ fn run(mut args: args::Args) {
     if args.dry_run {
         print_dry_run_and_exit(&args, &plan, launch.target);
     }
+    prepare_video_launch(&args);
     emit_launch_notices(&args, launch.target);
     let exit_code = launch_and_clean_up(&args, &plan, interrupted.as_ref(), job_orphan_reaper);
     drop(foreground_checkout_presence);
@@ -115,6 +117,47 @@ fn run(mut args: args::Args) {
         lease.release();
     }
     std::process::exit(exit_code);
+}
+
+/// `clud video [DIR] [--update | --path]` (#1851, #1866): `--path` prints the
+/// checkout and exits; `--update` reinstalls the pinned
+/// video-use checkout and exits; otherwise the session runs in `DIR`.
+fn enter_video_command(args: &args::Args) {
+    let Some(args::Command::Video { dir, update, path }) = &args.command else {
+        return;
+    };
+    if *path {
+        std::process::exit(clud::video::run_path());
+    }
+    if *update {
+        std::process::exit(clud::video::run_update());
+    }
+    if let Some(dir) = dir {
+        if let Err(error) = std::env::set_current_dir(dir) {
+            eprintln!("[clud] error: cannot enter {}: {error}", dir.display());
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Media tools, the managed install and the ElevenLabs key for a real
+/// `clud video` launch. Runs after the dry-run exit, so `--dry-run` never
+/// installs anything or reads the vault. The key is placed in this process's
+/// environment only now, immediately before the harness child inherits it.
+fn prepare_video_launch(args: &args::Args) {
+    if !matches!(args.command, Some(args::Command::Video { .. })) {
+        return;
+    }
+    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    match clud::video::prepare_launch(interactive) {
+        Ok(key) => unsafe {
+            std::env::set_var(clud::video::ELEVENLABS_ENV, key);
+        },
+        Err(error) => {
+            eprintln!("[clud] error: {error}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn start_checkout_presence(
@@ -260,6 +303,31 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
                 return Some(2);
             }
             backend_bootstrap::run_trusted_codex_update()
+        }
+        args::Command::Ci {
+            job,
+            filter,
+            workflow,
+            json,
+        } => clud::ci_local::run(&clud::ci_local::CiOptions {
+            job: job.clone(),
+            filter: filter.clone(),
+            workflow: workflow.clone(),
+            json: *json,
+        }),
+        args::Command::Doctor => {
+            if !args.passthrough.is_empty() {
+                eprintln!("doctor accepts no passthrough arguments");
+                return Some(2);
+            }
+            clud::doctor::run()
+        }
+        args::Command::DshUpdate => {
+            if !args.passthrough.is_empty() {
+                eprintln!("dsh-update accepts no passthrough arguments");
+                return Some(2);
+            }
+            clud::dsh_harness::run_update()
         }
         // Credential management is self-contained and must never resolve a backend,
         // start a daemon, or forward secrets to a harness.
@@ -654,7 +722,7 @@ fn apply_session_history_picker(
         return;
     }
     let environment = clud::daemon::default_state_dir().map(|state_dir| {
-        let home = dirs::home_dir().unwrap_or_default();
+        let home = clud::home::user_home().unwrap_or_default();
         clud::session_history::launch::Environment {
             state_dir,
             claude_dir: clud::session_history::import::claude_config_dir(&home),
@@ -781,6 +849,27 @@ fn resolve_launch_target<'a>(
     (launch_target, provider_profile)
 }
 
+/// `--provider-only` pins OpenRouter's upstream routing. The direct route hands
+/// it to the harness through `CLAUDE_CODE_EXTRA_BODY`; the unified gateway
+/// injects it into every OpenRouter request it forwards (#1863). Nothing else
+/// can carry it.
+fn validate_provider_only(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
+    if args.provider_only.is_empty() {
+        return;
+    }
+    if launch_target.model_provider != backend::ModelProvider::OpenRouter {
+        eprintln!(
+            "[clud] error: --provider-only applies only to an OpenRouter launch \
+             (direct or --unified)"
+        );
+        std::process::exit(2);
+    }
+    if let Some(error) = clud::openrouter_routing::invalid_slug(&args.provider_only) {
+        eprintln!("[clud] error: {error}");
+        std::process::exit(2);
+    }
+}
+
 fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");
@@ -792,12 +881,16 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
-    if let Some(error) = command::grind_launch_error(args, launch_target) {
+    validate_provider_only(args, launch_target);
+    if let Some(error) = command::grind_launch_error(args, launch_target)
+        .or_else(|| command::video_launch_error(args, launch_target))
+    {
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
     if launch_target.effective_harness == backend::Backend::DeepSeek {
-        if let Some(option) = args.unsupported_deepseek_harness_option() {
+        let clud_routes_model = launch_target.model_provider == backend::ModelProvider::OpenRouter;
+        if let Some(option) = args.unsupported_deepseek_harness_option(clud_routes_model) {
             eprintln!(
                 "unsupported option for DeepSeek Harness: {option}; pass native dsh options after --"
             );
@@ -837,6 +930,7 @@ fn resolve_model_selection(
                 std::process::exit(2);
             }
         };
+    refuse_unproven_free_model(args, launch_target);
     // #1304: an explicit `--openrouter --model <id>` becomes the saved default
     // the next plain `clud --openrouter` reuses. Saved before the credential
     // preflight so the choice survives even a launch that stops for a key.
@@ -855,6 +949,46 @@ fn resolve_model_selection(
                 eprintln!("[clud] warning: could not save the OpenRouter model: {error}")
             }
         }
+    }
+}
+
+/// #1833: a `:free` OpenRouter id is a cost promise. Refuse it, before the
+/// selection is saved as the default, unless the offline catalog proves the
+/// row is free; `--dry-run` refuses the same way.
+fn refuse_unproven_free_model(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
+    if launch_target.model_provider != backend::ModelProvider::OpenRouter {
+        return;
+    }
+    let Some(wire) = args
+        .resolved_model_selection
+        .as_ref()
+        .and_then(|selection| selection.wire_model.as_deref())
+    else {
+        return;
+    };
+    let catalog = openrouter_catalog::catalog_cached_or_embedded();
+    let verdict = clud::openrouter_free::check(wire, &catalog);
+    if let Some(message) = clud::openrouter_free::refusal(wire, &verdict, &catalog) {
+        eprintln!("[clud] error: {message}");
+        std::process::exit(2);
+    }
+    // Name the price on every OpenRouter launch, and say when it came from a
+    // saved default rather than this command line (#1833).
+    let source = args
+        .resolved_model_selection
+        .as_ref()
+        .and_then(|selection| selection.model_source)
+        .and_then(|source| serde_json::to_value(source).ok())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    if let Some(notice) = clud::openrouter_free::price_notice(wire, &catalog, &source) {
+        eprintln!("{notice}");
+    }
+    // Free ids hit OpenRouter's caps mid-session, which Claude Code reports
+    // as a malformed HTTP 200 response; say so before the session starts
+    // (#1845).
+    if let Some(notice) = clud::openrouter_free::free_limits_notice(wire) {
+        eprintln!("{notice}");
     }
 }
 
@@ -1078,6 +1212,19 @@ fn store_inline_api_key(args: &mut args::Args) {
     }
 }
 
+/// A dsh launch borrows clud's key only for a provider clud passes through
+/// (#1829): OpenRouter always, DeepSeek when the user asked for it by flag.
+/// A bare `--harness deepseek` keeps working on a key dsh stores itself.
+fn dsh_needs_clud_credential(launch_target: backend::ResolvedLaunchTarget) -> bool {
+    match launch_target.model_provider {
+        backend::ModelProvider::OpenRouter => true,
+        backend::ModelProvider::DeepSeek => {
+            launch_target.provider_source == backend::PreferenceSource::Cli
+        }
+        _ => false,
+    }
+}
+
 /// Provider credentials must exist before foreground or daemon-backed work
 /// is accepted. DeepSeek Harness owns its own provider credentials, so only
 /// clud-managed Claude/Codex routes use this preflight.
@@ -1085,7 +1232,9 @@ fn store_inline_api_key(args: &mut args::Args) {
 /// intentionally remain vault-free -- `launch_preflight_target` returns
 /// `None` for every dry run regardless of provider.
 fn preflight_provider_credentials(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
-    if launch_target.effective_harness == backend::Backend::DeepSeek {
+    if launch_target.effective_harness == backend::Backend::DeepSeek
+        && !dsh_needs_clud_credential(launch_target)
+    {
         return;
     }
     let Some(descriptor) =
@@ -1564,10 +1713,26 @@ fn print_dry_run_and_exit(
         // model this launch may reach, not just the one it starts on
         // (#1257).
         "allowed_models": plan.allowed_models,
+        // OpenRouter upstream providers every request is pinned to, fallbacks
+        // off (`--provider-only`).
+        "provider_only": plan.provider_only,
         // Whether that boundary was typed or inherited from the previous
         // selection -- the runtime prints a green startup line for the
         // inherited case (#1257).
         "pinned_from_previous_selection": plan.pinned_from_previous_selection,
+        // #1855: every routing decision this launch made, resolved once and
+        // carried on the plan. The audit surface the migration is validated
+        // against: slots, allowlist, context, effort and check verdicts are
+        // the same values the backends render.
+        "route": plan.route,
+        // #1833: what the offline catalog says about a `:free` id.
+        "free_check": plan.model_selection.as_ref()
+            .and_then(|selection| selection.wire_model.as_deref())
+            .filter(|_| plan.model_provider() == backend::ModelProvider::OpenRouter)
+            .map(|wire| clud::openrouter_free::check(
+                wire,
+                &openrouter_catalog::catalog_cached_or_embedded(),
+            ).as_str()),
         "coauthor": plan.coauthor,
         // Routing must be auditable without a paid request, and a ladder
         // is routing: it decides which account serves the turn after the
@@ -1608,7 +1773,7 @@ fn emit_launch_notices(args: &args::Args, launch_target: backend::ResolvedLaunch
         eprintln!("{notice}");
     }
 
-    // Issue #1610: tmp-wt size warning from the daemon's cached walk. Reads
+    // Issue #1610: worktrees size warning from the daemon's cached walk. Reads
     // one small file; no walk, no daemon round trip, silent on any failure.
     if let Some(line) = gc::worktree_size_cache::launch_warning() {
         eprintln!("{line}");
@@ -2056,7 +2221,7 @@ use main_helpers::{
 fn install_assets(home: Option<&std::path::Path>) -> i32 {
     let Some(home) = home
         .map(std::path::Path::to_path_buf)
-        .or_else(dirs::home_dir)
+        .or_else(clud::home::user_home)
     else {
         eprintln!("[clud] error: could not resolve a home directory; pass --home");
         return 2;

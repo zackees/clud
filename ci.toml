@@ -25,10 +25,8 @@ harness     = { run = "python -m ci.test_harness",           required = false }
 # `minimal` is what a main push runs: every Linux lane plus Static checks,
 # Dylint, Lint and the Linux unit/integration/harness legs. The cross
 # targets are added by label, exactly as ci.yml's `ci_matrix` resolves them.
-# `pre-prune = true` on the writer flows waives the lockfile-change peak in
-# CACHE-004's arithmetic (worst == steady). Without it, six `compile`
-# targets at ~1.4 GiB each double on a lockfile change and the declared
-# shape cannot fit the 10 GB cap at all.
+# The default-branch cache writers wait for cache-maint's real pre-prune
+# before saving. That ordered step backs flow.main's lockfile-peak waiver.
 [flow.minimal]
 platforms  = ["linux-x64"]
 suites      = ["static", "dylint", "lint", "unit", "integration", "harness"]

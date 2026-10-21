@@ -38,11 +38,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
-      - uses: zackees/setup-soldr@v0
+      - name: Set up soldr
+        uses: zackees/setup-soldr@v0
         with:
           cache: true
           # setup-soldr#559: a failed or cancelled job saves no build outputs
@@ -67,8 +69,11 @@ jobs:
         run: |
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
+          soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
       - name: Test dylint crate
-        run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+        run: |
+          RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+          RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
       - name: Run dylint over workspace
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
       # Late lints only see code that compiles for the checked target, so the

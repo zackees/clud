@@ -31,7 +31,8 @@ Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --glob
 ### Local validation before GitHub Actions
 
 **Mandatory for agents: run all local tests and lint through `bosn ci`**
-(`bosn ci run --workspace . --trigger pr --wait`), which replays the workflow
+(`bosn ci run --workspace . --trigger pr --wait`, or `clud ci [JOB] [--filter RE]`
+for the verdict plus only the failing steps' diagnostics), which replays the workflow
 under act2 in an isolated engine. Do not run tests or lint on the host or in a
 direct Bosn build task: those paths can interfere with the system `clud`. If
 act cannot represent an affected job (notably native Windows or macOS
@@ -44,18 +45,22 @@ act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
 zackees/ci.yml, not patched here. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 **Run the pre-push full PR pass through the local gate**, which wraps that
-same bosn run and, on a pass, stamps the commit so the PR skips the routine
+same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run`
-and `git push --force-with-lease`. Don't amend or rebase after stamping: that
-invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
+`uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate run`
+then publish the exact stamped head with
+`uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate push --sha <stamped-head>`.
+Use Bosn 0.1.18 with act2.15 and its verified execution pins. Ordinary PRs
+require proof under the base policy; do not amend or rebase after stamping.
+A changed tree requires another gate run. Plain `bosn ci run`
 stays valid for `--job static-checks` and focused jobs.
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
 local CI is a pre-push check, not the edit loop. Run the full PR plan at most
 once per change. The PR's GitHub CI is the CI of record. Don't wait in a busy
-bosn queue: cancel your own run (`bosn ci cancel RUN`) and push. Never
+bosn queue: cancel your own queued run (`bosn ci cancel RUN`) and wait for
+capacity before qualifying the head. Publish only a valid stamped head. Never
 `pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
 runs.
 
@@ -197,6 +202,16 @@ Policy: [zackees/ci.yml#229](https://github.com/zackees/ci.yml/issues/229)
 
 The only narrowly permitted Rust exception is a test that must use raw `std::process::Command` because `running_process::NativeProcess` would change the behavior under test. Such a test requires a documented, filename-specific exemption in `ci/banned_imports.py`; do not add an exemption for ordinary tests or production code.
 
+### Waiting: background + notify, never a loop
+
+Never poll. To wait, run the command in the background and wait for the notification.
+clud's `block_bad_cmd` hook refuses hand-written waits for the main agent and
+every sub-agent (`while`/`until`, a `for` loop that sleeps, a `sleep` chained
+to a `gh` status read, `tail -f`, `watch`); use `run_in_background`, or a tool
+with its own deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`)
+([#1880](https://github.com/zackees/clud/issues/1880),
+[DD-168](docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not)).
+
 ### One binary: `clud` is multicall
 
 clud ships exactly one executable, `clud`, so installation stays trivial. At
@@ -222,6 +237,14 @@ why. The shim modules are exempt. For a name outside clud's control (a
 distro package, a container image, the pre-clud `install`), mark the line
 `python-name-lint: allow`, or put `python-name-lint: allow-next-line` above
 a line that ends in a `\` continuation.
+
+### Home directory: `home::user_home` only
+
+Resolve the user's home with `crate::home::user_home()` (`clud::home::user_home()`
+from a binary). `dirs::home_dir`, `std::env::home_dir` and raw `USERPROFILE`
+reads are banned elsewhere by `ci/banned_home_dir.py` (`bash lint`) and the
+`ban_dirs_home_dir` Dylint lint: a second resolver disagrees on Windows
+([DD-161](docs/DESIGN_DECISIONS.md#dd-161-the-users-home-directory-has-exactly-one-resolver)).
 
 ### Cross-cutting registries — extend in all required places
 
@@ -279,7 +302,7 @@ Several features have a "single source of truth" registry that must be updated a
 
 - **Test that needs raw `std::process::Command`** → add the test filename to the exempt set in `ci/banned_imports.py`. The lint enforces that production subprocess execution goes through `running_process::NativeProcess`; exemptions exist for tests that deliberately need raw spawning because `NativeProcess` would attach a `Containment::Contained` Job Object that masks what's being tested. If your test errors with `BANNED — use running_process::NativeProcess instead`, decide whether `NativeProcess` would distort the test; if yes, add yourself to the exempt set with a comment explaining why.
 
-- **soldr version policy** → rolling latest everywhere; there is nothing to bump. `pyproject.toml` declares `requires = ["soldr"]` (unpinned build backend), `setup-soldr` steps under `.github/` pass no `version:`, `./install` defaults to `latest`, and the bundled Docker helper uses `ARG SOLDR_VERSION=latest` (asserted by a literal in `crates/clud-bin/src/tools.rs`). `tests/test_packaging_metadata.py::test_soldr_release_policy_moves_in_lockstep` fails if any of these reintroduces a numeric pin, so one path cannot fossilize on an old protocol (an ancient 0.8.44 pin broke catalogue setup, #1026). *Gotcha*: every `setup-soldr` job resolves "latest" via a GitHub API release lookup, so anonymous local `act` runs can exhaust the 60 req/hr limit (403). See [DD-120](docs/DESIGN_DECISIONS.md#dd-120-soldr-follows-rolling-latest-everywhere-superseding-dd-020).
+- **soldr version policy** → rolling latest everywhere; there is nothing to bump. A soldr version in clud settings (`rust.version`, `optimize.rust.soldr_version`) is ignored with a yellow warning, never honored ([DD-173](docs/DESIGN_DECISIONS.md#dd-173-soldr-cannot-be-pinned-a-version-setting-is-ignored-with-a-warning)). `pyproject.toml` declares `requires = ["soldr"]` (unpinned build backend), `setup-soldr` steps under `.github/` pass no `version:`, `./install` defaults to `latest`, and the bundled Docker helper uses `ARG SOLDR_VERSION=latest` (asserted by a literal in `crates/clud-bin/src/tools.rs`). `tests/test_packaging_metadata.py::test_soldr_release_policy_moves_in_lockstep` fails if any of these reintroduces a numeric pin, so one path cannot fossilize on an old protocol (an ancient 0.8.44 pin broke catalogue setup, #1026). *Gotcha*: every `setup-soldr` job resolves "latest" via a GitHub API release lookup, so anonymous local `act` runs can exhaust the 60 req/hr limit (403). See [DD-120](docs/DESIGN_DECISIONS.md#dd-120-soldr-follows-rolling-latest-everywhere-superseding-dd-020).
 
 ## Test Coverage
 

@@ -8,6 +8,9 @@ notices, and `/_clud/route/*` control surface. Reachable with
 `--failover <routes>` and `--failover-allow-metered`; `--dry-run` reports the
 resolved ladder and rejects an unroutable rung.
 
+The upstreams a ladder may descend onto, and the boundary it must respect,
+come from the launch's `ResolvedRoute`: see [route-plan.md](route-plan.md).
+
 One thing is deliberately **not** built: a standalone `clud route
 status` command. The gateway is launch-scoped and its port and token are never
 serialized -- that is the property that keeps a launch's credentials off disk --

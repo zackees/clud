@@ -87,11 +87,59 @@ pub fn deletion_safety_fragment() -> Value {
         "permissions": { "deny": deny },
         "hooks": {
             "PreToolUse": [{
-                "matcher": "Bash",
+                "matcher": guarded_tools_matcher(),
                 "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
             }]
         }
     })
+}
+
+/// Every tool a scanner rule inspects. The harness filters by matcher before
+/// the hook runs, so a rule for a tool missing here never fires: until
+/// #1954 the matcher was `Bash` alone, and the `/loop` stop guard, the grind
+/// write/agent/question caps, the recursive-agent guard and the Monitor wait
+/// refusal were dead in every repo without its own catch-all matcher.
+/// `block_bad_cmd`'s `every_rule_tool_reaches_the_dispatcher` keeps this in
+/// step with the rules.
+pub const GUARDED_TOOLS: &[&str] = &[
+    "Bash",
+    "PowerShell",
+    "ScheduleWakeup",
+    "Monitor",
+    "Agent",
+    "Workflow",
+    "AskUserQuestion",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+];
+
+/// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude
+/// Code's own worktrees are built under `~/.clud/worktrees` instead of
+/// `.claude/worktrees/` (`claude_worktree_hook`). Passed only to a Claude
+/// Code that knows these events (2.1.50+); older ones ignored a settings
+/// document that named an unknown event, which would also drop the guards.
+#[must_use]
+pub fn worktree_hooks_fragment() -> Value {
+    let mut events = serde_json::Map::new();
+    for event in [
+        crate::claude_worktree_hook::WORKTREE_CREATE_EVENT,
+        crate::claude_worktree_hook::WORKTREE_REMOVE_EVENT,
+    ] {
+        events.insert(
+            event.to_string(),
+            json!([{ "hooks": [{ "type": "command", "command": dispatcher_command(event) }] }]),
+        );
+    }
+    json!({ "hooks": Value::Object(events) })
+}
+
+/// [`GUARDED_TOOLS`] as one matcher; the harness reads it as an anchored
+/// regex over the tool name.
+#[must_use]
+pub fn guarded_tools_matcher() -> String {
+    GUARDED_TOOLS.join("|")
 }
 
 /// The command string a compiled line runs for `event`.

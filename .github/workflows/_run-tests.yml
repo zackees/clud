@@ -54,12 +54,14 @@ jobs:
       RUST_BACKTRACE: "1"
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
 
-      - uses: ./.github/actions/setup-exec
+      - name: Set up execution
+        uses: ./.github/actions/setup-exec
         with:
           bundle-name: ${{ inputs.suite != 'wheel-smoke' && format('bundle-{0}', inputs.target) || '' }}
 

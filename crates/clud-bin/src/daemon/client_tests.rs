@@ -443,3 +443,35 @@ fn a_slow_daemon_startup_is_waited_out_but_not_forever() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(clock.get() > super::DAEMON_STARTUP_WAIT);
 }
+
+/// #1841: `/proc/<pid>/exe` of a daemon whose binary a reinstall removed.
+#[test]
+fn a_deleted_executable_link_is_recognised() {
+    assert!(exe_link_is_deleted(
+        "/tmp/pip-uninstall-h8ypd14_/clud (deleted)"
+    ));
+    assert!(!exe_link_is_deleted("/home/me/.venv/bin/clud"));
+    assert!(!exe_link_is_deleted("/home/me/deleted/clud"));
+    assert!(!exe_link_is_deleted("/home/me/clud (deleted) copy"));
+}
+
+/// #1841: a same-version daemon running a deleted binary is replaced; a live
+/// one is kept, and the rule never overrides a version decision.
+#[test]
+fn a_matching_daemon_with_a_deleted_executable_is_replaced() {
+    use DaemonVersionDisposition::{Match, RefuseNewerOrUnknown, ReplaceOlder};
+    assert_eq!(with_deleted_executable(Match, true), ReplaceOlder);
+    assert_eq!(with_deleted_executable(Match, false), Match);
+    assert_eq!(
+        with_deleted_executable(RefuseNewerOrUnknown, true),
+        RefuseNewerOrUnknown
+    );
+    assert_eq!(with_deleted_executable(ReplaceOlder, false), ReplaceOlder);
+}
+
+/// The running test binary is on disk, so its own daemon-style check is false.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_current_process_executable_is_not_deleted() {
+    assert!(!daemon_executable_deleted(std::process::id()));
+}

@@ -102,17 +102,6 @@ impl fmt::Display for LadderError {
     }
 }
 
-/// The route a provider is served on inside the gateway, if any.
-fn route_for(provider: ModelProvider) -> Option<ConversationRoute> {
-    match provider {
-        ModelProvider::Claude => Some(ConversationRoute::Claude),
-        ModelProvider::Codex => Some(ConversationRoute::Codex),
-        ModelProvider::DeepSeek => Some(ConversationRoute::DeepSeek),
-        ModelProvider::OpenRouter => Some(ConversationRoute::OpenRouter),
-        ModelProvider::Kimi => Some(ConversationRoute::Kimi),
-    }
-}
-
 /// An ordered list of fallback routes plus the consent that governs it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FailoverLadder {
@@ -148,36 +137,51 @@ impl FailoverLadder {
         })
     }
 
-    fn rung(name: &str) -> Result<FailoverRung, LadderError> {
+    fn rung(spec: &str) -> Result<FailoverRung, LadderError> {
+        // `--model` accepts `<model>@<effort>`, so a ladder may too. The rung
+        // routes by model only; the suffix must never reach a wire ID (#1903).
+        let (name, _effort) = provider_catalog::split_effort_suffix(spec);
         // Aliases count too: a ladder saved before a provider rename
         // (`deepseek-v4-flash` -> `deepseek-flash`, #1192) must keep naming the
         // provider route instead of being forwarded to Anthropic verbatim.
         let catalog = provider_catalog::model_by_cli_id(name)
             .or_else(|| provider_catalog::model_by_wire_id(name))
             .or_else(|| provider_catalog::model_by_any_id(name));
+        let inferred = provider_catalog::inferred_provider_from_wire(name)
+            .filter(|provider| *provider != ModelProvider::Claude);
         match catalog {
             // A catalog row that is not Claude names a provider namespace clud
             // owns, so the replayed body must carry that row's wire ID.
             Some(entry) if entry.provider != ModelProvider::Claude => {
-                let Some(route) = route_for(entry.provider) else {
-                    return Err(LadderError::Unroutable {
-                        spec: name.to_string(),
-                        provider: entry.provider.as_str(),
-                    });
-                };
                 Ok(FailoverRung {
-                    spec: name.to_string(),
+                    spec: spec.to_string(),
                     wire_id: entry.wire_id.to_string(),
                     provider: entry.provider,
-                    route,
+                    // The one provider-to-route mapping (#1864). It is total,
+                    // which is why this arm can no longer produce an
+                    // `Unroutable` rung.
+                    route: crate::route_plan::conversation_route(entry.provider),
                     cost: CostOwner::for_provider(entry.provider),
+                })
+            }
+            // An uncataloged ID with a provider's wire prefix (`gpt-5.5`,
+            // `deepseek-v4-flash-0901`) still belongs to that provider, the same
+            // inference `--model` uses (#1902).
+            _ if inferred.is_some() => {
+                let provider = inferred.unwrap_or(ModelProvider::Claude);
+                Ok(FailoverRung {
+                    spec: spec.to_string(),
+                    wire_id: name.to_string(),
+                    provider,
+                    route: crate::route_plan::conversation_route(provider),
+                    cost: CostOwner::for_provider(provider),
                 })
             }
             // Everything else is an ordinary Claude model ID. Anthropic owns
             // its inventory, so it is forwarded exactly as written rather than
             // checked against a list that ages.
             _ => Ok(FailoverRung {
-                spec: name.to_string(),
+                spec: spec.to_string(),
                 wire_id: name.to_string(),
                 provider: ModelProvider::Claude,
                 route: ConversationRoute::Claude,
@@ -262,6 +266,27 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn effort_suffixed_catalog_rung_resolves_to_its_provider() {
+        let ladder = FailoverLadder::parse("codex-terra@high,claude-opus-4-1@max", true).unwrap();
+        let codex = &ladder.rungs()[0];
+        assert_eq!(codex.provider, ModelProvider::Codex);
+        assert_eq!(codex.spec, "codex-terra@high");
+        assert!(!codex.wire_id.contains('@'), "{}", codex.wire_id);
+        assert_eq!(ladder.rungs()[1].wire_id, "claude-opus-4-1");
+    }
+
+    #[test]
+    fn uncataloged_prefixed_wire_ids_keep_their_provider() {
+        let ladder = FailoverLadder::parse("deepseek-v4-flash-0901,gpt-5.5", false).unwrap();
+        let deepseek = &ladder.rungs()[0];
+        assert_eq!(deepseek.provider, ModelProvider::DeepSeek);
+        assert_eq!(deepseek.cost, CostOwner::Metered);
+        assert!(!ladder.withheld_for_consent().is_empty());
+        assert_eq!(ladder.rungs()[1].provider, ModelProvider::Codex);
+        assert_ne!(ladder.rungs()[1].route, ConversationRoute::Claude);
+    }
+
+    #[test]
     fn a_catalog_rung_carries_its_provider_wire_id_and_an_unknown_id_stays_claude() {
         let ladder = FailoverLadder::parse("deepseek-flash,claude-opus-4-1", true).unwrap();
         let rungs = ladder.rungs();
@@ -283,9 +308,17 @@ mod tests {
         // #937 Phase 4 gave Kimi its unified route; before that a `kimi-k3`
         // rung failed at parse time with `Unroutable`. Every provider must now
         // map to its own route, so no rung can be accepted and then fail.
+        let mut seen = Vec::new();
         for provider in ModelProvider::ALL {
-            assert!(route_for(*provider).is_some(), "{provider:?} has no route");
+            let route = crate::route_plan::conversation_route(*provider);
+            assert!(
+                !seen.contains(&route),
+                "{} shares a route with another provider",
+                provider.as_str()
+            );
+            seen.push(route);
         }
+        assert_eq!(seen.len(), ModelProvider::ALL.len());
         let ladder = FailoverLadder::parse("kimi-k3", true).unwrap();
         assert_eq!(ladder.rungs()[0].route, ConversationRoute::Kimi);
     }

@@ -109,6 +109,7 @@ pub enum HarnessSelection {
     Claude,
     Codex,
     #[serde(rename = "deepseek")]
+    #[value(alias = "dsh")]
     DeepSeek,
 }
 

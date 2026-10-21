@@ -30,7 +30,7 @@ pub fn inspect_current() -> HookHealthReport {
 /// clud's notion of the user home, overridable by `CLUD_HOOK_HOME`.
 ///
 /// The override is not a test convenience bolted on after the fact: on Windows
-/// `dirs::home_dir()` asks `SHGetKnownFolderPath`, which ignores a
+/// `crate::home::user_home()` asks `SHGetKnownFolderPath`, which ignores a
 /// `USERPROFILE` set by a test harness or a sandbox. Without it, a process
 /// pointed at a temp home still reads the developer's real dotfiles.
 ///
@@ -39,7 +39,7 @@ pub fn inspect_current() -> HookHealthReport {
 pub fn hook_home_dir() -> Option<PathBuf> {
     std::env::var_os("CLUD_HOOK_HOME")
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .or_else(crate::home::user_home)
 }
 
 pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport {

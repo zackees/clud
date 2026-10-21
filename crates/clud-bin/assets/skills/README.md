@@ -52,6 +52,10 @@ every backend's skills dir on launch. `clud-loop` was retired once
   `doctor` first; confirmation-gated `restart`/`reset`; Windows storage disks
   resolved from Docker Desktop's real config (never the assumed C: default)
   and never compacted or deleted automatically.
+- [video-use/](video-use/SKILL.md) - Explicit-only `/video-use` bridge to the
+  pinned browser-use/video-use checkout via `clud video --path`; no context
+  cost until invoked. Contract:
+  [launch-targets.md](../../../../docs/architecture/launch-targets.md#clud-video-video-use-as-a-session-scoped-plugin-1851).
 
 ## Platform coverage selection
 

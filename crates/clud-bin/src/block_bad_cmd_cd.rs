@@ -155,38 +155,67 @@ fn cd_builtins(dialect: ShellDialect) -> &'static [&'static str] {
 
 /// Find every `cd` in `command_text` that would move the session cwd.
 ///
-/// Skips subshells, command substitutions, and nested shells, all of which
-/// change only a child process's directory. `cwd` is the base that relative
-/// targets resolve against; `home` supplies `~` / `$HOME` expansion.
+/// Only commands the session's own shell runs count: not those in a
+/// subshell, a substitution, a nested shell (`bash -c 'cd /tmp'`) or a
+/// pipeline stage, all of which change only a child process's directory.
+/// `cwd` is the base relative targets resolve against; `home` supplies `~`
+/// and `$HOME` expansion. A target the evaluator resolved through a
+/// variable (`D=/tmp; cd "$D"`) is a concrete path; one only known at run
+/// time is [`CdTarget::Unresolvable`].
 pub(super) fn scan_session_cd(
     command_text: &str,
     dialect: ShellDialect,
     cwd: &Path,
     home: Option<&Path>,
 ) -> Vec<CdOccurrence> {
-    let stripped = strip_heredoc_bodies(command_text);
-    let mut found = Vec::new();
-    for segment in top_level_segments(&stripped, dialect) {
-        let words = command_words(&segment);
-        if words.is_empty() {
-            continue;
-        }
-        // `bash -c 'cd /tmp'` changes only the child's directory.
-        if nested_shell_command(&words, dialect).is_some() {
-            continue;
-        }
-        let program = program_name(&words[0]).to_ascii_lowercase();
-        if !cd_builtins(dialect).contains(&program.as_str()) {
-            continue;
-        }
-        let raw_target = cd_argument(&words[1..], dialect);
-        let target = match raw_target.as_deref() {
-            None => bare_cd_target(dialect, home),
-            Some(argument) => resolve_cd_argument(argument, cwd, home),
-        };
-        found.push(CdOccurrence { raw_target, target });
+    let script = parse_command_with_home(command_text, dialect, Some(cwd), home);
+    script
+        .invocations
+        .iter()
+        .filter(|inv| runs_in_session_shell(inv))
+        .filter_map(|inv| session_cd(inv, dialect, cwd, home))
+        .collect()
+}
+
+fn runs_in_session_shell(invocation: &crate::shell_ast::Invocation) -> bool {
+    use crate::shell_ast::Origin;
+    invocation.depth == 0
+        && invocation.pipeline.is_none()
+        && matches!(invocation.origin, Origin::Script | Origin::FunctionBody)
+}
+
+fn session_cd(
+    invocation: &crate::shell_ast::Invocation,
+    dialect: ShellDialect,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<CdOccurrence> {
+    let words = rule_words(invocation);
+    let program = program_name(words.first()?);
+    if !cd_builtins(dialect).contains(&program.as_str()) {
+        return None;
     }
-    found
+    let offset = invocation.words.len().saturating_sub(words.len());
+    let index = cd_argument_index(&words[1..], dialect).map(|at| at + 1);
+    // The operand as written (`$HOME`, not what it resolves to), for the
+    // denial message.
+    let raw_target = index.map(|at| {
+        invocation
+            .raw
+            .get(offset + at)
+            .map_or_else(|| words[at].clone(), |raw| unquote(raw))
+    });
+    let target = match index {
+        None => bare_cd_target(dialect, home),
+        Some(at) => match invocation.words.get(offset + at) {
+            Some(crate::shell_ast::Value::Literal(argument)) => {
+                let base = invocation.cwd.as_literal().map_or(cwd, Path::new);
+                resolve_cd_argument(argument, base, home)
+            }
+            _ => CdTarget::Unresolvable,
+        },
+    };
+    Some(CdOccurrence { raw_target, target })
 }
 
 /// The concrete directories a command's session-level `cd`s would move to.
@@ -209,139 +238,34 @@ pub(super) fn session_cd_targets(
         .collect()
 }
 
-/// Split a command into the segments that run in the session's own shell.
-///
-/// Everything inside `(...)` — which covers `$(...)` substitutions too,
-/// since the paren depth rises either way — and inside backticks is dropped
-/// rather than returned, because a `cd` there cannot escape its child.
-fn top_level_segments(command_text: &str, dialect: ShellDialect) -> Vec<String> {
-    let chars: Vec<char> = command_text.chars().collect();
-    let mut segments = Vec::new();
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    let mut depth = 0usize;
-    let mut i = 0usize;
-
-    let push = |buf: &mut String, segments: &mut Vec<String>| {
-        let segment = buf.trim();
-        if !segment.is_empty() {
-            segments.push(segment.to_string());
-        }
-        buf.clear();
-    };
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        if let Some(q) = quote {
-            if depth == 0 {
-                buf.push(ch);
-            }
-            if q != '\'' && is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-                if depth == 0 {
-                    buf.push(chars[i + 1]);
-                }
-                i += 2;
-                continue;
-            }
-            if ch == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        if ch == '\'' || ch == '"' || ch == '`' {
-            quote = Some(ch);
-            if depth == 0 {
-                buf.push(ch);
-            }
-            i += 1;
-            continue;
-        }
-
-        if is_shell_escape(ch, dialect) && i + 1 < chars.len() {
-            if depth == 0 {
-                buf.push(ch);
-                buf.push(chars[i + 1]);
-            }
-            i += 2;
-            continue;
-        }
-
-        if ch == '#' && dialect != ShellDialect::Cmd && is_shell_comment_start(&chars, i) {
-            while i < chars.len() && !matches!(chars[i], '\r' | '\n') {
-                i += 1;
-            }
-            continue;
-        }
-
-        if ch == '(' {
-            // A subshell or substitution starts here; the session cwd is
-            // safe from anything inside it, so end the current segment and
-            // swallow the group.
-            if depth == 0 {
-                push(&mut buf, &mut segments);
-            }
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if ch == ')' {
-            depth = depth.saturating_sub(1);
-            i += 1;
-            continue;
-        }
-        if depth > 0 {
-            i += 1;
-            continue;
-        }
-
-        let is_separator = matches!(ch, ';' | '\n' | '\r' | '|' | '&');
-        if is_separator {
-            push(&mut buf, &mut segments);
-            // Consume a paired `&&` / `||` in one step.
-            if (ch == '&' || ch == '|') && i + 1 < chars.len() && chars[i + 1] == ch {
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        buf.push(ch);
-        i += 1;
-    }
-    push(&mut buf, &mut segments);
-    segments
-}
-
-/// Pick the directory operand out of a `cd`'s arguments, skipping flags.
-fn cd_argument(args: &[String], dialect: ShellDialect) -> Option<String> {
+/// The index of the directory operand among a `cd`'s arguments, skipping
+/// flags.
+fn cd_argument_index(args: &[String], dialect: ShellDialect) -> Option<usize> {
     let mut index = 0usize;
     while index < args.len() {
         let arg = &args[index];
         // `cd -` is an operand, not a flag: it means "the previous directory".
         if arg == "-" {
-            return Some(arg.clone());
+            return Some(index);
         }
         let lower = arg.to_ascii_lowercase();
         if dialect == ShellDialect::PowerShell
             && matches!(lower.as_str(), "-path" | "-literalpath")
             && index + 1 < args.len()
         {
-            return Some(args[index + 1].clone());
+            return Some(index + 1);
         }
         let is_flag = match dialect {
-            // `/d` is a cmd flag; on POSIX a leading `/` is an absolute path.
-            ShellDialect::Cmd => arg.starts_with('-') || arg.starts_with('/'),
+            // `/d` is cmd's only `cd` flag; any other `/…` is a path (the
+            // evaluated `%USERPROFILE%` can be one).
+            ShellDialect::Cmd => arg.starts_with('-') || arg.eq_ignore_ascii_case("/d"),
             _ => arg.starts_with('-'),
         };
         if is_flag {
             index += 1;
             continue;
         }
-        return Some(arg.clone());
+        return Some(index);
     }
     None
 }
@@ -748,24 +672,33 @@ pub fn is_cwd_sensitive_hook_command(command: &str) -> bool {
     if has_self_rooting_prefix(command) {
         return false;
     }
-    command.split_whitespace().any(looks_like_relative_path)
+    crate::block_bad_cmd_rollout::parse_hook_command(command)
+        .invocations
+        .iter()
+        .flat_map(|invocation| invocation.words.iter())
+        .any(|word| looks_like_relative_path(word.text()))
 }
 
 /// Whether the command starts by planting itself at a session-constant
-/// absolute root, which makes any relative path after it safe.
+/// absolute root (`cd "$CLAUDE_PROJECT_DIR" && ...`, or an absolute program
+/// path), which makes any relative path after it safe.
 fn has_self_rooting_prefix(command: &str) -> bool {
-    let head = command
-        .split("&&")
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_start_matches("cd ")
-        .trim();
-    let head = unquote(head);
+    let script = crate::block_bad_cmd_rollout::parse_hook_command(command);
+    let Some(first) = script.invocations.first() else {
+        return false;
+    };
+    let words = first.argv();
+    let head = match words.first() {
+        Some(program) if program_name(program) == "cd" => words.get(1),
+        other => other,
+    };
+    let Some(head) = head else {
+        return false;
+    };
     if head.contains("CLAUDE_PROJECT_DIR") || head.contains("CLUD_PROJECT_DIR") {
         return true;
     }
-    !head.is_empty() && is_absolute_pathish(&head)
+    !head.is_empty() && is_absolute_pathish(head)
 }
 
 /// Whether `raw` reads as an absolute path in *either* platform's spelling.

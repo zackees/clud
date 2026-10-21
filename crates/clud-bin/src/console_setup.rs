@@ -13,6 +13,22 @@ const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 /// Windows console output mode flag for virtual terminal processing.
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
+/// Windows console output mode flag that defers the end-of-line wrap (#1942).
+///
+/// Without it, conhost moves the cursor to the next line, and on the bottom
+/// row scrolls the screen, as soon as a character lands in the last column.
+/// A VT terminal defers that wrap until the next printable character. A
+/// fullscreen TUI relayed through the PTY draws full-width rows and then
+/// positions the cursor, assuming the deferred wrap. Each eager wrap shifts
+/// the real screen by a line the child does not know about, and its
+/// cell-diff renderer never repairs the shift.
+const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
+
+/// The stdout bits a PTY session needs: VT processing plus the VT wrap
+/// semantics the relayed child assumes.
+pub const PTY_SESSION_OUTPUT_MODE_BITS: u32 =
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+
 /// A standard stream clud writes escape sequences to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutputStream {
@@ -131,9 +147,10 @@ impl Drop for ConsoleVtGuard {
 
 /// Enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on the Windows console input handle
 /// so ANSI sequences (bracketed paste, etc.) pass through to the child
-/// process, and `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stdout console
-/// handle so ANSI sequences written to stdout are interpreted instead of
-/// printed literally. Each handle is handled independently: a non-terminal or
+/// process, and [`PTY_SESSION_OUTPUT_MODE_BITS`] on the stdout console handle
+/// so ANSI sequences written to stdout are interpreted instead of printed
+/// literally, and a full-width row defers its wrap as on a VT terminal
+/// (#1942). Each handle is handled independently: a non-terminal or
 /// failing handle does not skip the other.
 /// Returns a guard that restores both original modes on drop.
 /// On non-Windows platforms this is a no-op.
@@ -151,10 +168,11 @@ pub fn enable_console_vt_input() -> ConsoleVtGuard {
             None
         };
         let original_output_mode = if io::stdout().is_terminal() {
-            or_console_mode(
-                io::stdout().as_raw_handle() as isize,
-                ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-            )
+            let handle = io::stdout().as_raw_handle() as isize;
+            // A console that rejects the deferred-wrap bit still gets VT
+            // processing; failing both would print escapes literally.
+            or_console_mode(handle, PTY_SESSION_OUTPUT_MODE_BITS)
+                .or_else(|| or_console_mode(handle, ENABLE_VIRTUAL_TERMINAL_PROCESSING))
         } else {
             None
         };

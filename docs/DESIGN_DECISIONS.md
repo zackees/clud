@@ -6085,6 +6085,8 @@ target is already unusable, and only under uv's own locks.
 
 ## DD-149: a configured soldr version is a minimum; a launch never downgrades soldr
 
+*Superseded by [DD-173](#dd-173-soldr-cannot-be-pinned-a-version-setting-is-ignored-with-a-warning): a version setting is now ignored entirely.*
+
 **Context:** DD-014 made a numeric `rust.version` / `optimize.rust.soldr_version`
 an exact pin. `soldr_activate` reconciled it on every launch: whenever the
 installed version differed from the pin it ran
@@ -6471,3 +6473,455 @@ rewrite project-owned hook commands or claim to alter Claude's renderer.
 tool call, with a count instead of one warning per hook. Native runtime
 deduplication and delivery of failures to the agent remain upstream work.
 See [hook-dispatch.md](architecture/hook-dispatch.md#native-hook-dependency-failures-1739).
+
+## DD-160: DeepSeek Harness is a clud-managed npm prefix driven by a launch overlay
+
+**Context.** #942 left `dsh` PATH-only: upstream ships it only as an npm
+developer preview (`npx @deepseek-ai/dsh web`), and clud did not want to
+change global npm state. #1829 needs `clud --harness dsh` and
+`clud --openrouter --harness dsh` to work on a clean machine with keys clud
+already holds.
+
+**Decision.** Install a pinned `@deepseek-ai/dsh` plus a pinned private
+`node` package into a versioned prefix under `~/.clud/harnesses/dsh/`.
+Pass provider keys only through the child environment. Select OpenRouter with
+a clud-owned overlay passed through dsh's own `--patch` flag.
+
+**Why not the alternatives.**
+- *`npx` on every launch* resolves a moving tag and re-downloads on a cold
+  cache. *Global npm* changes state the user owns. A versioned private prefix
+  can be pinned, verified, rolled back, and left alone when the user has their
+  own `dsh`.
+- *The system Node* is unreliable: dsh 0.2.0-rc.2 requires
+  `^22.19.0 || >=24.0.0`, and under Node 26 its native addon fails at boot even
+  though `engines` admits it. The private Node 24 removes both failure modes
+  and needs only npm from the host.
+- *Writing `$DSH_HOME/.credentials.yaml` or the user's profile* would create a
+  second copy of a secret clud cannot rotate, and would edit files the user
+  owns. dsh documents env precedence per run and `--patch` overlays applied
+  after every profile layer, so neither write is needed.
+- *A fork* was the fallback if upstream could not be pointed at OpenRouter
+  without UI interaction. It was not needed: the overlay alone selects dsh's
+  built-in `openrouter` route, verified end to end against a mock of the
+  Anthropic Messages endpoint.
+
+## DD-161: the user's home directory has exactly one resolver
+
+**Context.** #1829 shipped a Windows-only bug: the managed DeepSeek Harness
+installed under `dirs::home_dir()` (the Windows Known Folder profile) while
+backend discovery searched `USERPROFILE`, so with an isolated home the launch
+fell back to a bare `dsh`. Only native CI caught it. An audit (#1836) found 26
+library `home_dir` calls and about 20 private helpers re-implementing "where is
+home", with small differences: empty values honored or not, `USERPROFILE`
+checked first even on Unix, an OS fallback or none.
+
+**Decision.** `crates/clud-bin/src/home.rs::user_home` is the only resolver:
+on Windows `USERPROFILE`, then `HOME`, then the OS profile folder; elsewhere
+`HOME`, then the OS lookup; empty values are ignored. That is the precedence
+`clud_settings` already used, so `~/.clud` does not move for anyone. Two
+guards hold the line: `ci/banned_home_dir.py` in `bash lint` bans
+`dirs::home_dir`-style calls and raw `USERPROFILE` reads (every Windows-correct
+copy of the rule must read it), and the `ban_dirs_home_dir` Dylint lint bans
+the calls by resolved path, which also catches renamed imports.
+
+**Why both guards.** Dylint runs off the PR path (`_dylint.yml`, `ci-full`),
+which is how #1829's bug reached native CI. The text guard runs locally and on
+every PR; Dylint covers what text cannot see.
+
+**Exceptions.** `InstallPathEnv` snapshots the raw variables so bootstrap
+tests can inject them, and its consumers resolve through `home::resolve`.
+`crates/tap` is a one-dependency binary that cannot link clud. A helper with a
+distinct meaning, such as `hook_home_dir`'s `CLUD_HOOK_HOME` override, may
+wrap the resolver but never re-derive it.
+
+## DD-162: Codex launches default to auto review for approvals
+
+**Context.** Codex can send approval requests (sandbox escapes, blocked
+network, MCP prompts) to an auto-review subagent instead of the user. The
+config key is `approvals_reviewer = "auto_review"` (default `"user"`). The
+`--approve-for-me` flag also sets `approval_policy="on-request"` and
+`sandbox_mode="workspace-write"` (#1847).
+
+**Decision.** Every Codex-harness launch emits
+`-c approvals_reviewer="auto_review"` after the configured `config_overrides`
+and before the subcommand, so the interactive TUI, `exec` and `resume` all get
+it. clud sets only the reviewer, never `--approve-for-me`: the approval policy
+and sandbox stay with YOLO (DD-002) or `--safe`.
+
+**Why it is harmless under YOLO.** `--dangerously-bypass-approvals-and-sandbox`
+raises no approval requests, so the reviewer is idle. It takes effect on
+`--safe` launches, which otherwise stop and wait for the user.
+
+**Opt-out.** A reviewer the user already chose wins: an `approvals_reviewer=`
+entry in the clud settings `codex.config_overrides`, or passthrough
+`-c`/`--config approvals_reviewer=…`, `--approve-for-me` or `--not-so-yolo`.
+Like other clud `-c` overrides, the injected value takes precedence over
+`~/.codex/config.toml`.
+
+
+## DD-163: video-use is a session-scoped plugin pinned to a reviewed SHA
+
+**Context.** browser-use/video-use is a Claude Code skill whose documented
+install symlinks it into `~/.claude/skills/`. A skill there, or a bundled clud
+skill, is eligible to trigger in every session. The user asked for video-use
+only under a dedicated subcommand (#1851). It is also a fast-moving
+third-party repo that tells the agent to run shell commands and spends paid
+ElevenLabs credits.
+
+**Decision.** `clud video` keeps a checkout pinned to one reviewed commit
+under `~/.clud/extern/video-use/<sha>/`, wraps it in a clud-owned plugin
+directory, and passes that wrapper to the Claude harness with the
+session-only `--plugin-dir`. No `BUNDLED_SKILLS` row, no write to
+`~/.claude/skills` or `~/.codex/skills`, so DD-039's single installer is
+untouched. Bumping the pin is a reviewed change. The command is Claude-only,
+because `--plugin-dir` is a Claude Code feature. The ElevenLabs key is a
+plain vault secret (`clud.elevenlabs/api-key-v1`), not a `clud auth`
+provider, because it routes no model traffic.
+
+**Rejected.** A bundled skill (auto-triggers everywhere); tracking upstream
+`main` (unreviewed shell instructions on every launch); a `clud auth`
+provider row for ElevenLabs (that registry describes model routes).
+
+## DD-164: /video-use is an explicit-only bundled bridge skill
+
+**Context.** DD-163 kept video-use out of ordinary sessions, but the user also
+wanted to bind it on demand from any Claude session, without its description
+occupying context in general jobs (#1866).
+
+**Decision.** A small bundled `video-use` skill with
+`disable-model-invocation: true` (Claude Code: "Description not in context,
+full skill loads when invoked") and the Codex `agents/openai.yaml` policy
+`allow_implicit_invocation: false`, installed by the one skill installer
+(DD-039). Its body runs `clud video --path`, which installs and prints the
+pinned checkout, then follows that checkout's `SKILL.md`. The pin stays only
+in `video.rs`; the bridge never copies upstream instructions. This amends
+DD-163's "no `BUNDLED_SKILLS` row": the row is a bridge, not the upstream
+skill, and it never auto-triggers.
+
+**Rejected.** Bundling upstream's `SKILL.md` (a second, drifting copy of the
+pin); a model-invocable skill (its description costs context in every
+session).
+
+## DD-165: a gateway route gets the same context window and per-turn effort as a direct route
+
+**Context.** #1852 found that the unified gateway route set neither
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` nor `CLAUDE_CODE_MODEL_CAPABILITIES`, while
+the direct route set both for the very same wire id (divergences #3 and #4).
+Claude Code therefore clamped every gateway model at its own 200k default and
+never advertised the per-turn effort capability, so the same model behaved
+differently depending on which route reached it. The unified overlay was
+written before `ResolvedRoute` (#1855) existed and re-derived its own — smaller
+— subset of the launch's decisions.
+
+**Decision.** Once the resolver owns the context window and the effort
+capability, every renderer writes them: `render_unified_env` now emits
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` (`set_default`, so an ambient user value
+still wins), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (set, since it is clud's
+reviewed threshold for the wire id) and `CLAUDE_CODE_MODEL_CAPABILITIES`
+exactly as `render_direct_env` does. This is a deliberate behaviour change on
+the gateway route, and it is the first thing the migration fixes rather than
+preserves.
+
+**Consequences.** A gateway launch whose model has a catalogued window now
+reports the real one. A gateway launch that names no model at all still writes
+nothing, because an unpinned gateway launch sets no slot and so has no wire id
+to key either policy on; #1861 removes that gap by giving the unpinned case the
+descriptor's role mappings. The per-turn capability stays dark until the
+`per_turn_effort` server setting is flipped, so the visible change is the
+context window.
+
+**Rejected.** Keeping the gateway's smaller overlay and documenting the
+difference (that is the split #1852 exists to delete); keying the gateway's
+context on the harness default (it would keep the 200k clamp).
+
+## DD-166: an unpinned gateway launch uses the provider's role mappings
+
+**Context.** #1257 gave a *pinned* launch a boundary that covers every Claude
+Code slot. The unified gateway implemented only that half: it wrote the slot
+block when the launch was pinned and wrote nothing otherwise, so an unpinned
+gateway launch ignored the provider descriptor's `role_models` and
+`server_settings::provider_subagent_model` entirely (divergence #1b in #1852).
+The direct route has always honoured them, so the same DeepSeek launch served
+one set of role models on `--deepseek` and the harness's Anthropic defaults on
+an equivalent gateway route — including the fable slot, which the gateway
+never bound at all.
+
+**Decision.** Once `ResolvedRoute` owns the slot decision (#1855), the gateway
+renders every slot the route decided, pinned or not: an unpinned launch gets
+the descriptor's role mappings and the served subagent model, a pinned one gets
+the pin, and an admitted ambient `CLAUDE_CODE_SUBAGENT_MODEL` is written
+verbatim. `SlotModel::verbatim` carries that last distinction in the route, so
+the renderer does not re-derive it. This is a deliberate behaviour change and
+the second divergence the migration fixes rather than preserves.
+
+**Consequences.** A gateway launch now serves the provider's intended role
+models, and `--unified` and the equivalent direct route name the same catalog
+rows (`wire_id` on one, `discovery_id` on the other, which is C14's parity
+check). A native Claude gateway launch still binds nothing: it has no
+descriptor and no pin, so there is nothing to decide.
+
+**Rejected.** Keeping the two slot decisions (that is the split #1852 deletes);
+applying the descriptor only when the provider is the launch's own (the
+gateway's whole point is that one process serves several providers).
+
+## DD-167: the unified gateway injects `--provider-only` itself
+
+**Context.** `--provider-only` pins OpenRouter's upstream routing. Until now it
+was refused unless the launch was a *direct* `--openrouter` one, because clud
+not in the request path has only one way to hand the object over:
+`CLAUDE_CODE_EXTRA_BODY`, which the harness merges into its own requests
+(#1833/#1852 divergence #2). On `--unified` clud *is* in the request path — it
+proxies every turn — so the refusal was a limitation of where the object was
+rendered, not of the mechanism.
+
+**Decision.** The refusal now requires only that the launch name OpenRouter. The
+resolver's `ProviderRouting` is the single value either renderer produces: the
+direct route writes it into `CLAUDE_CODE_EXTRA_BODY` as before, and
+`UnifiedGatewayConfig::with_upstream_routing` injects the same
+`{"only": [...], "allow_fallbacks": false}` object into every request the
+gateway forwards to OpenRouter. Requests to any other upstream are untouched —
+the injection is keyed on the attempt's provider, not on the launch.
+
+**Consequences.** `--unified --model <openrouter row> --provider-only <slug>` is
+now valid and pinned identically to the direct route. A body that is not a JSON
+object is forwarded untouched rather than refused: the pin is a routing hint and
+the upstream's own error names the problem better than a clud-side refusal
+would.
+
+**Rejected.** Refusing `--provider-only` on unified and documenting the
+asymmetry (it is exactly the accidental per-route difference #1852 exists to
+remove); a second gateway-only flag for the same object.
+
+## DD-168: hand-written waits are refused; a short standalone `sleep` is not
+
+**Context.** One session (#1880) produced four hand-written wait loops; two ran
+for 7 hours. Each invented a completion check on a stand-in (its own process
+line, a word cut off by `tail`, a status string) and nothing made it give up.
+Every wait that used `run_in_background` and the harness's completion
+notification, or a tool with its own deadline, worked. Transcript analysis
+found counted `for i in $(seq …)` loops with `sleep` and chained
+`sleep N && gh run list` (a loop split across turns) as the commonest shapes.
+
+**Decision.** `block_bad_cmd` refuses waiting constructs in shell commands for
+every agent: `while`/`until`/infinite `for`, any loop that sleeps, unbounded
+`tail -f`, `watch`, and a `sleep` chained to a GitHub status read. A single
+`sleep` outside a loop stays **allowed up to 60 s** when nothing in the same
+command polls; longer, `infinity` or a non-literal duration is refused. The
+refusal names the replacement. The only escape is the audited
+`CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`.
+
+**Why 60 s.** A short pause has real uses that are not waits on a stand-in
+(letting a just-started server bind before one `curl`, rate-limit spacing) and
+cannot run away: it ends by itself. Banning it would push agents to
+overrides for harmless commands, eroding the override trail's signal. Above a
+minute a `sleep` is almost always a poll interval or "wait for CI", which is
+exactly what background + notify replaces; a non-literal length cannot be
+judged, so it fails closed. A `sleep` of any length beside a `gh` status read
+is refused, because that pair is one iteration of a poll.
+
+**Rejected.** Teaching a coding rule for loops (the four failures had four
+different bugs). Banning every `sleep` (see above). A `clud wait --file F
+--contains X --timeout` primitive: no need remains — background + notify plus
+`clud ci`, `bosn ci run --wait` and `pr_merge_watch` cover every wait the
+session and the transcript scan found. Allowing bounded `for` loops with
+`sleep`: the bound is routinely hours of iterations.
+
+
+## DD-169: a wrapper, an embedded script or another tool does not launder a wait
+
+**Context.** The #1972 audit of every agent transcript on the dev machine
+found that agents told "never poll" kept writing PR/CI watch loops in forms
+DD-168's scan did not read: `timeout 590 bash -c '<loop>'` (128 distinct
+commands), `timeout 1500 gh run watch` and other wrapped native watchers
+(104), loops written to `watch.sh` by a heredoc or run from a script file
+(19), a `sleep` inside a `case` arm, `python -c 'time.sleep(20)'` as the
+loop's sleep, Python `while True` + `subprocess(gh)` + `time.sleep` polls, and
+the same loops moved into the Monitor tool.
+
+**Decision.** The hand-written-wait scan judges what actually runs:
+
+- **Wrappers are peeled** before every waiter and loop check: `VAR=val`,
+  `timeout`, `nohup`, `env`, `stdbuf`, `nice`, `ionice`, `setsid`, `xargs`,
+  `command`, `exec`, `time`, `builtin` and the gate prefix. A peeled
+  `timeout` still exempts `tail -f` (it has a deadline), but not a loop or a
+  native watcher.
+- **Embedded scripts are scanned recursively**: `bash|sh|zsh|dash … -c`,
+  `eval`, PowerShell `-Command`, `python -c`, and heredoc bodies fed to a
+  shell or Python. Every DD-168 rule applies to them.
+- **Scripts on their way to disk, or on disk, are scanned for PR/CI waits
+  only**: a heredoc written by `cat`/`tee` to a `.sh`/`.py` file (or one with
+  a shell/Python shebang), and a literal script path run as `bash x.sh`,
+  `./x.sh` or `python x.py` (read from the hook's `cwd`, at most 256 KiB).
+  Such a file may be the repository's own script with a harmless retry, so
+  only a loop or sleep beside a GitHub status read, or a native watcher,
+  refuses it.
+- **A sleep in a `case` arm is a sleep**, and so is a loop-free
+  `python -c '…time.sleep(N)…'`. A Python loop that sleeps is a loop that
+  sleeps; triple-quoted strings are data (edit scripts carry code in them).
+- **A native watcher in any loop is refused**, even the gh-shim's canonical
+  `gh pr checks --watch`. Outside a loop, `gh run watch` and an unshimmed
+  `gh pr checks --watch` are refused while `git.pr_wait_fail_fast` is on
+  (its opt-out still allows the bare watch, as before).
+- Every PR/CI refusal names the blessed waiter and how to run it,
+  `clud tool run github/pr_merge_watch.py <PR> [--repo OWNER/NAME]
+  [--timeout SECS]` under `run_in_background`, plus `clud ci` and
+  `bosn ci run --wait`. The audited `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`
+  remains the only escape.
+
+Monitor and PowerShell reach the same scan through `GUARDED_TOOLS` (#1954).
+The regression corpus is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`:
+one real command per audited shape plus legitimate neighbours that must stay
+allowed, run by `block_bad_cmd_wait_scan_tests.rs`.
+
+**Rejected.** Peeling wrappers in the shared `command_words`: it would change
+every other rule (`timeout 60 cargo build` would start tripping the soldr
+rule). Scanning every heredoc body: commit messages and issue bodies quote
+loops. Applying all of DD-168 to script files: a repository's install script
+with `for i in 1 2 3; do …; sleep 2; done` is not an agent's wait. Reading
+script paths that hold `$VAR`, globs or `~`: they cannot be resolved without
+running the shell.
+
+**Not covered.** Codex sessions: clud installs no `cmd-scan` hook into Codex
+(it only migrates and normalizes an existing `~/.codex/hooks.json`), so these
+rules do not run there. A script written by the Write tool and run later by
+a variable path is not read.
+
+## DD-170: the command scanner reads syntax trees and says what it cannot know
+
+**Context.** `block_bad_cmd` read commands with a hand-written splitter and
+tokenizer, then matched rules on word positions. Each rule family grew its own
+partial lexer on top: heredoc stripping, substitution extraction, a
+top-level-segment splitter for `cd`, an offset-preserving heredoc masker for
+the gate, a redirect-aware tokenizer for the settings-file write check, and
+`split_whitespace` over words to look inside `bash -c`. Each was its own
+source of bypasses (#1299, #1305). #1961 measured the result: of 14 ways an agent
+created a worktree or clone, the scanner registered 1, and `git -C <dir> clone`
+walked past the extern-directory guard.
+
+**Decision.** Every command is parsed by a real grammar (`tree-sitter-bash`,
+`tree-sitter-powershell`; a minimal splitter for cmd.exe) and evaluated
+without running anything into one list of invocations, which every rule reads
+(`shell_ast`, [shell-ast.md](architecture/shell-ast.md)). Evaluation resolves
+what is knowable from the text and the base environment, such as assignments,
+`export`, `cd` chains, literal `for` lists and the text of nested shells. It
+marks every other value `Unknown` with a reason, and each rule declares what it
+does with an unknown (the table in shell-ast.md). The hand-written splitters
+are gone. A recall oracle replays real commands against the git/gh calls the
+shim recorded them running, and its floor may only rise. `git worktree add`
+outside `~/.clud/worktrees` (or `/grind`'s directory) is now refused, since the
+same parse makes that guard unbypassable too.
+
+**Why tree-sitter.** It is error-tolerant: bad input yields `ERROR` nodes,
+never a failed parse, so the scanner always has a structure. It covers bash
+and PowerShell behind one API, and its bash grammar is the one Codex CLI's
+command-safety parsing uses. Its parse cost is microseconds; the latency
+budget test holds parse plus evaluation under 5 ms at p99.
+
+**Why evaluate, and only statically.** Most bypasses were values a reader can
+see: `G=git; $G clone`, `R=/x; git -C "$R"`, `cd /repo && git worktree add ..`.
+Running anything to learn a value (`$(…)`, `read`) is never acceptable in a
+pre-execution hook, so those stay `Unknown`, and the runtime shim, which sees
+the real argv, covers what static evaluation cannot.
+
+**Rejected.** Patching each hand-written lexer: the bypasses lived in the
+position-based logic over them, not in one bug. `brush-parser`: bash only, and
+its evaluator is built to execute. `tree-sitter-batch` for cmd.exe: too little
+use to rely on, and cmd expands `%VAR%` when a line is read, which no grammar
+models, so a splitter that does exactly that is more faithful. Treating every
+unknown as a match in every rule: the right answer differs per rule, so it is
+declared per rule.
+
+This supersedes the mentions of `command_words()` in DD-016's override note
+and DD-056's gate note: the gate now reads literal words from the syntax tree
+for the same reason it avoided `command_words`.
+
+## DD-171: Codex gets a global `clud-cmd-scan` hook written to its user config
+
+**Context.** clud's rule is to compile hooks into launch arguments and never
+write them into a user's config ([hook-dispatch.md](architecture/hook-dispatch.md#delivery-compiled-into-cli-args-not-written-to-files)).
+That guards only sessions clud launches. Claude Code users get the scanner
+globally; Codex users did not, and the #1972 audit found ~1,300 hand-written
+wait loops in bare `codex` sessions that no hook saw.
+
+**Decision.** Every Codex global launch setup ensures one `matcher: "*"`
+`clud-cmd-scan` PreToolUse entry in `~/.codex/hooks.json` and seeds its
+`hooks.state` trusted hash in `~/.codex/config.toml`
+(`codex_cmd_scan_install.rs`). It reuses `codex_hook_normalize`'s lock and
+safety rules: create if missing, preserve everything else, never duplicate
+an existing `clud-cmd-scan` handler, never overwrite a trust entry, leave a
+malformed file alone. `hooks.codex_global_cmd_scan: false` in clud's
+settings file turns it off. This supersedes DD-169's "Not covered: Codex
+sessions" note.
+
+**Why seed trust.** Codex ignores an untrusted file hook, so an entry without
+its hash would be dead weight. Trust is seeded only for clud's own exact
+handler, the same thing the `-c` path already does for its session-flag hook.
+
+**Rejected.** A wrapper `codex` shim: it misses IDE and app sessions and
+fights the user's PATH. Documenting Codex as unguarded: the audit shows the
+loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
+session whose user opted out of the global entry or whose files are malformed,
+at the cost of scanning a Bash call twice.
+
+
+## DD-172: safe-rm trashes HOME files and tool data dirs outside the roots
+
+**Context (#1956, #1957).** The creation ledger records only `safe-mktemp`. A
+file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
+`.desktop` entry, a wrong Claude Code memory file) was refused, so agents
+overwrote it in place or left a manual cleanup list for the user.
+
+**Decision.** Outside the roots, a single file or symlink is trashed only
+strictly inside a tool or app data dir (`~/.claude`, `~/.codex`, `~/.cache`,
+`~/.local/share`), and a directory is trashed only strictly inside a tool
+data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
+(`~/Documents` and the other XDG user dirs) and a credentials/settings
+denylist are refused outright, as is any directory containing a denylisted
+path. Home itself stays refused.
+
+**Why.** A single file is bounded, recoverable from the trash for 72 hours,
+and audited. A recursive delete is not bounded: one wrong `-r` under home can
+take a project or years of documents, so directories stay limited to dirs
+that hold regenerable tool data. Keys, credentials and settings are not
+recoverable in the way that matters: a deleted key is a lockout, and a
+deleted clud settings file silently drops the user's overrides.
+
+**Rejected.** Any single file under home (the first cut of this rule: it
+reached the source files of every other repo under `~/dev`, which no
+#1956/#1957 case needs). Every subfolder of home (the owner's first proposal: one wrong
+`safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
+trees are copied there). Extending the ledger to every Write/Edit/redirect
+(more plumbing, and still misses files from earlier sessions). A slug-matched
+exception for only the current project's memory dir (#1957's first draft,
+superseded once `~/.claude` became deletable).
+
+
+## DD-173: soldr cannot be pinned; a version setting is ignored with a warning
+
+**Context.** DD-149 kept `rust.version` / `optimize.rust.soldr_version` as a
+floor. A numeric value still had two effects: it could force an install of
+that version's floor, and it turned off the daily rolling-latest refresh, so a
+repo or user that once wrote a pin stayed on an old soldr indefinitely. Old
+soldr protocols then ran beside current brokers and CI wrappers on a shared
+machine and broke them, the same failure class as stale `bosn==` pins in
+other repos' gate scripts.
+
+**Decision.** clud no longer honors any soldr version setting. When a settings
+layer (`.clud/settings.json`, `.clud/settings.local.json` or ~/.clud/settings.json)
+carries a numeric soldr version, launch prints one yellow warning saying the
+pin is ignored and to remove it, then behaves exactly as if no version were
+set: it uses the installed soldr, installs one if missing, upgrades one below
+the `soldr shims` floor, and refreshes to the latest release daily.
+`clud optimize rust --soldr-version X` prints the same warning and persists
+nothing; neither settings writer emits `soldr_version` any more. A newer soldr
+is still never downgraded.
+
+**Why.** Rolling latest is already the policy everywhere else (DD-120); the
+setting was the last way to opt out of it, and every use of that opt-out seen
+so far was a stale pin nobody remembered writing. A warning rather than a
+parse error keeps an old settings file from disarming its other rules.
+
+**Rejected.** Keeping the floor semantics (a stale floor still froze the
+refresh). Rewriting the user's settings file to drop the key (clud does not
+edit settings it did not write). Failing the launch on a pin (too harsh for a
+value that is now simply unused).

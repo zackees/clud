@@ -74,6 +74,7 @@ struct FileMigration {
 
 pub fn run_startup_checks(auto_fix_hooks: bool) {
     ensure_helper_on_session_path();
+    crate::hook_handshake::export_for_session();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
 
@@ -337,20 +338,25 @@ fn dangling_pinned_helper_replacement(command: &str) -> Option<&'static str> {
     (exact && is_helper && path.is_absolute() && !path.exists()).then_some(replacement)
 }
 
-/// The program a hook command runs: its first word, with a leading
-/// PowerShell `& ` and surrounding quotes removed.
+/// The program a hook command runs: its first word as written, quotes
+/// removed and variables left unexpanded. A leading `& ` is PowerShell's call
+/// operator, so such a command is read as PowerShell.
 pub fn hook_program(command: &str) -> Option<String> {
-    let rest = command.trim_start();
-    let rest = rest.strip_prefix("& ").unwrap_or(rest).trim_start();
-    let first = rest.chars().next()?;
-    if first == '\'' || first == '"' {
-        let end = rest[1..].find(first)?;
-        return Some(rest[1..1 + end].to_string());
-    }
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == ';')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_string())
+    let script = parse_hook_command(command);
+    let invocation = script.invocations.first()?;
+    Some(invocation.words.first()?.text().to_string())
+}
+
+/// Parse a hook command line from a settings file. Nothing is inherited, so
+/// `$CLAUDE_PROJECT_DIR` and friends read as written.
+pub fn parse_hook_command(command: &str) -> crate::shell_ast::Script {
+    use crate::shell_ast::{BaseEnv, Dialect};
+    let dialect = if command.trim_start().starts_with('&') {
+        Dialect::PowerShell
+    } else {
+        Dialect::Posix
+    };
+    crate::shell_ast::parse(command, dialect, &BaseEnv::new(""))
 }
 
 /// Warnings for hook commands whose program is an absolute path that does
@@ -394,13 +400,19 @@ pub fn dangling_hook_program_warnings(repo_root: &Path, home: Option<&Path>) -> 
 /// The helper-only directory contains exactly one program.
 pub fn ensure_helper_on_session_path() {
     let path_env = std::env::var("PATH").unwrap_or_default();
-    if crate::shim_resolve::which(&native_helper_name(), &path_env).is_some() {
+    if let Some(found) = crate::shim_resolve::which(&native_helper_name(), &path_env) {
+        if let InstallProbe::HelperPresent { path } = probe_current_install() {
+            let owned = refresh_owned_helper(&found, &path, crate::home::user_home().as_deref());
+            if let Some(warning) = foreign_helper_warning(&found, &path, owned) {
+                eprintln!("{warning}");
+            }
+        }
         return;
     }
     let InstallProbe::HelperPresent { path } = probe_current_install() else {
         return;
     };
-    let Some(home) = helper_home() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     let Ok(dir) = expose_helper_at(&home, &path) else {
@@ -413,19 +425,68 @@ pub fn ensure_helper_on_session_path() {
     }
 }
 
-/// Under the user's home: the helper-only PATH directory.
-const HELPER_BIN_SUBDIR: &str = ".clud/state/helper-bin";
-
-fn helper_home() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
+/// Bring a `clud-cmd-scan` already on PATH up to the running `clud` when clud
+/// owns its location: beside the running binary, or the helper-only
+/// directory. An upgrade replaces `clud` but not these aliases, and the hook
+/// then runs the old build's rules (#1949: the `/loop` stop guard never ran).
+/// A helper anywhere else belongs to someone else and is left alone. A
+/// `clud-shim` left beside `clud` by a pre-#1551 install is refreshed too;
+/// the interpreter and tool names (`python`, `rm`, ...) never are, because
+/// beside `clud` in a virtualenv they are the real programs.
+/// Returns whether `found` was in a clud-owned location.
+fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool {
+    let Some(dir) = found.parent() else {
+        return false;
+    };
+    let beside_clud = clud
+        .parent()
+        .is_some_and(|clud_dir| same_dir(dir, clud_dir));
+    let helper_bin = home.is_some_and(|home| same_dir(dir, &home.join(HELPER_BIN_SUBDIR)));
+    if !beside_clud && !helper_bin {
+        return false;
     }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
+    for name in [
+        crate::multicall::CMD_SCAN,
+        crate::multicall::LEGACY_CMD_SCAN,
+        crate::multicall::SHIM,
+    ] {
+        let target = dir.join(crate::shim_registry::file_name(name));
+        if name == crate::multicall::CMD_SCAN || target.is_file() {
+            // Best effort: on Windows a running helper cannot be replaced,
+            // and the existing one still works.
+            let _ = crate::alias_link::install_alias(clud, &target);
+        }
+    }
+    true
+}
+
+/// The launch warning for a `clud-cmd-scan` that PATH finds first but that is
+/// not the running `clud` and sits where clud may not replace it: every hook
+/// in the session would run that other build's rules, silently (#1954).
+fn foreign_helper_warning(found: &Path, clud: &Path, owned: bool) -> Option<String> {
+    let current = clud.canonicalize().ok()?;
+    if owned || crate::alias_link::is_alias_of(&current, found) {
+        return None;
+    }
+    Some(format!(
+        "clud: warning: {} is first on PATH and is not this clud ({}); \
+         its hooks will enforce that build's rules. Remove it or put {} first.",
+        found.display(),
+        clud.display(),
+        clud.parent()
+            .map_or_else(String::new, |dir| dir.display().to_string())
+    ))
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
+
+/// Under the user's home: the helper-only PATH directory.
+const HELPER_BIN_SUBDIR: &str = ".clud/state/helper-bin";
 
 /// Place the scanner names alone in the helper-only directory under `home`
 /// as aliases of `clud` (hardlink, then symlink, then copy; see
@@ -466,7 +527,7 @@ fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
 fn hook_home_dir() -> Option<PathBuf> {
     std::env::var_os("CLUD_HOOK_HOME")
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .or_else(crate::home::user_home)
 }
 
 #[cfg(test)]
@@ -739,6 +800,77 @@ mod tests {
             Some("python")
         );
         assert_eq!(hook_program("   "), None);
+    }
+
+    /// #1949: an upgrade replaced `clud` but left the `clud-cmd-scan` beside
+    /// it from the old build, which PATH found first, so every hook ran the
+    /// old rules. A helper clud owns is refreshed; anyone else's is not.
+    #[test]
+    fn a_stale_helper_clud_owns_is_refreshed_and_a_foreign_one_is_not() {
+        let tmp = tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let clud = install.join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2-longer");
+        let beside = install.join(native_helper_name());
+        write(&beside, "clud-v1");
+        let home = tmp.path().join("home");
+        let helper_bin = home.join(HELPER_BIN_SUBDIR).join(native_helper_name());
+        write(&helper_bin, "clud-v1");
+        let foreign = tmp.path().join("elsewhere").join(native_helper_name());
+        write(&foreign, "someone-else");
+
+        assert!(refresh_owned_helper(&beside, &clud, Some(&home)));
+        assert!(refresh_owned_helper(&helper_bin, &clud, Some(&home)));
+        assert!(!refresh_owned_helper(&foreign, &clud, Some(&home)));
+
+        assert_eq!(std::fs::read_to_string(&beside).unwrap(), "clud-v2-longer");
+        assert_eq!(
+            std::fs::read_to_string(&helper_bin).unwrap(),
+            "clud-v2-longer"
+        );
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "someone-else");
+    }
+
+    /// #1954: a pre-#1551 `clud-shim` sat stale beside `clud`; it is
+    /// refreshed with the scanner, but the real `python` there is not.
+    #[test]
+    fn refresh_covers_a_stale_clud_shim_and_never_an_interpreter() {
+        let tmp = tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let clud = install.join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2-longer");
+        let scan = install.join(native_helper_name());
+        write(&scan, "clud-v1");
+        let shim = install.join(crate::shim_registry::file_name(crate::multicall::SHIM));
+        write(&shim, "clud-v1");
+        let python = install.join(crate::shim_registry::file_name("python"));
+        write(&python, "real-python");
+
+        assert!(refresh_owned_helper(&scan, &clud, None));
+
+        assert_eq!(std::fs::read_to_string(&shim).unwrap(), "clud-v2-longer");
+        assert_eq!(std::fs::read_to_string(&python).unwrap(), "real-python");
+    }
+
+    #[test]
+    fn a_foreign_helper_first_on_path_is_warned_about() {
+        let tmp = tempdir().unwrap();
+        let clud = tmp
+            .path()
+            .join("install")
+            .join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2");
+        let foreign = tmp.path().join("elsewhere").join(native_helper_name());
+        write(&foreign, "clud-v1");
+        let warning = foreign_helper_warning(&foreign, &clud, false).unwrap();
+        assert!(
+            warning.contains(&foreign.display().to_string()),
+            "{warning}"
+        );
+        assert_eq!(foreign_helper_warning(&foreign, &clud, true), None);
+        let alias = tmp.path().join("install").join(native_helper_name());
+        crate::alias_link::install_alias(&clud, &alias).unwrap();
+        assert_eq!(foreign_helper_warning(&alias, &clud, false), None);
     }
 
     #[test]

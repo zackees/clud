@@ -88,7 +88,7 @@ fn maybe_sweep_at_root(
     // out of unit tests so no test can ever reach the real cache or real uv.
     #[cfg(not(test))]
     if cache_root == crate::tools::clud_uv_cache_dir() {
-        let max = home_dir()
+        let max = crate::home::user_home()
             .map(|h| crate::clud_settings::peek_cache_max_bytes_at(&h))
             .unwrap_or(0);
         match uv_cache::enforce_cap(max) {
@@ -115,7 +115,7 @@ fn maybe_sweep_at_root(
 }
 
 fn sentinel_path() -> Option<PathBuf> {
-    let home = home_dir()?;
+    let home = crate::home::user_home()?;
     Some(home.join(".clud/state").join(SENTINEL_FILE))
 }
 
@@ -134,17 +134,6 @@ fn write_sentinel(path: &std::path::Path, now: SystemTime) -> std::io::Result<()
         .map_err(|_| std::io::Error::other("system clock before UNIX epoch"))?
         .as_secs();
     fs::write(path, secs.to_string())
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]

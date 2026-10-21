@@ -2,9 +2,7 @@
 
 use crate::backend::{Backend, ModelProvider, RoutingMode};
 use crate::clud_settings::CodexCliLoginImport;
-use crate::codex_bridge::{
-    BridgeConfig, BridgeError, BridgeHandle, UnifiedGatewayConfig, UNIFIED_GATEWAY_TOKEN_HEADER,
-};
+use crate::codex_bridge::{BridgeConfig, BridgeError, BridgeHandle, UNIFIED_GATEWAY_TOKEN_HEADER};
 use crate::codex_model::ModelSpec;
 use crate::command::LaunchPlan;
 use crate::selector::{self, Key, Note, Row, Selector, Step, View};
@@ -16,11 +14,15 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-// Direct requests are not monitored by clud; do not lengthen Claude Code's
-// documented per-request default. The bridge budget is a separate DD-028
-// decision and must not change as a side effect of direct-route policy.
-const DIRECT_API_TIMEOUT_MS: &str = "600000";
-const BRIDGE_API_TIMEOUT_MS: &str = "3000000";
+// #1855: the timeouts, the scrub lists and the bridge's injected role rows are
+// routing *decisions*, so they live in `route_plan` beside the resolver that
+// owns them. These aliases keep this module's render call sites reading the
+// same names they always did.
+use crate::route_plan::{
+    CODEX_BRIDGE_OPUS_MODEL as CODEX_VIA_CLAUDE_OPUS_MODEL,
+    CODEX_BRIDGE_SONNET_MODEL as CODEX_VIA_CLAUDE_SONNET_MODEL,
+    DIRECT_TIMEOUT_MS as DIRECT_API_TIMEOUT_MS,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexCliImportChoice {
@@ -245,6 +247,7 @@ impl ForegroundRuntime {
         // DeepSeek Harness launch needs no clud vault or bridge setup at all.
         if plan.effective_harness() == Backend::DeepSeek {
             apply_route_context(&mut env, plan);
+            prepare_dsh_child(plan, &mut env)?;
             for notice in &pin_notices {
                 eprintln!("{notice}");
             }
@@ -277,6 +280,7 @@ impl ForegroundRuntime {
         // the launch-context record can tell an ambient value from ours.
         let ambient = env.clone();
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
+        runtime.apply_initial_effort(plan)?;
         runtime.apply_attribution(plan)?;
         runtime.apply_session_history(plan);
         if plan.effective_harness() == Backend::Claude && !cfg!(test) {
@@ -309,6 +313,17 @@ impl ForegroundRuntime {
         mut env: Vec<(String, String)>,
         store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
+        // Every launch check runs once, here, against the route and before
+        // any backend branch: a refusal must not depend on which renderer was
+        // about to run (#1862).
+        let route =
+            crate::route_plan::route_of(plan, &crate::route_plan::Ambient::from_child_env(&env));
+        if let Some(refusal) = crate::route_plan::first_refusal(
+            &route,
+            &crate::openrouter_catalog::catalog_cached_or_embedded(),
+        ) {
+            return Err(BridgeError::Model(refusal));
+        }
         let (bridge, claude_settings, mut startup_notices) = if is_unified(plan) {
             let integration_upstreams =
                 crate::codex_bridge::unified_integration_upstreams_from_process();
@@ -319,43 +334,46 @@ impl ForegroundRuntime {
             // (test) credentials, so logout is observable end to end.
             let fixture_keys =
                 integration_upstreams.is_some() && !crate::provider_auth::test_vault_active();
-            let deepseek_key = fixture_keys
-                .then(|| "clud-test-deepseek-key".to_string())
-                .or_else(|| store.get().ok().flatten());
-            // OpenRouter keeps its own vault record, so it needs its own store
-            // rather than the injected DeepSeek-scoped one. Probed inline for
-            // the same reason `codex_available` is: an absent optional
-            // credential must omit a discovery row, never fail the launch.
-            let openrouter_key = fixture_keys
-                .then(|| "clud-test-openrouter-key".to_string())
-                .or_else(|| {
-                    crate::provider_auth::NativeSecretStore::new_for(
-                        crate::provider_auth::OPENROUTER_VAULT_SERVICE,
-                        crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
-                    )
-                    .ok()
-                    .and_then(|store| {
-                        use crate::provider_auth::SecretStore as _;
-                        store.get().ok().flatten()
-                    })
-                });
-            // Kimi, like OpenRouter, has its own vault record. Integration
-            // runs probe it only when a Kimi fake exists, so a stored key can
-            // never reach the real Moonshot endpoint from a test.
             let kimi_fake = integration_has_kimi(&integration_upstreams);
-            let kimi_key = if integration_upstreams.is_some() && (fixture_keys || !kimi_fake) {
-                None
-            } else {
-                crate::provider_auth::NativeSecretStore::new_for(
-                    crate::provider_auth::KIMI_VAULT_SERVICE,
-                    crate::provider_auth::KIMI_VAULT_ACCOUNT,
+            // One key lookup, driven by the route's own credential sources:
+            // the vault identifiers come from each provider's registry
+            // descriptor, so this path names no vault constant itself.
+            let key_for = |provider: ModelProvider| -> Option<String> {
+                if fixture_keys {
+                    return Some(format!("clud-test-{}-key", provider.as_str()));
+                }
+                // Integration runs probe Kimi only when a Kimi fake exists, so
+                // a stored key can never reach the real Moonshot endpoint from
+                // a test.
+                if provider == ModelProvider::Kimi
+                    && integration_upstreams.is_some()
+                    && (fixture_keys || !kimi_fake)
+                {
+                    return None;
+                }
+                // The injected store is this launch's provider-scoped one, and
+                // is what a direct DeepSeek launch reads through too.
+                if provider == ModelProvider::DeepSeek {
+                    return store.get().ok().flatten();
+                }
+                let descriptor = crate::provider_registry::descriptor_for(provider)?;
+                let vault = crate::provider_auth::NativeSecretStore::new_for(
+                    descriptor.vault_service,
+                    descriptor.vault_account,
                 )
-                .ok()
-                .and_then(|store| {
-                    use crate::provider_auth::SecretStore as _;
-                    store.get().ok().flatten()
-                })
+                .ok()?;
+                let source = route
+                    .upstreams
+                    .iter()
+                    .find(|upstream| upstream.provider == provider)
+                    .map(|upstream| upstream.credential.clone())?;
+                crate::route_plan::read_credential(&source, &vault)
+                    .ok()
+                    .flatten()
             };
+            let deepseek_key = key_for(ModelProvider::DeepSeek);
+            let openrouter_key = key_for(ModelProvider::OpenRouter);
+            let kimi_key = key_for(ModelProvider::Kimi);
             let codex_available = integration_upstreams.is_some()
                 || crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
             let mut startup_notices = unified_startup_notices(
@@ -385,10 +403,12 @@ impl ForegroundRuntime {
                         .to_string(),
                 );
             }
-            let unified = UnifiedGatewayConfig::new(deepseek_key, codex_available)
-                .with_openrouter(openrouter_key)
-                .with_route(crate::backend::ModelProvider::Kimi, kimi_key)
-                .with_failover(failover);
+            if crate::route_plan::discovery_is_disabled(&env) {
+                return Err(BridgeError::DiscoveryDisabled);
+            }
+            let unified =
+                crate::route_plan::render_unified_config(&route, codex_available, &key_for)
+                    .with_failover(failover);
             let unified = integration_upstreams
                 .as_ref()
                 .map_or(unified.clone(), |upstreams| {
@@ -398,19 +418,27 @@ impl ForegroundRuntime {
                 .with_unified_gateway(unified)
                 // #1257: the gateway refuses any model outside the launch's
                 // allowlist, so the pin holds even though discovery is on.
-                .with_allowed_models(plan.allowed_models.clone());
+                .with_allowed_models(route.allowlist.clone());
             let config = integration_upstreams
                 .as_ref()
                 .map_or(config.clone(), |upstreams| {
                     config.with_integration_test_codex_upstream(upstreams)
                 });
             let bridge = BridgeHandle::start(config)?;
-            apply_unified_overlay(
-                &mut env,
-                &bridge,
-                plan.model_selection.as_ref(),
-                &plan.allowed_models,
-            )?;
+            // The user's own headers survive below the gateway's, so read them
+            // before the overlay's scrub removes the key.
+            let ambient_headers = env
+                .iter()
+                .find(|(key, _)| env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"))
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            crate::route_plan::render_unified_env(
+                &route,
+                bridge.base_url(),
+                bridge.bearer_token(),
+                ambient_headers.as_deref(),
+            )
+            .apply(&mut env);
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)
         } else if is_codex_via_claude(plan) {
@@ -418,18 +446,31 @@ impl ForegroundRuntime {
             // the first turn: by the time a request is in flight the user has
             // already waited, and the message would arrive wrapped in the
             // harness's own API-error framing.
-            let selection = codex_selection_from_plan(plan)?;
+            if crate::route_plan::discovery_is_disabled(&env) {
+                return Err(BridgeError::DiscoveryDisabled);
+            }
+            let render = crate::route_plan::render_codex_bridge(
+                &route,
+                crate::route_plan::CodexBridgeRequest {
+                    default_model: codex_selection_from_plan(plan)?,
+                    selected_model_cli_id: plan
+                        .model_selection
+                        .as_ref()
+                        .and_then(|selection| selection.model.as_deref()),
+                },
+            );
             let bridge = BridgeHandle::start(
                 BridgeConfig::default()
-                    .with_default_model(selection.clone())
-                    .with_selected_model_cli_id(
-                        plan.model_selection
-                            .as_ref()
-                            .and_then(|selection| selection.model.clone()),
-                    )
-                    .with_allowed_models(codex_via_claude_bridge_allowlist(plan)),
+                    .with_default_model(render.default_model)
+                    .with_selected_model_cli_id(render.selected_model_cli_id)
+                    .with_allowed_models(render.allowed_models),
             )?;
-            apply_cross_route_overlay(&mut env, &bridge)?;
+            crate::route_plan::render_codex_bridge_env(
+                &route,
+                bridge.base_url(),
+                bridge.bearer_token(),
+            )
+            .apply(&mut env);
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), Vec::new())
         } else if is_anthropic_compat_via_claude(plan) {
@@ -438,17 +479,19 @@ impl ForegroundRuntime {
             // it documents that invariant rather than silently defaulting.
             let descriptor = crate::provider_registry::descriptor_for(plan.model_provider())
                 .expect("is_anthropic_compat_via_claude already proved a descriptor resolves");
-            let secret = store
-                .get()
+            // The route decides where the credential comes from; the read is
+            // the one place a secret enters this launch.
+            let source = route
+                .upstreams
+                .first()
+                .map(|upstream| upstream.credential.clone())
+                .ok_or(BridgeError::AnthropicCompatCredentials)?;
+            let secret = crate::route_plan::read_credential(&source, store)
                 .map_err(|_| BridgeError::AnthropicCompatCredentials)?
                 .ok_or(BridgeError::AnthropicCompatCredentials)?;
-            apply_anthropic_compat_overlay(
-                &mut env,
-                &secret,
-                descriptor,
-                plan.model_selection.as_ref(),
-                &plan.allowed_models,
-            );
+            refuse_blocked_free_model(descriptor, plan, &secret)?;
+            crate::route_plan::render_direct_env(&route, &secret).apply(&mut env);
+            apply_provider_only(&mut env, descriptor, &plan.provider_only)?;
             // #1257: discovery is off under a pin, so say why once instead of
             // leaving the picker silently short of gateway rows.
             let mut notices = Vec::new();
@@ -516,7 +559,7 @@ impl ForegroundRuntime {
             bridge.set_status_usage_writer(std::sync::Arc::clone(writer));
         }
         if let Some(injection) = statusline {
-            let home = dirs::home_dir();
+            let home = crate::home::user_home();
             runtime.inject_statusline(plan, injection, home.as_deref())?;
         }
         Ok(runtime)
@@ -574,6 +617,21 @@ impl ForegroundRuntime {
             true
         };
         self.merge_launch_settings(plan, compose)
+    }
+
+    /// Settings work on Claude clients that predate the `--effort` flag.
+    /// Unlike an environment override, this leaves interactive effort editable.
+    fn apply_initial_effort(&mut self, plan: &LaunchPlan) -> Result<(), BridgeError> {
+        if plan.effective_harness() != Backend::Claude {
+            return Ok(());
+        }
+        let Some(effort) = settings_effort(&plan.command) else {
+            return Ok(());
+        };
+        self.merge_launch_settings(plan, |document| {
+            document["effortLevel"] = serde_json::json!(effort);
+            true
+        })
     }
 
     /// Apply the plan's commit/PR attribution choice (#1317) to this
@@ -716,6 +774,7 @@ impl ForegroundRuntime {
             if settings.replaces_user_argument {
                 remove_user_settings_argument(&mut command);
             }
+            remove_settings_effort(&mut command);
             command.insert(1, settings.value.clone());
             command.insert(1, "--settings".to_string());
         }
@@ -875,6 +934,44 @@ impl fmt::Debug for ForegroundRuntime {
     }
 }
 
+/// #1829: hand the dsh child clud's provider key, its private Node and, for
+/// OpenRouter, the overlay its `--patch` argument names.
+fn prepare_dsh_child(
+    plan: &LaunchPlan,
+    env: &mut Vec<(String, String)>,
+) -> Result<(), BridgeError> {
+    // The route decides the model, the key variable and the base URL; dsh
+    // itself owns everything else about its provider configuration.
+    let route = crate::route_plan::route_of(plan, &crate::route_plan::Ambient::from_child_env(env));
+    let render = crate::route_plan::render_dsh(&route);
+    let facts = crate::dsh_harness::ChildFacts {
+        executable: plan.command.first().map(String::as_str).unwrap_or("dsh"),
+        provider: render.provider,
+        wire_model: render.wire_model.as_deref(),
+        base_url: render.base_url.as_deref(),
+    };
+    let vault = |provider: ModelProvider| {
+        use crate::provider_auth::SecretStore as _;
+        let descriptor = crate::provider_registry::descriptor_for(provider)?;
+        crate::provider_auth::NativeSecretStore::new_for(
+            descriptor.vault_service,
+            descriptor.vault_account,
+        )
+        .ok()?
+        .get()
+        .ok()
+        .flatten()
+    };
+    crate::dsh_harness::prepare_child(
+        &facts,
+        crate::dsh_harness::managed_home().as_deref(),
+        env,
+        &|name| std::env::var(name).ok(),
+        &vault,
+    )
+    .map_err(|error| BridgeError::Settings(format!("DeepSeek Harness setup failed: {error}")))
+}
+
 pub fn with_foreground_runtime<ResultValue>(
     plan: &LaunchPlan,
     env: Vec<(String, String)>,
@@ -917,6 +1014,56 @@ pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::Pl
 
 /// The wire model the direct overlay launches: the selection's, else the
 /// provider's reviewed catalog default.
+/// `--provider-only`: hand OpenRouter's `provider` routing object to Claude
+/// Code through `CLAUDE_CODE_EXTRA_BODY`, keeping any other keys already set.
+fn apply_provider_only(
+    env: &mut Vec<(String, String)>,
+    descriptor: &crate::provider_registry::AnthropicCompatProvider,
+    slugs: &[String],
+) -> Result<(), BridgeError> {
+    if slugs.is_empty() || descriptor.provider != ModelProvider::OpenRouter {
+        return Ok(());
+    }
+    let key = crate::openrouter_routing::EXTRA_BODY_ENV;
+    let existing = env
+        .iter()
+        .find(|(candidate, _)| env_key_eq(candidate, key))
+        .map(|(_, value)| value.clone());
+    let body = crate::openrouter_routing::extra_body(existing.as_deref(), slugs)
+        .map_err(BridgeError::Model)?;
+    set_env(env, key, &body);
+    Ok(())
+}
+
+/// #1833: a free OpenRouter id whose every endpoint the workspace guardrail
+/// excludes would fail on the first turn with a bare 400. Probe it once, only
+/// for an id the catalog proved free (so the probe never bills), and refuse
+/// the launch with the fix instead.
+fn refuse_blocked_free_model(
+    descriptor: &crate::provider_registry::AnthropicCompatProvider,
+    plan: &LaunchPlan,
+    secret: &str,
+) -> Result<(), BridgeError> {
+    if descriptor.provider != ModelProvider::OpenRouter {
+        return Ok(());
+    }
+    let Some(wire) = plan
+        .model_selection
+        .as_ref()
+        .and_then(|selection| selection.wire_model.as_deref())
+    else {
+        return Ok(());
+    };
+    let catalog = crate::openrouter_catalog::catalog_cached_or_embedded();
+    if crate::openrouter_free::check(wire, &catalog) != crate::openrouter_free::FreeCheck::Free {
+        return Ok(());
+    }
+    match crate::openrouter_free::probe(wire, secret, &catalog) {
+        crate::openrouter_free::ProbeVerdict::Blocked(message) => Err(BridgeError::Model(message)),
+        crate::openrouter_free::ProbeVerdict::Proceed => Ok(()),
+    }
+}
+
 fn direct_wire_model(
     provider: ModelProvider,
     selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
@@ -980,59 +1127,6 @@ fn unified_startup_notices(
     notices
 }
 
-/// Shared union scrub const used by every Anthropic-compat provider's overlay
-/// (issue #937 Phase 2, #936 "Generalization" -> 1d). This is the union of:
-///
-/// - the DeepSeek connector's original list, plus
-/// - `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL`, plus
-/// - the legacy `*_NAME` variants of every default-model slot.
-///
-/// The additions are an intended hardening delta, not a no-op refactor: a
-/// review finding on #936 noted the original list let an ambient value in any
-/// of these slots survive into the DeepSeek child and misroute model
-/// selection. `ANTHROPIC_CUSTOM_MODEL_OPTION*` stays a separate prefix scrub
-/// below, not a literal entry here, since it has no fixed suffix.
-///
-/// `CLAUDE_CODE_EFFORT_LEVEL` is deliberately NOT on this list (DD-059): an
-/// ambient user value is preserved so the harness's own `/effort` control
-/// stays authoritative, and clud no longer injects its own pin -- the catalog
-/// default effort travels on the harness's `--effort` session flag instead.
-const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "ANTHROPIC_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-];
-
-/// Claude Code's role aliases are process-wide configuration. On the direct
-/// Codex-through-Claude route they must name bridge discovery rows, rather
-/// than the harness's unavailable Anthropic defaults. Keep these IDs aligned
-/// with the Codex rows in `provider_catalog.rs`.
-const CODEX_VIA_CLAUDE_OPUS_MODEL: &str = "clud-claude-codex-sol";
-const CODEX_VIA_CLAUDE_SONNET_MODEL: &str = "clud-claude-codex-terra";
-const CODEX_VIA_CLAUDE_CONFLICTING: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-];
-
 /// Machine-readable launch identity for bundled skills. This is child-local,
 /// route-owned data: a user-provided value never decides which models a skill
 /// is allowed to delegate to.
@@ -1087,23 +1181,6 @@ fn model_pin_notices(plan: &LaunchPlan, color: bool) -> Vec<String> {
     } else {
         text
     }]
-}
-
-/// The bridge boundary for the codex-via-claude route (#1257): the launch's
-/// pin plus this route's own injected role rows -- DD-038's opus/sonnet
-/// substitutions are sent by clud's own overlay, so refusing them at the
-/// bridge would refuse clud's own configuration. An empty pin stays empty:
-/// unconstrained launches are byte-for-byte the pre-#1257 behavior.
-fn codex_via_claude_bridge_allowlist(plan: &LaunchPlan) -> Vec<String> {
-    let mut allowed = plan.allowed_models.clone();
-    if !allowed.is_empty() {
-        for role in [CODEX_VIA_CLAUDE_OPUS_MODEL, CODEX_VIA_CLAUDE_SONNET_MODEL] {
-            if !allowed.iter().any(|entry| entry.eq_ignore_ascii_case(role)) {
-                allowed.push(role.to_string());
-            }
-        }
-    }
-    allowed
 }
 
 /// The image-capability warning for a launch whose model cannot accept images,
@@ -1165,242 +1242,6 @@ pub(crate) fn per_turn_effort_capability(
         .then(|| format!("{wire_model}=per_turn_effort"))
 }
 
-/// The OpenRouter-descriptor arm of the per-turn-effort injection (#1528).
-///
-/// OpenRouter's descriptor route is the only one clud reaches that carries
-/// this capability claim: Kimi's and DeepSeek's direct descriptors point at
-/// their own vendor endpoints, which never see this message shape, so they
-/// must not be told the harness may send it. `apply_anthropic_compat_overlay`
-/// itself is only on the direct Anthropic-compat route (its production caller
-/// is the `is_anthropic_compat_via_claude` arm of `start_with_secret_store`);
-/// unified mode builds its own gateway env and never reaches this or that
-/// function, so the unified path is untouched.
-///
-/// `catalog` is a closure so the descriptor and flip gates run before the
-/// catalog is resolved: a shipped-dark or non-OpenRouter launch reads nothing.
-fn inject_per_turn_effort(
-    env: &mut Vec<(String, String)>,
-    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
-    wire_model: &str,
-    enabled: bool,
-    catalog: impl FnOnce() -> crate::openrouter_catalog::Catalog,
-) {
-    if descriptor.provider != ModelProvider::OpenRouter || !enabled {
-        return;
-    }
-    if let Some(capability) = per_turn_effort_capability(&catalog(), wire_model, enabled) {
-        push_default(env, "CLAUDE_CODE_MODEL_CAPABILITIES", &capability);
-    }
-}
-
-/// Provider-neutral child-env overlay for any Anthropic-compatible API-key
-/// provider (#936/#937 Phase 2, replacing the DeepSeek-only
-/// `apply_deepseek_overlay`). `descriptor` supplies the base URL and the
-/// subagent/haiku wire model; the default wire model when `selection` is
-/// `None` comes from the catalog's reviewed default for the descriptor's
-/// provider, not a hardcoded literal.
-///
-/// `allowed` is the launch's model allowlist (#1257). Empty keeps every slot
-/// on the descriptor's own role mapping; non-empty makes the pin a cost
-/// boundary that covers the auxiliary slots and discovery too, because an
-/// OpenRouter key bills every model id sent with it.
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
-fn apply_anthropic_compat_overlay(
-    env: &mut Vec<(String, String)>,
-    secret: &str,
-    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
-    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
-    allowed: &[String],
-) {
-    // Read before the scrub below, which removes the key outright: #1257's
-    // one precedence rule is that a user-set subagent slot wins *inside* the
-    // allowlist, and after the scrub there would be nothing left to evaluate
-    // that rule against.
-    let ambient_subagent = env
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
-    // real per-OS env-var uniqueness semantics for the Codex overlay above):
-    // this is a security guarantee against leaking an ambient Anthropic key
-    // into the child, not an OS-semantics match, and it must hold the same
-    // way on every platform.
-    env.retain(|(key, _)| {
-        !ANTHROPIC_COMPAT_CONFLICTING
-            .iter()
-            .any(|candidate| key.eq_ignore_ascii_case(candidate))
-            && !key
-                .to_ascii_uppercase()
-                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
-    });
-    if descriptor.provider == ModelProvider::OpenRouter {
-        env.retain(|(key, _)| !key.eq_ignore_ascii_case("OPENROUTER_API_KEY"));
-    }
-    let model = direct_wire_model(descriptor.provider, selection).expect(
-        "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
-         -- add a `provider_default: true` row in provider_catalog.rs",
-    );
-    let role_models = descriptor.role_models;
-    // A served subagent name (#1192) replaces the descriptor's compiled-in one.
-    let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
-        .unwrap_or(descriptor.subagent_wire_id);
-    // #1257: the allowlist governs every slot, not just the main conversation.
-    // `None` means unconstrained, so the descriptor's role mapping below stays
-    // authoritative and the overlay is byte-for-byte what it was.
-    let constrained = crate::provider_catalog::model_allowlist_slot(allowed, selection);
-    // Precedence, decided once: clud owns the boundary and the user chooses
-    // inside it. An ambient `CLAUDE_CODE_SUBAGENT_MODEL` therefore wins only
-    // on a constrained launch and only when the allowlist admits it; an
-    // unconstrained launch keeps scrubbing it, exactly as before (#1257).
-    let ambient_subagent = ambient_subagent
-        .as_deref()
-        .filter(|_| constrained.is_some())
-        .filter(|value| crate::provider_catalog::model_allowlist_allows(allowed, value));
-    let model = constrained.as_deref().unwrap_or(model);
-    let (opus_model, sonnet_model, haiku_model, subagent_model, fable_model) = match constrained
-        .as_deref()
-    {
-        Some(constrained) => (
-            constrained,
-            constrained,
-            constrained,
-            ambient_subagent.unwrap_or(constrained),
-            Some(constrained),
-        ),
-        None => (
-            role_models.map_or(model, |roles| roles.opus),
-            role_models.map_or(model, |roles| roles.sonnet),
-            role_models.map_or(subagent_wire_id, |roles| roles.haiku),
-            ambient_subagent
-                .unwrap_or_else(|| role_models.map_or(subagent_wire_id, |roles| roles.subagent)),
-            role_models.and_then(|roles| roles.fable),
-        ),
-    };
-    env.extend([
-        (
-            "ANTHROPIC_BASE_URL".to_string(),
-            descriptor.anthropic_base_url.to_string(),
-        ),
-        ("ANTHROPIC_AUTH_TOKEN".to_string(), secret.to_string()),
-        ("ANTHROPIC_MODEL".to_string(), model.to_string()),
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            opus_model.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            sonnet_model.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-            haiku_model.to_string(),
-        ),
-        (
-            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-            subagent_model.to_string(),
-        ),
-    ]);
-    match fable_model {
-        Some(fable) => env.push((
-            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-            fable.to_string(),
-        )),
-        None if role_models.is_none() => env.push((
-            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-            model.to_string(),
-        )),
-        None => {}
-    }
-    if descriptor.explicitly_empty_anthropic_api_key {
-        env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
-    }
-    // #1257: discovery only adds rows and cannot subtract them (DD-054), so a
-    // constrained launch does not ask for it at all rather than advertising a
-    // set the allowlist would then have to be enforced against after the fact.
-    // The launch notice in `start_with_secret_store` says so out loud.
-    if descriptor.enable_gateway_model_discovery && allowed.is_empty() {
-        env.push((
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
-            "1".to_string(),
-        ));
-    }
-    // Catalog data, not a hardcoded `model.ends_with("[1m]")` check (#937
-    // Phase 2, #936 "Generalization" -> 1e): exact wire-ID lookup so an
-    // auto-context wire model never falls back to a same-family row's window
-    // via `cli_id`/alias matching.
-    if let Some(window) = crate::provider_catalog::model_by_wire_id(model)
-        .and_then(|entry| entry.claude_compact_window)
-    {
-        env.push((
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
-            window.to_string(),
-        ));
-    }
-    // Exact window from the served datasheet section (#1258), consulted only
-    // when neither catalog field knows this wire ID: a reviewed
-    // `claude_max_context_tokens` wins outright (see `effective_context_window`),
-    // and an ID in neither source emits nothing — unchanged behavior.
-    // Deliberately `push_default`: an ambient user-set value survives (this
-    // key is not in ANTHROPIC_COMPAT_CONFLICTING, same spirit as DD-059
-    // preserving CLAUDE_CODE_EFFORT_LEVEL). `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-    // is NOT set on this route — with the real window learned the harness
-    // derives its own threshold, and per-provider compact thresholds
-    // (DeepSeek/Kimi) remain a reviewed decision.
-    if let Some(window) = crate::server_settings::effective_context_window(model) {
-        push_default(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", &window.to_string());
-    }
-    // #1528: Claude Code keeps the prompt cache across a mid-session effort
-    // change only when its client-side `per_turn_effort` capability is on for
-    // the launched wire ID. There is no wire field, header, or discovery row
-    // for it: the harness resolves it from its baked catalog, gateway-served
-    // capability metadata, or this env var. OpenRouter publishes the *gate*
-    // under its own name -- `supports_reasoning_effort`, derived from its
-    // `reasoning_effort` token -- while the injected token is Claude Code's
-    // vocabulary, which clud does not get to rename. This overlay owns that
-    // mapping.
-    //
-    // OpenRouter publishes nothing about per-turn *delivery*, so the gate says
-    // only "this model accepts an effort setting", not "a mid-session change
-    // keeps the cache". That claim is a property of OpenRouter's Messages
-    // endpoint and ships dark behind the `per_turn_effort` server setting
-    // (`crates/clud-bin/assets/server-settings.json`) until a recorded live
-    // endpoint check confirms both acceptance and the honored level.
-    //
-    // The read stays lazy and offline (#1528): the helper short-circuits on
-    // the descriptor and the flip before the catalog closure runs, and
-    // `catalog_cached_or_embedded` resolves the daemon-state cache and the
-    // always-present embedded copy without a fetch -- so this adds neither
-    // egress nor a launch delay.
-    //
-    // `push_default`, so an ambient `CLAUDE_CODE_MODEL_CAPABILITIES` the user
-    // already sets is preserved rather than overwritten -- the same precedence
-    // this overlay gives `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. That key is
-    // deliberately NOT in `ANTHROPIC_COMPAT_CONFLICTING`, which would scrub it.
-    inject_per_turn_effort(
-        env,
-        descriptor,
-        model,
-        crate::server_settings::per_turn_effort_enabled(),
-        crate::openrouter_catalog::catalog_cached_or_embedded,
-    );
-    // #1263: the direct route is the one launch shape where clud is *not* in
-    // the request path -- Claude Code talks to the provider itself, so clud
-    // can neither see the model stream nor time it out. The only lever here is
-    // the harness's own client timeout, and until now this overlay was the one
-    // route that never set it: a direct `--openrouter` launch silently
-    // inherited the harness's undocumented default, and clud neither set nor
-    // logged it. A hung request then stalled with nothing anywhere watching.
-    //
-    // `push_default`, so an explicit `API_TIMEOUT_MS` from the user's
-    // environment still wins (the same precedence DD-059 gives
-    // `CLAUDE_CODE_EFFORT_LEVEL`). The launch notice names the effective value.
-    push_default(env, "API_TIMEOUT_MS", DIRECT_API_TIMEOUT_MS);
-}
-
 fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
     if let Some(selection) = plan
         .model_selection
@@ -1419,78 +1260,6 @@ fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, Bri
         .map(ModelSpec::parse)
         .transpose()
         .map_err(|error| BridgeError::Model(error.to_string()))
-}
-
-fn apply_cross_route_overlay(
-    env: &mut Vec<(String, String)>,
-    bridge: &BridgeHandle,
-) -> Result<(), BridgeError> {
-    if env.iter().any(|(key, value)| {
-        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
-    }) {
-        return Err(BridgeError::DiscoveryDisabled);
-    }
-    env.retain(|(key, _)| {
-        !CODEX_VIA_CLAUDE_CONFLICTING
-            .iter()
-            .any(|conflicting| env_key_eq(key, conflicting))
-            && !env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && !key
-                .to_ascii_uppercase()
-                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
-    });
-    env.push((
-        "ANTHROPIC_BASE_URL".to_string(),
-        bridge.base_url().to_string(),
-    ));
-    env.push((
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
-        bridge.bearer_token().to_string(),
-    ));
-    // The built-in `opus` and `sonnet` aliases also select models for Claude
-    // Code workflows and subagents. The bridge cannot serve Anthropic model
-    // IDs, so bind them to honest, advertised Codex rows. This deliberately
-    // leaves Haiku alone: it is used for Claude Code side work and has no
-    // corresponding Codex tier policy.
-    env.extend([
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".to_string(),
-            "Codex Sol (OpenAI)".to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME".to_string(),
-            "Codex Terra (OpenAI)".to_string(),
-        ),
-    ]);
-    // Claude Code 2.1.223+ discovers every provider-scoped row from the
-    // bridge. Its context override is process-wide, so the catalog must prove
-    // that every switchable Codex row has one common real ceiling.
-    let context_tokens = crate::provider_catalog::common_claude_context_tokens(
-        ModelProvider::Codex,
-    )
-    .ok_or_else(|| {
-        BridgeError::Model(
-            "Codex Claude-discovery models need one explicit common context-token ceiling"
-                .to_string(),
-        )
-    })?;
-    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    set_env(
-        env,
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-        &context_tokens.to_string(),
-    );
-    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
-    Ok(())
 }
 
 fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
@@ -1522,71 +1291,6 @@ fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
         }
     });
     set_env(env, ROUTE_CONTEXT_ENV, &context.to_string());
-}
-
-fn apply_unified_overlay(
-    env: &mut Vec<(String, String)>,
-    bridge: &BridgeHandle,
-    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
-    allowed: &[String],
-) -> Result<(), BridgeError> {
-    if env.iter().any(|(key, value)| {
-        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
-    }) {
-        return Err(BridgeError::DiscoveryDisabled);
-    }
-    // Replace only the base URL. Unlike direct DeepSeek and Codex routes, the
-    // Claude credential stays untouched so saved claude.ai OAuth/API-key auth
-    // reaches the native Claude upstream through this gateway.
-    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_BASE_URL"));
-    env.push((
-        "ANTHROPIC_BASE_URL".to_string(),
-        bridge.base_url().to_string(),
-    ));
-    let custom = env
-        .iter()
-        .find(|(key, _)| env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"));
-    let gateway_header = format!("{UNIFIED_GATEWAY_TOKEN_HEADER}: {}", bridge.bearer_token());
-    let custom_headers = custom
-        .map(|headers| format!("{gateway_header}\n{headers}"))
-        .unwrap_or(gateway_header);
-    env.push(("ANTHROPIC_CUSTOM_HEADERS".to_string(), custom_headers));
-    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    set_env(env, "CLUD_GATEWAY_TOKEN", bridge.bearer_token());
-    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
-    // #1257: a pinned launch constrains the auxiliary slots too, unlike the
-    // descriptor-driven direct route where they are independent role rows. On
-    // this gateway route the slot value is the row's *discovery* id: Claude
-    // Code classifies a raw wire id like `~anthropic/claude-sonnet-latest` as
-    // an unknown provider id and falls back to a built-in Anthropic row --
-    // exactly the spend the pin exists to stop. Discovery itself stays on
-    // here because clud proxies the catalog and can filter it; an ambient
-    // `CLAUDE_CODE_SUBAGENT_MODEL` wins only when the allowlist admits it,
-    // mirroring the direct route's single precedence rule.
-    if let Some(pinned) = crate::provider_catalog::model_allowlist_slot(allowed, selection) {
-        let discovery = crate::provider_catalog::model_by_any_id(&pinned)
-            .and_then(|row| row.discovery_id)
-            .unwrap_or(&pinned)
-            .to_string();
-        let ambient_subagent = env
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
-            .map(|(_, value)| value.trim().to_string())
-            .filter(|value| {
-                !value.is_empty() && crate::provider_catalog::model_allowlist_allows(allowed, value)
-            });
-        let subagent = ambient_subagent.unwrap_or_else(|| discovery.clone());
-        set_env(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_FABLE_MODEL", &discovery);
-        set_env(env, "CLAUDE_CODE_SUBAGENT_MODEL", &subagent);
-    }
-    Ok(())
 }
 
 fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -1855,6 +1559,17 @@ fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
     crate::clud_hooks_compile::claude_settings_fragment(&hooks, cwd_changed_supported)
 }
 
+/// Whether this launch's client takes clud's `WorktreeCreate` hook: a harness
+/// whose settings surface accepts hooks, on Claude Code 2.1.50 or newer.
+fn claude_takes_worktree_hooks(plan: &LaunchPlan) -> bool {
+    // Unit tests never probe whatever `claude` the machine has installed.
+    !cfg!(test)
+        && plan.effective_harness().settings_surface().accepts_hooks()
+        && plan.command.first().is_some_and(|binary| {
+            crate::backend_bootstrap::probe_claude_worktree_hooks_support(binary.as_ref())
+        })
+}
+
 /// Hand `generated` to Claude as a launch-scoped `--settings` source.
 ///
 /// When the user supplied their own `--settings`, clud merges into *their*
@@ -1870,13 +1585,29 @@ fn compose_launch_settings(
 
 fn compose_launch_settings_document(
     plan: &LaunchPlan,
+    settings: serde_json::Value,
+) -> Result<(serde_json::Value, bool), BridgeError> {
+    compose_launch_settings_document_with(plan, settings, claude_takes_worktree_hooks(plan))
+}
+
+/// [`compose_launch_settings_document`] with the worktree-hook decision
+/// made by the caller, so tests need not probe a real client.
+fn compose_launch_settings_document_with(
+    plan: &LaunchPlan,
     mut settings: serde_json::Value,
+    worktree_hooks: bool,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
     if !plan.unsafe_mode {
         let safety = crate::clud_hooks_compile::deletion_safety_fragment();
         crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
             .map_err(BridgeError::Settings)?;
         merge_deletion_denies(&mut settings, &safety)?;
+    }
+    // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
+    if worktree_hooks {
+        let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();
+        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &worktrees)
+            .map_err(BridgeError::Settings)?;
     }
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return Ok((settings, false));
@@ -1918,12 +1649,31 @@ fn compose_launch_settings_document(
     Ok((user_settings, true))
 }
 
-/// Render the same deletion settings in a dry-run plan without creating a
-/// launch-scoped file or changing the executable plan.
+/// Ordinary effort levels accepted by older Claude settings schemas.
+fn settings_effort(command: &[String]) -> Option<&str> {
+    command.windows(2).find_map(|pair| {
+        (pair[0] == "--effort" && matches!(pair[1].as_str(), "low" | "medium" | "high" | "xhigh"))
+            .then_some(pair[1].as_str())
+    })
+}
+
+fn remove_settings_effort(command: &mut Vec<String>) {
+    if settings_effort(command).is_some() {
+        if let Some(index) = command.iter().position(|arg| arg == "--effort") {
+            command.drain(index..index + 2);
+        }
+    }
+}
+
+/// Render launch settings and effort compatibility without creating a file.
 pub fn dry_run_claude_command(plan: &LaunchPlan) -> Result<Vec<String>, String> {
-    let (settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
+    let (mut settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
         .map_err(|error| error.to_string())?;
+    if let Some(effort) = settings_effort(&plan.command) {
+        settings["effortLevel"] = serde_json::json!(effort);
+    }
     let mut command = plan.command.clone();
+    remove_settings_effort(&mut command);
     remove_user_settings_argument(&mut command);
     command.insert(1, settings.to_string());
     command.insert(1, "--settings".to_string());
@@ -2065,12 +1815,6 @@ fn remove_user_settings_argument(command: &mut Vec<String>) {
     }
 }
 
-fn push_default(env: &mut Vec<(String, String)>, key: &str, value: &str) {
-    if !env.iter().any(|(candidate, _)| env_key_eq(candidate, key)) {
-        env.push((key.to_string(), value.to_string()));
-    }
-}
-
 fn env_key_eq(left: &str, right: &str) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
@@ -2178,8 +1922,10 @@ mod tests {
             failover: None,
             failover_allow_metered: false,
             allowed_models: Vec::new(),
+            provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
+            route: None,
         }
     }
 
@@ -2618,6 +2364,20 @@ mod tests {
         assert!(rendered.contains("terra"), "{rendered}");
     }
 
+    /// The direct route for the overlay tests: the same decision the
+    /// production builder makes, from the inputs those tests already have.
+    fn direct_route(
+        descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
+        selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+        allowed: &[String],
+        env: &[(String, String)],
+    ) -> crate::route_plan::ResolvedRoute {
+        let mut plan = plan(descriptor.provider, Backend::Claude);
+        plan.model_selection = selection.cloned();
+        plan.allowed_models = allowed.to_vec();
+        crate::route_plan::resolve(&plan, &crate::route_plan::Ambient::from_child_env(env))
+    }
+
     fn deepseek_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
         crate::provider_registry::descriptor_for(ModelProvider::DeepSeek)
             .expect("DeepSeek must have an Anthropic-compat descriptor")
@@ -2638,13 +2398,11 @@ mod tests {
     #[test]
     fn golden_anthropic_compat_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         let mut pairs = env.clone();
         pairs.sort();
@@ -2711,13 +2469,11 @@ mod tests {
         .unwrap();
         assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro"));
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), Some(&selection), &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            Some(&selection),
-            &[],
-        );
+        )
+        .apply(&mut env);
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -2798,13 +2554,11 @@ mod tests {
             ),
         ];
         let mut env = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         for (key, _) in &base {
             assert_eq!(
                 lookup(&env, key),
@@ -2833,13 +2587,11 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &child),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "anthropic_api_key"), None);
@@ -2878,13 +2630,11 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), Some(&selection), &[], &env),
             "ds-test-secret",
-            deepseek_descriptor(),
-            Some(&selection),
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
@@ -3109,13 +2859,11 @@ mod tests {
     #[test]
     fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -3442,13 +3190,11 @@ mod tests {
     #[test]
     fn golden_kimi_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &env),
             "kimi-golden-secret",
-            kimi_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -3522,13 +3268,11 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &child),
             "kimi-test-secret",
-            kimi_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), None);
@@ -3614,7 +3358,11 @@ mod tests {
     #[test]
     fn kimi_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None, &[]);
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &env),
+            "kimi-test-secret",
+        )
+        .apply(&mut env);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -3666,13 +3414,11 @@ mod tests {
             ),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(openrouter_descriptor(), None, &[], &child),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(
             lookup(&child, "ANTHROPIC_BASE_URL"),
@@ -3794,13 +3540,16 @@ mod tests {
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
             "4242".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(
+                openrouter_descriptor(),
+                Some(&openrouter_selection("xiaomi/mimo-v2.6-flash")),
+                &[],
+                &env,
+            ),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            Some(&openrouter_selection("xiaomi/mimo-v2.6-flash")),
-            &[],
-        );
+        )
+        .apply(&mut env);
         // An explicit user-set window is never clobbered (DD-059's spirit).
         assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("4242"));
     }
@@ -3869,83 +3618,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn per_turn_effort_injection_respects_the_flip_and_the_descriptor() {
-        let wire = "deepseek/deepseek-v4.1-flash";
-        let gated = per_turn_effort_catalog(wire, true);
-
-        let mut enabled_env = Vec::new();
-        inject_per_turn_effort(
-            &mut enabled_env,
-            openrouter_descriptor(),
-            wire,
-            true,
-            || catalog_from(&gated),
-        );
-        assert_eq!(
-            lookup(&enabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some(format!("{wire}=per_turn_effort").as_str())
-        );
-
-        let mut disabled_env = Vec::new();
-        inject_per_turn_effort(
-            &mut disabled_env,
-            openrouter_descriptor(),
-            wire,
-            false,
-            || catalog_from(&gated),
-        );
-        assert_eq!(
-            lookup(&disabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            None
-        );
-
-        // Kimi and DeepSeek direct routes hit vendor endpoints, not
-        // OpenRouter's Messages API, so the claim must never reach them --
-        // not even with the flip on and an admitting row.
-        for descriptor in [deepseek_descriptor(), kimi_descriptor()] {
-            let mut vendor_env = Vec::new();
-            inject_per_turn_effort(&mut vendor_env, descriptor, wire, true, || {
-                catalog_from(&gated)
-            });
-            assert_eq!(
-                lookup(&vendor_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-                None,
-                "{}",
-                descriptor.display_name
-            );
-        }
-    }
-
-    #[test]
-    fn per_turn_effort_injection_preserves_an_ambient_user_value() {
-        let wire = "deepseek/deepseek-v4.1-flash";
-        let mut env = vec![(
-            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
-            "user/chosen-model=per_turn_effort".to_string(),
-        )];
-        inject_per_turn_effort(&mut env, openrouter_descriptor(), wire, true, || {
-            catalog_from(&per_turn_effort_catalog(wire, true))
-        });
-        // `push_default`, not overwrite: the user's own claim survives.
-        assert_eq!(
-            lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some("user/chosen-model=per_turn_effort")
-        );
-        // And with nothing admitting the row, an ambient value is untouched.
-        let mut ungated = vec![(
-            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
-            "user/chosen-model=per_turn_effort".to_string(),
-        )];
-        inject_per_turn_effort(&mut ungated, openrouter_descriptor(), wire, true, || {
-            catalog_from(&per_turn_effort_catalog(wire, false))
-        });
-        assert_eq!(
-            lookup(&ungated, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some("user/chosen-model=per_turn_effort")
-        );
-    }
-
     /// The overlay itself is dark today (the built-in flip is `false`), and it
     /// must not have started emitting the key on any route.
     #[test]
@@ -3956,7 +3628,11 @@ mod tests {
             kimi_descriptor(),
         ] {
             let mut env = Vec::new();
-            apply_anthropic_compat_overlay(&mut env, "secret", descriptor, None, &[]);
+            crate::route_plan::render_direct_env(
+                &direct_route(descriptor, None, &[], &env),
+                "secret",
+            )
+            .apply(&mut env);
             assert_eq!(
                 lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
                 None,
@@ -3969,13 +3645,16 @@ mod tests {
     #[test]
     fn anthropic_compat_overlay_emits_no_window_for_an_id_in_neither_source() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(
+                openrouter_descriptor(),
+                Some(&openrouter_selection("nonexistent/model-v9")),
+                &[],
+                &env,
+            ),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            Some(&openrouter_selection("nonexistent/model-v9")),
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
     }
@@ -4058,6 +3737,28 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
+    fn provider_only_hands_openrouter_routing_to_the_harness() {
+        let only = vec!["parasail/fp8".to_string()];
+        let mut env = vec![(
+            "CLAUDE_CODE_EXTRA_BODY".to_string(),
+            r#"{"top_k":5}"#.to_string(),
+        )];
+        apply_provider_only(&mut env, openrouter_descriptor(), &only).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(lookup(&env, "CLAUDE_CODE_EXTRA_BODY").unwrap()).unwrap();
+        assert_eq!(body["top_k"], 5);
+        assert_eq!(
+            body["provider"],
+            serde_json::json!({"only": ["parasail/fp8"], "allow_fallbacks": false})
+        );
+        // No flag, or another provider: the environment is untouched.
+        let mut untouched = Vec::new();
+        apply_provider_only(&mut untouched, openrouter_descriptor(), &[]).unwrap();
+        apply_provider_only(&mut untouched, kimi_descriptor(), &only).unwrap();
+        assert!(untouched.is_empty());
+    }
+
+    #[test]
     fn a_pinned_openrouter_overlay_pins_every_slot_and_turns_discovery_off() {
         let pin = "~anthropic/claude-sonnet-latest";
         let base = vec![
@@ -4075,13 +3776,11 @@ mod tests {
             ),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(openrouter_descriptor(), None, &[pin.to_string()], &child),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            None,
-            &[pin.to_string()],
-        );
+        )
+        .apply(&mut child);
         for key in [
             "ANTHROPIC_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -4120,13 +3819,11 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             "deepseek-v4-pro".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut admitted,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &allowed, &admitted),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &allowed,
-        );
+        )
+        .apply(&mut admitted);
         assert_eq!(
             lookup(&admitted, "CLAUDE_CODE_SUBAGENT_MODEL"),
             Some("deepseek-v4-pro")
@@ -4137,13 +3834,11 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             "claude-opus-5".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut rejected,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &allowed, &rejected),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &allowed,
-        );
+        )
+        .apply(&mut rejected);
         assert_eq!(
             lookup(&rejected, "CLAUDE_CODE_SUBAGENT_MODEL"),
             Some("deepseek-flash"),
@@ -4316,12 +4011,12 @@ mod tests {
     fn codex_via_claude_folds_its_role_rows_into_the_boundary_without_dupes() {
         // Unconstrained stays unconstrained: no boundary, no injected rows.
         let mut route = plan(ModelProvider::Codex, Backend::Claude);
-        assert!(codex_via_claude_bridge_allowlist(&route).is_empty());
+        assert!(crate::route_plan::codex_bridge_allowlist(&route).is_empty());
         // A pin gains the route's own injected role rows (DD-038), or the
         // bridge would refuse clud's own configuration.
         route.allowed_models = vec!["gpt-5.6-luna".to_string()];
         assert_eq!(
-            codex_via_claude_bridge_allowlist(&route),
+            crate::route_plan::codex_bridge_allowlist(&route),
             vec![
                 "gpt-5.6-luna".to_string(),
                 CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
@@ -4334,7 +4029,7 @@ mod tests {
             "gpt-5.6-luna".to_string(),
         ];
         assert_eq!(
-            codex_via_claude_bridge_allowlist(&route),
+            crate::route_plan::codex_bridge_allowlist(&route),
             vec![
                 CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
                 "gpt-5.6-luna".to_string(),
@@ -4401,6 +4096,33 @@ mod tests {
     }
 
     #[test]
+    fn older_claude_receives_effort_as_settings_for_every_spawn_mode() {
+        let mut launch = plan(ModelProvider::Claude, Backend::Claude);
+        launch.command = vec!["claude".into(), "--effort".into(), "low".into()];
+        let mut runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+        runtime.apply_initial_effort(&launch).unwrap();
+        let path = settings_argument(&runtime).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(settings["effortLevel"], "low");
+        for mode in [SpawnMode::Subprocess, SpawnMode::Pty] {
+            let adapter = RecordingAdapter::default();
+            runtime
+                .spawn_with(&adapter, mode, launch.command.clone(), None)
+                .unwrap();
+            let calls = adapter.calls.borrow();
+            assert!(!calls[0].1.iter().any(|arg| arg == "--effort"));
+            assert!(calls[0].1.iter().any(|arg| arg == "--settings"));
+        }
+        let dry = dry_run_claude_command(&launch).unwrap();
+        assert!(!dry.iter().any(|arg| arg == "--effort"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&dry[2]).unwrap()["effortLevel"],
+            "low"
+        );
+    }
+
+    #[test]
     fn a_plain_claude_launch_carries_declared_hooks_as_settings() {
         // The ungating: before Phase 2b only bridge routes composed settings,
         // so a plain launch registered nothing.
@@ -4419,6 +4141,28 @@ mod tests {
             "clud-cmd-scan --event Stop"
         );
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_some());
+    }
+
+    /// #1962/#1971: a client that knows `WorktreeCreate` gets clud's line, so
+    /// its worktrees land under `~/.clud/worktrees`; one that does not gets no
+    /// line at all, since an unknown event could void the whole document.
+    #[test]
+    fn worktree_hooks_are_registered_only_when_the_client_takes_them() {
+        let launch = plan(ModelProvider::Claude, Backend::Claude);
+        let (with, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), true).unwrap();
+        assert_eq!(
+            with["hooks"]["WorktreeCreate"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeCreate"
+        );
+        assert_eq!(
+            with["hooks"]["WorktreeRemove"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event WorktreeRemove"
+        );
+        assert!(with["hooks"]["PreToolUse"].is_array(), "the guards stay");
+        let (without, _) =
+            compose_launch_settings_document_with(&launch, serde_json::json!({}), false).unwrap();
+        assert!(without["hooks"].get("WorktreeCreate").is_none());
     }
 
     #[test]
@@ -5040,3 +4784,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "route_snapshots_tests.rs"]
+mod route_snapshots_tests;

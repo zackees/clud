@@ -38,9 +38,9 @@ CANONICAL_SKILL_DIR = "assets/skills/"
 
 #: Modules permitted to construct a backend skills-directory path. Keep this
 #: as small as possible — every entry is another place a second installer
-#: could grow. `skills_home.rs` is here because it resolves the home dir that
-#: `skills.rs` joins onto.
-SKILL_WRITER_ALLOWLIST = frozenset({"skills.rs", "skills_home.rs", "skills_tests.rs"})
+#: could grow. Home resolution lives in `home.rs` (#1836), which builds no
+#: skills path.
+SKILL_WRITER_ALLOWLIST = frozenset({"skills.rs", "skills_tests.rs"})
 
 #: Per-line escape hatch, mirroring `banned_cross_tools.ALLOW_MARKER`. Prose
 #: explaining these rules necessarily names the banned shapes, and a module

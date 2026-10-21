@@ -9,7 +9,9 @@ members = [
     "testbins/probe-target",
 ]
 exclude = [
+    "dylints/ban_dirs_home_dir",
     "dylints/ban_manual_slash_normalize",
+    "dylints/enforce_platform_boundary",
     # Phase-1 web-terminal fidelity spike (zackees/clud#929). Kept out of the
     # workspace so its Tauri/wry tree + portable-pty spawning don't perturb the
     # shipped build, CI matrix, or `bash lint`.
@@ -30,7 +32,7 @@ too_many_lines = "warn"
 libraries = [{ path = "dylints/*" }]
 
 [workspace.package]
-version = "2.8.27"
+version = "2.8.31"
 edition = "2021"
 rust-version = "1.95"
 license-file = "LICENSE"

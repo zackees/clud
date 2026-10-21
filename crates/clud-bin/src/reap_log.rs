@@ -304,7 +304,10 @@ impl ReapCounters {
 #[derive(Debug)]
 pub struct ReapFlightRecorder {
     path: PathBuf,
-    last_write: Instant,
+    /// `None` until the first write. Seeding it with `now - interval` panicked
+    /// when the monotonic clock was younger than the interval, e.g. an
+    /// autostart within 5s of boot (#1913).
+    last_write: Option<Instant>,
     disabled: bool,
 }
 
@@ -312,19 +315,22 @@ impl ReapFlightRecorder {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            last_write: Instant::now() - FLIGHT_RECORDER_INTERVAL,
+            last_write: None,
             disabled: false,
         }
     }
 
     pub fn checkpoint(&mut self, counters: &ReapCounters) {
-        if self.disabled || self.last_write.elapsed() < FLIGHT_RECORDER_INTERVAL {
+        let recent = self
+            .last_write
+            .is_some_and(|last| last.elapsed() < FLIGHT_RECORDER_INTERVAL);
+        if self.disabled || recent {
             return;
         }
         if self.write(counters).is_err() {
             self.disabled = true;
         }
-        self.last_write = Instant::now();
+        self.last_write = Some(Instant::now());
     }
 
     fn write(&self, counters: &ReapCounters) -> std::io::Result<()> {
@@ -760,6 +766,25 @@ mod tests {
     fn unit_test_reap_log_is_isolated_from_production_sessions() {
         let path = session_reap_log_path(Path::new("/state"), 47180, 1_700_000_000);
         assert!(path.ends_with("test-sessions/47180__1700000000/reap.jsonl"));
+    }
+
+    #[test]
+    fn flight_recorder_needs_no_clock_history_and_still_throttles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reap-health.json");
+        let mut recorder = ReapFlightRecorder::new(path.clone());
+        assert!(
+            recorder.last_write.is_none(),
+            "construction must not do Instant arithmetic"
+        );
+        recorder.checkpoint(&ReapCounters::default());
+        assert!(path.exists(), "the first checkpoint writes immediately");
+        fs::remove_file(&path).unwrap();
+        recorder.checkpoint(&ReapCounters::default());
+        assert!(
+            !path.exists(),
+            "a second checkpoint inside the interval is throttled"
+        );
     }
 
     #[test]

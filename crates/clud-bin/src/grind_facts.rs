@@ -132,19 +132,89 @@ pub fn lookup_in(dir: &Path, session_id: Option<&str>, now: SystemTime) -> Looku
 }
 
 /// [`lookup_in`] against the real `~/.clud/tmp/grind`, now.
+///
+/// A found file is touched: the hook looks facts up on every tool call of
+/// the run, so the file's age is how long the run has been silent, which
+/// `clud grind-facts owner` reports to a later run (#1819).
 pub fn lookup(session_id: Option<&str>) -> Lookup {
-    match facts_dir() {
-        Some(dir) => lookup_in(&dir, session_id, SystemTime::now()),
-        None => Lookup::NoSession,
+    let Some(dir) = facts_dir() else {
+        return Lookup::NoSession;
+    };
+    let found = lookup_in(&dir, session_id, SystemTime::now());
+    if matches!(found, Lookup::Found(_)) {
+        if let Some(path) = session_id.and_then(|id| facts_path_in(&dir, id)) {
+            let _ = touch_existing(&path);
+        }
     }
+    found
 }
 
-const USAGE: &str = "usage: clud grind-facts <path|clear|task>
+/// One run whose facts record a feature PR: its session and how long its
+/// facts file has gone untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub session: String,
+    pub idle_secs: u64,
+}
+
+/// The PR number a facts `feature.pr` names: a number, a numeric string,
+/// or a PR URL ending in `/pull/<n>`.
+fn feature_pr_number(facts: &Value) -> Option<String> {
+    let pr = facts.get("feature")?.get("pr")?;
+    let text = match pr {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.trim_end_matches('/').rsplit('/').next()?.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty() && text.chars().all(|c| c.is_ascii_digit())).then_some(text)
+}
+
+/// Every run under `dir` whose facts record feature PR `pr`, as of `now`.
+/// A run that died keeps its file until the session-temp sweep, so a large
+/// `idle_secs` marks a feature PR nobody is working on.
+pub fn owners_in(dir: &Path, pr: &str, now: SystemTime) -> Vec<Owner> {
+    let pr = pr.trim_start_matches('#');
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut owners: Vec<Owner> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let session = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".json")?
+                .to_string();
+            if !valid_session_id(&session) {
+                return None;
+            }
+            let facts: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+            if feature_pr_number(&facts).as_deref() != Some(pr) {
+                return None;
+            }
+            let idle_secs = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map_or(0, |age| age.as_secs());
+            Some(Owner { session, idle_secs })
+        })
+        .collect();
+    owners.sort_by(|a, b| a.session.cmp(&b.session));
+    owners
+}
+
+const USAGE: &str = "usage: clud grind-facts <path|clear|task|owner>
   path   print this session's run-facts file (~/.clud/tmp/grind/<session>.json)
          and mark an existing one as current, so a long run never goes stale
   clear  remove this session's run-facts file
   task --checkout <dir> [--] <file>...
-         record one worker task's files (the grind planner runs this)";
+         record one worker task's files (the grind planner runs this)
+  owner <pr>
+         print, as JSON, every run whose facts record feature PR <pr> and how
+         long each has been silent (the /grind router's no-overlap check)";
 
 /// `clud grind-facts <path|clear>`. Returns the exit code.
 pub fn run_cli(args: &[String]) -> i32 {
@@ -168,6 +238,10 @@ fn run_cli_in(
     let action = match args {
         [action] if matches!(action.as_str(), "path" | "clear") => action.as_str(),
         [action, ..] if action == "task" => "task",
+        [action, pr] if action == "owner" => {
+            let _ = writeln!(out, "{}", owner_report(dir, pr, session_id));
+            return 0;
+        }
         _ => {
             let _ = writeln!(err, "{USAGE}");
             return 2;
@@ -236,6 +310,21 @@ fn run_cli_in(
             }
         },
     }
+}
+
+/// `clud grind-facts owner <pr>`: `{"pr", "owners": [{session, idle_secs, own}]}`.
+fn owner_report(dir: &Path, pr: &str, session_id: Option<&str>) -> Value {
+    let owners: Vec<Value> = owners_in(dir, pr, SystemTime::now())
+        .into_iter()
+        .map(|o| {
+            serde_json::json!({
+                "own": session_id == Some(o.session.as_str()),
+                "session": o.session,
+                "idle_secs": o.idle_secs,
+            })
+        })
+        .collect();
+    serde_json::json!({"pr": pr.trim_start_matches('#'), "owners": owners})
 }
 
 /// `--checkout <dir> [--] <file>...`; the checkout must be absolute.
@@ -574,6 +663,42 @@ mod tests {
         assert!(
             lock.is_dir(),
             "a failed acquisition must not remove the directory"
+        );
+    }
+
+    #[test]
+    fn owners_name_every_run_recording_the_feature_pr() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), A, r#"{"feature": {"pr": 1814}}"#);
+        write(
+            dir.path(),
+            B,
+            r#"{"feature": {"pr": "https://github.com/o/r/pull/1814"}}"#,
+        );
+        write(dir.path(), "other", r#"{"feature": {"pr": "18140"}}"#);
+        write(dir.path(), "plain", r#"{"mode": "parallel"}"#);
+        let later = SystemTime::now() + Duration::from_secs(600);
+        let owners = owners_in(dir.path(), "#1814", later);
+        let sessions: Vec<&str> = owners.iter().map(|o| o.session.as_str()).collect();
+        assert_eq!(sessions, [A, B]);
+        assert!(owners.iter().all(|o| o.idle_secs >= 590), "{owners:?}");
+        assert!(owners_in(dir.path(), "99", later).is_empty());
+    }
+
+    #[test]
+    fn cli_owner_reports_json_and_marks_its_own_run() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), A, r#"{"feature": {"pr": 7}}"#);
+        let (code, out, _) = cli(&["owner", "7"], Some(A), dir.path());
+        assert_eq!(code, 0);
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["pr"], "7");
+        assert_eq!(v["owners"][0]["session"], A);
+        assert_eq!(v["owners"][0]["own"], true);
+        let (_, out, _) = cli(&["owner", "8"], Some(B), dir.path());
+        assert_eq!(
+            serde_json::from_str::<Value>(out.trim()).unwrap()["owners"],
+            serde_json::json!([])
         );
     }
 

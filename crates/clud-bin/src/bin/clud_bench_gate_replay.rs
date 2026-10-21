@@ -29,7 +29,7 @@ fn main() {
         }
     }
     let root = root.unwrap_or_else(|| {
-        dirs::home_dir()
+        clud::home::user_home()
             .unwrap_or_default()
             .join(".claude")
             .join("projects")

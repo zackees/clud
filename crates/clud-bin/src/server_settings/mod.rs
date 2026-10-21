@@ -273,7 +273,7 @@ fn load_for_process() -> Snapshot {
         .filter(|url| !url.trim().is_empty());
     let cache_path = match url_override {
         Some(_) => None,
-        None => dirs::home_dir().map(|home| home.join(CACHE_RELATIVE_PATH)),
+        None => crate::home::user_home().map(|home| home.join(CACHE_RELATIVE_PATH)),
     };
     let url = url_override.unwrap_or_else(|| SERVER_URL.to_string());
     let loaded = store::load(store::Sources {

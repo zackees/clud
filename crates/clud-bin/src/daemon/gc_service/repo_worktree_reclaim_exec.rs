@@ -234,8 +234,22 @@ pub(crate) fn run_reclaim_with(
     lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
     collect_procs: &dyn Fn() -> ProcessCwdSnapshot,
 ) -> ReclaimOutcome {
+    run_reclaim_with_guard(
+        job,
+        lookup_prs,
+        collect_procs,
+        &super::source_guard::source_in_use_with_processes,
+    )
+}
+
+fn run_reclaim_with_guard(
+    job: &ReclaimJob,
+    lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
+    collect_procs: &dyn Fn() -> ProcessCwdSnapshot,
+    source_probe: &dyn Fn(&Path, &ProcessCwdSnapshot) -> Option<&'static str>,
+) -> ReclaimOutcome {
     if job.row.reservation {
-        return run_reservation_reclaim(job);
+        return run_reservation_reclaim(job, source_probe);
     }
     if git_discovery_env_is_poisoned() {
         return ReclaimOutcome::Spared("git discovery env set".to_string());
@@ -245,6 +259,11 @@ pub(crate) fn run_reclaim_with(
 
     // 1. Fresh facts, then the pure re-check.
     let procs = collect_procs();
+    if worktree.exists() {
+        if let Some(reason) = source_probe(&worktree, &procs) {
+            return ReclaimOutcome::Spared(reason.to_string());
+        }
+    }
     let prs = lookup_prs(&repo_root);
     let fresh = probe_one(
         &repo_root,
@@ -264,7 +283,21 @@ pub(crate) fn run_reclaim_with(
         return ReclaimOutcome::Spared("tip unknown".to_string());
     };
 
-    // 2. Remove the worktree. Never --force.
+    // PR lookup can take seconds: re-sample immediately before mutation.
+    if let Some(reason) = source_probe(&worktree, &collect_procs()) {
+        return ReclaimOutcome::Spared(reason.to_string());
+    }
+
+    // 2. Persist the evidence before touching source. Never --force.
+    let rule = format!(
+        "verified merged branch={branch} tip={tip} repo={}",
+        job.row.repo_root
+    );
+    if let Err(error) =
+        crate::gc::delete_audit::record_required("gc.repo-worktree-reclaim", &worktree, &rule)
+    {
+        return ReclaimOutcome::Spared(format!("audit unavailable: {error}"));
+    }
     clear_readonly(&worktree);
     let path_arg = worktree.to_string_lossy().to_string();
     if let Err(err) = git(
@@ -278,12 +311,21 @@ pub(crate) fn run_reclaim_with(
         return ReclaimOutcome::Failed("directory still present after git worktree remove".into());
     }
 
+    finish_reclaim_refs(job, &repo_root, &branch, &tip)
+}
+
+fn finish_reclaim_refs(
+    job: &ReclaimJob,
+    repo_root: &Path,
+    branch: &str,
+    tip: &str,
+) -> ReclaimOutcome {
     let mut notes = Vec::new();
 
     // 3. Local branch, only at the verified tip.
     let local_ref = format!("refs/heads/{branch}");
-    match branch_delete_decision(rev(&repo_root, &local_ref).as_deref(), &tip) {
-        Ok(()) => match git(&repo_root, &["branch", "-D", &branch], GIT_QUERY_TIMEOUT) {
+    match branch_delete_decision(rev(repo_root, &local_ref).as_deref(), tip) {
+        Ok(()) => match git(repo_root, &["branch", "-D", branch], GIT_QUERY_TIMEOUT) {
             Ok(_) => notes.push(format!("deleted branch {branch}")),
             Err(err) => notes.push(format!("kept branch {branch}: {err}")),
         },
@@ -291,13 +333,13 @@ pub(crate) fn run_reclaim_with(
     }
 
     // 4. Remote branch: opt-in, exact tip, leased.
-    let remote_tip = rev(&repo_root, &format!("refs/remotes/origin/{branch}"));
-    match remote_delete_decision(job.delete_remote, remote_tip.as_deref(), &tip) {
+    let remote_tip = rev(repo_root, &format!("refs/remotes/origin/{branch}"));
+    match remote_delete_decision(job.delete_remote, remote_tip.as_deref(), tip) {
         Ok(()) => {
             let lease = format!("--force-with-lease={local_ref}:{tip}");
             let refspec = format!(":{local_ref}");
             match git(
-                &repo_root,
+                repo_root,
                 &["push", &lease, "origin", &refspec],
                 GIT_PUSH_TIMEOUT,
             ) {
@@ -309,18 +351,21 @@ pub(crate) fn run_reclaim_with(
     }
 
     // 5. Prune stale administrative entries.
-    if let Err(err) = git(&repo_root, &["worktree", "prune"], GIT_QUERY_TIMEOUT) {
+    if let Err(err) = git(repo_root, &["worktree", "prune"], GIT_QUERY_TIMEOUT) {
         notes.push(format!("prune failed: {err}"));
     }
     ReclaimOutcome::Removed { notes }
 }
 
-/// Issue #1486: reclaim an unused `tmp-wt` reservation. Re-probes it from
+/// Issue #1486: reclaim an unused `worktrees` reservation. Re-probes it from
 /// scratch (fresh process table, fresh emptiness, fresh age), requires the
 /// unchanged `reserved-unused` verdict ([`reverify_reservation`]), then
 /// calls `remove_dir`, which the OS refuses for a directory that gained an
 /// entry in the last instant. Never recursive, never git.
-fn run_reservation_reclaim(job: &ReclaimJob) -> ReclaimOutcome {
+fn run_reservation_reclaim(
+    job: &ReclaimJob,
+    source_probe: &dyn Fn(&Path, &ProcessCwdSnapshot) -> Option<&'static str>,
+) -> ReclaimOutcome {
     let path = PathBuf::from(&job.row.path);
     let still_under_root = job
         .wt_root
@@ -330,6 +375,16 @@ fn run_reservation_reclaim(job: &ReclaimJob) -> ReclaimOutcome {
     let fresh = probe_reservation(&path, &job.session_cwds, &procs);
     if let Err(reason) = reverify_reservation(&fresh, still_under_root) {
         return ReclaimOutcome::Spared(reason);
+    }
+    if let Some(reason) = source_probe(&path, &procs) {
+        return ReclaimOutcome::Spared(reason.to_string());
+    }
+    if let Err(error) = crate::gc::delete_audit::record_required(
+        "gc.worktree-reservation",
+        &path,
+        "verified empty, idle and unused reservation",
+    ) {
+        return ReclaimOutcome::Spared(format!("audit unavailable: {error}"));
     }
     match std::fs::remove_dir(&path) {
         Ok(()) => ReclaimOutcome::Removed {

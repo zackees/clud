@@ -22,6 +22,7 @@ re-explaining.
 | [architecture/launch-setup.md](architecture/launch-setup.md) | ~70 | Session-only vs global launch setup, persistent setup actions, selected-backend gating |
 | [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | always-on `clud __daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |
 | [architecture/windows-quirks.md](architecture/windows-quirks.md) | ~300 | Windows-only platform code: trampoline, BatBadBat `.cmd` rewrite, console modes, Shift+Enter key translation, `IDropTarget`, `CREATE_NO_WINDOW`, ARM whisper carveout |
+| [architecture/route-plan.md](architecture/route-plan.md) | ~140 | `ResolvedRoute`: the one place a launch's backend, upstreams, slots, allowlist, discovery, context, effort, timeouts, scrub list and launch checks are decided; every backend renders it, launch checks run before the backend branch, and request-path features stay gateway-side (#1852) |
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
 | [architecture/launch-targets.md](architecture/launch-targets.md) | ~540 | Independent model-provider and harness resolution, sticky settings, foreground bridge lifecycle, compatibility; DeepSeek direct provider (credential trust boundary, preflight, child overlay, no bridge) |
 | [architecture/provider-selection.md](architecture/provider-selection.md) | ~120 | #900's compatible launch grammar, direct-vs-unified routing mode, provider-neutral model catalog, modifier normalization, and plan/repeat propagation |
@@ -31,6 +32,7 @@ re-explaining.
 | [architecture/hook-dispatch.md](architecture/hook-dispatch.md) | ~340 | clud running a repo's own hooks instead of the harness: `.clud/hooks.json` declaration, the rooting contract (cwd + `CLUD_PROJECT_DIR` = the declaring repo), the exit-code contract and why it fails open, the per-root firing matrix (parent/child/extern, Tier B source from frontend settings), extern trust via `clud extern trust` (DD-060/DD-061/DD-062), Phase 5's three-level `"auto"` `bash.block_cd` relaxation and the capability-gated `CwdChanged` backstop (DD-063/DD-064), and delivery by compiling settings into CLI args rather than writing config files (#966/#967/#977) |
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
+| [architecture/shell-ast.md](architecture/shell-ast.md) | ~150 | The command scanner's parser (#1962): tree-sitter bash/PowerShell grammars and a cmd.exe splitter producing evaluated invocations, what static evaluation resolves versus marks `Unknown`, each rule's Unknown policy, the worktree location guard, and the recall oracle over real shim-recorded calls |
 | [architecture/rm-tools.md](architecture/rm-tools.md) | ~170 | `safe-rm` (#1461): trash, profile roots, audit, hook rewrite, and the child catastrophe floor |
 | [architecture/unsafe-mode.md](architecture/unsafe-mode.md) | ~40 | Per-launch `--unsafe` policy and the clud safeguards it disables |
 | [architecture/shim-dispatch.md](architecture/shim-dispatch.md) | ~90 | `clud-shim`'s alias registry, single dispatch path, session ABI stamp, and fail-open passthrough outside a session (#1546) |
@@ -67,6 +69,7 @@ re-explaining.
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)
 - **"How do provider and harness preferences resolve?"** -> [launch-targets.md](architecture/launch-targets.md)
 - **"Which model ID is stable, and how do effort/context reach a worker?"** -> [provider-selection.md](architecture/provider-selection.md)
+- **"Where is a launch's routing decided, and what does `--dry-run` show?"** -> [route-plan.md](architecture/route-plan.md)
 - **"How do I change a value in installed builds without a release?"** -> [server-settings.md](architecture/server-settings.md)
 - **"How does one Claude session switch safely among providers?"** -> [unified-gateway.md](architecture/unified-gateway.md)
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)

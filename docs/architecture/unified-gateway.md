@@ -4,6 +4,10 @@
 Claude Code child. It is foreground-owned and is shut down with that child; it
 is neither a sidecar nor a daemon.
 
+The configuration this gateway is built from — which routes exist, which
+slots bind where, and the upstream routing object it injects — is the launch's
+`ResolvedRoute`: see [route-plan.md](route-plan.md).
+
 Unified is an explicit routing mode, not a provider. It always uses the Claude
 harness, rejects an explicit Codex harness before bootstrap, and requires
 Claude Code 2.1.223 or newer. Older clients are rejected with their installed

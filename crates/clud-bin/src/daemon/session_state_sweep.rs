@@ -48,8 +48,9 @@ pub fn maybe_sweep_at(
     if let Some(last) = read_sentinel(sentinel_path) {
         match now.duration_since(last) {
             Ok(age) if age < MIN_INTERVAL => return Ok(None),
-            // Clock skew (sentinel in the future) → skip, recover next tick.
-            Err(_) => return Ok(None),
+            // A sentinel dated in the future (clock was ahead) is invalid:
+            // sweep now and rewrite it, or the sweep stays off until real
+            // time catches up (#1910).
             _ => {}
         }
     }
@@ -97,7 +98,7 @@ fn log_report(report: &session_state::SweepReport) {
 }
 
 fn state_dir() -> Option<PathBuf> {
-    Some(home_dir()?.join(".clud").join("state"))
+    Some(crate::home::user_home()?.join(".clud").join("state"))
 }
 
 fn read_sentinel(path: &std::path::Path) -> Option<SystemTime> {
@@ -117,17 +118,6 @@ fn write_sentinel(path: &std::path::Path, now: SystemTime) -> std::io::Result<()
     fs::write(path, secs.to_string())
 }
 
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +131,17 @@ mod tests {
             maybe_sweep_at(&sentinel, &tmp.path().join("sessions"), SystemTime::now()).unwrap();
         assert!(result.is_some(), "first run must execute the sweep");
         assert!(sentinel.exists());
+    }
+
+    #[test]
+    fn future_sentinel_is_repaired_instead_of_skipping() {
+        let tmp = tempdir().unwrap();
+        let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+        let sessions = tmp.path().join("sessions");
+        let now = SystemTime::now();
+        write_sentinel(&sentinel, now + Duration::from_secs(30 * 24 * 60 * 60)).unwrap();
+        assert!(maybe_sweep_at(&sentinel, &sessions, now).unwrap().is_some());
+        assert!(read_sentinel(&sentinel).unwrap() <= now);
     }
 
     #[test]

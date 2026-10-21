@@ -37,6 +37,12 @@ fn eligible(root: &Path, launch_roots: &[PathBuf]) -> bool {
     checkout(root)
         && owned_by_caller(root)
         && launch_roots.iter().any(|launch| {
+            // `root` is canonical; compare a canonical launch root too, or a
+            // symlinked temp prefix (macOS `/var` -> `/private/var`) makes
+            // every sibling look foreign.
+            let launch =
+                crate::path_norm::canonicalize_plain(launch).unwrap_or_else(|_| launch.clone());
+            let launch = &launch;
             checkout(launch)
                 && launch != root
                 && launch

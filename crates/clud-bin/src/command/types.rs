@@ -88,6 +88,10 @@ pub struct LaunchPlan {
     /// old worker payloads readable.
     #[serde(default)]
     pub allowed_models: Vec<String>,
+    /// OpenRouter upstream providers every request must use, fallbacks off
+    /// (`--provider-only`); empty leaves OpenRouter's routing alone.
+    #[serde(default)]
+    pub provider_only: Vec<String>,
     /// True when `allowed_models` came from the *previous* model selection
     /// (no `--model` / `--allow-model` on the command line), not from an
     /// explicit pin (#1257). The runtime announces exactly that case as a
@@ -99,6 +103,11 @@ pub struct LaunchPlan {
     /// old worker payloads on the same default.
     #[serde(default)]
     pub coauthor: crate::attribution::Coauthor,
+    /// Every routing decision this launch made, resolved once (#1855). A
+    /// serde default keeps pre-#1855 daemon payloads readable; a worker that
+    /// receives one uses it rather than re-deriving a second copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<crate::route_plan::ResolvedRoute>,
 }
 
 impl LaunchPlan {
@@ -146,8 +155,10 @@ mod tests {
             failover: None,
             failover_allow_metered: false,
             allowed_models: Vec::new(),
+            provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
+            route: None,
         }
     }
 

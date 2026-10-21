@@ -32,7 +32,7 @@ pub fn alias_names() -> Vec<String> {
 /// cannot be resolved — callers degrade silently (the launch path
 /// just skips shim install).
 pub fn shims_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(SHIMS_SUBDIR))
+    crate::home::user_home().map(|h| h.join(SHIMS_SUBDIR))
 }
 
 /// Testable variant — install all aliases under `home_root` as links to
@@ -52,6 +52,7 @@ pub fn extract_shims_at(home_root: &Path, shim_source: &Path) -> std::io::Result
     }
     // The pre-#1551 byte-hash sentinel; freshness is now file identity.
     let _ = std::fs::remove_file(shims_dir.join(".shim-hash"));
+    purge_retired_aliases(&shims_dir);
     let mut installed = 0;
     for alias in alias_names() {
         let target = shims_dir.join(&alias);
@@ -115,7 +116,7 @@ pub fn prepare_session_shims_at(
 /// delivery, but before the backend is spawned so every launch path inherits
 /// the same aliases.
 pub fn prepare_current_session() -> std::io::Result<bool> {
-    let Some(home) = home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return Ok(false);
     };
     let current_exe = std::env::current_exe()?;
@@ -135,17 +136,6 @@ pub fn prepare_current_session() -> std::io::Result<bool> {
         }
     }
     Ok(true)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 /// Whether `exe` is `clud` itself (any case, `.exe` or not) and so a valid
@@ -176,7 +166,22 @@ pub fn rm_alias_names() -> Vec<String> {
     shim_registry::file_names_in(ShimDir::Session)
 }
 
+/// Alias names clud no longer serves. An install made them in its own alias
+/// dirs, and nothing relinks or removes a name the registry dropped, so each
+/// stayed behind as a full copy of an old build (the two deletion helpers
+/// retired by #1461, were 115 MB apiece; #1954). Append a name when the
+/// registry drops it.
+pub const RETIRED_ALIASES: &[&str] = &["rm-file", "rm-dir"]; // legacy-deletion-purge: allow
+
+/// Remove [`RETIRED_ALIASES`] from one of clud's own alias dirs. Best effort.
+fn purge_retired_aliases(dir: &Path) {
+    for name in RETIRED_ALIASES {
+        let _ = crate::rm_tool::remove_link_or_file(&dir.join(shim_registry::file_name(name)));
+    }
+}
+
 fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
+    purge_retired_aliases(dir);
     // Only known legacy aliases are ours to remove. In particular, do not
     // delete another concurrent installer's NamedTempFile before it persists.
     for alias in alias_names() {
@@ -254,7 +259,7 @@ fn install_rm_with(
 /// start and the first one after an upgrade relinks the dir. Best effort and
 /// silent: a failure leaves the dir for the next launch.
 pub fn refresh_running_session_aliases() {
-    let (Some(home), Ok(exe)) = (home_dir(), std::env::current_exe()) else {
+    let (Some(home), Ok(exe)) = (crate::home::user_home(), std::env::current_exe()) else {
         return;
     };
     let var = |key: &str| std::env::var_os(key);
@@ -364,6 +369,30 @@ mod tests {
         let staged = path.with_extension("new");
         fs::write(&staged, content).unwrap();
         fs::rename(&staged, path).unwrap();
+    }
+
+    /// #1954: the retired deletion helpers outlived their retirement as old-build
+    /// copies in both alias dirs, because only current names were managed.
+    #[test]
+    fn retired_aliases_are_purged_from_both_alias_dirs() {
+        let (tmp, src) = make_source(b"clud");
+        let home = tmp.path().join("home");
+        let shims = home.join(SHIMS_SUBDIR);
+        let session = home.join(shim_registry::SESSION_SUBDIR);
+        for dir in [&shims, &session] {
+            fs::create_dir_all(dir).unwrap();
+            for name in RETIRED_ALIASES {
+                fs::write(dir.join(shim_registry::file_name(name)), b"old build").unwrap();
+            }
+        }
+        extract_shims_at(&home, &src).unwrap();
+        install_rm_at(&home, &src).unwrap();
+        for dir in [&shims, &session] {
+            for name in RETIRED_ALIASES {
+                let path = dir.join(shim_registry::file_name(name));
+                assert!(!path.exists(), "{} survived", path.display());
+            }
+        }
     }
 
     /// Replace an alias the way an attacker or a bad tool would: unlink and

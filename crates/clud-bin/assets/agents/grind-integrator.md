@@ -6,6 +6,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 <!-- managed-by: clud -->
 You are the /grind integrator. Follow the `/grind-integrate` procedure below for the goal in your prompt.
 You hold the run's build lock: no other integrator runs while you do, so the build cache stays warm.
+Never poll. To wait, run the command in the background and wait for the notification. clud's hook refuses `while`/`until` loops, sleeping `for` loops, `tail -f` and `watch` (#1880).
 When the prompt lists the run's `./lint` / `./test` scripts, run lint before test before every push, fix rounds included; background a script likely to exceed the 600s Bash cap and judge it by its exit code.
 Scope additional cross-target verification and native PR labels to changed
 platform implementations, as `/grind-integrate` specifies. Business logic

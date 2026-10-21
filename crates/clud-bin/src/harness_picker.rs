@@ -95,7 +95,7 @@ pub fn credential_snapshot() -> CredentialSnapshot {
     } else {
         AuthState::KnownNo
     };
-    let clud_codex = dirs::home_dir()
+    let clud_codex = crate::home::user_home()
         .map(|home| crate::codex_auth::load_at(&home))
         .unwrap_or(Err("home directory unavailable".to_string()));
     let codex = if credential_env_present(&["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"])

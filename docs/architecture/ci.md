@@ -71,6 +71,25 @@ checkout (uncommitted work included), so each run tests exactly the tree you
 have. Local CI is a pre-push check within the [budget below](#local-ci-budget),
 not the edit loop: the PR's GitHub Actions run is the CI of record.
 
+**Prefer `clud ci`** (#1839). It wraps the same bosn run, waits, and prints a
+one-line verdict plus only the failing steps' diagnostics (rustc/clippy errors
+with their `-->` location, failing tests and panics, ruff findings),
+ANSI-stripped. An `incomplete` run or engine error is reported as a failed run
+even when the observed jobs succeeded; missing coverage or failed cleanup
+cannot supply a pass. This diagnostic command does not issue attestations:
+the shared CI tool verifies eligibility separately. A stale bosn daemon gets
+a one-line fix instead of a refusal.
+
+```bash
+clud ci                                          # the PR plan
+clud ci static-checks                            # formatting, ruff, guards
+clud ci lint-linux-x64                           # clippy and doc-tests
+clud ci test-linux-x64-unit --filter openrouter_free   # plus matching test lines
+clud ci test-linux-x64-unit --json               # verdict, failing steps, diagnostics
+```
+
+The raw bosn commands below remain available:
+
 ```bash
 docker info
 bosn ci run --workspace . --trigger pr --wait              # the PR's jobs: static, build, clippy, dylint, Linux unit
@@ -203,20 +222,35 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
-git push --force-with-lease
+uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate push --sha <stamped-head>
 ```
 
-The gate refuses an uncommitted tree. On a cold commit it runs the same full
-`bosn ci run --workspace . --trigger pr --wait` plan through
-[`ci/local_gate.py`](../../ci/local_gate.py). The wrapper checks Bosn's
-structured result for the exact clean head and workspace, the act engine,
-and act2.3 or later (available in bosn 0.1.12). It requires each routine job's
-successful `Main` execution steps, all three unit shards, and `CI OK` before
-issuing a tree-bound receipt. Boolean status codes and malformed job trees
-cannot prove a pass. Gate commands use `uv run --no-project --isolated` so
-an ancestor checkout's virtual environment cannot select older gate tools.
-That receipt seeds separate static, Dylint, Clippy,
+The gate refuses an uncommitted tree. On a cold commit it invokes
+`bosn ci run --workspace . --trigger pr --wait --json` directly. Clud declares
+workflow selections and lane mappings in `local-gate.toml`; the shared ci-lint
+resolver derives checks from the original workflow source and validates the
+terminal Bosn report. No clud executable or repository receipt parser is
+required. Qualified caller/matrix identities distinguish all three unit
+shards and repeated reusable build jobs. Missing, failed, ambiguous or
+incompatible evidence cannot produce a lane pass or attestation.
+The shared verifier queries the running Bosn daemon's effective execution
+pins before reuse and publication. Every result key and terminal receipt
+must match that profile. Hosted skips obey the PR base's lane age limits
+(default 24 hours); reuse keeps the original execution timestamp.
+The provider must emit qualified identities for skipped jobs as well as
+completed jobs; a missing identity refuses proof.
+
+The [ci.yml#362](https://github.com/zackees/ci.yml/issues/362) pilot uses
+public Bosn 0.1.18 and act2.15 with verified execution pins. Clud PR #1886
+proved the generic local gate, unchanged local reuse, exact publication and
+five hosted routine-job skips in run `37609104548`. This enrollment uses the
+shared verifier correction from ci.yml PR #382; no Clud receipt parser is
+part of enforcement.
+The legacy receipt script and its existing tests remain during qualification;
+they are outside the generic gate's execution path.
+
+The validated report seeds separate static, Dylint, Clippy,
 build, and unit cache entries. Root Python test changes invalidate static
 and unit while retaining the Rust-only Dylint, Clippy, and build passes;
 other changes conservatively invalidate every lane. With fewer than three
@@ -227,8 +261,11 @@ message (tree unchanged) with a `Local-Gate:` trailer and one stamped
 gate attestation` step (`ci-lint local-gate verify --trust`, in the `static`
 job, displayed as `CI mode`) then sets `skip_<job>` for `static-checks`,
 `dylint`, `lint-linux-x64`, `build-linux-x64` and `test-linux-x64-unit`, and
-`CI OK` counts each of those skips as success. The PR's critical path drops
-from about 5.5 minutes to the mode job's ~10 s.
+`CI OK` calls the same pinned `ci-lint gate` to independently verify those
+skips against the actual commit and PR base policy. Its `--workflow-plan
+ci.yml` selection derives required jobs from this workflow's conditions
+and dependencies; there is no second list of mode-specific result mappings.
+Missing or invalid proof cannot credit a skipped required job.
 
 The mode job installs nothing beyond the runner's cached Python
 ([zackees/ci.yml GEN-018](https://github.com/zackees/ci.yml/blob/main/docs/policy-general.md)).
@@ -237,16 +274,22 @@ than ahead of them, so an unattested PR's build starts ~25 s sooner. The cost
 is that a lint failure no longer cancels the build lanes before they start;
 `CI OK` still fails.
 
-It fails closed. Every lane runs remotely, as before, when the head is
-unattested or its stamp no longer matches (any amend or rebase after the gate
-ran), on a fork or a non-writer author, with a `ci-test`/`ci-windows`/`ci-full`
-label, when the PR touches a surface (`ci/**`, either declaration, the
-workflows and the local actions they use), and for the 1-in-10 audit sample.
-The policy is read from the PR's **base**, so a PR cannot loosen its own gate.
-Pushes to `main` never skip (the post-merge catch), and release dispatches
-never read attestations. The gate runs in `shadow` mode: an unattested head is
-reported, never failed. Plain `bosn ci run` remains valid; it just earns no
-skip.
+The prerequisite and skip decisions are separate. Once this declaration
+is on the PR base, `mode = "enforce"` refuses an ordinary head without a
+valid tree-bound local pass before the dependent remote lanes start. The
+base owns mode and author exemptions; a head cannot weaken either. An
+unavailable base commit or unreadable/malformed policy refuses verification.
+A readable base with no gate declaration permits initial enrollment. The default bot
+authors remain exempt from the prerequisite and receive remote coverage.
+
+Passing the prerequisite does not guarantee remote skips. Forks, non-writer
+authors, expanded `ci-test`/`ci-windows`/`ci-full` coverage, changes to CI
+surfaces and the 1-in-10 audit sample run the selected remote lanes. A fork
+still needs a local pass unless its author is exempt. Native-only lanes stay
+remote. ACT replay always executes its checks before producing proof.
+Default-branch pushes use the separate verified PR-tree reuse mechanism;
+release dispatches do not consume local attestations. Plain `bosn ci run`
+remains useful for focused checks but does not stamp or publish a pass.
 
 #### Validation evidence (2026-10-03)
 
@@ -279,21 +322,32 @@ executed. Require each actual shard and `CI OK` to pass.
 ### Default-branch reuse evidence (GEN-021)
 
 The `CI mode` job probes `main` pushes with the pinned checker's
-`ci-lint reuse-check --mode shadow` ([zackees/ci.yml#157](https://github.com/zackees/ci.yml/issues/157)).
-It compares the merged tree with its associated PR head and requires a recent
-successful PR run containing all seven routine check cells: static checks,
-Dylint, Clippy, build, and the three unit shards. Attested PR jobs that were
-skipped do not count as successful executed jobs for this probe.
+`ci-lint reuse-check --mode enforce`. It compares the merged tree with its
+associated PR head and requires a successful PR run no older than 12 hours
+containing all seven routine check cells: static checks, Dylint, Clippy,
+build, and the three unit shards. Attested PR jobs that were skipped do not
+count as successful executed jobs for this probe.
 
-The mode job records the reason, tree, proving PR/run and API-call count in
-its summary; `CI OK` repeats the provenance. No job condition consumes this
-decision, so all selected `main` jobs still run. API errors or missing proof
-report no reuse. PR and release events do not run the probe.
+A verified decision skips only Static checks, Clippy and the Linux unit
+caller. Dylint and Build linux-x64 still run as default-branch cache writers.
+API errors or missing proof produce no reuse. PR and release events do not
+run the probe.
 
-Promotion to skipping requires the upstream measurement window (at least
-14 days and 100 decisive runs, with no unexplained false reuse), plus a
-separate implementation of the enforced gate. Compare `reuse-report` against
-the actual executed job names before promotion; renames fail closed.
+The mode job exports the existing schema-1 decision as `reuse_evidence`,
+using `reuse-check`'s `evidence_json` output. `CI OK` supplies this document
+to `ci-lint gate --default-branch-reuse` alongside the actual needs results
+and GitHub event. The shared consumer derives every selected reusable leaf's
+hosted name from workflow source, then verifies distinct proving job IDs
+against their live name, head SHA, run ID and successful conclusion. Missing,
+ambiguous or mismatched evidence refuses the skip. Local attestation skips
+use a separate proof path through `--attested-workflow ci.yml`.
+
+The mode job and `CI OK` record the reason, tree and proving PR/run in their
+summaries. Default-branch reuse enforcement predates PR #1887, which
+introduced the enforced local prerequisite. PR #1889 migrated the final
+consumer to the shared verifier and passed hosted run `37699034850` with
+all selected jobs executing because its CI surfaces changed. An ordinary
+attested follow-up still needs to prove the shared consumer's hosted skips.
 
 ### Manual Windows probes (ignored tests)
 
@@ -466,8 +520,9 @@ happened. So:
 #### `ci-windows` keeps the routine Linux lanes (#1652, decided)
 
 `windows` mode runs every `minimal` lane on the same run, and `CI OK`
-requires them (`for result in $MINIMAL $WINDOWS`). So a green `CI OK` always
-means the routine Linux lanes passed on that head SHA. Rejected options:
+requires them through the shared verifier's source-derived workflow plan.
+A green `CI OK` requires each selected lane to have passed on that head SHA
+or carry a valid independently verified proof. Rejected options:
 
 - Look up another run for the same SHA from `CI OK`. That adds a GitHub API
   dependency and ordering races: the other run may still be queued, skipped

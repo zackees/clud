@@ -106,7 +106,7 @@ struct StatusUsageState {
 
 type SharedStatusUsage = Arc<Mutex<StatusUsageState>>;
 
-const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
+pub(crate) const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
 pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
 
 /// A launch-scoped multiplexer configuration. Secret material is intentionally
@@ -125,6 +125,10 @@ pub struct UnifiedGatewayConfig {
     /// Ordered fallback routes. Empty by default, so a launch that did not ask
     /// for failover keeps exactly today's behavior and today's spend.
     failover: FailoverLadder,
+    /// `--provider-only` (#1863): the OpenRouter upstream routing object every
+    /// request forwarded to OpenRouter must carry. `None` leaves OpenRouter's
+    /// own routing alone, which is the pre-#1863 behavior everywhere.
+    upstream_routing: Option<crate::route_plan::ProviderRouting>,
     /// Which routes can serve right now. Shared across connections because a
     /// route drained on one turn must stay drained for the next one, and
     /// launch-scoped because a wedged account in this session must never
@@ -140,6 +144,7 @@ impl UnifiedGatewayConfig {
             codex_available,
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
             failover: FailoverLadder::default(),
+            upstream_routing: None,
             route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
         .with_route(ModelProvider::DeepSeek, deepseek_api_key)
@@ -215,6 +220,37 @@ impl UnifiedGatewayConfig {
     pub fn with_failover(mut self, failover: FailoverLadder) -> Self {
         self.failover = failover;
         self
+    }
+
+    /// The upstream routing object this gateway must inject (#1863).
+    pub fn with_upstream_routing(
+        mut self,
+        routing: Option<crate::route_plan::ProviderRouting>,
+    ) -> Self {
+        self.upstream_routing = routing;
+        self
+    }
+
+    /// The body to forward for `provider`: the client's own bytes, or -- for an
+    /// OpenRouter route with a `--provider-only` pin -- the same document with
+    /// `provider` merged in. A body that is not a JSON object is forwarded
+    /// untouched rather than refused: the pin is a routing hint, not a
+    /// validation gate, and the upstream's own error is more useful.
+    fn routed_body(&self, provider: ModelProvider, body: &[u8]) -> Option<Vec<u8>> {
+        if provider != ModelProvider::OpenRouter {
+            return None;
+        }
+        let routing = self.upstream_routing.as_ref()?;
+        let mut document: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(body).ok()?;
+        document.insert(
+            "provider".to_string(),
+            serde_json::json!({
+                "only": routing.only,
+                "allow_fallbacks": routing.allow_fallbacks,
+            }),
+        );
+        serde_json::to_vec(&serde_json::Value::Object(document)).ok()
     }
 
     /// Point every unified proxy destination at the deterministic foreground
@@ -1961,7 +1997,7 @@ impl UnifiedAttempt {
         };
         Self {
             provider: entry.provider,
-            route: conversation_route_for(entry.provider),
+            route: crate::route_plan::conversation_route(entry.provider),
             model: Some(
                 resolved
                     .codex_effort_suffix
@@ -2017,6 +2053,9 @@ fn dispatch_unified_attempt(
             let route = unified
                 .route_for(provider)
                 .expect("guarded by route_for above");
+            // #1863: the gateway can honour `--provider-only` itself, because
+            // it owns the request path.
+            let routed = unified.routed_body(provider, payload);
             serve_unified_anthropic_proxy(
                 stream,
                 turn.conversations,
@@ -2024,7 +2063,7 @@ fn dispatch_unified_attempt(
                 attempt.route,
                 &route.base_url,
                 "/v1/messages",
-                payload,
+                routed.as_deref().unwrap_or(payload),
                 turn.headers,
                 Some(&route.api_key),
                 config.stream_idle_timeout,
@@ -2130,6 +2169,13 @@ fn finish_without_failover(
         Some(route) => (route.base_url.as_str(), Some(route.api_key.as_str())),
         None => (unified.anthropic_base_url.as_str(), None),
     };
+    let provider = match route {
+        ConversationRoute::DeepSeek => ModelProvider::DeepSeek,
+        ConversationRoute::Kimi => ModelProvider::Kimi,
+        ConversationRoute::OpenRouter => ModelProvider::OpenRouter,
+        ConversationRoute::Claude | ConversationRoute::Codex => ModelProvider::Claude,
+    };
+    let routed = unified.routed_body(provider, payload);
     serve_unified_anthropic_proxy(
         stream,
         conversations,
@@ -2137,7 +2183,7 @@ fn finish_without_failover(
         route,
         base_url,
         "/v1/messages",
-        payload,
+        routed.as_deref().unwrap_or(payload),
         headers,
         key,
         config.stream_idle_timeout,
@@ -2360,18 +2406,6 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
         .filter(|entry| config.provider_available(entry.provider))
         .filter_map(|entry| entry.discovery_id)
         .collect()
-}
-
-/// The conversation route a catalog provider is served on. Every route
-/// change starts a new history epoch, so each provider needs its own.
-fn conversation_route_for(provider: ModelProvider) -> ConversationRoute {
-    match provider {
-        ModelProvider::Claude => ConversationRoute::Claude,
-        ModelProvider::Codex => ConversationRoute::Codex,
-        ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
-        ModelProvider::Kimi => ConversationRoute::Kimi,
-        ModelProvider::OpenRouter => ConversationRoute::OpenRouter,
-    }
 }
 
 /// Proxy an Anthropic-compatible Messages response without buffering its body.
@@ -5539,6 +5573,30 @@ Connection: close
         );
     }
 
+    #[test]
+    fn sol_6_1_picker_and_wire_ids_reach_codex_without_a_launch_pin() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let catalog = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert!(catalog.contains("clud-claude-codex-sol-6-1"), "{catalog}");
+        for selector in ["gpt-6.1-sol", "codex-sol-6.1", "clud-claude-codex-sol-6-1"] {
+            let body = PROBE_BODY.replace("claude-x", &format!("{selector}@high"));
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+            );
+            assert_eq!(status(&response), 200, "{selector}: {response}");
+            let captured = upstream.requests().pop().unwrap();
+            let sent: serde_json::Value = serde_json::from_str(captured_body(&captured)).unwrap();
+            assert_eq!(sent["model"], "gpt-6.1-sol");
+            assert_eq!(sent["reasoning"]["effort"], "high");
+        }
+        assert_eq!(upstream.requests().len(), 3);
+    }
+
     /// Issue #1022: an uncataloged full ID the user pinned at launch reaches
     /// upstream verbatim.
     ///
@@ -6195,6 +6253,7 @@ Connection: close
                 "clud-claude-codex-sol",
                 "clud-claude-codex-terra",
                 "clud-claude-codex-luna",
+                "clud-claude-codex-sol-6-1",
                 "clud-claude-deepseek-v4-pro-0813",
                 "clud-claude-deepseek-flash",
             ],
@@ -6208,6 +6267,7 @@ Connection: close
                 "Codex Sol (OpenAI)",
                 "Codex Terra (OpenAI)",
                 "Codex Luna (OpenAI)",
+                "Codex Sol 6.1 (OpenAI)",
                 "DeepSeek V4 Pro 0813",
                 "DeepSeek V4.1 Flash",
             ]
@@ -6268,7 +6328,7 @@ Connection: close
         clippy::cognitive_complexity,
         reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
     )]
-    fn unified_routes_all_five_ids_with_provider_credential_isolation() {
+    fn unified_routes_all_six_ids_with_provider_credential_isolation() {
         let codex = FakeResponses::start();
         let claude = FakeResponses::start();
         let deepseek = FakeResponses::start();
@@ -6295,6 +6355,7 @@ Connection: close
             "clud-claude-codex-sol",
             "clud-claude-codex-terra",
             "clud-claude-codex-luna",
+            "clud-claude-codex-sol-6-1",
             "clud-claude-deepseek-v4-pro-0813",
             "clud-claude-deepseek-flash",
         ] {
@@ -6321,11 +6382,11 @@ Connection: close
         assert!(!claude_request.contains("clud-test-upstream-key"));
 
         let codex_requests = codex.requests();
-        assert_eq!(codex_requests.len(), 3);
+        assert_eq!(codex_requests.len(), 4);
         for (raw, wire_id) in
             codex_requests
                 .iter()
-                .zip(["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna"])
+                .zip(["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-6.1-sol"])
         {
             assert!(raw.starts_with("POST /v1/responses "));
             assert!(raw.contains(wire_id), "{raw}");
@@ -8267,13 +8328,30 @@ Connection: close
             "listener shutdown must tear down a queued socket: {queued_result:?}"
         );
         bridge.shutdown().unwrap();
-        assert!(TcpStream::connect(addr).is_err());
 
-        let addr_after_drop = {
+        // Probing a released ephemeral port is racy: a test running in
+        // parallel can bind it, so the connect succeeds (#1929). Prove drop
+        // closes the listener through a socket it had already accepted.
+        let mut held = {
             let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
-            bridge.socket_addr()
+            TcpStream::connect(bridge.socket_addr()).unwrap()
         };
-        assert!(TcpStream::connect(addr_after_drop).is_err());
+        // macOS refuses setsockopt with EINVAL once the peer has already
+        // closed the socket; the read below still observes the close.
+        let _ = held.set_read_timeout(Some(Duration::from_secs(5)));
+        let held_result = held.read(&mut byte);
+        assert!(
+            matches!(held_result, Ok(0))
+                || held_result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                    )
+                }),
+            "dropping the bridge must close its sockets: {held_result:?}"
+        );
     }
 
     #[test]

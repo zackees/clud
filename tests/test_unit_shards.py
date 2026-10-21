@@ -95,6 +95,15 @@ def test_unrecorded_files_are_weighted_by_test_count() -> None:
     assert big == {"tests/test_big.py"}  # the rest balance against it
 
 
+@pytest.mark.parametrize(
+    "body", ["[]", "null", '{"tests/test_a.py": null, "tests/test_b.py": true}']
+)
+def test_malformed_weights_fall_back_to_test_counts(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "weights.json"
+    path.write_text(body, encoding="utf-8")
+    assert load_weights(path) == {}
+
+
 def test_recorded_weights_beat_test_counts() -> None:
     counts = {"tests/test_slow.py": 1, "tests/test_fast1.py": 50, "tests/test_fast2.py": 50}
     weights = {"tests/test_slow.py": 100.0, "tests/test_fast1.py": 1.0, "tests/test_fast2.py": 1.0}

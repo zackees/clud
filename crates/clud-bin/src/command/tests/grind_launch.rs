@@ -131,3 +131,130 @@ fn grind_through_claude_harness_seeds_native_loop_interactively() {
         prompt.starts_with("/grind ") && prompt.contains("zackees/clud/issues")
     }));
 }
+
+/// `clud --<provider>` routed directly through the Claude harness.
+fn third_party_claude_route(provider: ModelProvider) -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
+        model_provider: provider,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: provider.native_harness(),
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
+/// Every non-Anthropic provider the CLI routes through the Claude harness,
+/// paired with its CLI shortcut flag.
+fn non_anthropic_claude_routes() -> Vec<(ModelProvider, &'static str)> {
+    let mut routes: Vec<(ModelProvider, &'static str)> =
+        crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS
+            .iter()
+            .map(|descriptor| (descriptor.provider, descriptor.cli_flag))
+            .collect();
+    if !routes
+        .iter()
+        .any(|(provider, _)| *provider == ModelProvider::OpenRouter)
+    {
+        routes.push((ModelProvider::OpenRouter, "--openrouter"));
+    }
+    routes
+}
+
+/// True when the command suppresses the Workflow tool, either as the value
+/// of a `--disallowedTools` flag or inline as `--disallowedTools=...`.
+fn plan_disallows_workflow(command: &[String]) -> bool {
+    command.iter().enumerate().any(|(index, arg)| {
+        let after_disallowed = index > 0 && command[index - 1] == "--disallowedTools";
+        (after_disallowed || arg.starts_with("--disallowedTools")) && arg.contains("Workflow")
+    })
+}
+
+/// #1813: `/grind` on a gateway route must still get the Workflow tool. The
+/// router starts the workflow and ends its turn; if the Workflow tool never
+/// fires there is no task notification to wake it, so the run stalls with no
+/// error at all. Pin, for every non-Anthropic provider, that the native
+/// harness is Claude, that the grind gate admits the route, and that the
+/// interactive plan neither goes headless nor disallows `Workflow`.
+#[test]
+fn grind_launches_the_workflow_session_on_every_non_anthropic_claude_route() {
+    let url = "https://github.com/zackees/clud/issues";
+    for (provider, flag) in non_anthropic_claude_routes() {
+        assert_eq!(
+            provider.native_harness(),
+            Backend::Claude,
+            "{provider}: /grind needs the Workflow tool, which only the Claude harness has"
+        );
+        let args = parse(&["clud", flag, "grind", url]);
+        let target = third_party_claude_route(provider);
+        assert_eq!(
+            grind_launch_error(&args, target),
+            None,
+            "{provider}: grind must launch on a Claude-harness gateway route"
+        );
+        let plan = build_launch_plan_for_target(&args, target, "claude");
+        assert!(
+            !plan.command.iter().any(|arg| arg == "-p"),
+            "{provider}: grind must not go headless; command={:?}",
+            plan.command
+        );
+        assert_eq!(plan.launch_mode, console_launch_mode(), "{provider}");
+        assert_eq!(plan.iterations, 1, "{provider}");
+        assert!(plan.loop_markers.is_none(), "{provider}");
+        assert!(
+            plan.command
+                .last()
+                .is_some_and(|prompt| prompt.starts_with("/grind ") && prompt.contains(url)),
+            "{provider}: last arg must seed /grind with the URL; command={:?}",
+            plan.command
+        );
+        assert!(
+            !plan_disallows_workflow(&plan.command),
+            "{provider}: the Workflow tool must not be disallowed (#1813 silent stall); \
+             command={:?}",
+            plan.command
+        );
+    }
+}
+
+/// #1808: the OpenRouter route clears the Claude-harness gate, but the
+/// session-shape refusals still apply to it: `/grind` needs one foreground
+/// interactive PTY whatever provider the session talks to.
+#[test]
+fn grind_on_openrouter_still_refuses_detached_and_subprocess_sessions() {
+    let url = "https://github.com/zackees/clud/issues";
+    let target = third_party_claude_route(ModelProvider::OpenRouter);
+    let args = parse(&["clud", "--openrouter", "grind", url]);
+    assert_eq!(grind_launch_error(&args, target), None);
+    for (flag, needle) in [
+        ("--detach", "foreground interactive PTY"),
+        ("--subprocess", "interactive PTY"),
+    ] {
+        let args = parse(&["clud", "--openrouter", flag, "grind", url]);
+        let error = grind_launch_error(&args, target)
+            .unwrap_or_else(|| panic!("{flag}: OpenRouter grind must be refused"));
+        assert!(error.contains(needle), "{flag}: {error}");
+    }
+}
+
+/// #1809: the OpenRouter `/grind` session is a plain interactive harness
+/// session: no headless flag, no clud-side repetition, and no stream-json
+/// progress rendering.
+#[test]
+fn grind_on_openrouter_boots_one_plain_interactive_session() {
+    let url = "https://github.com/zackees/clud/issues/1807";
+    let args = parse(&["clud", "--openrouter", "grind", url]);
+    let plan = build_launch_plan_for_target(
+        &args,
+        third_party_claude_route(ModelProvider::OpenRouter),
+        "claude",
+    );
+    let seed = format!("/grind {url}");
+    assert_eq!(plan.command.last(), Some(&seed));
+    assert!(!plan.command.contains(&"-p".to_string()));
+    assert!(!plan.command.contains(&"exec".to_string()));
+    assert!(!plan.stream_json_progress);
+    assert!(plan.repeat_schedule.is_none());
+    assert!(plan.loop_markers.is_none());
+    assert_eq!(plan.iterations, 1);
+}

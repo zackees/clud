@@ -87,6 +87,13 @@ pub(super) fn ensure_downloaded_in_background(done_flag: Arc<AtomicBool>) {
 /// temp file alongside, verifies SHA-256, then atomic-renames.
 /// Idempotent: succeeds without downloading if a valid copy
 /// already exists.
+fn download_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(60))
+        .build()
+}
+
 fn download_to_cache() -> Result<PathBuf, String> {
     let final_path = default_cache_path();
     if final_path.is_file() && verify_sha256(&final_path).unwrap_or(false) {
@@ -106,8 +113,11 @@ fn download_to_cache() -> Result<PathBuf, String> {
         final_path
     );
 
-    let response = ureq::get(MODEL_URL)
-        .timeout(Duration::from_secs(300))
+    // Connect and per-read stall timeouts, not an overall deadline: ureq's
+    // `timeout` also covers the body, so a ~466 MB download on a link slower
+    // than ~12 Mbit/s always failed partway (#1917).
+    let response = download_agent()
+        .get(MODEL_URL)
         .call()
         .map_err(|err| format!("HTTP error fetching {MODEL_URL}: {err}"))?;
     let total_bytes: Option<u64> = response
@@ -186,4 +196,18 @@ pub(super) fn verify_sha256(path: &Path) -> io::Result<bool> {
 /// the auto-download has finished without joining.
 pub(super) fn fresh_completion_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn model_download_has_no_overall_deadline() {
+        // An overall request timeout also bounds the body read, which a large
+        // model on a slow link cannot meet (#1917). Only connect/read stall
+        // timeouts belong on this download.
+        let source = include_str!("model.rs");
+        let overall = concat!(".timeout", "(Duration");
+        assert!(!source.contains(overall));
+        assert!(source.contains(".timeout_read("));
+    }
 }

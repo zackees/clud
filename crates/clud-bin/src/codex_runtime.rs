@@ -23,11 +23,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 fn cache_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(CACHE_PATH))
+    crate::home::user_home().map(|home| home.join(CACHE_PATH))
 }
 
 fn last_good_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(LAST_GOOD_PATH))
+    crate::home::user_home().map(|home| home.join(LAST_GOOD_PATH))
 }
 
 fn read_cached(path: &Path) -> Option<Manifest> {

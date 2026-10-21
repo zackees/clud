@@ -70,9 +70,40 @@ That route launches DeepSeek *through Claude* without selecting native `dsh`.
 Unknown auth status keeps the existing picker/default behavior. `clud run`
 normalizes to the same path; explicit flags, saved routing, and dry runs win.
 
-DeepSeek Harness is PATH-only in this first integration. clud does not install
-the developer preview automatically; an explicit missing selection reports
-the upstream `npx @deepseek-ai/dsh web` guidance.
+## DeepSeek Harness install and providers
+
+Issue #1829 makes `dsh` a first-class install target ([DD-160](../DESIGN_DECISIONS.md#dd-160-deepseek-harness-is-a-clud-managed-npm-prefix-driven-by-a-launch-overlay)).
+`--harness dsh` is an alias of `--harness deepseek`. `src/dsh_harness.rs` owns
+the contract:
+
+- **Install.** Discovery checks PATH first, then
+  `~/.clud/harnesses/dsh/<version>/node_modules/.bin/dsh` (`dsh.cmd` on
+  Windows). A user-managed `dsh` on PATH always wins and is never touched. A
+  missing `dsh` on a terminal gets the same `[y/N]` prompt as Claude and Codex
+  (default No); non-interactive launches name `clud dsh-update`, which installs
+  or confirms the reviewed release explicitly. The install runs
+  `npm install --prefix <staging>` for the pinned `@deepseek-ai/dsh` and a
+  pinned private `node` package, verifies `dsh --version`, and renames the
+  staging directory into place, so a failure leaves no partial prefix. Only npm
+  is required from the system; global npm, the system Node, shell startup files
+  and `$DSH_HOME` are never written.
+- **Runtime.** A managed `dsh` runs with its prefix's `.bin` first on PATH, so
+  it boots on the private Node 24 even where the system has Node 20 (below
+  dsh's floor) or Node 26 (which fails dsh's native addon).
+- **Keys.** `ForegroundRuntime::start` hands the child `DEEPSEEK_API_KEY`, or
+  `OPENROUTER_API_KEY` for an OpenRouter launch, from clud's vault. An ambient
+  value wins. Keys go only into the child-local environment, never into dsh's
+  `.credentials.yaml`. The credential preflight runs for OpenRouter and for an
+  explicit `--deepseek`; a bare `--harness dsh` still runs on a key dsh stores
+  itself.
+- **OpenRouter.** `clud --openrouter --harness dsh` appends
+  `--patch ~/.clud/harnesses/dsh/patches/openrouter-<model>.yml`, which the
+  runtime writes before spawn. The overlay makes dsh's built-in `openrouter`
+  route active with `api: anthropic-messages`, the descriptor's
+  `https://openrouter.ai/api` base URL, `apiKeyEnv: OPENROUTER_API_KEY`, and
+  the resolved model declared explicitly (so an ID outside dsh's catalog still
+  resolves). `--model` and the saved OpenRouter model reach dsh through the
+  ordinary OpenRouter selection. The user's own dsh profiles are never edited.
 
 ## Foreground Codex-through-Claude bridge
 
@@ -635,6 +666,51 @@ best-effort. OpenRouter through the Codex harness and OpenRouter in clud's
 unified gateway are separate scopes because they use different protocol and
 routing contracts. Clud does not delete Claude Code-owned cached login state;
 users encountering an auth conflict must run `/logout` once in Claude Code.
+
+## `clud video`: video-use as a session-scoped plugin (#1851)
+
+`clud video [DIR] [--update]` (`video.rs`) runs the third-party
+[browser-use/video-use](https://github.com/browser-use/video-use) skill in one
+Claude session and nowhere else
+([DD-163](../DESIGN_DECISIONS.md#dd-163-video-use-is-a-session-scoped-plugin-pinned-to-a-reviewed-sha)).
+
+- **Managed checkout.** `~/.clud/extern/video-use/<VIDEO_USE_SHA>/`: a
+  `git fetch --depth 1` of the pinned commit into a sibling staging dir,
+  verified (`HEAD` equals the pin, `SKILL.md` present, `uv sync` succeeded,
+  then a `.clud-verified` marker), and renamed into place. Python deps live in
+  that checkout's private `.venv`. `--update` forces a reinstall and exits.
+- **Plugin wrapper.** `~/.clud/extern/video-use-plugin/` holds
+  `.claude-plugin/plugin.json` (`name: clud-video-use`) and
+  `skills/video-use`, a symlink to the checkout (a copy without `.git` where
+  links fail). Claude Code discovers plugin skills at
+  `<plugin>/skills/<name>/SKILL.md`; `claude plugin validate` accepts the
+  layout, and a session follows the symlink.
+- **Launch.** `command/builder.rs` adds `--plugin-dir <wrapper>` and a
+  `/video-use ...` seed prompt (inventory, propose, wait for the user's OK)
+  only for `Command::Video`; a plain launch has neither. `video_launch_error`
+  refuses non-Claude harnesses, because `--plugin-dir` is a Claude Code flag.
+  `DIR` becomes the session's working directory.
+- **Preconditions** (real launches only, after the `--dry-run` exit, so a dry
+  run installs nothing and reads no vault): `ffmpeg`/`ffprobe` on PATH (one
+  message with a platform install hint; clud never runs a package manager),
+  the managed install, and the ElevenLabs key.
+- **Key.** An ambient `ELEVENLABS_API_KEY` wins; then the native vault at
+  `clud.elevenlabs/api-key-v1` (the debug-only test vault in tests); then, on
+  a TTY, one masked prompt whose answer is stored; otherwise an error. clud
+  sets the key in its own environment immediately before spawning the
+  harness, which inherits it; it never appears in the plan or `--dry-run`.
+- **Never automatic.** The upstream skill is never written to
+  `~/.claude/skills` or `~/.codex/skills`.
+- **On demand: `/video-use` (#1866).** A second entry point for an ordinary
+  session: the bundled bridge skill `assets/skills/video-use/` is
+  explicit-only (`disable-model-invocation: true` for Claude, whose docs say
+  the description then stays out of context; `allow_implicit_invocation:
+  false` in `agents/openai.yaml` for Codex), so it costs no context until the
+  user types `/video-use`. It runs `clud video --path`, which installs the
+  pinned checkout if needed and prints it, then follows that checkout's
+  `SKILL.md`. The key comes from an ambient `ELEVENLABS_API_KEY`; otherwise
+  the user runs `clud video` once. See
+  [DD-164](../DESIGN_DECISIONS.md#dd-164-video-use-is-an-explicit-only-bundled-bridge-skill).
 
 ## Ownership
 

@@ -40,8 +40,9 @@
 //!                               // rustdoc through soldr (default: true when
 //!                               // a settings file is present).
 //!     "install":   true,        // auto-install soldr if missing (default: true).
-//!     "version":   "0.7.55"     // optional minimum version (never a
-//!                               // downgrade target); absent = latest.
+//!     "version":   "0.7.55"     // IGNORED with a yellow warning: soldr
+//!                               // cannot be pinned (DD-173); the installed
+//!                               // soldr is used and kept at latest.
 //!   },
 //!   "bash": {
 //!     "block_cd": "auto"        // "auto" | true | false — pin the session
@@ -921,7 +922,7 @@ fn discover_repo_clud_config_raw(start: &Path) -> Option<RawRepoCludConfig> {
 }
 
 fn discover_user_clud_config_raw() -> Option<RawRepoCludConfig> {
-    let home = dirs::home_dir()?;
+    let home = crate::home::user_home()?;
     let candidate = home.join(".clud").join("settings.json");
     if !candidate.is_file() {
         return None;

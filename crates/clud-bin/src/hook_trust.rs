@@ -267,7 +267,13 @@ pub fn valid_name(name: &str) -> bool {
 #[must_use]
 pub fn origin_of(repo_root: &Path) -> Option<String> {
     let git_dir = git_dir_of(repo_root)?;
-    let config_path = git_dir.join("config");
+    // A linked worktree's gitdir holds no `config`; it names the shared
+    // repository dir in `commondir`, relative to itself (#1904).
+    let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|text| git_dir.join(text.trim()))
+        .unwrap_or(git_dir);
+    let config_path = common_dir.join("config");
     let text = std::fs::read_to_string(&config_path).ok()?;
     remote_origin_url(&text)
 }
@@ -313,7 +319,10 @@ fn remote_origin_url(text: &str) -> Option<String> {
         if !in_origin_section {
             continue;
         }
-        let (key, value) = line.split_once('=')?;
+        // A valueless boolean key (`mirror`) is legal git config (#1905).
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if key.trim().eq_ignore_ascii_case("url") {
             let value = value.trim().trim_matches('"').to_string();
             if !value.is_empty() {
@@ -327,7 +336,8 @@ fn remote_origin_url(text: &str) -> Option<String> {
 fn section_is_origin(header: &str) -> bool {
     let inner = header.trim_start_matches('[').trim_end_matches(']').trim();
     let Some((section, rest)) = inner.split_once(['.', ' ']) else {
-        return inner.eq_ignore_ascii_case("remote");
+        // A bare `[remote]` header has no subsection, so it is not origin.
+        return false;
     };
     if !section.eq_ignore_ascii_case("remote") {
         return false;

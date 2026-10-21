@@ -226,6 +226,7 @@ fn transcript_forces_centralized_daemon() {
         failover: None,
         failover_allow_metered: false,
         allow_model: Vec::new(),
+        provider_only: Vec::new(),
         mode: None,
         effort: None,
         context_window: None,

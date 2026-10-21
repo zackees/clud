@@ -210,6 +210,44 @@ the range would include the whole rebase delta). The denial names the correct
 `git/review_range.py`. A fresh upstream, a branch with no upstream, and any other
 command are untouched. Code: `block_bad_cmd_stale_upstream.rs`.
 
+### Hand-written wait guard (#1880)
+
+Never poll. To wait, run the command in the background and wait for the notification.
+
+For every shell call, from the main agent or any sub-agent (the rule reads
+`tool_input.command` and never consults `agent_id`/`agent_type`), the scan
+refuses: `while`/`until`/`select` loops and `for ((;;))`; a `for`/`foreach`
+loop whose body sleeps; `tail -f`/`-F`/`--follow` and `Get-Content -Wait`
+not wrapped in `timeout`; `watch`; a `sleep` in the same command as a `gh`
+status read; and a standalone `sleep` over 60 s or of non-literal length
+(DD-168). A `for` loop over a finite list with no `sleep`, a one-shot
+`pgrep`/`gh` snapshot and a short `sleep` stay allowed. Process-list waits
+(`while pgrep -f …`, `while ps … | grep …`) fall to the loop rule. The refusal
+names the replacement: `run_in_background` plus the completion notification,
+or a waiter with its own deadline (`clud ci`, `bosn ci run --wait`,
+`pr_merge_watch`). The only escape is the audited
+`CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`; the rule only tightens.
+Code: `block_bad_cmd_wait_loop.rs`; fixtures from the issue's session in
+`block_bad_cmd_wait_loop_tests.rs` (including a sub-agent payload). The PR-
+specific polling rule (`blocking_pr_wait_reason`) now also covers counted
+`for … sleep` loops, chained `sleep && gh …`, `gh api` run/job/check/Pages
+reads and `gh pr view --json mergeStateStatus|mergeable|state`.
+
+#1972 (DD-169) closes the laundering routes: wrapper programs (`timeout`,
+`nohup`, `env`, `VAR=`, `stdbuf`, `nice`, `setsid`, `xargs`, `command`,
+`exec`, …) are peeled before every check; `bash -c`/`eval`/`python -c`
+payloads and heredocs fed to a shell or Python are scanned recursively;
+heredocs written to a `.sh`/`.py` file and literal script files run from the
+call's `cwd` are scanned for PR/CI waits; a `case`-arm `sleep` and a
+`python -c` `time.sleep` count as sleeps; a native watcher inside any loop is
+refused. PR/CI refusals spell out `clud tool run github/pr_merge_watch.py
+<PR> [--repo OWNER/NAME] [--timeout SECS]` under `run_in_background`. The
+helpers live in `block_bad_cmd_wait_scan.rs`; the audit's regression corpus
+is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`, run by
+`block_bad_cmd_wait_scan_tests.rs`. Codex sessions run it through the
+session-flag hook clud injects at launch and, for a bare `codex`, the global
+entry described in [Global Codex hook](#global-codex-hook-1972).
+
 ### Repeated-call guard (#1674)
 
 For every `PreToolUse` call that carries a `session_id`, the scan hashes the
@@ -261,7 +299,11 @@ shell server (`mcp__*`), or a Codex session would bypass the guard entirely
 and `.codex/hooks.json` register `clud-cmd-scan` with `matcher: "*"`. The scan
 self-selects the shell dialect internally, so a non-shell tool call is a cheap
 no-op. (clud's own compiled dispatch already uses `*` — see below — so this only
-matters for the bare lines a user or repo installs by hand.)
+matters for the bare lines a user or repo installs by hand.) Codex sessions
+get the same coverage: the session-flag `hooks.PreToolUse` override clud passes
+to Codex uses `matcher="*"` (`CODEX_HOOK_MATCHER` in `command/builder.rs`,
+#1954). Rules keyed on Claude tool names (`Write`, `Agent`, …) still see only
+Claude's names; Codex's own names for those tools are not mapped yet.
 
 Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
 user installed, and the `--event PreToolUse` line clud compiles — and a declared
@@ -294,8 +336,38 @@ into each frontend's native surface and passes it at launch:
   launch. clud injects a `clud-cmd-scan` command hook and a trusted hash for
   its exact canonical JSON, without bypassing hook trust. It also injects
   generated deletion instructions through `developer_instructions`. Existing
-  user hooks and instructions are preserved. clud does not write to
-  `~/.codex/hooks.json` or `config.toml`.
+  user hooks and instructions are preserved. The one exception to "never
+  written to files" is the global scanner entry below.
+
+### Global Codex hook (#1972)
+
+The `-c` hook only guards Codex sessions clud launches. A bare `codex` in any
+other repo ran unguarded (the #1972 audit counted ~1,300 Codex `exec` wait
+loops), so every Codex global launch setup also runs
+`codex_cmd_scan_install.rs` (action `codex-cmd-scan-install` in
+`launch_setup.rs`, after `codex-hook-normalize`):
+
+- `~/.codex/hooks.json` gets `{"matcher":"*","hooks":[{"type":"command","command":"clud-cmd-scan"}]}`
+  appended to `hooks.PreToolUse`, unless any handler there already runs
+  `clud-cmd-scan` (whatever its matcher). The file is created if missing.
+- `~/.codex/config.toml` gets `[hooks.state."<hooks.json path>:pre_tool_use:G:H"]
+  trusted_hash = "sha256:..."` for that handler, because Codex runs no file
+  hook it has not trusted. An existing entry for the key is never overwritten.
+- Read-modify-write under `~/.clud/settings.lock`, like `codex_hook_normalize`.
+  Malformed JSON/TOML or an unexpected shape is logged (verbose) and left
+  untouched; unknown fields and other hooks are preserved; nothing is
+  rewritten when nothing changed. Codex's `[features] hooks` flag is not
+  touched: current Codex runs hooks by default, which the `-c` path already
+  relies on, and an explicit `hooks = false` is the user's choice.
+- Opt out with `"hooks": {"codex_global_cmd_scan": false}` in
+  `~/.clud/settings.json`; removing the entry by hand without that switch
+  gets it reinstalled on the next launch.
+- A clud-launched Codex session sees both hooks (both match `*` since
+  #1954), so each guarded call is scanned twice. The verdicts agree; the
+  repeated-call guard counts each call twice. The session hook still guards
+  a user who opted out of the global entry.
+
+Rationale: [DD-171](../DESIGN_DECISIONS.md#dd-171-codex-gets-a-global-clud-cmd-scan-hook-written-to-its-user-config).
 
 This removes a whole hazard class that writing files would carry: idempotence,
 read-modify-write lost updates, two writers fighting over one file (the #847

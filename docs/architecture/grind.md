@@ -31,6 +31,53 @@ tool and, in cron mode, its native `/loop`. A Codex or DeepSeek model uses
 (`command::builder::grind_launch_error`); clud never substitutes `clud loop`
 or a hand-rolled loop.
 
+### Third-party model routes and the Workflow tool
+
+`/grind` depends entirely on Claude Code's Workflow tool. `--openrouter`,
+`--deepseek`, `--kimi` and the other Anthropic-compatible providers resolve
+to the Claude harness through `ModelProvider::native_harness()`, so
+`grind_launch_error` (`crates/clud-bin/src/command/builder.rs`) admits them
+([provider-selection.md](provider-selection.md)). The router starts the
+workflow and ends its turn; the run then advances only on task
+notifications. If the gateway model never emits the Workflow tool call, or
+the tool is suppressed, no notification ever arrives and the run waits
+silently with no error. Signs of this failure:
+
+- the router's turn ended with no Workflow `tool_use` in the transcript;
+- `~/.clud/tmp/grind/<session>.json` gets no run-facts update and no
+  worktree appears under `~/.clud/worktrees/`;
+- `--disallowedTools` in `clud --dry-run ... grind <url>` names Workflow.
+
+The remedy is to rerun on the Claude route or on a model that supports tool
+use. `grind_launches_the_workflow_session_on_every_non_anthropic_claude_route`
+in `crates/clud-bin/src/command/tests/grind_launch.rs` pins the launch side.
+
+**Verified end to end on OpenRouter (#1811).** On 2026-10-05, installed
+clud 2.8.27 ran `clud --openrouter --model ~anthropic/claude-sonnet-latest
+grind` on smoke meta #1825 (one child, #1818). The run used sequential mode,
+the session model for every role, and `feature_merge: later`. Every stage
+completed: routing, the plan-only pass, the two-call question round,
+prework, plan → work → review → integrate → land (goal PR #1827 merged into
+the feature branch by the lander), and Finish. Finish marked feature PR #1826
+ready, filed follow-up #1828, and removed the run facts and `plan.json`.
+#1826 then merged, closing #1818 and #1825.
+
+Why every role billed to OpenRouter: the launch was pinned (the
+`gateway model discovery is off` notice), and the overlay gave every
+`ANTHROPIC_DEFAULT_*` slot and the subagent slot the pinned id. Its only
+credential was the OpenRouter token at `https://openrouter.ai/api`, with
+`ANTHROPIC_API_KEY` empty. Workflow agents with no model override inherit
+that session, so no request could authenticate to Anthropic.
+
+What this run did not check (#1811):
+- OpenRouter's activity page, so the per-role wire ids were not read there.
+- The invalid-key failure path. Testing it would overwrite the stored vault
+  key.
+
+Defects it found: #1828 (`./test` pty timing on the integrator host), and
+#1830 (classification flipped bug/feature for the same child across two
+launches).
+
 ## The DAG
 
 `/grind` is a router over bundled skills, one bundled workflow, and five
@@ -98,6 +145,11 @@ everything first:
 - **Models** for planner, worker, reviewer and integrator (the lander shares
   the integrator's). The default is the session's own model, whatever route
   resolved it; an unchanged default is omitted so the agent inherits it.
+  `grind-run.js` maps `args.models` onto each `agent()`'s `model`. On a
+  direct gateway route the launch is pinned (DD-077) and every
+  `ANTHROPIC_DEFAULT_*` slot carries the pinned id, so a tier alias stays
+  inside the pin; a full wire id passes straight to the gateway, outside
+  it, because the direct route has no bridge to refuse it (#1810).
 - **Local CI**: offered only when `docker info` succeeds and
   `.github/workflows/ci.yml` exists. Otherwise the router prints why
   ("Docker/github actions disabled due to no docker running", or that
@@ -125,8 +177,9 @@ carries its parent session's id (`tests/harness/test_grind_facts.py`), so
 every agent resolves its own run. Two runs, in one repo or two, never share
 or clobber facts, and one run finishing cannot change another's caps. A
 session with no file, or with a file older than 72 hours (a crashed run the
-session-temp sweep has not removed yet; `clud grind-facts path` refreshes a
-live one, and `/grind-cron` asks for it every tick), gets the strictest caps
+session-temp sweep has not removed yet; every hook lookup and
+`clud grind-facts path` refresh a live one, and `/grind-cron` asks for it
+every tick), gets the strictest caps
 (sequential, no CI), and the hook log says why
 (`crates/clud-bin/src/grind_facts.rs`,
 [DD-103](../DESIGN_DECISIONS.md#dd-103-grind-run-facts-are-keyed-by-session-id-and-live-under-cludtmpgrind)).
@@ -201,6 +254,12 @@ this is the contract.
   into `<main>` whose `grind/meta-<X>-…` head names the top meta or one of
   its sub-metas, since a group's feature branch carries its sub-meta's
   number. A feature PR under a different top meta does not block.
+- **Abandoned feature PRs.** A stalled or ended run leaves its feature PR
+  open (#1819). The router marks a blocking PR *abandoned* when no goal
+  landed on it and no run owning it (`clud grind-facts owner <pr>`) has
+  made a tool call in 30 minutes; the hook refreshes a run's facts file on
+  every lookup, so its age is that run's silence. The question round then
+  offers to close it and run the feature stage. A live PR always blocks.
 - `grind-run.js` enforces the deferral and the no-overlap rule, not just the
   router.
 - **Closing the top meta.** The chosen group's feature PR carries
@@ -576,6 +635,14 @@ The rationale is in
 - Exactly **one** integrator runs at a time. It is the only role that
   builds, so builds never overlap and caches stay warm. No `bosn` wrapper is
   needed or allowed.
+  **bosn substitute** (#1818). CLAUDE.md's "run through `bosn ci`" rule
+  applies to interactive sessions, not grind roles: the grind-integrator's
+  caps hook denies `bosn`, so the integrator never runs it. Inside a run it
+  runs the run's chosen scripts (`./lint`, `./test`, or the planner's verify
+  commands) directly, in the background when they may exceed 600s and never
+  piped through `tail`. The pre-push full-PR bosn / local-gate pass is not
+  run by the integrator; GitHub CI on the PR is the CI of record.
+  Native-platform coverage gaps are reported, never claimed as covered.
 - The planner declares `depends_on`. An isolated goal rebases onto
   `origin/<base>` (`<main>` in the bug stage, the feature branch in the
   feature stage). A dependent goal waits until its dependency merges, then
@@ -651,6 +718,9 @@ separately.
 The per-feature suites in `tests/harness/`, each named for the section above
 it covers:
 
+- `grind_launch.rs`'s
+  `grind_launches_the_workflow_session_on_every_non_anthropic_claude_route`
+  (Rust) — third-party routes launch the Workflow session.
 - `test_grind_routing.py` — input routing and the `/do` refusal.
 - `test_grind_plan_only.py` — the plan-only pass and threshold.
 - `test_grind_meta_of_metas.py`, `test_grind_overlap.py` — regroup and no

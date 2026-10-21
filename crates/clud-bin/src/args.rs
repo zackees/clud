@@ -132,6 +132,13 @@ pub struct Args {
     #[arg(long = "allow-model", value_name = "MODEL", action = ArgAction::Append)]
     pub allow_model: Vec<String>,
 
+    /// OpenRouter only: serve every request from exactly these upstream
+    /// providers (OpenRouter's `provider.only`, e.g. `parasail/fp8`), with
+    /// fallbacks off, so a request fails rather than rerouting to another
+    /// provider or price. Repeatable.
+    #[arg(long = "provider-only", value_name = "PROVIDER", action = ArgAction::Append)]
+    pub provider_only: Vec<String>,
+
     /// Reasoning effort, kept independent from the selected model.
     #[arg(long = "effort")]
     pub effort: Option<String>,
@@ -390,14 +397,16 @@ impl Args {
     /// Codex and therefore cannot be translated honestly to DeepSeek Harness.
     /// Backend passthrough remains available after `--` for native `dsh`
     /// options.
-    pub fn unsupported_deepseek_harness_option(&self) -> Option<&'static str> {
+    /// `allow_model` is true for an OpenRouter launch, where clud selects the
+    /// model through its dsh overlay (#1829).
+    pub fn unsupported_deepseek_harness_option(&self, allow_model: bool) -> Option<&'static str> {
         if self.message.is_some() {
             Some("--message")
         } else if self.continue_session {
             Some("--continue")
         } else if self.resume.is_some() {
             Some("--resume")
-        } else if self.model.is_some() {
+        } else if self.model.is_some() && !allow_model {
             Some("--model")
         } else if self.effort.is_some() {
             Some("--effort")
@@ -539,6 +548,27 @@ pub enum Command {
     },
     /// Install or update Codex through CLUD's verified standalone-installer path.
     CodexUpdate,
+    /// Install or confirm DeepSeek Harness in clud's private npm prefix.
+    DshUpdate,
+    /// Report hook and alias health: stale or retired aliases in clud's own
+    /// alias dirs, a foreign `clud-cmd-scan` first on PATH, and the hook
+    /// matcher's tool coverage (#1954). Exits 1 when anything is wrong.
+    Doctor,
+    /// Run a CI job locally under bosn and show only the verdict and the
+    /// failing steps' diagnostics (#1839).
+    Ci {
+        /// Workflow job id, e.g. `test-linux-x64-unit`; omit for the PR plan.
+        job: Option<String>,
+        /// Also print log lines matching this regex (e.g. a test module).
+        #[arg(long)]
+        filter: Option<String>,
+        /// Workflow file, when not `.github/workflows/ci.yml`.
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage provider credentials. Claude authentication remains owned by
     /// Claude Code and is reported as externally managed.
     Auth {
@@ -605,6 +635,20 @@ pub enum Command {
     /// (#1393) in the current checkout and exits with its status.
     Grind {
         url: Option<String>,
+    },
+    /// Edit videos with browser-use/video-use (#1851). Loads the pinned
+    /// video-use skill as a plugin for this one Claude session only; ordinary
+    /// `clud` sessions never see it.
+    Video {
+        /// Directory holding the source videos (default: current directory).
+        dir: Option<std::path::PathBuf>,
+        /// Reinstall the pinned video-use checkout and its Python deps, then exit.
+        #[arg(long)]
+        update: bool,
+        /// Print the pinned video-use checkout path (installing it first if
+        /// missing), then exit. The explicit-only `/video-use` skill uses it.
+        #[arg(long, conflicts_with = "update")]
+        path: bool,
     },
     /// Install clud's bundled skills, agent types and workflows now, the same
     /// files a launch installs. `--home` targets another home directory; the
@@ -818,7 +862,7 @@ pub enum Command {
             value_parser = clap::value_parser!(bool),
         )]
         use_soldr_shims: bool,
-        /// soldr release version to install and persist.
+        /// Ignored with a warning: soldr cannot be pinned and always follows latest.
         #[arg(long = "soldr-version", default_value = "latest")]
         soldr_version: String,
     },
@@ -1372,6 +1416,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "fix",
     "do",
     "grind",
+    "video",
     "wasm",
     "attach",
     "kill",
@@ -1395,6 +1440,9 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "auth",
     "models",
     "codex-update",
+    "dsh-update",
+    "doctor",
+    "ci",
     "codex-auth",
     "deepseek-auth",
     "run",
@@ -1506,23 +1554,37 @@ fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
 /// registered subcommands precedence by spelling a bare resume as an explicit
 /// empty value for clap, then normalize that empty value back to `Some(None)`.
 /// A session actually named like a subcommand remains addressable with
-/// `--resume=<session>`.
+/// `--resume=<session>`. A following flag (`--resume --model opus`) is never a
+/// session id either, so it gets the same treatment; otherwise the splitter
+/// would take the flag as resume's value (#1899).
 fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     let mut normalized = raw.to_vec();
+    let mut skip_value = false;
     for i in 1..raw.len() {
         let arg = raw[i].as_str();
+        let consumes_next = takes_next_value(arg) && !matches!(arg, "--resume" | "-r");
+        if std::mem::replace(&mut skip_value, consumes_next) {
+            continue;
+        }
         if arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg) {
             break;
         }
         if matches!(arg, "--resume" | "-r")
-            && raw
-                .get(i + 1)
-                .is_some_and(|next| TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str()))
+            && raw.get(i + 1).is_some_and(|next| {
+                TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str())
+                    || (next.starts_with('-') && next.len() > 1)
+            })
         {
             normalized[i] = "--resume=".to_string();
         }
     }
     normalized
+}
+
+/// True when `arg` is a clud value flag spelled without `=`, so the next token
+/// is its value rather than a flag or subcommand.
+fn takes_next_value(arg: &str) -> bool {
+    SPLITTER_VALUE_FLAGS.contains(&arg) || SPLITTER_SHORT_VALUE_FLAGS.contains(&arg)
 }
 
 /// Provider flags that accept an inline API key.
@@ -1538,9 +1600,14 @@ const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrout
 fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
     let mut normalized = Vec::with_capacity(raw.len() + 1);
     let mut in_clud_flags = true;
+    let mut skip_value = false;
     for (index, arg) in raw.iter().enumerate() {
-        if index > 0 && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str())) {
+        // A value flag's value (`--name test`) is never a subcommand (#1900).
+        let is_value = std::mem::replace(&mut skip_value, in_clud_flags && takes_next_value(arg));
+        if index > 0 && !is_value && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str()))
+        {
             in_clud_flags = false;
+            skip_value = false;
         }
         let assignment = arg.split_once('=').filter(|(flag, _)| {
             in_clud_flags && index > 0 && INLINE_KEY_PROVIDER_FLAGS.contains(flag)
@@ -1570,6 +1637,7 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
     "--resume-mode",
     "--model",
     "--allow-model",
+    "--provider-only",
     "--provider",
     "--mode",
     "--failover",

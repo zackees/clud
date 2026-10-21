@@ -46,6 +46,15 @@ pub fn run(
     }
 }
 
+/// soldr cannot be pinned: a requested version is ignored with a yellow
+/// warning, nothing is persisted, and the install follows latest.
+fn ignore_soldr_pin(requested: &str) -> &'static str {
+    if let Some(pin) = crate::soldr_activate::pinned_version(Some(requested)) {
+        eprintln!("{}", crate::soldr_activate::pin_ignored_warning(pin));
+    }
+    "latest"
+}
+
 fn run_rust(
     args: &Args,
     global: bool,
@@ -54,6 +63,7 @@ fn run_rust(
     use_soldr_shims: bool,
     soldr_version: &str,
 ) -> i32 {
+    let soldr_version = ignore_soldr_pin(soldr_version);
     let settings = RustOptimizeSettings {
         use_soldr_shims,
         install_soldr,
@@ -210,7 +220,8 @@ pub(crate) fn parse_scope_answer(answer: &str) -> WriteScope {
 /// to install today. Used by the pre-install announcement and the dry-run
 /// preview so the user knows the destination before any network I/O.
 fn planned_soldr_install_target() -> Result<PathBuf, String> {
-    let home = home_dir().ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let home = crate::home::user_home()
+        .ok_or_else(|| "could not resolve user home directory".to_string())?;
     let target_dir = global_bin_dir(&home);
     let asset = soldr_asset_for_current_platform("0.0.0")?; // version unused for binary_name
     Ok(target_dir.join(asset.binary_name))
@@ -252,14 +263,11 @@ fn write_repo_directive_at(path: &Path, settings: &RustOptimizeSettings) -> io::
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    let mut rust = serde_json::json!({
+    // No `soldr_version`: soldr cannot be pinned (it always follows latest).
+    root["optimize"]["rust"] = serde_json::json!({
         "use_soldr_shims": settings.use_soldr_shims,
         "install_soldr": settings.install_soldr,
     });
-    if !settings.soldr_version.eq_ignore_ascii_case("latest") {
-        rust["soldr_version"] = serde_json::json!(settings.soldr_version);
-    }
-    root["optimize"]["rust"] = rust;
     let mut body = serde_json::to_string_pretty(&root).map_err(io::Error::other)?;
     body.push('\n');
     fs::write(path, body)
@@ -407,7 +415,8 @@ fn ensure_soldr_installed(version: &str) -> Result<String, String> {
     if let Ok(path) = which::which("soldr") {
         return Ok(format!("soldr already installed at {}", path.display()));
     }
-    let home = home_dir().ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let home = crate::home::user_home()
+        .ok_or_else(|| "could not resolve user home directory".to_string())?;
     let target_dir = global_bin_dir(&home);
     fs::create_dir_all(&target_dir)
         .map_err(|error| format!("create {}: {error}", target_dir.display()))?;
@@ -676,23 +685,6 @@ fn soldr_asset_for_current_platform(version: &str) -> Result<SoldrAsset, String>
     })
 }
 
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,7 +706,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["optimize"]["rust"]["use_soldr_shims"], false);
         assert_eq!(parsed["optimize"]["rust"]["install_soldr"], true);
-        assert_eq!(parsed["optimize"]["rust"]["soldr_version"], "9.9.9");
+        assert!(
+            parsed["optimize"]["rust"].get("soldr_version").is_none(),
+            "a soldr version is never written: soldr cannot be pinned"
+        );
     }
 
     #[test]

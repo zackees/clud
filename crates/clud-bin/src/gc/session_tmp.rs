@@ -134,7 +134,7 @@ pub const OVERRIDDEN_KEYS: &[&str] = &["TMPDIR", "TMP", "TEMP"];
 /// be determined (headless/misconfigured env) — the caller then leaves the
 /// OS temp dir in place.
 pub fn session_tmp_dir() -> Option<PathBuf> {
-    Some(session_tmp_dir_for(&home_dir()?))
+    Some(session_tmp_dir_for(&crate::home::user_home()?))
 }
 
 /// `<home>/.clud/tmp`. Pure; `worktree_root` (#1485) asserts its own root is
@@ -504,23 +504,6 @@ fn remove_entry(path: &Path, is_dir: bool, dry_run: bool, rule: &str, report: &m
         // Non-fatal (Windows lock, races) — retried on the next sweep.
         Err(_) => report.skipped += 1,
     }
-}
-
-pub(crate) fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = std::env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

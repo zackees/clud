@@ -73,7 +73,7 @@ pub fn handle_cwd_changed(raw_payload: &str, parent: Option<&Path>) -> i32 {
             env_roots.as_deref(),
         )
         .paths();
-        let scan = scan_hook_cwd_sensitivity(parent, home_dir().as_deref());
+        let scan = scan_hook_cwd_sensitivity(parent, crate::home::user_home().as_deref());
         let in_repo = super::block_bad_cmd_cd::nearest_repo_root(parent).is_some();
         let policy = resolve_policy(config.bash.block_cd, in_repo, &scan);
         append_log(&format!("cwd_changed_drift_check policy={policy:?}"));

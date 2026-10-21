@@ -90,7 +90,10 @@ commit only, grouped by (workflow file, check name) -- never the display
     continues on the new commit;
   - on a failure in workflow X only the failing run and X's runs created
     strictly before it are cancelled; newer runs, same-second runs and other
-    workflows are left alone.
+    workflows are left alone. The failing run itself is cancelled only when
+    none of its jobs is still in progress (GitHub cancels whole runs, so a
+    cancel would discard sibling jobs' results); an unreadable job list
+    keeps it too (obs-rust/obs-studio#13).
 `merge_group` runs and check runs for any other commit are ignored; legacy
 commit statuses keep GitHub's newest-per-context result.
 The PR's check rollup never decides a failure on its own (#1742): it mixes
@@ -2064,6 +2067,8 @@ def cancel_pr_runs(  # noqa: C901
                         reason="out_of_scope",
                     )
                 continue
+            if rid == limit and _keep_failing_run(repo_arg, rid, log, opts.mode):
+                continue
         if opts.mode == "runs":
             attempts += 1
             if opts.dry_run:
@@ -2109,6 +2114,30 @@ def cancel_pr_runs(  # noqa: C901
                 cancel = gh("api", "-X", "POST", f"repos/{repo_arg}/actions/jobs/{jid}/cancel")
                 _report_cancel(jid, cancel, opts, log, "jobs")
     return attempts
+
+
+def _keep_failing_run(repo: str, run_id: int, log: WatchLog | None, mode: str) -> bool:
+    """True when the failing run must not be cancelled (obs-rust/obs-studio#13).
+
+    GitHub cancels whole runs only; it has no per-job cancel. Cancelling the
+    failing run would throw away every sibling job still in progress (a full
+    build an hour in) along with its timing and result. So the failing run is
+    cancelled only when nothing in it is running any more: its remaining jobs
+    are all queued or waiting, which costs nothing to drop. When its jobs
+    cannot be read, it is kept: a lost result is not recoverable, CI minutes
+    are.
+    """
+    jobs = paginate(f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs")
+    if jobs is None:
+        reason = "jobs_unreadable"
+    elif any(_lower(j.get("status")) == "in_progress" for j in jobs):
+        reason = "jobs_in_progress"
+    else:
+        return False
+    print(f"CANCEL  workflow_run={run_id} status=skipped  ({reason}: in-flight results kept)")
+    if log:
+        log.emit("cancel_item", mode=mode, run_id=run_id, status="skipped", reason=reason)
+    return True
 
 
 def _report_cancel(
@@ -3619,7 +3648,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-retry", action="store_true", help="disable backoff/retry on cancel API calls"
     )
-    ns = p.parse_args(argv)
+    # #1839: the tool runner forwards a `--` placed after the PR number as
+    # data (`1835 -- --no-cancel`), and argparse then reads every later flag as a
+    # positional and exits 64 -- in the background, silently wasting a CI
+    # wait. This tool takes no passthrough, so a literal `--` is only ever
+    # that forwarding separator.
+    ns = p.parse_args([arg for arg in argv if arg != "--"])
     command_cap = _env_int("CLUD_TOOL_COMMAND_TIMEOUT_SECS", 0)
     if command_cap > 0:
         ns.timeout = min(ns.timeout, max(1, command_cap - 60))

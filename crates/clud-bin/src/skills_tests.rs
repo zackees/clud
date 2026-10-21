@@ -59,6 +59,7 @@ fn do_and_grind_skills_install_with_explicit_only_invocation() {
         "grind-integrate",
         "grind-land",
         "grind-cron",
+        "video-use",
     ] {
         let body = std::fs::read_to_string(base.join(name).join("SKILL.md")).unwrap();
         assert!(body.contains("disable-model-invocation: true"), "{name}");
@@ -174,6 +175,27 @@ fn refresh_never_touches_a_copy_whose_marker_the_user_removed() {
         std::fs::read_to_string(alpha_dir.join("SKILL.md")).unwrap(),
         "mine now\n",
         "dropping the marker is how a user claims ownership"
+    );
+}
+
+#[test]
+fn install_never_overwrites_a_non_utf8_user_skill() {
+    let dir = tempdir().unwrap();
+    let managed = [BundledSkill {
+        name: "alpha",
+        skill_md: "<!-- managed-by: clud -->\nnew body\n",
+    }];
+    let alpha_dir = dir.path().join("alpha");
+    std::fs::create_dir_all(&alpha_dir).unwrap();
+    std::fs::write(alpha_dir.join("SKILL.md"), b"caf\xe9\n").unwrap();
+
+    let report = install_to(dir.path(), &managed).unwrap();
+
+    assert!(report.installed.is_empty());
+    assert_eq!(report.skipped_existing, vec!["alpha"]);
+    assert_eq!(
+        std::fs::read(alpha_dir.join("SKILL.md")).unwrap(),
+        b"caf\xe9\n"
     );
 }
 
@@ -1021,6 +1043,24 @@ fn os_debug_skill_warns_that_attaching_suspends_the_target() {
 
 /// `/do`'s body is rendered at invocation by `clud do-prompt` (#1322); the
 /// contract lives in `command::do_prompt`, which has its own tests.
+#[test]
+fn video_use_skill_is_explicit_only_and_bridges_to_the_pinned_checkout() {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|s| s.name == "video-use")
+        .expect("video-use must be bundled (#1866)")
+        .skill_md;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter_yaml("video-use", skill)).unwrap();
+    assert_eq!(parsed["name"].as_str(), Some("video-use"));
+    assert_eq!(parsed["disable-model-invocation"].as_bool(), Some(true));
+    assert!(skill.contains(MANAGED_BY_CLUD_MARKER));
+    // The pin lives only in video.rs; the skill asks clud for the path.
+    assert!(skill.contains("clud video --path"));
+    assert!(!skill.contains(crate::video::VIDEO_USE_SHA));
+    assert!(skill.contains("ELEVENLABS_API_KEY"));
+}
+
 #[test]
 fn do_skill_renders_its_prompt_through_clud_do_prompt() {
     let skill = BUNDLED_SKILLS

@@ -310,6 +310,15 @@ fn test_harness_flag_is_typed_and_not_forwarded() {
             vec!["clud", "--harness", "deepseek"],
             HarnessSelection::DeepSeek,
         ),
+        // #1829: `dsh` is the executable's own name and must parse too.
+        (
+            vec!["clud", "--openrouter", "--harness", "dsh"],
+            HarnessSelection::DeepSeek,
+        ),
+        (
+            vec!["clud", "--openrouter", "--harness=dsh"],
+            HarnessSelection::DeepSeek,
+        ),
     ] {
         let args = parse(&raw);
         assert_eq!(args.harness, Some(expected));
@@ -331,7 +340,10 @@ fn deepseek_harness_rejects_clud_options_it_cannot_translate() {
         (vec!["clud", "--allow-plan-mode"], "--allow-plan-mode"),
     ] {
         let args = parse(&argv);
-        assert_eq!(args.unsupported_deepseek_harness_option(), Some(expected));
+        assert_eq!(
+            args.unsupported_deepseek_harness_option(false),
+            Some(expected)
+        );
     }
     let args = parse(&[
         "clud",
@@ -342,8 +354,39 @@ fn deepseek_harness_rejects_clud_options_it_cannot_translate() {
         "--",
         "--verbose",
     ]);
-    assert_eq!(args.unsupported_deepseek_harness_option(), None);
+    assert_eq!(args.unsupported_deepseek_harness_option(false), None);
     assert_eq!(args.passthrough, ["--verbose"]);
+}
+
+#[test]
+fn deepseek_harness_accepts_model_only_when_clud_routes_the_model() {
+    let args = parse(&[
+        "clud",
+        "--openrouter",
+        "--harness",
+        "dsh",
+        "--model",
+        "openai/gpt-5",
+    ]);
+    assert_eq!(args.unsupported_deepseek_harness_option(true), None);
+    assert_eq!(
+        args.unsupported_deepseek_harness_option(false),
+        Some("--model")
+    );
+}
+
+#[test]
+fn doctor_is_a_dispatched_subcommand() {
+    let args = parse(&["clud", "doctor"]);
+    assert!(matches!(args.command, Some(Command::Doctor)));
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn dsh_update_is_a_dispatched_subcommand() {
+    let args = parse(&["clud", "dsh-update"]);
+    assert!(matches!(args.command, Some(Command::DshUpdate)));
+    assert!(args.passthrough.is_empty());
 }
 
 #[test]
@@ -970,6 +1013,31 @@ fn bare_resume_gives_registered_builtins_precedence_over_optional_session_value(
     let short = parse(&["clud", "--codex", "-r", "do", "README.md"]);
     assert_eq!(short.resume, Some(None));
     assert!(matches!(short.command, Some(Command::Do { .. })));
+}
+
+#[test]
+fn inline_key_split_survives_value_named_like_subcommand() {
+    let args = parse(&[
+        "clud",
+        "--name",
+        "test",
+        "--deepseek=sk-0123456789abcdefghij",
+    ]);
+    assert!(args.deepseek);
+    assert_eq!(args.session_name.as_deref(), Some("test"));
+    assert!(args.passthrough.is_empty(), "{:?}", args.passthrough);
+}
+
+#[test]
+fn bare_resume_does_not_swallow_following_flag() {
+    let long = parse(&["clud", "--resume", "--model", "opus"]);
+    assert_eq!(long.resume, Some(None));
+    assert_eq!(long.model.as_deref(), Some("opus"));
+    assert!(long.passthrough.is_empty(), "{:?}", long.passthrough);
+    let short = parse(&["clud", "-r", "-p", "hi"]);
+    assert_eq!(short.resume, Some(None));
+    assert_eq!(short.prompt.as_deref(), Some("hi"));
+    assert!(short.passthrough.is_empty(), "{:?}", short.passthrough);
 }
 
 #[test]
@@ -1711,4 +1779,31 @@ fn api_key_shape_detection() {
     assert!(!looks_like_api_key("sk-has spaces 0123456789"));
     assert!(!looks_like_api_key("pk-0123456789abcdef0123"));
     assert!(!looks_like_api_key("sk-12345"));
+}
+
+#[test]
+fn ci_is_a_dispatched_subcommand_with_its_flags() {
+    let args = parse(&[
+        "clud",
+        "ci",
+        "test-linux-x64-unit",
+        "--filter",
+        "openrouter_free",
+        "--json",
+    ]);
+    match args.command {
+        Some(Command::Ci {
+            job,
+            filter,
+            json,
+            workflow,
+        }) => {
+            assert_eq!(job.as_deref(), Some("test-linux-x64-unit"));
+            assert_eq!(filter.as_deref(), Some("openrouter_free"));
+            assert!(json);
+            assert_eq!(workflow, None);
+        }
+        other => panic!("expected ci, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
 }

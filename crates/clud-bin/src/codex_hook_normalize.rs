@@ -27,7 +27,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fs4::fs_std::FileExt;
 use serde_json::Value;
@@ -67,7 +67,7 @@ impl NormalizeOutcome {
 /// on any change. All failures are non-fatal — a missing home dir, an
 /// unwritable `~/.clud`, or any I/O hiccup must never block a launch.
 pub fn run_global_normalization(verbose: bool) {
-    let Some(home) = home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         if verbose {
             eprintln!("[clud] codex hook normalize: no home dir");
         }
@@ -206,7 +206,7 @@ fn is_exact_int(value: &Value, expected: u64) -> bool {
     matches!(value, Value::Number(_)) && value.as_u64() == Some(expected)
 }
 
-fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
+pub(crate) fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -226,19 +226,8 @@ fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
 /// RAII guard for the cross-process `~/.clud/settings.lock` lock. The OS
 /// releases the advisory lock when the file handle drops or the process
 /// exits, so Drop intentionally does nothing; we just keep `File` alive.
-struct LockGuard {
+pub(crate) struct LockGuard {
     _file: File,
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]

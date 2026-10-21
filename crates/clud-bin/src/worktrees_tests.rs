@@ -588,7 +588,7 @@ fn remove_worktree_path_refuses_when_live_process_references_worktree() {
 }
 
 #[test]
-fn remove_worktree_path_falls_back_when_git_success_leaves_dir() {
+fn unforced_worktree_removal_never_deletes_source_left_after_git_success() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
     let wt = tmp.path().join("wt");
@@ -604,34 +604,15 @@ fn remove_worktree_path_falls_back_when_git_success_leaves_dir() {
             .push(args.iter().map(|s| s.to_string()).collect());
         Ok(String::new())
     })
-    .expect("fallback should remove directory and prune");
+    .expect_err("unforced removal must not erase a recreated source directory");
 
-    assert_eq!(outcome, RemovalOutcome::FallbackAfterGitSuccess);
-    assert!(!wt.exists());
+    assert!(outcome.contains("refusing recursive fallback"));
+    assert!(wt.join("file.txt").exists());
     let calls = calls.into_inner();
     assert_eq!(
-        calls[0],
-        vec![
-            "worktree".to_string(),
-            "remove".to_string(),
-            wt.to_string_lossy().to_string()
-        ]
-    );
-    assert_eq!(
-        calls[1],
-        vec![
-            "worktree".to_string(),
-            "unlock".to_string(),
-            wt.to_string_lossy().to_string()
-        ]
-    );
-    assert_eq!(
-        calls[2],
-        vec![
-            "worktree".to_string(),
-            "prune".to_string(),
-            "--expire=now".to_string()
-        ]
+        calls.len(),
+        1,
+        "no prune or recursive fallback after the refusal"
     );
 }
 
@@ -693,4 +674,35 @@ fn fmt_age_picks_largest_unit() {
     assert_eq!(fmt_age(Duration::from_secs(90)), "1m");
     assert_eq!(fmt_age(Duration::from_secs(3700)), "1h");
     assert_eq!(fmt_age(Duration::from_secs(86_400 * 3)), "3d");
+}
+
+#[test]
+fn ancestry_cleanup_checks_container_binds_before_attempting_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("work"), "active").unwrap();
+    let result = remove_worktree_path_if_unused(tmp.path(), &source, true, &|_| {
+        Some("pinned: container bind references source tree")
+    });
+    assert_eq!(
+        result,
+        Err("pinned: container bind references source tree".into())
+    );
+    assert!(source.join("work").exists());
+}
+
+#[test]
+fn unforced_worktree_removal_preserves_source_after_git_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("uncommitted"), "new work").unwrap();
+    let error = remove_worktree_path_with_git(tmp.path(), &source, false, |_, args| {
+        assert!(!args.contains(&"--force"));
+        Err("worktree is dirty".into())
+    })
+    .unwrap_err();
+    assert_eq!(error, "worktree is dirty");
+    assert!(source.join("uncommitted").exists());
 }

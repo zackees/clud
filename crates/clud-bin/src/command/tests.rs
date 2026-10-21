@@ -1,7 +1,7 @@
 use super::builder::{
     build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, grind_launch_error,
     interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
-    plan_mode_suppression_notice, repeat_implies_no_done_warning,
+    plan_mode_suppression_notice, repeat_implies_no_done_warning, video_launch_error,
 };
 use super::prompts::{
     build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, is_github_url,
@@ -54,6 +54,8 @@ fn codex_prefix() -> Vec<String> {
         "codex".to_string(),
         "-c".to_string(),
         DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string(),
+        "-c".to_string(),
+        r#"approvals_reviewer="auto_review""#.to_string(),
     ]
 }
 
@@ -903,6 +905,30 @@ fn unsafe_launch_omits_clud_deletion_instructions_for_both_harnesses() {
         .any(|value| value.contains("keep my instructions")));
 }
 
+#[test]
+fn codex_config_long_form_developer_instructions_are_merged() {
+    for passthrough in [
+        &["--config", "developer_instructions=\"be terse\""][..],
+        &["--config=developer_instructions=\"be terse\""][..],
+    ] {
+        let mut raw = vec!["clud", "--codex", "--"];
+        raw.extend_from_slice(passthrough);
+        let p = plan(&raw);
+        let overrides: Vec<&String> = p
+            .command
+            .iter()
+            .filter(|arg| arg.contains("developer_instructions"))
+            .collect();
+        assert_eq!(overrides.len(), 1, "{passthrough:?}: {overrides:?}");
+        let merged = codex_config_values(&p)
+            .into_iter()
+            .find(|value| value.starts_with("developer_instructions="))
+            .expect("clud's developer_instructions override");
+        assert!(merged.contains("be terse"), "{merged}");
+        assert!(merged.len() > "developer_instructions=\"be terse\"".len() + 40);
+    }
+}
+
 /// (DD-086). `cargo test` may or may not have a terminal, so ask.
 fn console_launch_mode() -> LaunchMode {
     if crate::session::terminals_are_interactive() {
@@ -935,6 +961,9 @@ mod codex_native_routes;
 
 #[path = "tests/grind_launch.rs"]
 mod grind_launch;
+
+#[path = "tests/video_launch.rs"]
+mod video_launch;
 
 #[path = "tests/loop_contract.rs"]
 mod loop_contract;

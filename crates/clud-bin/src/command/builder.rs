@@ -16,6 +16,11 @@ use super::prompts::{
 };
 use super::types::{HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule};
 
+/// #1847 / DD-162: route Codex approval requests to its auto-review subagent
+/// instead of the user. It only matters when approvals are not bypassed
+/// (`--safe`); YOLO launches raise no approval requests.
+const CODEX_APPROVALS_REVIEWER_KEY: &str = "approvals_reviewer";
+const CODEX_AUTO_REVIEW_CONFIG: &str = r#"approvals_reviewer="auto_review""#;
 const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
 const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filenames=["CODEX.md"]"#;
 const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
@@ -61,6 +66,22 @@ pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&
     }
     if args.detach || args.detachable {
         return Some("`clud grind` requires a foreground interactive PTY; remove `--detach` or `--detachable`");
+    }
+    None
+}
+
+/// `clud video` (#1851) loads video-use through Claude Code's session-only
+/// `--plugin-dir`, which no other harness has, and needs an interactive
+/// session for the skill's propose-then-approve flow.
+pub fn video_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
+    if !matches!(args.command, Some(Command::Video { .. })) {
+        return None;
+    }
+    if !matches!(target.effective_harness, Backend::Claude) {
+        return Some("`clud video` requires the Claude harness, whose `--plugin-dir` loads video-use for this session only; use `--harness claude`");
+    }
+    if args.subprocess {
+        return Some("`clud video` requires an interactive PTY; remove `--subprocess`");
     }
     None
 }
@@ -360,20 +381,25 @@ fn merge_claude_append_prompt(passthrough: &[String], unsafe_mode: bool) -> (Str
 }
 
 fn take_codex_developer_instructions(passthrough: &mut Vec<String>) -> Option<String> {
+    let parse = |value: &str| {
+        value
+            .strip_prefix("developer_instructions=")
+            .and_then(parse_codex_instruction_override)
+    };
     let mut found = None;
     let mut index = 0;
-    while index + 1 < passthrough.len() {
-        if passthrough[index] == "-c" {
-            if let Some(value) = passthrough[index + 1]
-                .strip_prefix("developer_instructions=")
-                .and_then(parse_codex_instruction_override)
-            {
-                found = Some(value);
-                passthrough.drain(index..index + 2);
-                continue;
-            }
+    while index < passthrough.len() {
+        // Codex takes `-c <kv>`, `--config <kv>` and `--config=<kv>` (#1901).
+        let (value, width) = match passthrough[index].as_str() {
+            "-c" | "--config" => (passthrough.get(index + 1).and_then(|v| parse(v)), 2),
+            arg => (arg.strip_prefix("--config=").and_then(parse), 1),
+        };
+        if let Some(value) = value {
+            found = Some(value);
+            passthrough.drain(index..index + width);
+        } else {
+            index += 1;
         }
-        index += 1;
     }
     found
 }
@@ -439,12 +465,24 @@ fn build_launch_plan_for_target_at(
         } else if args.passthrough.is_empty() {
             cmd.push("web".to_string());
         }
+        // #1829: an OpenRouter launch selects dsh's OpenRouter route through
+        // a clud-owned overlay; the runtime writes the file before spawn.
+        if let Some(patch) = crate::dsh_harness::plan_patch_path(
+            target.model_provider,
+            crate::dsh_harness::openrouter_model(model_selection.as_ref()),
+        ) {
+            cmd.extend(["--patch".to_string(), patch.to_string_lossy().into_owned()]);
+        }
     }
 
     if backend.settings_surface() == crate::backend::SettingsSurface::CodexConfigOverrides {
         for override_value in &args.codex_config_overrides {
             cmd.push("-c".to_string());
             cmd.push(override_value.clone());
+        }
+        if !codex_reviewer_already_chosen(&args.codex_config_overrides, &passthrough) {
+            cmd.push("-c".to_string());
+            cmd.push(CODEX_AUTO_REVIEW_CONFIG.to_string());
         }
         if !has_codex_project_doc_fallback_override(&args.codex_config_overrides) {
             if let Some(fallback_config) = codex_project_doc_fallback_config(cwd) {
@@ -476,7 +514,8 @@ fn build_launch_plan_for_target_at(
         // Codex resolves session-flag hook trust from the subcommand's config
         // layer. Keep these overrides alongside the exec/resume flags.
         let scan = "clud-cmd-scan";
-        cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"Bash\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
+        let matcher = CODEX_HOOK_MATCHER;
+        cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"{matcher}\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
         cmd.extend(["-c".into(), format!("hooks.state={{\"/<session-flags>/config.toml:pre_tool_use:0:0\"={{trusted_hash=\"{}\"}}}}", codex_hook_hash(scan))]);
         let has_passthrough_instructions = codex_passthrough_instructions.is_some();
         let existing_instructions = if has_passthrough_instructions {
@@ -729,9 +768,27 @@ fn build_launch_plan_for_target_at(
             task_summary = Some(format!("grind {url}"));
             push_prompt_interactive(&mut cmd, build_grind_prompt(url));
         }
+        Some(Command::Video { .. }) => {
+            // Session-scoped plugin: never a global skill install (DD-163).
+            let home = crate::home::user_home().unwrap_or_default();
+            task_summary = Some("video".to_string());
+            cmd.push("--plugin-dir".to_string());
+            cmd.push(
+                crate::video::plugin_dir(&home)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if seed_interactive_builtin {
+                let checkout = crate::video::checkout_dir(&home);
+                push_prompt_interactive(&mut cmd, crate::video::seed_prompt(&checkout));
+            }
+        }
         Some(Command::Auth { .. })
         | Some(Command::Models { .. })
         | Some(Command::CodexUpdate)
+        | Some(Command::DshUpdate)
+        | Some(Command::Doctor)
+        | Some(Command::Ci { .. })
         | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })
@@ -835,7 +892,7 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    LaunchPlan {
+    let mut plan = LaunchPlan {
         unsafe_mode: args.unsafe_mode,
         command: cmd,
         iterations,
@@ -861,19 +918,28 @@ fn build_launch_plan_for_target_at(
         failover: args.failover.clone(),
         failover_allow_metered: args.failover_allow_metered,
         allowed_models: args.model_allowlist(),
+        provider_only: args.provider_only.clone(),
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),
         pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
-    }
+        route: None,
+    };
+    // #1855: the route is resolved once, here, from the plan it describes --
+    // so every backend renderer and `--dry-run` read one decision instead of
+    // re-deriving their own copy of it.
+    plan.route = Some(crate::route_plan::resolve(
+        &plan,
+        &crate::route_plan::Ambient::from_process(),
+    ));
+    plan
 }
 
+/// Codex's session-flag PreToolUse matcher: every tool, as this repo's own
+/// `.codex/hooks.json` registers it. A `Bash`-only matcher left every rule
+/// for another tool dead under Codex, as it was under Claude before #1954.
+const CODEX_HOOK_MATCHER: &str = "*";
+
 fn codex_hook_hash(command: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let value = serde_json::json!({
-        "event_name": "pre_tool_use",
-        "hooks": [{"async": false, "command": command, "timeout": 600, "type": "command"}],
-        "matcher": "Bash",
-    });
-    format!("sha256:{:x}", Sha256::digest(value.to_string().as_bytes()))
+    crate::codex_cmd_scan_install::codex_hook_trust_hash(CODEX_HOOK_MATCHER, command, 600)
 }
 
 fn existing_codex_instructions(args: &Args) -> Option<String> {
@@ -891,7 +957,7 @@ fn existing_codex_instructions(args: &Args) -> Option<String> {
                     std::env::var_os("HOME")
                         .map(|home| std::path::PathBuf::from(home).join(".codex"))
                 })
-                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+                .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))?;
             let path = config_dir.join("config.toml");
             let text = std::fs::read_to_string(path).ok()?;
             text.parse::<toml::Value>()
@@ -955,12 +1021,33 @@ fn gateway_model_selection(
 }
 
 fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {
-    overrides.iter().any(|value| {
-        value
-            .trim_start()
-            .strip_prefix(CODEX_PROJECT_DOC_FALLBACK_KEY)
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    })
+    overrides
+        .iter()
+        .any(|value| codex_override_sets_key(value, CODEX_PROJECT_DOC_FALLBACK_KEY))
+}
+
+fn codex_override_sets_key(value: &str, key: &str) -> bool {
+    value
+        .trim_start()
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// #1847: the user already picked a Codex approvals reviewer, through clud's
+/// `config_overrides` or backend passthrough (`-c`/`--config` with the key,
+/// or Codex's `--approve-for-me` / `--not-so-yolo`), so clud's auto-review
+/// default must not override it.
+fn codex_reviewer_already_chosen(overrides: &[String], passthrough: &[String]) -> bool {
+    let sets_reviewer = |value: &str| codex_override_sets_key(value, CODEX_APPROVALS_REVIEWER_KEY);
+    overrides.iter().any(|value| sets_reviewer(value))
+        || passthrough.iter().enumerate().any(|(index, arg)| {
+            matches!(arg.as_str(), "--approve-for-me" | "--not-so-yolo")
+                || arg.strip_prefix("--config=").is_some_and(sets_reviewer)
+                || (matches!(arg.as_str(), "-c" | "--config")
+                    && passthrough
+                        .get(index + 1)
+                        .is_some_and(|value| sets_reviewer(value)))
+        })
 }
 
 fn codex_project_doc_fallback_config(cwd: &Path) -> Option<&'static str> {
@@ -1081,11 +1168,11 @@ mod codex_hook_hash_tests {
     fn canonical_hook_hash_golden_vectors() {
         assert_eq!(
             codex_hook_hash("clud-cmd-scan"),
-            "sha256:0b359276e29d1bb5bb14f8a3151259417ee1fe86ed339a80fb57ba3798b2dbc9"
+            "sha256:de4254a10d700c90ae0152fb911cf432a7e284fe4a94659452c1cab80d9f05b3"
         );
         assert_eq!(
             codex_hook_hash("/tmp/clud cmd-scan --event PreToolUse"),
-            "sha256:207fd7661e69092031acc67bd4ee7bc06df7e758faca2fdbed8e9cfe6bf101cc"
+            "sha256:f1e8926650feac924e61dd910ad96a3fc22466eedd26e245743f739989ca27b5"
         );
     }
 }

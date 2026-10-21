@@ -74,8 +74,8 @@ pub enum WorkspaceTrust {
 /// read as "untrusted" and warn a user whose workspace is fine.
 ///
 /// Home resolution goes through `hook_health::hook_home_dir`, i.e.
-/// `CLUD_HOOK_HOME` before `dirs::home_dir()`. That override matters on
-/// Windows, where `dirs::home_dir()` asks `SHGetKnownFolderPath` and ignores a
+/// `CLUD_HOOK_HOME` before `crate::home::user_home()`. That override matters on
+/// Windows, where `crate::home::user_home()` asks `SHGetKnownFolderPath` and ignores a
 /// `USERPROFILE` set by a test harness or a sandbox — without it a process
 /// pointed at a temp home reads the developer's real state file instead.
 ///

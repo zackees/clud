@@ -72,11 +72,18 @@ Known compatibility spellings normalize immediately:
 - `opus` -> model `claude-opus`, wire alias `opus`.
 
 For a direct Codex launch with no explicit or saved provider selection, the
-reviewed catalog default is `codex-sol` / `gpt-5.6-sol` at `low` effort
+reviewed catalog fallback is `codex-sol` / `gpt-6-sol` at `low` effort
 (#1254). The same normalized selection feeds both the native Codex harness and
 Codex through the Claude harness. Explicit CLI values remain highest
 precedence, followed by saved `providers.codex` values; unified mode does not
 import this direct-provider default.
+
+Sol 6.1 has a separate catalog row: `codex-sol-6.1`, alias `sol-6.1`, wire ID
+`gpt-6.1-sol`, and Claude discovery ID `clud-claude-codex-sol-6-1`. Select it
+with `clud --codex --harness claude --model gpt-6.1-sol`, or choose
+**Codex Sol 6.1 (OpenAI)** in `/model`. Its reviewed effort is `low`; supported
+efforts are `low`, `medium`, `high`, `xhigh`, and `max`, with a 1,050,000-token
+context window. Existing Sol, Terra, and Luna selections remain available.
 
 DeepSeek upgrades its API aliases in place and occasionally renames them. As
 of 2026-09-14, DeepSeek's Models & Pricing page lists `deepseek-flash`
@@ -154,7 +161,9 @@ Two shapes stay silent. A mid-session `/model` pick of the Pro row in an
 otherwise Claude-provider unified session — no launch-time signal can see a
 choice made after launch, so that gap needs a gateway-side check. And the
 native DeepSeek harness (`--harness deepseek`, `dsh`), which owns its own
-provider configuration and takes no `--model`; clud emits no notice there.
+provider configuration and takes no `--model` (except OpenRouter, see
+[launch-targets](launch-targets.md#deepseek-harness-install-and-providers));
+clud emits no notice there.
 
 ### Adding a cataloged model
 
@@ -235,17 +244,22 @@ accepted work.
 
 ## Harness application
 
+The launch plan retains the normalized `--effort` selection internally. Before
+spawning Claude, the runtime moves `low`, `medium`, `high`, and `xhigh` to the
+merged settings document and removes the flag, supporting clients that predate
+that CLI option. Dry runs render the same conversion. `max` retains its session
+flag because Claude settings do not accept it.
+
 - Native Claude receives its normalized wire model through `--model` and an
-  explicit effort through Claude Code's `--effort` session flag.
+  explicit ordinary effort through launch-scoped `effortLevel` settings.
 - Native Codex receives the wire model through `-m` and effort through
   the documented `model_reasoning_effort` config override.
 - Codex through Claude emits a registered `clud-claude-codex-*` discovery ID
-  and carries ordinary effort through Claude Code's independent `--effort`
-  session flag. The bridge still accepts `wire@effort` as a compatibility
+  and carries ordinary effort through launch-scoped `effortLevel` settings. The bridge still accepts `wire@effort` as a compatibility
   input; only the provider wire ID reaches OpenAI.
 - Direct DeepSeek keeps its reviewed no-override 1m child profile. Effort
-  defaults to the catalog's `low` and travels on Claude Code's `--effort`
-  session flag — an initial value, never a pinned `CLAUDE_CODE_EFFORT_LEVEL`,
+  defaults to the catalog's `low` and travels through launch-scoped
+  `effortLevel` settings — an initial value, never a pinned `CLAUDE_CODE_EFFORT_LEVEL`,
   so `/effort` stays live (DD-059). Explicit model, effort, and context
   selections replace only their corresponding child-profile values.
 - Direct OpenRouter uses the Claude harness with
@@ -305,10 +319,30 @@ remains the frontend and receives the resolved main-model wire ID through its
    catalog slug before launch. Unknown full IDs pass through losslessly because
    OpenRouter owns that namespace.
 3. Claude Code's `/model` command offers the gateway-discovered live
-   inventory after launch, alongside its own built-in rows. Clud enables
-   discovery on unpinned launches but does not implement a separate
-   pre-launch OpenRouter picker, and cannot restrict the picker to the
-   discovered set.
+   inventory after launch, alongside its own built-in rows, but only on a
+   launch with no model pin. A direct `clud --openrouter` launch is always
+   pinned: with no `--model`, the resolved selection (the saved
+   `providers.openrouter.model`, else the catalog default) is the pin
+   ([DD-077](../DESIGN_DECISIONS.md#dd-077-a-launch-time-model-pin-constrains-every-model-slot-not-just-the-main-model)),
+   so discovery is off and the picker shows only the built-in rows. The
+   `--unified` route keeps discovery on, filtered to the allowlist. Clud
+   does not implement a separate pre-launch OpenRouter picker, and cannot
+   restrict the picker to the discovered set.
+
+`--provider-only <slug>` (repeatable) pins every request of a direct
+`clud --openrouter` launch to the named upstream providers, for example
+`clud --openrouter --model deepseek/deepseek-v4.1-flash --provider-only
+parasail/fp8`. clud passes OpenRouter's `provider` object (`{"only": [...],
+"allow_fallbacks": false}`) to Claude Code through `CLAUDE_CODE_EXTRA_BODY`,
+which Claude Code merges into every request; other keys already in that
+variable are kept. Fallbacks are always off, so a request fails rather than
+rerouting to another provider or price. Any other route, or a malformed
+slug, is refused with exit 2, and `--dry-run` reports the pin as
+`provider_only`.
+
+Once a launch is resolved, every routing decision it made — backend, upstreams,
+slots, allowlist, discovery, context, effort, timeouts and the launch checks —
+lives in one `ResolvedRoute`: see [route-plan.md](route-plan.md).
 
 A live `clud --openrouter --model <id>` also becomes OpenRouter's saved
 default (`providers.openrouter.model` in `~/.clud/settings.json`), so the next
@@ -385,6 +419,41 @@ without a restart -- and can be failed over automatically. See
 
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
+
+### OpenRouter `:free` models
+
+`crates/clud-bin/src/openrouter_free.rs` owns this (#1833, #1838).
+
+- **Proven free or refused.** A `:free` id must match a zero-priced row in
+  the offline catalog. A priced or unknown `:free` id is refused before
+  launch, so a stale or mistyped id never bills.
+- **One launch probe.** Before the session starts, clud sends one
+  `max_tokens: 1` request with the stored key. Only an endpoint-exclusion
+  refusal stops the launch; a free model's 429 or a 5xx lets it proceed.
+- **OpenRouter's reason is relayed, not restated.** The error prints
+  OpenRouter's message and each `metadata.ineligibility_reasons[]` entry with
+  its `configure_url` verbatim, from either the chat-completions or the
+  `/messages` error shape.
+- **Guardrail flags hide behind "No policies".** A guardrail carries its own
+  free-endpoint data flags (train on request data, publish prompts) that the
+  guardrail *list* does not show. The list can read "No policies" while a flag
+  excludes every free endpoint whose provider trains on prompts (nvidia,
+  poolside, liquid in #1838), and the account Privacy page cannot override a
+  stricter guardrail. The fix is the guardrail's edit view. No request field
+  (`provider.data_collection`, `zdr`, provider order) bypasses the filter.
+- **Alternatives and credit.** The error suggests other `:free` ids from the
+  offline catalog, and only for a refused id makes one free `GET /credits`
+  call. With no credit left it says so instead of offering the paid variant:
+  a key's spending limit (`limit_remaining`) is a cap, not money.
+- **Mid-session limits are named at launch (#1845).** A free id that passes
+  the probe can still hit OpenRouter's per-minute or per-day caps, or an
+  upstream error, later in a long session. On the direct route, Claude Code
+  reports that as `API returned an empty or malformed response (HTTP 200)`:
+  the stream ends after one event, and the non-streaming retry gets a JSON
+  body that is not a Message. clud is not in that request path, so every
+  `:free` launch prints one note naming that symptom and the paid id. Turning
+  the error into a proper Anthropic error would belong to the `--unified`
+  gateway.
 
 ### Anthropic-compatible credential preflight
 

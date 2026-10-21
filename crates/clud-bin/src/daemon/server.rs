@@ -307,6 +307,17 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
+                // The listener is non-blocking so this loop can poll for
+                // shutdown. On macOS and Windows an accepted socket inherits
+                // that mode (Linux does not), so the handler's first read
+                // could fail with WouldBlock before the client's request
+                // arrived and the client saw an empty reply.
+                if let Err(error) = stream.set_nonblocking(false) {
+                    eprintln!(
+                        "[clud-daemon] dropping connection: cannot make it blocking: {error}"
+                    );
+                    continue;
+                }
                 let activity_guard = test_activity
                     .as_ref()
                     .map(TestRuntimeActivity::start_request);

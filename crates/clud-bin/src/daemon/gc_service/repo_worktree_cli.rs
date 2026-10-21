@@ -77,6 +77,11 @@ pub(crate) fn spawn_cli_probe(
     rx
 }
 
+/// Shared source-use admission for the legacy ancestry-driven CLI path.
+pub(crate) fn source_reclamation_reason(path: &Path) -> Option<&'static str> {
+    super::source_guard::source_in_use(path)
+}
+
 /// Remove one `reclaimable` row through the daemon's executor: fresh
 /// re-probe and unchanged-verdict re-check, `git worktree remove` (never
 /// `--force`), `branch -D` only at the verified tip, then prune. The CLI

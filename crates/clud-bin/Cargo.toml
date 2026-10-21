@@ -36,6 +36,8 @@ getrandom = "0.4"
 # Issue #132: gitignore-aware repo walk for the startup large-file guard.
 # Matches the major version ripgrep / fd use; no feature flags needed.
 ignore = "0.4"
+# File identity (including NTFS hardlinks), rather than matching size/mtime.
+same-file = "1"
 # Issue #556: in-process git-index parse for the large-file guard's fast
 # (tracked-files + cached sizes) pass. Pinned exactly; license MIT OR
 # Apache-2.0 (gitoxide family). Only the index reader is pulled in — no ODB,
@@ -96,7 +98,7 @@ toml_edit = "0.25.11"
 # Issue #447: pure-Rust zip extraction for the vendored Git Bash bundle.
 # `deflate` is the only compression method present in git-bash-bin.zip;
 # disabling default features avoids pulling bzip2/zstd C deps.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"
@@ -119,6 +121,13 @@ shell-words = "1.1"
 # block-bad-cmd hook — glob patterns compile to an anchored regex, and
 # `match_mode: "regex"` rules use this directly.
 regex = "1"
+# #1962: real shell grammars for the PreToolUse command scanner, replacing a
+# hand-written tokenizer. MIT; the grammars compile one C file each through
+# `cc` (no C++). Pinned exactly so a grammar update is a reviewed change:
+# node kinds are matched by name in `shell_ast`.
+tree-sitter = "=0.26.13"
+tree-sitter-bash = "=0.25.1"
+tree-sitter-powershell = "=0.26.4"
 tempfile = "3"
 
 [dev-dependencies]

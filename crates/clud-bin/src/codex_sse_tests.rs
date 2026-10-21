@@ -1051,3 +1051,24 @@ fn parallel_calls_with_punctuation_only_difference_get_distinct_client_ids() {
     assert!(is_legal_id(first_id));
     assert!(is_legal_id(second_id));
 }
+
+#[test]
+fn frame_decoder_keeps_a_character_split_across_reads() {
+    let bytes = "data: {\"t\":\"\u{e9}\"}\n\n".as_bytes();
+    let split = bytes.iter().position(|byte| *byte == 0xC3).unwrap() + 1;
+    let mut decoder = FrameDecoder::new();
+    let mut frames = decoder.push(&bytes[..split]);
+    frames.extend(decoder.push(&bytes[split..]));
+    frames.extend(decoder.finish());
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "{\"t\":\"\u{e9}\"}");
+}
+
+#[test]
+fn frame_decoder_replaces_invalid_bytes_and_flushes_a_truncated_tail() {
+    let mut decoder = FrameDecoder::new();
+    let mut frames = decoder.push(b"data: a\xffb\n\ndata: c\xc3");
+    frames.extend(decoder.finish());
+    assert_eq!(frames[0].data, "a\u{FFFD}b");
+    assert_eq!(frames[1].data, "c\u{FFFD}");
+}

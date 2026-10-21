@@ -43,8 +43,15 @@ pub struct LaunchPlan {
     pub stream_json_progress: bool,     // claude subprocess-mode loop only
     pub codex_model: Option<String>,    // legacy bridge compatibility field
     pub model_selection: Option<ResolvedModelSelection>, // normalized provider/model/effort/context
+    pub route: Option<ResolvedRoute>,   // every routing decision, resolved once (#1855)
 }
 ```
+
+`ResolvedRoute` (`crates/clud-bin/src/route_plan.rs`, #1855) is the one place a
+launch's backend, upstreams, model slots, allowlist, discovery, context window,
+effort capability, upstream routing, timeout and launch checks are decided.
+Each backend renders it; none re-derives it. It is additive and omitted when
+absent, so a pre-#1855 payload still round-trips.
 
 `LoopMarkers { done_path, blocked_path }` and
 `RepeatSchedule { interval_secs }` live in the same module. All three derive
@@ -74,8 +81,12 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
 1. **Seeds `cmd` with `backend_path`** and reads the effective harness from
    the resolved target.
 2. **Adds Codex configuration before its subcommand.** Every configured `-c`
-   override is emitted first, followed by the project-document fallback when
-   the caller did not override it.
+   override is emitted first, then `approvals_reviewer="auto_review"` (Codex
+   auto review, #1847) unless the settings overrides or passthrough already
+   choose a reviewer (`-c`/`--config approvals_reviewer=…`, `--approve-for-me`,
+   `--not-so-yolo`), followed by the project-document fallback when the caller
+   did not override it. Auto review only acts under `--safe`, because YOLO
+   raises no approval requests ([DD-162](../DESIGN_DECISIONS.md#dd-162-codex-launches-default-to-auto-review-for-approvals)).
 3. **Selects the Codex subcommand.** Explicit `-p` prompts and `loop` use
    `exec`; the built-ins `do`, `up`, `rebase`, and `fix` seed the interactive
    TUI without a subcommand. `grind` instead requires one normal Claude-harness
@@ -143,7 +154,8 @@ construction. Model-provider selection is carried separately by
 |---|---|---|---|
 | Subcommand keyword | (none) | `exec` for `-p`/`loop`; none for interactive built-ins (including intended `grind`); `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
 | YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | none; DSH owns permissions |
-| Model flag | `--model <id>` | `-m <id>` | unsupported; DSH owns provider/model profiles |
+| Approval reviewer | user | `-c approvals_reviewer="auto_review"` unless the user chose one | none |
+| Model flag | `--model <id>` | `-m <id>` | OpenRouter: `--patch` overlay naming the model ([launch-targets](launch-targets.md#deepseek-harness-install-and-providers)); otherwise unsupported |
 | Prompt delivery | `-p <prompt>` | bare positional | bare positional after the headless profile |
 | `-m <message>` | `-m <message>` passthrough | dropped because it would clobber `--model` | rejected before bootstrap |
 | `--continue` / `--resume` | native flags | `resume` subcommand | rejected before bootstrap |

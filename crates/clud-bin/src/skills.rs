@@ -35,10 +35,6 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::Backend;
 
-#[path = "skills_home.rs"]
-mod skills_home;
-use skills_home::home_dir;
-
 const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
 /// One bundled skill: the directory name and the literal `SKILL.md` body.
@@ -165,6 +161,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "clud-os-debug",
         skill_md: include_str!("../assets/skills/clud-os-debug/SKILL.md"),
+    },
+    BundledSkill {
+        name: "video-use",
+        skill_md: include_str!("../assets/skills/video-use/SKILL.md"),
     },
 ];
 
@@ -325,7 +325,7 @@ pub struct LegacyPurgeReport {
 /// [`InstallError::NoHomeDir`] only when the home dir itself cannot be
 /// resolved.
 pub fn ensure_installed() -> Result<Vec<(&'static SkillBackend, InstallReport)>, InstallError> {
-    let home = home_dir().ok_or(InstallError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(InstallError::NoHomeDir)?;
     ensure_installed_at(&home)
 }
 
@@ -348,7 +348,7 @@ pub fn ensure_installed_at(
 pub fn ensure_installed_for_backend(
     backend: Backend,
 ) -> Result<Option<(&'static SkillBackend, InstallReport)>, InstallError> {
-    let home = home_dir().ok_or(InstallError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(InstallError::NoHomeDir)?;
     ensure_installed_for_backend_at(&home, backend)
 }
 
@@ -392,7 +392,9 @@ fn install_explicit_invocation_policies(base: &Path) -> Result<(), InstallError>
         "grind-land",
         "grind-cron",
     ];
-    for (name, policy) in std::iter::once(("do", DO_POLICY))
+    const VIDEO_USE_POLICY: &str = include_str!("../assets/skills/video-use/agents/openai.yaml");
+    for (name, policy) in [("do", DO_POLICY), ("video-use", VIDEO_USE_POLICY)]
+        .into_iter()
         .chain(GRIND_SKILLS.iter().map(|name| (*name, GRIND_POLICY)))
     {
         let skill_dir = base.join(name);
@@ -408,6 +410,7 @@ fn install_explicit_invocation_policies(base: &Path) -> Result<(), InstallError>
         match std::fs::read_to_string(&path) {
             Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => continue,
             Ok(existing) if normalize(&existing) == normalize(policy) => continue,
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
             _ => {
                 std::fs::create_dir_all(&agents_dir)?;
                 std::fs::write(&path, policy)?;
@@ -450,10 +453,15 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
         let skill_md = skill_dir.join("SKILL.md");
         match std::fs::read_to_string(&skill_md) {
             // Never installed here: write it.
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 std::fs::create_dir_all(&skill_dir)?;
                 std::fs::write(&skill_md, skill.skill_md)?;
                 report.installed.push(skill.name);
+            }
+            // Present but unreadable (non-UTF-8, permissions): it is not ours
+            // to overwrite, so leave it alone (#1906).
+            Err(_) => {
+                report.skipped_existing.push(skill.name);
             }
             // A copy the user has taken ownership of (marker stripped, or
             // hand-authored): never touch it.

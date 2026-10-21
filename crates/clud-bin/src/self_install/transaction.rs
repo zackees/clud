@@ -286,9 +286,7 @@ fn approved_destination() -> Result<PathBuf, String> {
     {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData/Local"))
-            })
+            .or_else(|| crate::home::user_home().map(|home| home.join("AppData/Local")))
             .ok_or("cannot locate per-user local app data")?;
         if !local.is_absolute() {
             return Err("per-user local app data must be absolute".into());
@@ -726,8 +724,12 @@ fn extract_wheel(wheel: File, target: &mut File, asset: &ResolvedAsset) -> Resul
     let mut found = false;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let path = Path::new(entry.name());
-        if entry.name().contains(['\\', ':', '\0'])
+        let name = entry
+            .name()
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        let path = Path::new(&name);
+        if name.contains(['\\', ':', '\0'])
             || path
                 .components()
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))

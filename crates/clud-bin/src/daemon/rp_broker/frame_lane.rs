@@ -150,7 +150,7 @@ pub(in crate::daemon) fn publish_cache_manifest(state_dir: &Path) -> io::Result<
     let runtime_root = state_dir.to_string_lossy().into_owned();
     let lock_root = state_dir.join("daemon.lock").to_string_lossy().into_owned();
     let log_root = state_dir.join("logs").to_string_lossy().into_owned();
-    let config_root = dirs::home_dir()
+    let config_root = crate::home::user_home()
         .map(|home| home.join(".clud"))
         .unwrap_or_else(|| state_dir.to_path_buf())
         .to_string_lossy()
