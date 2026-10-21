@@ -1,6 +1,6 @@
 schema = 3
 profile = "library"
-linter  = "zackees/ci.yml@f1984ebe546a89e9677c904563aa443791283102"   # the exact ci-lint commit precheck runs
+linter  = "zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb"   # the exact ci-lint commit precheck runs
 
 # ── Platforms ─────────────────────────────────────────────────────────────
 # Derived from .github/workflows/ci.yml's own `runs-on:` labels and the
