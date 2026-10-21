@@ -1025,6 +1025,15 @@ fn spawn_repo_worktree_probe(
                 &procs,
                 wt_root.as_deref(),
             );
+            // #1687: measure only on this background thread. The CLI reads
+            // the snapshot and never walks a checkout to produce its report.
+            if let Err(error) = crate::gc::target_size_cache::refresh(
+                rows.iter()
+                    .filter(|row| !row.reservation)
+                    .map(|row| (row.repo_root.clone(), row.path.clone())),
+            ) {
+                eprintln!("[clud] gc: target size snapshot failed: {error}");
+            }
             // Issue #1610: size worktrees here, off the launch path, so the
             // launch banner only reads the cached result.
             refresh_worktree_size_cache(wt_root.as_deref());

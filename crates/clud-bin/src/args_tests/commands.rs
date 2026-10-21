@@ -64,11 +64,26 @@ fn test_gc_bare_subcommand_yields_none() {
 }
 
 #[test]
+fn test_gc_list_targets_json() {
+    let args = parse(&["clud", "gc", "list", "--targets", "--json"]);
+    assert!(matches!(
+        args.command,
+        Some(Command::Gc {
+            subcommand: Some(GcSubcommand::List {
+                targets: true,
+                json: true,
+                kind: None,
+            }),
+        })
+    ));
+}
+
+#[test]
 fn test_gc_list() {
     let args = parse(&["clud", "gc", "list"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::List { json, kind }),
+            subcommand: Some(GcSubcommand::List { json, kind, .. }),
         }) => {
             assert!(!json);
             assert!(kind.is_none());
@@ -83,7 +98,7 @@ fn test_gc_list_json() {
     let args = parse(&["clud", "gc", "list", "--json"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::List { json, kind }),
+            subcommand: Some(GcSubcommand::List { json, kind, .. }),
         }) => {
             assert!(json);
             assert!(kind.is_none());
@@ -97,7 +112,7 @@ fn test_gc_list_kind_filter() {
     let args = parse(&["clud", "gc", "list", "--kind", "trash"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::List { json, kind }),
+            subcommand: Some(GcSubcommand::List { json, kind, .. }),
         }) => {
             assert!(!json);
             assert_eq!(kind.as_deref(), Some("trash"));

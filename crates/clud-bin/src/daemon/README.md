@@ -23,7 +23,7 @@ baseline before the next client merges; see
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 
 1. **Session manager** — spawns per-session worker subprocesses for `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs`, and `clud loop --repeat`. Each worker owns one backend (`claude` or `codex`) running under a PTY or a captured subprocess, persists snapshots + an append-only log to disk, and brokers attach/detach from interactive clients.
-2. **GC service** — single-owner of `~/.clud/data.redb`. All `clud gc *` IPC ops route to a dedicated registry-worker thread (`gc_service.rs`); the worker is the sole reader/writer of the redb file, eliminating multi-process locking races (issue #138).
+2. **GC service** — single-owner of `~/.clud/data.redb`. All `clud gc *` IPC ops route to a dedicated registry-worker thread (`gc_service.rs`); the worker is the sole reader/writer of the redb file, eliminating multi-process locking races (issue #138). The background repo-worktree probe also refreshes the [read-only target-size report](../../../../docs/architecture/gc-and-registry.md#cached-rust-target-sizes-1687); `gc list --targets` reads that snapshot without IPC.
 
 Foreground interactive launches still use the direct runner by default — the daemon hosts the centralized PTY path only when explicitly opted in (`--detach`, `--detachable`, `--experimental-daemon-centralized`, repeat jobs). See [docs/architecture/daemon-ipc.md](../../../../docs/architecture/daemon-ipc.md) for the wire protocol, attach flow, snapshot/log persistence, and failure modes. This README is the per-file inventory.
 

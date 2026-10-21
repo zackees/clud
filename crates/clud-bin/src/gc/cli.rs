@@ -85,6 +85,7 @@ enum GcAction {
     List {
         json: bool,
         kind: Option<String>,
+        targets: bool,
     },
     Prune {
         dry_run: bool,
@@ -108,8 +109,13 @@ enum GcAction {
 
 fn normalize(sub: GcSubcommand) -> GcAction {
     match sub {
-        GcSubcommand::List { json, kind } => GcAction::List {
+        GcSubcommand::List {
             json,
+            kind,
+            targets,
+        } => GcAction::List {
+            json,
+            targets,
             // `--kind all` on list means "no filter".
             kind: kind.filter(|k| k != ALL_KIND),
         },
@@ -161,6 +167,15 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
     };
     let action = normalize(sub);
 
+    if let GcAction::List {
+        json,
+        targets: true,
+        ..
+    } = &action
+    {
+        return super::target_size_cache::run_report(*json);
+    }
+
     if let Some(code) = validate_pre_daemon(&action) {
         return code;
     }
@@ -173,6 +188,7 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
         GcAction::List {
             json,
             kind: Some(k),
+            ..
         } if k == UV_CACHE_KIND => return cmd_list_uv_cache(*json),
         GcAction::Purge {
             dry_run,
@@ -201,7 +217,7 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
         }
     };
     match action {
-        GcAction::List { json, kind } => cmd_list(&state_dir, json, kind.as_deref()),
+        GcAction::List { json, kind, .. } => cmd_list(&state_dir, json, kind.as_deref()),
         GcAction::Prune {
             dry_run,
             older_than,
@@ -1113,12 +1129,14 @@ mod tests {
     #[test]
     fn normalize_list_kind_all_means_no_filter() {
         let action = normalize(GcSubcommand::List {
+            targets: false,
             json: false,
             kind: Some(ALL_KIND.into()),
         });
         assert_eq!(
             action,
             GcAction::List {
+                targets: false,
                 json: false,
                 kind: None,
             }
