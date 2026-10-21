@@ -539,6 +539,8 @@ impl Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Acquire a credential in a masked window and deliver it directly to a sink.
+    Secret(crate::secret_prompt::Options),
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
     /// Query clud's cached OpenRouter model and pricing catalog.
@@ -1438,6 +1440,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "settings",
     "test",
     "auth",
+    "secret",
     "models",
     "codex-update",
     "dsh-update",
@@ -1745,7 +1748,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     // subcommand missing from this list does not fail loudly: clud silently
     // swallows everything after `--` as backend passthrough, and the subcommand
     // sees an empty command vector.
-    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "safe-rm"];
+    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "safe-rm", "secret"];
 
     // Which subcommand we are inside, once one has been seen. `None` means the
     // tokens still belong to clud's own top-level flags.

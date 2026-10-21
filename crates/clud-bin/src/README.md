@@ -23,6 +23,10 @@ single [`LaunchPlan`]. Submodules under `command/`, `daemon/`, `dnd/`, and
 the orchestration glue and standalone utilities consumed by both `main.rs` and
 the integration tests.
 
+Credential prompt ownership (`secret_prompt.rs`, `secret_prompt/gui.rs`, and
+`secret_prompt/sink.rs`) is documented in
+[secret-prompt.md](../../../docs/architecture/secret-prompt.md).
+
 ## Subdirectories
 
 - [command/](command/README.md) - `LaunchPlan` construction: backend argv

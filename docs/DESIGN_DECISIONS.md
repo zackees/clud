@@ -6925,3 +6925,18 @@ parse error keeps an old settings file from disarming its other rules.
 refresh). Rewriting the user's settings file to drop the key (clud does not
 edit settings it did not write). Failing the launch on a pin (too harsh for a
 value that is now simply unused).
+
+
+## DD-174: Credential prompts deliver to sinks without exposing values to agents
+
+The native credential prompt (#1708) is part of the existing multicall binary,
+using masked single and multiline egui fields with persistence disabled. The
+agent selects the host/purpose and sink; the user enters the value in the
+window. File, vault and command sinks expose only outcome status. Child output
+is discarded even on failure because credential tools can echo stdin.
+
+Askpass needs a separate stdout protocol for git/ssh/sudo, so its multicall
+alias checks the requesting process chain and refuses ordinary agent callers.
+This protects against accidental capture, not hostile local process spoofing.
+No GUI fails clearly rather than requesting secrets through chat. The detailed
+contract lives in [secret-prompt.md](architecture/secret-prompt.md).

@@ -84,3 +84,6 @@ for the installer model and rationale.
 See the checklist in
 [docs/architecture/skill-system.md](../../../../docs/architecture/skill-system.md#adding-a-skill).
 Register in `skills.rs::BUNDLED_SKILLS`.
+
+`clud-secret` acquires credentials through the masked native prompt and direct
+sinks; see [secret-prompt.md](../../../../docs/architecture/secret-prompt.md).

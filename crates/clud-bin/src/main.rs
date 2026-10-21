@@ -315,6 +315,7 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             workflow: workflow.clone(),
             json: *json,
         }),
+        args::Command::Secret(options) => clud::secret_prompt::run(options),
         args::Command::Doctor => {
             if !args.passthrough.is_empty() {
                 eprintln!("doctor accepts no passthrough arguments");
