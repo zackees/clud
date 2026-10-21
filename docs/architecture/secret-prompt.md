@@ -63,7 +63,10 @@ fake credentials, check output suppression even when a sink echoes input,
 preserve multiline file contents, exercise cancellation and blocked stdin,
 and inspect masked widget output without opening a desktop window. A separate
 native-window probe renders and delivers a fake multiline value on graphical
-runners, using xvfb-run on Linux when available; headless skips do not establish
+runners, using xvfb-run on Linux when available. A second Linux probe runs a
+headless Weston compositor with software OpenGL, removes `DISPLAY`, and opens
+the window through Wayland. It waits on compositor startup output with a
+deadline and always terminates the compositor. Headless skips do not establish
 native window coverage.
 The native CI setup sets `CLUD_REQUIRE_SECRET_GUI=1`: there a missing display,
 runtime or graphics context fails the probe rather than skipping coverage.

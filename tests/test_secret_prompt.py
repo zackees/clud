@@ -240,3 +240,71 @@ def test_ssh_askpass_unlocks_a_fixture_key(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("ssh-ed25519 ")
     assert "fake-askpass-token" not in result.stdout + result.stderr
+
+
+def _wait_for_wayland_socket(compositor, socket_path: Path) -> None:
+    """Consume compositor startup output with a deadline, without sleep polling."""
+    import time
+
+    deadline = time.monotonic() + 20
+    while not socket_path.is_socket():
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "Wayland compositor did not create its socket"
+        assert compositor.poll() is None, "Wayland compositor exited during startup"
+        compositor.next_stderr(timeout=remaining)
+
+
+def test_native_secret_window_on_wayland(tmp_path: Path) -> None:
+    """Force a real Wayland window, with X11 unavailable as a fallback."""
+    import os
+    import shutil
+    import sys
+
+    import pytest
+
+    from tests import process
+    from tests.test_hello import CLUD
+
+    if sys.platform != "linux":
+        pytest.skip("Wayland is a Linux desktop backend")
+    weston = shutil.which("weston")
+    if weston is None:
+        assert os.environ.get("CLUD_REQUIRE_SECRET_GUI") != "1", "Wayland coverage requires Weston"
+        pytest.skip("Weston is required for the Wayland window probe")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    source = tmp_path / "fixture"
+    source.write_text("FAKE_WAYLAND_PRIVATE_KEY\nsecond line\n")
+    destination = tmp_path / "received"
+    env = {key: value for key, value in os.environ.items() if key not in (
+        "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET",
+    )}
+    env.update({
+        "XDG_RUNTIME_DIR": str(runtime),
+        "WAYLAND_DISPLAY": "clud-secret-test",
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+        "CLUD_INTEGRATION_TESTS": "1",
+        "CLUD_TEST_SECRET_PROMPT_FILE": str(source),
+        "CLUD_TEST_SECRET_PROMPT_GUI": "1",
+    })
+    help_result = process.run([weston, "--help"], capture_output=True, text=True, timeout=10)
+    renderer = "--renderer=gl" if "--renderer" in help_result.stdout else "--use-gl"
+    compositor = process.Popen(
+        [weston, "--backend=headless-backend.so", renderer, "--no-config",
+         "--socket=clud-secret-test", "--idle-time=0"],
+        env=env, stdout=process.PIPE, stderr=process.PIPE, text=True,
+    )
+    try:
+        _wait_for_wayland_socket(compositor, runtime / "clud-secret-test")
+        result = process.run(
+            [CLUD, "secret", "--multiline", "--to-file", str(destination)],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        diagnostics = result.stdout + result.stderr
+        assert result.returncode == 0, diagnostics
+        assert result.stdout.strip() == "stored"
+        assert "FAKE_WAYLAND_PRIVATE_KEY" not in diagnostics
+        assert destination.read_text() == source.read_text()
+    finally:
+        compositor.terminate()
+        compositor.wait(timeout=10)
