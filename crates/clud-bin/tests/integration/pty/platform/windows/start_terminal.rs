@@ -1,0 +1,94 @@
+//! #2007: an explicitly opened Command Prompt outlives its clud-owned PTY.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use clud::job_orphan_reaper::ForegroundJobTracker;
+use clud::process_identity::ProcessIdentity;
+use running_process::pty::NativePtyProcess;
+
+struct Fixture {
+    process: NativePtyProcess,
+    tracker: Option<ForegroundJobTracker>,
+    terminal: Option<ProcessIdentity>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.process.close_impl();
+        drop(self.tracker.take());
+        if let Some(identity) = self.terminal {
+            clud::process_tree::kill_tree_filtered_automatic(identity, &|_| true);
+        }
+    }
+}
+
+fn git_bash() -> PathBuf {
+    ["ProgramFiles", "ProgramW6432"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(|root| PathBuf::from(root).join("Git/bin/bash.exe"))
+        .find(|path| path.is_file())
+        .expect("Git Bash is required for the Windows start-command regression")
+}
+
+fn wait_for_terminal(process: &NativePtyProcess) -> ProcessIdentity {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    loop {
+        if let Some(bytes) = process.read_chunk_impl(Some(0.1)).unwrap() {
+            output.extend(bytes);
+            // ConPTY may request the cursor position before Bash starts.
+            let _ = process.write_impl(b"\x1b[1;1R", false);
+        }
+        let scan = clud::process_scan::scan_env("CLUD");
+        if let Some(terminal) = scan.tagged.iter().find(|candidate| {
+            candidate.parent_pid == std::process::id()
+                && candidate.name.eq_ignore_ascii_case("cmd.exe")
+                && candidate.command.split_whitespace().count() == 1
+        }) {
+            return terminal.identity();
+        }
+        assert!(Instant::now() < deadline, "no opened cmd.exe: {}", String::from_utf8_lossy(&output));
+    }
+}
+
+#[test]
+fn start_cmd_survives_pty_close_and_foreground_cleanup() {
+    require_pty_or_skip!("start_cmd_survives_pty_close_and_foreground_cleanup");
+    let temp = tempfile::tempdir().unwrap();
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    let overrides = clud::shell::nounset::env_overrides_at(temp.path(), false, None);
+    let originator = format!("CLUD:{}", std::process::id());
+    for (key, value) in overrides.into_iter().chain([
+        ("CLUD_EXE".to_string(), crate::exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud")).display().to_string()),
+        (running_process::ORIGINATOR_ENV_VAR.to_string(), originator),
+        ("MSYS2_ARG_CONV_EXCL".to_string(), "*".to_string()),
+    ]) {
+        env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+        env.push((key, value));
+    }
+    let process = NativePtyProcess::new(
+        vec![git_bash().display().to_string(), "--noprofile".into(), "--norc".into(), "-c".into(), "start cmd.exe; printf 'START_REQUESTED\\n'; read -r".into()],
+        None, Some(env), 24, 80, None,
+    ).unwrap();
+    process.set_echo(false);
+    let mut fixture = Fixture {
+        process,
+        tracker: Some(ForegroundJobTracker::install().expect("foreground tracker")),
+        terminal: None,
+    };
+    fixture.process.start_impl().unwrap();
+    fixture.tracker.as_ref().unwrap().register_backend(fixture.process.pid().unwrap().unwrap(), "bash.exe");
+    let terminal = wait_for_terminal(&fixture.process);
+    fixture.terminal = Some(terminal);
+    fixture.process.close_impl().unwrap();
+    drop(fixture.tracker.take());
+    assert!(terminal.is_live(), "explicitly opened Command Prompt died with clud cleanup");
+    let facts = clud::reaper_facts::collect_host_facts(&[terminal.pid], &Default::default(), Vec::new());
+    // The explicit launch must also declare persistence for later orphan sweeps.
+    let scan = clud::process_scan::scan_env("CLUD");
+    assert!(scan.declared_daemons.contains(&terminal.pid));
+    let facts = clud::reaper_facts::FactsSnapshot { declared_daemons: scan.declared_daemons, ..facts };
+    assert_eq!(clud::reaper_facts::spare_signal(&facts, terminal.pid, "cmd.exe"), Some(clud::reaper_facts::SpareReason::DeclaredDaemon));
+}
