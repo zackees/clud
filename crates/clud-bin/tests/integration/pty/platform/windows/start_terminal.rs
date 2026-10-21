@@ -153,10 +153,12 @@ fn start_intercepts_only_a_bare_cmd_request() {
         env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
         env.push((key, value));
     }
-    // Record fallback argv without launching any extra applications. A real
-    // Bash function still exercises argument boundaries and start dispatch.
+    // Mock stock start before re-sourcing startup, so even the RED run cannot
+    // open unrelated applications. The fixed startup replaces this function.
     let script = r#"
 command() { printf 'FALLBACK'; printf '[%s]' "$@"; printf '\n'; }
+start() { command start "$@"; }
+. "$BASH_ENV"
 start cmd
 start CMD.EXE
 start cmd.exe /c exit
