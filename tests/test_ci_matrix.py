@@ -220,8 +220,17 @@ def test_every_build_waits_for_mode_and_full_is_complete():
     assert "matrix:" not in dylint_workflow
     for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
         block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
-        assert "    needs: static\n" in block, name
-        assert "    if: needs.static.outputs.mode" in block, name
+        # Accept either `needs: static` or `needs: [static, ...]`: the
+        # property under test is that every build WAITS FOR static's mode
+        # output, not the exact scalar-vs-list spelling. `build-linux-x64`
+        # legitimately lists `cache-maint` as a second dependency (the
+        # pre-prune must precede its cache save), which a substring match on
+        # the scalar form rejected while the behaviour was correct.
+        assert "needs: static" in block or "needs: [static," in block, name
+        # Same for the `if:` -- the property is that it consults static's
+        # mode output. `always() && !cancelled() && ...` (needed to survive a
+        # skipped `cache-maint`) no longer starts with `if: needs.static...`.
+        assert "needs.static.outputs.mode" in block, name
     assert "--workflow-plan ci.yml" in text
 
 
@@ -638,3 +647,20 @@ def test_default_branch_reuse_skips_validation_but_never_the_cache_writers() -> 
     # Enforcement, not shadow, or the skips would never happen.
     assert "--mode enforce" in static
     assert "--mode shadow" not in static
+
+
+def test_preprune_is_ordered_before_writers_and_only_deletes_on_main_pushes() -> None:
+    text = CI_YML.read_text(encoding="utf-8")
+    maintenance = text.split("\n  cache-maint:\n", 1)[1].split("\n  dylint:\n", 1)[0]
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in maintenance
+    assert "actions: write" in maintenance
+    assert "uses: ./.github/actions/setup-exec" in maintenance
+    assert '"$VENV_PY" -m ci.cache_lockfile_changed' in maintenance
+    assert "--lockfile-changed --max-deletes 50" in maintenance
+    for job in ("dylint", "build-linux-x64"):
+        block = text.split(f"\n  {job}:\n", 1)[1].split("\n  #", 1)[0]
+        assert "needs: [static, cache-maint]" in block
+        assert "always() && !cancelled()" in block
+        assert "needs.static.result == 'success'" in block
+        assert "needs.cache-maint.result == 'success'" in block
+        assert "needs.cache-maint.result == 'skipped'" in block
