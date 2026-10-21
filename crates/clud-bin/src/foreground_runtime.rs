@@ -491,7 +491,7 @@ impl ForegroundRuntime {
                 .ok_or(BridgeError::AnthropicCompatCredentials)?;
             refuse_blocked_free_model(descriptor, plan, &secret)?;
             crate::route_plan::render_direct_env(&route, &secret).apply(&mut env);
-            apply_provider_only(&mut env, descriptor, &plan.provider_only)?;
+            apply_upstream_routing(&mut env, descriptor, route.upstream_routing.as_ref())?;
             // #1257: discovery is off under a pin, so say why once instead of
             // leaving the picker silently short of gateway rows.
             let mut notices = Vec::new();
@@ -1016,20 +1016,20 @@ pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::Pl
 /// provider's reviewed catalog default.
 /// `--provider-only`: hand OpenRouter's `provider` routing object to Claude
 /// Code through `CLAUDE_CODE_EXTRA_BODY`, keeping any other keys already set.
-fn apply_provider_only(
+fn apply_upstream_routing(
     env: &mut Vec<(String, String)>,
     descriptor: &crate::provider_registry::AnthropicCompatProvider,
-    slugs: &[String],
+    routing: Option<&crate::route_plan::ProviderRouting>,
 ) -> Result<(), BridgeError> {
-    if slugs.is_empty() || descriptor.provider != ModelProvider::OpenRouter {
+    let Some(routing) = routing.filter(|_| descriptor.provider == ModelProvider::OpenRouter) else {
         return Ok(());
-    }
+    };
     let key = crate::openrouter_routing::EXTRA_BODY_ENV;
     let existing = env
         .iter()
         .find(|(candidate, _)| env_key_eq(candidate, key))
         .map(|(_, value)| value.clone());
-    let body = crate::openrouter_routing::extra_body(existing.as_deref(), slugs)
+    let body = crate::openrouter_routing::policy_body(existing.as_deref(), routing)
         .map_err(BridgeError::Model)?;
     set_env(env, key, &body);
     Ok(())
@@ -1882,6 +1882,47 @@ mod tests {
     /// credential vault.
     struct FakeSecretStore(Option<String>);
 
+    struct UnreadSecretStore;
+
+    impl crate::provider_auth::SecretStore for UnreadSecretStore {
+        fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not read credentials")
+        }
+        fn set(&self, _secret: &str) -> Result<(), crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not write credentials")
+        }
+        fn delete(&self) -> Result<(), crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not delete credentials")
+        }
+    }
+
+    #[test]
+    fn unsupported_privacy_policies_refuse_before_credential_access() {
+        use crate::backend::RoutingMode::{Direct, Unified};
+
+        for (provider, harness, mode) in [
+            (ModelProvider::Claude, Backend::Claude, Direct),
+            (ModelProvider::Kimi, Backend::Claude, Direct),
+            (ModelProvider::Claude, Backend::Claude, Unified),
+            (ModelProvider::OpenRouter, Backend::DeepSeek, Direct),
+        ] {
+            for (zdr, no_data_collection) in [(true, false), (false, true)] {
+                let mut plan = plan(provider, harness);
+                plan.routing_mode = mode;
+                plan.zdr = zdr;
+                plan.no_data_collection = no_data_collection;
+                let result = ForegroundRuntime::start_with_secret_store(
+                    &plan,
+                    Vec::new(),
+                    &UnreadSecretStore,
+                );
+                assert!(
+                    matches!(result, Err(BridgeError::Model(reason)) if reason.contains("OpenRouter"))
+                );
+            }
+        }
+    }
+
     impl crate::provider_auth::SecretStore for FakeSecretStore {
         fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
             Ok(self.0.clone())
@@ -1923,6 +1964,8 @@ mod tests {
             failover_allow_metered: false,
             allowed_models: Vec::new(),
             provider_only: Vec::new(),
+            zdr: false,
+            no_data_collection: false,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,
@@ -3743,7 +3786,10 @@ mod tests {
             "CLAUDE_CODE_EXTRA_BODY".to_string(),
             r#"{"top_k":5}"#.to_string(),
         )];
-        apply_provider_only(&mut env, openrouter_descriptor(), &only).unwrap();
+        let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+        plan.provider_only = only.clone();
+        let routing = crate::route_plan::provider_routing(&plan);
+        apply_upstream_routing(&mut env, openrouter_descriptor(), routing.as_ref()).unwrap();
         let body: serde_json::Value =
             serde_json::from_str(lookup(&env, "CLAUDE_CODE_EXTRA_BODY").unwrap()).unwrap();
         assert_eq!(body["top_k"], 5);
@@ -3753,8 +3799,8 @@ mod tests {
         );
         // No flag, or another provider: the environment is untouched.
         let mut untouched = Vec::new();
-        apply_provider_only(&mut untouched, openrouter_descriptor(), &[]).unwrap();
-        apply_provider_only(&mut untouched, kimi_descriptor(), &only).unwrap();
+        apply_upstream_routing(&mut untouched, openrouter_descriptor(), None).unwrap();
+        apply_upstream_routing(&mut untouched, kimi_descriptor(), routing.as_ref()).unwrap();
         assert!(untouched.is_empty());
     }
 

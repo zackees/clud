@@ -208,6 +208,8 @@ fn backend_prompt_launch_plan(
         failover_allow_metered: false,
         allow_model: Vec::new(),
         provider_only: Vec::new(),
+        zdr: false,
+        no_data_collection: false,
         effort: None,
         context_window: None,
         prompt: Some(prompt),

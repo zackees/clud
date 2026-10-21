@@ -854,12 +854,12 @@ fn resolve_launch_target<'a>(
 /// injects it into every OpenRouter request it forwards (#1863). Nothing else
 /// can carry it.
 fn validate_provider_only(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
-    if args.provider_only.is_empty() {
+    if args.provider_only.is_empty() && !args.zdr && !args.no_data_collection {
         return;
     }
     if launch_target.model_provider != backend::ModelProvider::OpenRouter {
         eprintln!(
-            "[clud] error: --provider-only applies only to an OpenRouter launch \
+            "[clud] error: --provider-only, --zdr and --no-data-collection apply only to an OpenRouter launch \
              (direct or --unified)"
         );
         std::process::exit(2);

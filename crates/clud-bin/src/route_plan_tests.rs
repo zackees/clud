@@ -37,6 +37,8 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         failover_allow_metered: false,
         allowed_models: Vec::new(),
         provider_only: Vec::new(),
+        zdr: false,
+        no_data_collection: false,
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
         route: None,
@@ -975,8 +977,37 @@ fn a_provider_only_pin_is_the_routes_upstream_routing() {
         Some(ProviderRouting {
             only: vec!["deepinfra".to_string()],
             allow_fallbacks: false,
+            zdr: false,
+            data_collection: None,
         })
     );
+}
+
+#[test]
+fn openrouter_privacy_policy_survives_serialization() {
+    let policy = serde_json::json!({
+        "only": [], "allow_fallbacks": true, "zdr": true, "data_collection": "deny"
+    });
+    let routing: ProviderRouting = serde_json::from_value(policy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(routing).unwrap(), policy);
+}
+
+#[test]
+fn openrouter_privacy_flags_keep_fallbacks_until_a_provider_is_pinned() {
+    let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+    plan.zdr = true;
+    plan.no_data_collection = true;
+    let route = resolve(&plan, &Ambient::default());
+    let routing = route.upstream_routing.unwrap();
+    assert!(routing.zdr);
+    assert_eq!(routing.data_collection.as_deref(), Some("deny"));
+    assert!(routing.allow_fallbacks);
+    plan.provider_only.push("parasail/fp8".to_string());
+    let pinned = resolve(&plan, &Ambient::default())
+        .upstream_routing
+        .unwrap();
+    assert!(!pinned.allow_fallbacks);
+    assert!(pinned.zdr);
 }
 
 /// C14/D20: the bridge renders its slots and boundary from the route, and the

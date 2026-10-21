@@ -4,10 +4,12 @@
 //! unless the request body carries a `provider` object. On the direct route
 //! clud is not in the request path, so it hands that object to Claude Code
 //! through `CLAUDE_CODE_EXTRA_BODY`, a JSON object Claude Code merges into
-//! every request. `allow_fallbacks` is always `false`: a pinned launch fails
-//! a request rather than silently rerouting to another provider or price.
+//! every request. Provider pins disable fallbacks; privacy-only policies keep
+//! fallbacks enabled among endpoints satisfying the requested privacy policy.
 
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::{Map, Value};
 
 /// The variable Claude Code merges into every request body.
 pub const EXTRA_BODY_ENV: &str = "CLAUDE_CODE_EXTRA_BODY";
@@ -39,13 +41,29 @@ pub fn invalid_slug(slugs: &[String]) -> Option<String> {
 /// value: other keys the user set are kept, and only `provider` is replaced.
 /// An existing value that is not a JSON object is an error, not overwritten.
 pub fn extra_body(existing: Option<&str>, slugs: &[String]) -> Result<String, String> {
+    policy_body(
+        existing,
+        &crate::route_plan::ProviderRouting {
+            only: slugs.to_vec(),
+            allow_fallbacks: false,
+            zdr: false,
+            data_collection: None,
+        },
+    )
+}
+
+/// Merge the resolved routing policy into the harness request body.
+pub fn policy_body(
+    existing: Option<&str>,
+    routing: &crate::route_plan::ProviderRouting,
+) -> Result<String, String> {
     let mut body = match existing.map(str::trim).filter(|text| !text.is_empty()) {
         None => Map::new(),
         Some(text) => match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(map)) => map,
             _ => {
                 return Err(format!(
-                    "--provider-only needs {EXTRA_BODY_ENV} to be a JSON object, but it is set \
+                    "OpenRouter routing needs {EXTRA_BODY_ENV} to be a JSON object, but it is set \
                      to something else; unset it or make it an object"
                 ))
             }
@@ -53,7 +71,7 @@ pub fn extra_body(existing: Option<&str>, slugs: &[String]) -> Result<String, St
     };
     body.insert(
         "provider".to_string(),
-        json!({"only": slugs, "allow_fallbacks": false}),
+        serde_json::to_value(routing).expect("routing contains only JSON values"),
     );
     Ok(Value::Object(body).to_string())
 }
@@ -93,6 +111,22 @@ mod tests {
             value,
             json!({"provider": {"only": ["parasail/fp8"], "allow_fallbacks": false}})
         );
+    }
+
+    #[test]
+    fn privacy_policy_merges_without_disabling_fallbacks() {
+        let routing = crate::route_plan::ProviderRouting {
+            only: Vec::new(),
+            allow_fallbacks: true,
+            zdr: true,
+            data_collection: Some("deny".to_string()),
+        };
+        let body = policy_body(Some(r#"{"top_k":5}"#), &routing).unwrap();
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["top_k"], 5);
+        assert_eq!(value["provider"], serde_json::to_value(&routing).unwrap());
+        assert!(policy_body(Some("[]"), &routing).is_err());
+        assert!(policy_body(Some("invalid"), &routing).is_err());
     }
 
     #[test]

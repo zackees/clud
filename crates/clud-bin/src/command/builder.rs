@@ -919,6 +919,8 @@ fn build_launch_plan_for_target_at(
         failover_allow_metered: args.failover_allow_metered,
         allowed_models: args.model_allowlist(),
         provider_only: args.provider_only.clone(),
+        zdr: args.zdr,
+        no_data_collection: args.no_data_collection,
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),
         pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
         route: None,
