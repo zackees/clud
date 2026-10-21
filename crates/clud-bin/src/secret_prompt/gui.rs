@@ -139,7 +139,7 @@ mod tests {
         for multiline in [false, true] {
             let context = egui::Context::default();
             let mut secret = "SENTINEL_CREDENTIAL\nPRIVATE_KEY".to_string();
-            let output = context.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     masked_editor(ui, &mut secret, multiline);
                 });
@@ -147,6 +147,9 @@ mod tests {
             let rendered = format!("{:?}", output.shapes);
             assert!(!rendered.contains("SENTINEL_CREDENTIAL"));
             assert!(!rendered.contains("PRIVATE_KEY"));
+            // This headless rendering probe has no graphics backend to apply
+            // texture updates; acknowledge them before dropping FullOutput.
+            output.textures_delta.clear();
         }
     }
 }
