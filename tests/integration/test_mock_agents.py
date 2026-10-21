@@ -490,6 +490,34 @@ def _drop_scrub_lists(value: object) -> object:
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
 
+    @pytest.mark.parametrize("model", ["codex-sol-6.1", "gpt-6.1-sol", "sol-6.1"])
+    def test_sol_6_1_launch_reaches_the_selected_wire_model(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path,
+        fake_responses: _FakeResponsesServer, model: str,
+    ) -> None:
+        env = mock_env.copy()
+        env["CLUD_INTEGRATION_TESTS"] = "1"
+        env["CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL"] = fake_responses.base_url
+        dry = _run(
+            clud_binary, "--dry-run", "--codex", "--harness", "claude",
+            "--model", model, "--effort", "high", "-p", "hello", env=env,
+        )
+        assert dry.returncode == 0, dry.stderr
+        plan = json.loads(dry.stdout)
+        model_index = plan["command"].index("--model")
+        assert plan["command"][model_index + 1] == "clud-claude-codex-sol-6-1"
+        result = _run(
+            clud_binary, "--codex", "--harness", "claude", "--subprocess",
+            "--model", model, "--effort", "high", "-p", "hello", "--",
+            "--mock-codex-bridge-probe", str(tmp_path / "sol-6-1-probe.json"), env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert len(fake_responses.requests) == 1
+        _, _, body = fake_responses.requests[0].partition(b"\r\n\r\n")
+        sent = json.loads(body)
+        assert sent["model"] == "gpt-6.1-sol"
+        assert sent["reasoning"]["effort"] == "high"
+
     @pytest.mark.skipif(sys.platform == "win32", reason="fixture uses a POSIX executable script")
     @pytest.mark.parametrize(
         ("available", "expected", "source", "page_two"),

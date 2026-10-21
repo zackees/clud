@@ -665,6 +665,25 @@ pub(crate) fn remove_worktree_path(
     path: &Path,
     force: bool,
 ) -> Result<&'static str, String> {
+    remove_worktree_path_if_unused(
+        main_repo,
+        path,
+        force,
+        &repo_worktree_cli::source_reclamation_reason,
+    )
+}
+
+fn remove_worktree_path_if_unused(
+    main_repo: &Path,
+    path: &Path,
+    force: bool,
+    source_probe: &dyn Fn(&Path) -> Option<&'static str>,
+) -> Result<&'static str, String> {
+    if path.try_exists().unwrap_or(true) {
+        if let Some(reason) = source_probe(path) {
+            return Err(reason.to_string());
+        }
+    }
     remove_worktree_path_with_git_and_process_refs(
         main_repo,
         path,
@@ -700,6 +719,15 @@ where
     P: Fn(&Path) -> Vec<WorktreeProcessRef>,
 {
     ensure_no_live_process_refs(path, &process_refs)?;
+    crate::gc::delete_audit::record_required(
+        "worktree.git-remove",
+        path,
+        &format!(
+            "repo={} force={force}; live-process guard passed",
+            main_repo.display()
+        ),
+    )
+    .map_err(|error| format!("refusing unaudited worktree removal: {error}"))?;
     let mut args: Vec<&str> = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -711,6 +739,9 @@ where
         Ok(_) => {
             if !path_try_exists(path)? {
                 return Ok(RemovalOutcome::GitRemove);
+            }
+            if !force {
+                return Err("git reported removal but source is still present; refusing recursive fallback without --force".into());
             }
             fallback_remove_and_prune(main_repo, path, &git, &process_refs).map_err(
                 |fallback_err| {
@@ -724,6 +755,9 @@ where
         }
         Err(git_err) => {
             if path_try_exists(path)? {
+                if !force {
+                    return Err(git_err);
+                }
                 fallback_remove_and_prune(main_repo, path, &git, &process_refs).map_err(
                     |fallback_err| {
                         format!(
@@ -754,11 +788,12 @@ where
     if path_try_exists(path)? {
         // Audit before acting (#893): this fallback physically removes a
         // worktree after the git-level removal failed.
-        crate::gc::delete_audit::record(
+        crate::gc::delete_audit::record_required(
             "worktree.fallback-remove",
             path,
-            "git-worktree fallback prune",
-        );
+            "git-worktree fallback prune; fresh live-process guard passed",
+        )
+        .map_err(|error| format!("refusing unaudited fallback removal: {error}"))?;
         match std::fs::remove_dir_all(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

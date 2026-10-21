@@ -27,6 +27,55 @@ nothing about tracking, sweeping, or reclaiming changed.
 
 `extern_root.rs` owns the location; see DD-053 for why it moved.
 
+## Source reclamation safety and the #1790 incident
+
+On 2026-10-04 the entire `ci.yml-extern` parent disappeared during active
+cross-repository work. The deletion actor remains **unproven**. The 2026-10-20
+investigation checked the retained audit log, the 2.8.27 scanner naming rules,
+tracked-entry deletion, worktree fallback removal, and the build-target sweep.
+The retained audit contained no exact parent deletion record; it did contain
+child deletions from `gc.entry-delete` and `worktree.fallback-remove`. This
+negative result does not exclude an unaudited operation or an external actor.
+The scanner's sibling-name filter does not select `ci.yml-extern` itself;
+the target sweep selects `target/`, not its source parent. No retained evidence
+identifies Soldr or an external shell as the actor either. Historical process
+and container ownership at the incident time cannot be reconstructed from the
+current process table.
+
+The investigation found concrete defenses that were missing:
+
+- A non-checkout could be reclaimed on mtime alone. It is now pinned as
+  `not a verified git checkout`; nested clones and bare repositories are never
+  vouched for by a clean ancestor checkout. A checkout owning Git's linked
+  worktree metadata is also retained.
+- Sibling clones bypassed the extern-repo Git-state policy. Both kinds now
+  receive off-worker cached verdicts and fresh pre-removal Git checks.
+- Session cwds alone did not cover other host processes or container binds.
+  Automatic source removal checks fresh host cwds and running Docker bind
+  sources, including a child source or an ancestor bind. Missing process facts,
+  failed Docker inspection, malformed mounts or incomplete results veto removal.
+  A missing Docker executable means no Docker inspection is available on that
+  host; no container operations are attempted. Containers are never removed by
+  this source-protection check.
+- Source-removal audit writes were best effort, and successful Git worktree
+  removal had no direct audit event. Tracked-entry and worktree removals now
+  require a persisted pre-action record naming the exact path, registry or Git
+  evidence, and rule. Automatic legacy worktree removal also honors Git's dirty
+  tree refusal: it never forces removal or recursively deletes after a refusal.
+  The CLI's ancestry-driven cleanup also checks source use; without an explicit
+  `--force`, it never recursively removes source left behind by Git. An audit write/sync failure refuses removal. Cache-only
+  sweeps retain their existing best-effort logging policy.
+
+The focused RED test is
+`unknown_container_directory_is_pinned_even_when_stale`; before the fix it
+reports `purge: true` for an uninspected directory. The tests also cover nested
+checkout parents, common-Git metadata, live child cwds, child/ancestor binds,
+unavailable snapshots, unrelated paths, and a genuinely clean pushed checkout.
+Protection of uncommitted/unpushed work remains a Git-verdict requirement;
+unknown or unreadable contents cannot be reclaimed as a shortcut. Restoring a
+pathname never proves an old deleted-inode container bind points at the new
+source: an overlapping running bind remains a veto until the runner is rebuilt.
+
 ## Two redb databases
 
 | File | Concern | Ownership | Lifetime |
@@ -178,7 +227,7 @@ is **an error**, not a fallback — there is no read-only path in v1
 
   How verdicts are produced (issue #946):
 
-  1. The periodic tick does the one thing only the worker can — `registry.list(extern-repo)` —
+  1. The periodic tick does the one thing only the worker can — `registry.list` filtered to extern-repo and sibling-clone rows —
      and hands the rows to `spawn_extern_probe` (`gc_service.rs`).
   2. A `clud-gc-extern-probe` thread computes `extern_repo_purge_verdict` for each row and
      sends the **complete snapshot** back as `RegistryMsg::ExternVerdicts`, reusing the same

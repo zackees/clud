@@ -59,9 +59,8 @@ pub(super) enum GitWorkState {
     /// shipped. Exactly backwards: these are the checkouts that should be
     /// reclaimed *soonest*.
     Merged,
-    /// Not a git work tree of its own. We cannot make a safety judgement,
-    /// so callers fall back to the mtime idle gate alone (the pre-guard
-    /// behaviour) rather than pinning forever.
+    /// Not a git work tree of its own. Its contents have not been verified,
+    /// so pin it: a parent directory may contain nested active checkouts.
     Unknown,
     /// A probe query exceeded `GIT_PROBE_TIMEOUT` or git could not be run.
     /// Distinct from `Unknown`: there *is* a repository here, we simply
@@ -359,6 +358,12 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
         return GitWorkState::Unknown;
     }
 
+    // This checkout may own the common Git directory of other worktrees,
+    // even when their processes have cwds outside this source tree.
+    if cwd.join(".git").join("worktrees").exists() {
+        return GitWorkState::HasLocalWork;
+    }
+
     // An inherited GIT_DIR (etc.) outranks `cwd` in git's discovery, so the
     // probe would silently answer about someone else's repository.
     if git_discovery_env_is_poisoned() {
@@ -482,7 +487,7 @@ pub(crate) enum PurgeClass {
 /// | true   | *     | *           | HasLocalWork | no (pinned: local work)  |
 /// | true   | *     | *           | ProbeFailed  | no (pinned: unreadable)  |
 /// | true   | true  | *           | Clean        | yes                      |
-/// | true   | true  | *           | Unknown      | yes (mtime fallback)     |
+/// | true   | true  | *           | Unknown      | no (unverified contents)     |
 /// | true   | *     | true        | Merged       | yes (short window, #993)  |
 ///
 /// Two idle flags because merged checkouts earn a shorter window: their work
@@ -539,14 +544,14 @@ pub(super) fn extern_repo_purge_decision(
             reason: "reclaimable: clean and pushed",
             class: PurgeClass::Reclaimable,
         },
-        GitWorkState::Unknown if idle => PurgeDecision {
-            purge: true,
-            reason: "reclaimable: not a git checkout",
-            class: PurgeClass::Reclaimable,
+        GitWorkState::Unknown => PurgeDecision {
+            purge: false,
+            reason: "pinned: not a verified git checkout",
+            class: PurgeClass::Pinned,
         },
         // Idle only by the merged window, but not merged: the full window
         // still governs.
-        GitWorkState::Clean | GitWorkState::Unknown => PurgeDecision {
+        GitWorkState::Clean => PurgeDecision {
             purge: false,
             reason: "spared: recently active",
             class: PurgeClass::Spared,
@@ -631,6 +636,47 @@ fn most_recent_mtime(path: &Path) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
+    /// #1790: a container directory can hold nested clones and active
+    /// container binds even when it has no `.git` of its own.
+    #[test]
+    fn unknown_container_directory_is_pinned_even_when_stale() {
+        let decision = extern_repo_purge_decision(true, true, true, GitWorkState::Unknown);
+        assert!(
+            !decision.purge,
+            "uninspected contents must survive: {decision:?}"
+        );
+        assert_eq!(decision.class, PurgeClass::Pinned);
+        assert_eq!(decision.reason, "pinned: not a verified git checkout");
+    }
+
+    #[test]
+    fn shared_git_metadata_is_not_disposable_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/worktrees/active-child")).unwrap();
+        assert_eq!(git_work_state(dir.path()), GitWorkState::HasLocalWork);
+    }
+
+    #[test]
+    fn nested_checkout_parent_is_not_a_disposable_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("nested-clone");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+        std::fs::write(child.join("unpushed-work"), "irreplaceable").unwrap();
+        let entry = TrackedEntry {
+            id: 1,
+            kind: "sibling-clone".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            created_unix: 0,
+        };
+        let decision = extern_repo_purge_verdict(&entry, Duration::ZERO);
+        assert!(!decision.purge);
+        assert_eq!(decision.reason, "pinned: not a verified git checkout");
+        assert!(child.join("unpushed-work").is_file());
+    }
+
     /// A directory's mtime can read slightly ahead of `SystemTime::now()`
     /// (fine-grained file timestamps on a fast machine, or plain clock
     /// skew). That is "touched just now", age zero, not "age unknown": with
@@ -697,9 +743,9 @@ mod tests {
             (
                 (true, true, true, GitWorkState::Unknown),
                 (
-                    true,
-                    "reclaimable: not a git checkout",
-                    PurgeClass::Reclaimable,
+                    false,
+                    "pinned: not a verified git checkout",
+                    PurgeClass::Pinned,
                 ),
             ),
         ];
@@ -723,7 +769,7 @@ mod tests {
     #[test]
     fn unreadable_git_state_is_spared_not_purged() {
         assert!(!extern_repo_purge_decision(true, true, true, GitWorkState::ProbeFailed).purge);
-        assert!(extern_repo_purge_decision(true, true, true, GitWorkState::Unknown).purge);
+        assert!(!extern_repo_purge_decision(true, true, true, GitWorkState::Unknown).purge);
     }
 
     /// Build `<tmp>/origin` (a real remote) plus `<tmp>/work` cloned from it,

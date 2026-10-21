@@ -144,28 +144,7 @@ pub fn is_fresh(source: &Path, target: &Path) -> bool {
 /// Whether `candidate` is `source` itself: the same file (a hardlink) or a
 /// symlink that resolves to it. A byte copy is not detected here.
 pub fn is_alias_of(source: &Path, candidate: &Path) -> bool {
-    let Ok(source) = std::fs::canonicalize(source) else {
-        return false;
-    };
-    let Ok(link_meta) = std::fs::symlink_metadata(candidate) else {
-        return false;
-    };
-    if link_meta.file_type().is_symlink() {
-        return std::fs::canonicalize(candidate).is_ok_and(|resolved| resolved == source);
-    }
-    match (std::fs::metadata(&source), std::fs::metadata(candidate)) {
-        (Ok(source_meta), Ok(candidate_meta)) => {
-            candidate_meta.is_file() && same_file(&source_meta, &candidate_meta)
-        }
-        _ => false,
-    }
-}
-
-/// Unix compares device and inode. Windows has no stable file-index API in
-/// std; a hardlink there is caught by [`is_fresh`]'s size and mtime
-/// comparison, and by the byte comparison in `shim_registry`.
-fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    crate::platform::alias_link::same_file(a, b)
+    same_file::is_same_file(source, candidate).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -179,6 +158,20 @@ mod tests {
         fs::write(&path, body).unwrap();
         crate::platform::shim_fs::set_mode(&path, 0o755).unwrap();
         path
+    }
+
+    #[test]
+    fn trust_recognizes_hardlinks_and_rejects_copies_with_matching_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let source = source_in(tmp.path(), b"trusted");
+        let hardlink = tmp.path().join("hardlink");
+        install_alias_with(&source, &hardlink, &[Method::Hardlink]).unwrap();
+        assert!(is_alias_of(&source, &hardlink));
+        assert!(is_alias_of(&source, &source));
+        let copied = tmp.path().join("copy");
+        install_alias_with(&source, &copied, &[Method::Copy]).unwrap();
+        assert!(is_fresh(&source, &copied));
+        assert!(!is_alias_of(&source, &copied));
     }
 
     #[test]

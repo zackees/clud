@@ -280,6 +280,7 @@ impl ForegroundRuntime {
         // the launch-context record can tell an ambient value from ours.
         let ambient = env.clone();
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
+        runtime.apply_initial_effort(plan)?;
         runtime.apply_attribution(plan)?;
         runtime.apply_session_history(plan);
         if plan.effective_harness() == Backend::Claude && !cfg!(test) {
@@ -629,6 +630,21 @@ impl ForegroundRuntime {
         self.merge_launch_settings(plan, compose)
     }
 
+    /// Settings work on Claude clients that predate the `--effort` flag.
+    /// Unlike an environment override, this leaves interactive effort editable.
+    fn apply_initial_effort(&mut self, plan: &LaunchPlan) -> Result<(), BridgeError> {
+        if plan.effective_harness() != Backend::Claude {
+            return Ok(());
+        }
+        let Some(effort) = settings_effort(&plan.command) else {
+            return Ok(());
+        };
+        self.merge_launch_settings(plan, |document| {
+            document["effortLevel"] = serde_json::json!(effort);
+            true
+        })
+    }
+
     /// Apply the plan's commit/PR attribution choice (#1317) to this
     /// launch's Claude settings. clud hides Claude Code's attribution unless
     /// the launch opted in; keys the user's own `--settings` set are kept.
@@ -769,6 +785,7 @@ impl ForegroundRuntime {
             if settings.replaces_user_argument {
                 remove_user_settings_argument(&mut command);
             }
+            remove_settings_effort(&mut command);
             command.insert(1, settings.value.clone());
             command.insert(1, "--settings".to_string());
         }
@@ -1643,12 +1660,31 @@ fn compose_launch_settings_document_with(
     Ok((user_settings, true))
 }
 
-/// Render the same deletion settings in a dry-run plan without creating a
-/// launch-scoped file or changing the executable plan.
+/// Ordinary effort levels accepted by older Claude settings schemas.
+fn settings_effort(command: &[String]) -> Option<&str> {
+    command.windows(2).find_map(|pair| {
+        (pair[0] == "--effort" && matches!(pair[1].as_str(), "low" | "medium" | "high" | "xhigh"))
+            .then_some(pair[1].as_str())
+    })
+}
+
+fn remove_settings_effort(command: &mut Vec<String>) {
+    if settings_effort(command).is_some() {
+        if let Some(index) = command.iter().position(|arg| arg == "--effort") {
+            command.drain(index..index + 2);
+        }
+    }
+}
+
+/// Render launch settings and effort compatibility without creating a file.
 pub fn dry_run_claude_command(plan: &LaunchPlan) -> Result<Vec<String>, String> {
-    let (settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
+    let (mut settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
         .map_err(|error| error.to_string())?;
+    if let Some(effort) = settings_effort(&plan.command) {
+        settings["effortLevel"] = serde_json::json!(effort);
+    }
     let mut command = plan.command.clone();
+    remove_settings_effort(&mut command);
     remove_user_settings_argument(&mut command);
     command.insert(1, settings.to_string());
     command.insert(1, "--settings".to_string());
@@ -4028,6 +4064,33 @@ pub(crate) mod tests {
             .iter()
             .position(|argument| argument == "--settings")?;
         command.get(index + 1).cloned()
+    }
+
+    #[test]
+    fn older_claude_receives_effort_as_settings_for_every_spawn_mode() {
+        let mut launch = plan(ModelProvider::Claude, Backend::Claude);
+        launch.command = vec!["claude".into(), "--effort".into(), "low".into()];
+        let mut runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+        runtime.apply_initial_effort(&launch).unwrap();
+        let path = settings_argument(&runtime).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(settings["effortLevel"], "low");
+        for mode in [SpawnMode::Subprocess, SpawnMode::Pty] {
+            let adapter = RecordingAdapter::default();
+            runtime
+                .spawn_with(&adapter, mode, launch.command.clone(), None)
+                .unwrap();
+            let calls = adapter.calls.borrow();
+            assert!(!calls[0].1.iter().any(|arg| arg == "--effort"));
+            assert!(calls[0].1.iter().any(|arg| arg == "--settings"));
+        }
+        let dry = dry_run_claude_command(&launch).unwrap();
+        assert!(!dry.iter().any(|arg| arg == "--effort"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&dry[2]).unwrap()["effortLevel"],
+            "low"
+        );
     }
 
     #[test]

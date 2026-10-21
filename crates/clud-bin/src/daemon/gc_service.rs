@@ -32,6 +32,7 @@ pub(crate) mod repo_worktree_cli;
 mod repo_worktree_probe;
 mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
+mod source_guard;
 
 use super::watch_service as gc_watch_service;
 
@@ -216,7 +217,10 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
         let result = if spared.is_some() {
             Ok(())
         } else {
-            remove_entry_filesystem(&entry)
+            remove_entry_filesystem(
+                &entry,
+                "automatic purge; applicable eligibility and source-use guards passed",
+            )
         };
         let completion = PurgeCompletion {
             id: entry.id,
@@ -562,16 +566,39 @@ fn handle_registry_msg(
 /// Last-moment safety re-check, run on the purge-pool thread. Returns the
 /// spare reason when the entry must NOT be deleted after all.
 ///
-/// Only extern-repo rows carry a probe verdict, and only they can go stale in
-/// a way that costs data: their verdict encodes "no uncommitted or unpushed
-/// work", which a developer can invalidate at any moment. Other kinds have no
-/// such gate and are unchanged.
+/// Extern and sibling clone verdicts encode "no uncommitted or unpushed
+/// work", which a developer can invalidate at any moment. All source kinds,
+/// including legacy worktree rows, also receive fresh source-use checks.
+/// Cache/trash entries keep their existing eligibility policy.
 fn reverify_before_delete(entry: &TrackedEntry) -> Option<&'static str> {
-    if entry.kind != EXTERN_REPO_KIND {
+    reverify_before_delete_with(entry, &source_guard::source_in_use)
+}
+
+fn reverify_before_delete_with(
+    entry: &TrackedEntry,
+    source_probe: &dyn Fn(&Path) -> Option<&'static str>,
+) -> Option<&'static str> {
+    if entry_is_cacheable(entry) {
+        let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
+        if !decision.purge {
+            return Some(decision.reason);
+        }
+    } else if entry.kind == WORKTREE_KIND {
+        let path = Path::new(&entry.path);
+        if let Some(reason) = source_probe(path) {
+            return Some(reason);
+        }
+        let decision = extern_repo::extern_repo_purge_decision(
+            path.is_dir(),
+            true,
+            true,
+            extern_repo::git_work_state(path),
+        );
+        return (!decision.purge).then_some(decision.reason);
+    } else {
         return None;
     }
-    let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
-    (!decision.purge).then_some(decision.reason)
+    source_probe(Path::new(&entry.path))
 }
 
 /// Issue #1603: log one reclaim outcome, free its in-flight slot and, when
@@ -743,8 +770,13 @@ where
     // `RegistryMsg::ExternVerdicts`. Results are therefore one tick behind,
     // which is the trade: a checkout becomes reclaimable on the tick after
     // it is first seen clean, rather than stalling every client op.
-    match registry.list(Some(EXTERN_REPO_KIND)) {
-        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+    match registry.list(None) {
+        Ok(rows) => spawn_extern_probe(
+            rows.into_iter().filter(entry_is_cacheable).collect(),
+            completion_tx,
+            activity,
+            spare_reasons,
+        ),
         Err(err) => eprintln!("[clud] gc tick: extern-repo list failed: {err}"),
     }
     // Issues #1591/#1603: act on the previous snapshot's reclaimable rows,
@@ -818,8 +850,13 @@ fn prime_extern_verdicts(
     spare_reasons: &mut SpareReasons,
     live_cwds_provider: &LiveCwdsProvider,
 ) {
-    match registry.list(Some(EXTERN_REPO_KIND)) {
-        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+    match registry.list(None) {
+        Ok(rows) => spawn_extern_probe(
+            rows.into_iter().filter(entry_is_cacheable).collect(),
+            completion_tx,
+            activity,
+            spare_reasons,
+        ),
         Err(err) => eprintln!("[clud] gc: initial extern-repo list failed: {err}"),
     }
     spawn_repo_worktree_probe(
