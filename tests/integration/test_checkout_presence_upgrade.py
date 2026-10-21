@@ -14,6 +14,7 @@ idle session that probes the daemon.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -24,10 +25,7 @@ import pytest
 
 from tests import process
 
-from ._daemon_helpers import (
-    kill_process_only,
-    managed_env,
-)
+from ._daemon_helpers import managed_env
 
 pytestmark = pytest.mark.integration
 
@@ -76,25 +74,35 @@ def _start_newer_daemon(tmp_path: Path) -> tuple[process.Popen, int, Path]:
             "listener.bind(('127.0.0.1',0))\n"
             "listener.listen(64)\n"
             "count=pathlib.Path(sys.argv[2])\n"
-            "count.write_text('0')\n"
-            "pathlib.Path(sys.argv[1]).write_text(str(listener.getsockname()[1]))\n"
+            "def publish(path, value):\n"
+            "    temporary=path.with_name(path.name+'.tmp')\n"
+            "    temporary.write_text(str(value))\n"
+            "    temporary.replace(path)\n"
+            "publish(count, 0)\n"
+            "publish(pathlib.Path(sys.argv[1]), listener.getsockname()[1])\n"
             "probes=0\n"
             "while True:\n"
             "    conn,_=listener.accept()\n"
             "    conn.close()\n"
             "    probes+=1\n"
-            "    count.write_text(str(probes))\n",
+            "    publish(count, probes)\n",
             str(port_file),
             str(count_file),
         ],
         stdout=process.DEVNULL,
         stderr=process.DEVNULL,
     )
-    deadline = time.monotonic() + 10
-    while not port_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert port_file.exists(), "stand-in daemon failed to start"
-    return daemon, int(port_file.read_text()), count_file
+    try:
+        deadline = time.monotonic() + 10
+        while not port_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert port_file.exists(), "stand-in daemon failed to start"
+        return daemon, int(port_file.read_text()), count_file
+    except BaseException:
+        if daemon.poll() is None:
+            daemon.kill()
+        daemon.wait(timeout=10)
+        raise
 
 
 def _probes(count_file: Path) -> int:
@@ -113,19 +121,19 @@ def _drain_stderr(session: process.Popen, lines: list[str], seconds: float) -> N
         lines.append(line)
 
 
-def _wait_until_dead(pid: int, timeout: float = 15.0) -> None:
+def _wait_until_dead(daemon: psutil.Process, timeout: float = 15.0) -> None:
     """Gone or a zombie. A detached daemon killed inside a container whose
     PID 1 does not reap stays a zombie, which a bare `kill(pid, 0)` still
     reports as alive."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+            if not daemon.is_running() or daemon.status() == psutil.STATUS_ZOMBIE:
                 return
         except psutil.NoSuchProcess:
             return
         time.sleep(0.1)
-    raise AssertionError(f"daemon pid {pid} still running after kill")
+    raise AssertionError(f"daemon pid {daemon.pid} still running after kill")
 
 
 def _cpu_seconds(pid: int) -> float:
@@ -160,12 +168,12 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
         text=True,
     )
     newer_daemon = None
-    old_daemon_pid = None
+    old_daemon = None
     stderr: list[str] = []
     try:
         _wait_for_presence(clud_binary, env, repo, session)
         info_path = state_dir / "daemon.json"
-        old_daemon_pid = int(json.loads(info_path.read_text(encoding="utf-8"))["pid"])
+        old_daemon = psutil.Process(int(json.loads(info_path.read_text(encoding="utf-8"))["pid"]))
 
         # The upgrade. Publish the newer daemon first, then remove the old
         # one, so the session's reconnect sees the newer build rather than an
@@ -183,8 +191,8 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
             ),
             encoding="utf-8",
         )
-        kill_process_only(old_daemon_pid)
-        _wait_until_dead(old_daemon_pid)
+        old_daemon.kill()
+        _wait_until_dead(old_daemon)
 
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and not any(_NOTE in line for line in stderr):
@@ -216,5 +224,6 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
         if newer_daemon is not None and newer_daemon.poll() is None:
             newer_daemon.kill()
             newer_daemon.wait(timeout=10)
-        if old_daemon_pid is not None:
-            kill_process_only(old_daemon_pid)
+        if old_daemon is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                old_daemon.kill()
