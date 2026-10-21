@@ -517,6 +517,11 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
         (Pinned, "not empty".to_string())
     );
 
+    // A probe may hold a Git child cwd open; do not dispatch deletion yet.
+    assert!(spare_reasons.begin_repo_probe());
+    assert_eq!(phase(&mut spare_reasons), 0);
+    spare_reasons.repo_probe_finished();
+
     // The race: an agent starts using the reservation after the probe.
     fs::write(race.join("new.txt"), "fresh work\n").unwrap();
 
@@ -524,6 +529,10 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
         phase(&mut spare_reasons),
         2,
         "the two cached reclaimable rows"
+    );
+    assert!(
+        !spare_reasons.begin_repo_probe(),
+        "a new probe must wait for pending deletions"
     );
     let outcomes = expect_reclaims(&rx, &mut spare_reasons, 2);
     assert!(

@@ -96,8 +96,15 @@ impl SpareReasons {
         self.repo_worktrees.retain(|r| r.path != path);
     }
 
-    /// Claim the repo-worktree probe slot; `false` while one is running.
+    pub(super) fn repo_probe_in_flight(&self) -> bool {
+        self.repo_probe_in_flight
+    }
+
+    /// Probes and reclaims cannot overlap: a Git probe holds its cwd on Windows.
     pub(super) fn begin_repo_probe(&mut self) -> bool {
+        if !self.repo_reclaims_in_flight.is_empty() {
+            return false;
+        }
         !std::mem::replace(&mut self.repo_probe_in_flight, true)
     }
 
