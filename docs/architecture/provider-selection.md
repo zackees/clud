@@ -72,11 +72,18 @@ Known compatibility spellings normalize immediately:
 - `opus` -> model `claude-opus`, wire alias `opus`.
 
 For a direct Codex launch with no explicit or saved provider selection, the
-reviewed catalog default is `codex-sol` / `gpt-5.6-sol` at `low` effort
+reviewed catalog fallback is `codex-sol` / `gpt-6-sol` at `low` effort
 (#1254). The same normalized selection feeds both the native Codex harness and
 Codex through the Claude harness. Explicit CLI values remain highest
 precedence, followed by saved `providers.codex` values; unified mode does not
 import this direct-provider default.
+
+Sol 6.1 has a separate catalog row: `codex-sol-6.1`, alias `sol-6.1`, wire ID
+`gpt-6.1-sol`, and Claude discovery ID `clud-claude-codex-sol-6-1`. Select it
+with `clud --codex --harness claude --model gpt-6.1-sol`, or choose
+**Codex Sol 6.1 (OpenAI)** in `/model`. Its reviewed effort is `low`; supported
+efforts are `low`, `medium`, `high`, `xhigh`, and `max`, with a 1,050,000-token
+context window. Existing Sol, Terra, and Luna selections remain available.
 
 DeepSeek upgrades its API aliases in place and occasionally renames them. As
 of 2026-09-14, DeepSeek's Models & Pricing page lists `deepseek-flash`
