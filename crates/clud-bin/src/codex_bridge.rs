@@ -4524,7 +4524,8 @@ mod tests {
             zdr: true,
             data_collection: Some("deny".to_string()),
         };
-        let gateway = UnifiedGatewayConfig::default().with_upstream_routing(Some(policy.clone()));
+        let gateway =
+            UnifiedGatewayConfig::new(None, false).with_upstream_routing(Some(policy.clone()));
         let request = br#"{"messages":[],"provider":{"zdr":false},"top_k":5}"#;
         let bytes = gateway
             .routed_body(ModelProvider::OpenRouter, request)
