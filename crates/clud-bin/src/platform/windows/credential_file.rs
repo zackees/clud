@@ -190,7 +190,10 @@ mod tests {
         let owner = "S-1-5-21-123-456-789-1001";
         for flags in ["P", "PAI", "PAR", "PARAI"] {
             assert!(is_owner_only_acl(&format!("D:{flags}(A;;FA;;;OW)"), owner));
-            assert!(is_owner_only_acl(&format!("D:{flags}(A;;FA;;;{owner})"), owner));
+            assert!(is_owner_only_acl(
+                &format!("D:{flags}(A;;FA;;;{owner})"),
+                owner
+            ));
         }
         for acl in [
             "D:AI(A;;FA;;;OW)",
