@@ -1349,6 +1349,9 @@ pub enum GcSubcommand {
         /// Issue #135: emit a JSON array instead of the human-readable table.
         #[arg(long = "json")]
         json: bool,
+        /// Report daemon-cached Rust target sizes across repository worktrees.
+        #[arg(long, conflicts_with = "kind")]
+        targets: bool,
         /// Restrict to a single managed kind (e.g. `worktree`, `trash`).
         #[arg(long = "kind")]
         kind: Option<String>,
