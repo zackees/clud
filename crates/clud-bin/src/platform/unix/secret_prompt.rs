@@ -10,7 +10,11 @@ pub fn graphics_available() -> bool {
     if !super::host::LINUX {
         return true;
     }
-    let present = |name| std::env::var(name).ok().is_some_and(|value| !value.is_empty());
+    let present = |name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.is_empty())
+    };
     // Match winit's backend choice: Wayland wins when both displays exist.
     available_with(
         present("WAYLAND_DISPLAY") || present("WAYLAND_SOCKET"),
