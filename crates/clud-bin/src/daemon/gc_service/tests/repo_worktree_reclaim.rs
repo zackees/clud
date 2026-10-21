@@ -558,3 +558,34 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
     );
     assert!(wt_root.is_dir(), "the root is never a removal target");
 }
+
+#[test]
+fn spared_and_failed_batches_refresh_before_the_next_reclaim() {
+    for outcome in [
+        ReclaimOutcome::Spared("now not empty".to_string()),
+        ReclaimOutcome::Failed("sharing violation".to_string()),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Registry::open_at(&tmp.path().join("gc.redb")).unwrap();
+        let mut state = SpareReasons::new();
+        let path = tmp.path().join("reservation").to_string_lossy().to_string();
+        state.begin_repo_reclaim(path.clone());
+        assert!(!state.begin_repo_probe());
+        apply_repo_worktree_reclaimed(&mut state, &path, &outcome);
+        assert!(state.repo_snapshot_needs_refresh());
+        let (pool_tx, pool_rx) = mpsc::channel();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        assert_eq!(run_repo_worktree_phase(
+            &registry, &pool_tx, &completion_tx, None, &mut state, Vec::new(),
+            RepoWorktreeGcConfig {
+                mode: ReclaimMode::Delete,
+                delete_remote: false,
+                wt_root: None,
+            },
+        ), 0);
+        assert!(matches!(pool_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        apply_repo_snapshot(&completion_rx, &mut state);
+        assert!(!state.repo_snapshot_needs_refresh());
+        assert!(state.begin_repo_probe());
+    }
+}

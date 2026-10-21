@@ -936,7 +936,12 @@ fn run_repo_worktree_phase(
         return 0;
     }
     let live = canonicalize_live_cwds(live_cwds.clone());
-    let rows: Vec<RepoWorktreeRow> = spare_reasons.repo_worktrees().0.to_vec();
+    // A completed batch must refresh even when failed/spared rows remain.
+    let rows: Vec<RepoWorktreeRow> = if spare_reasons.repo_snapshot_needs_refresh() {
+        Vec::new()
+    } else {
+        spare_reasons.repo_worktrees().0.to_vec()
+    };
     let mut dispatched = 0usize;
     for row in rows {
         let live_now = entry_path_contains_live_cwd_path(&row.path, &live);
