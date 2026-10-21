@@ -38,9 +38,15 @@ fn an_unreaped_zombie_is_not_a_live_identity() {
         ProcessRefreshKind::nothing(),
     );
     let batched = ProcessIdentity::observe_in(&system, identity.pid);
-    assert!(child.wait().expect("reap child after observations").success());
+    assert!(child
+        .wait()
+        .expect("reap child after observations")
+        .success());
     assert_eq!(waited, 0, "waitid must leave an exited child unreaped");
-    assert!(!was_live, "an unreaped zombie must not be considered running");
+    assert!(
+        !was_live,
+        "an unreaped zombie must not be considered running"
+    );
     assert_eq!(observed, None, "the direct probe must exclude a zombie");
     assert_eq!(batched, None, "the batched probe must exclude a zombie");
 }

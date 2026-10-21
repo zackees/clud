@@ -92,7 +92,10 @@ impl ProcessIdentity {
         system
             .process(Pid::from_u32(pid))
             .filter(|process| {
-                !matches!(process.status(), ProcessStatus::Zombie | ProcessStatus::Dead)
+                !matches!(
+                    process.status(),
+                    ProcessStatus::Zombie | ProcessStatus::Dead
+                )
             })
             .map(|process| Self::new(pid, process.start_time()))
     }
