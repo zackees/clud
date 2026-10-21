@@ -139,3 +139,58 @@ fn start_cmd_survives_pty_close_and_foreground_cleanup() {
         check_started_terminal(request);
     }
 }
+
+#[test]
+fn start_intercepts_only_a_bare_cmd_request() {
+    use running_process::{CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    for (key, value) in clud::shell::nounset::env_overrides_at(temp.path(), false, None)
+        .into_iter()
+        .chain([("CLUD_EXE".to_string(), "/usr/bin/echo".to_string())])
+    {
+        env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+        env.push((key, value));
+    }
+    // Record fallback argv without launching any extra applications. A real
+    // Bash function still exercises argument boundaries and start dispatch.
+    let script = r#"
+command() { printf 'FALLBACK'; printf '[%s]' "$@"; printf '\n'; }
+start cmd
+start CMD.EXE
+start cmd.exe /c exit
+start /b cmd.exe
+start '' cmd.exe
+start notepad.exe
+"#;
+    let child = NativeProcess::new(ProcessConfig {
+        command: CommandSpec::Argv(vec![git_bash().display().to_string(), "--noprofile".into(), "--norc".into(), "-c".into(), script.into()]),
+        cwd: None,
+        env: Some(env),
+        capture: true,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Null,
+        nice: None,
+        address_space_limit_bytes: None,
+    });
+    child.start().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "Bash dispatch fixture timed out");
+        match child.read_combined(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(event) => {
+                output.extend(event.line);
+                output.push(b'\n');
+            }
+            ReadStatus::Timeout => {}
+            ReadStatus::Eof => break,
+        }
+    }
+    assert_eq!(child.wait(Some(Duration::from_secs(5))).unwrap(), 0);
+    let output = String::from_utf8(output).unwrap().replace('\r', "");
+    assert_eq!(output, "__start-cmd\n__start-cmd\nFALLBACK[start][cmd.exe][/c][exit]\nFALLBACK[start][/b][cmd.exe]\nFALLBACK[start][][cmd.exe]\nFALLBACK[start][notepad.exe]\n");
+}
