@@ -1,7 +1,8 @@
 //! Native Linux zombie fixture for the process-identity liveness contract.
 #![cfg(target_os = "linux")]
 
-use super::*;
+use crate::process_identity::ProcessIdentity;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// #1993: an unreaped daemon still has a PID and start time, but no
 /// listener or executable code remains. Hold that exact state with

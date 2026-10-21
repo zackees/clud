@@ -205,10 +205,14 @@ def test_a_mention_that_says_no_is_still_denied(world: dict[str, object]) -> Non
     for text in (
         "Just do one agent - no worktrees",
         "Don't use the git work tree. Just do them one at a time in this repo",
+        "worktrees not allowed",
+        "worktrees aren't allowed",
         "find stale worktrees that we can purge",
     ):
         assert _prompt(world, text).returncode == 0
-    assert world["daemon"].sets() == []
+    assert world["daemon"].sets() == [
+        {"session_flag_op": "set", "session_id": SESSION, "key": "worktrees", "value": False}
+    ] * 4
     _assert_denied(_worktree_add(world), "has not allowed")
 
 
@@ -221,6 +225,13 @@ def test_a_yes_allows_that_session_only(world: dict[str, object]) -> None:
     allowed = _tool(world, "EnterWorktree", {})
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     _assert_denied(_tool(world, "EnterWorktree", {}, session="other-session"), "has not allowed")
+
+
+def test_a_later_no_revokes_previously_granted_consent(world: dict[str, object]) -> None:
+    assert _prompt(world, "use worktrees").returncode == 0
+    assert _tool(world, "EnterWorktree", {}).returncode == 0
+    assert _prompt(world, "worktrees are not allowed now").returncode == 0
+    _assert_denied(_tool(world, "EnterWorktree", {}), "has not allowed")
 
 
 def test_an_agent_isolation_without_worktree_is_untouched(world: dict[str, object]) -> None:

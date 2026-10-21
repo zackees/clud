@@ -53,11 +53,15 @@ const ALLOW_AFTER: &[&str] = &["ok", "okay", "allowed", "fine", "enabled"];
 /// say no, and "branch" says nothing about worktrees.
 #[must_use]
 pub fn says_yes(prompt: &str) -> bool {
-    let lower = prompt.to_lowercase();
-    lower.split(['.', '!', '?', ';', '\n']).any(clause_says_yes)
+    consent_decision(prompt) == Some(true)
 }
 
-fn clause_says_yes(clause: &str) -> bool {
+fn consent_decision(prompt: &str) -> Option<bool> {
+    let lower = prompt.to_lowercase();
+    lower.split(['.', '!', '?', ';', '\n']).rev().find_map(clause_decision)
+}
+
+fn clause_decision(clause: &str) -> Option<bool> {
     let words: Vec<String> = clause
         .replace("work-tree", "worktree")
         .replace("work tree", "worktree")
@@ -65,19 +69,18 @@ fn clause_says_yes(clause: &str) -> bool {
         .filter(|word| !word.is_empty())
         .map(str::to_string)
         .collect();
-    words.iter().enumerate().any(|(index, word)| {
+    words.iter().enumerate().rev().find_map(|(index, word)| {
         if !word.starts_with("worktree") {
-            return false;
+            return None;
         }
         let before = &words[index.saturating_sub(6)..index];
-        let after = &words[index + 1..words.len().min(index + 3)];
-        let negated = before.iter().any(|w| is_negation(w))
-            || before
-                .windows(2)
-                .any(|pair| pair[0] == "do" && pair[1] == "not");
-        !negated
-            && (before.iter().any(|w| ALLOW_BEFORE.contains(&w.as_str()))
-                || after.iter().any(|w| ALLOW_AFTER.contains(&w.as_str())))
+        let after = &words[index + 1..words.len().min(index + 4)];
+        if before.iter().chain(after).any(|word| is_negation(word)) {
+            return Some(false);
+        }
+        (before.iter().any(|word| ALLOW_BEFORE.contains(&word.as_str()))
+            || after.iter().any(|word| ALLOW_AFTER.contains(&word.as_str())))
+            .then_some(true)
     })
 }
 
@@ -101,7 +104,7 @@ pub fn tool_creates_worktree(tool_name: &str, tool_input: Option<&Value>) -> boo
     }
 }
 
-/// Handle `UserPromptSubmit`: record consent when the prompt says yes.
+/// Handle `UserPromptSubmit`: record explicit permission or revocation.
 /// Always exits 0 and prints nothing; stdout here would be added to the
 /// conversation, and exit 2 would erase the user's prompt.
 #[must_use]
@@ -126,11 +129,11 @@ pub fn handle_prompt_in(state_dir: &Path, stdin: &str) -> i32 {
     let Some(session) = session.filter(|id| crate::grind_facts::valid_session_id(id)) else {
         return 0;
     };
-    if !says_yes(prompt) {
+    let Some(allowed) = consent_decision(prompt) else {
         return 0;
-    }
+    };
     if let Err(error) =
-        crate::daemon::session_flag_set(state_dir, session, FLAG_KEY, Value::Bool(true))
+        crate::daemon::session_flag_set(state_dir, session, FLAG_KEY, Value::Bool(allowed))
     {
         eprintln!("[clud worktrees] could not record consent: {error}");
     }
@@ -250,6 +253,13 @@ mod tests {
     fn a_no_in_one_sentence_does_not_cancel_a_yes_in_another() {
         assert!(says_yes("No rush. You can use worktrees."));
         assert!(!says_yes("You can use branches. No worktrees."));
+    }
+
+    #[test]
+    fn explicit_refusal_after_worktree_noun_is_not_permission() {
+        assert!(!says_yes("worktrees not allowed"));
+        assert!(!says_yes("worktrees aren't allowed"));
+        assert!(!says_yes("use worktrees. No worktrees now."));
     }
 
     #[test]

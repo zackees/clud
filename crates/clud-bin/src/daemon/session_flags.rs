@@ -248,6 +248,15 @@ mod tests {
     }
 
     #[test]
+    fn a_later_refusal_revokes_the_sessions_permission() {
+        let state = serve_session_flags();
+        prompt(state.path(), "s1", "use worktrees");
+        assert!(crate::worktree_consent::refusal_in(state.path(), Some("s1")).is_none());
+        prompt(state.path(), "s1", "no worktrees");
+        assert!(crate::worktree_consent::refusal_in(state.path(), Some("s1")).is_some());
+    }
+
+    #[test]
     fn a_session_is_refused_when_no_daemon_is_recorded() {
         let empty = tempfile::TempDir::new().unwrap();
         prompt(empty.path(), "s1", "use worktrees");

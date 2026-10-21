@@ -7001,3 +7001,7 @@ record consent, so it is left as it was.
 to a worktree on their own; they wait or ask. Codex, with no prompt event
 mapped, gets consent from the environment only. See
 [session-controls.md](architecture/session-controls.md).
+
+The worktree prompt control records explicit refusals as revocation. A later
+refusal replaces an earlier grant; prompts unrelated to worktrees retain the
+current decision. Negation after the worktree noun never grants permission.

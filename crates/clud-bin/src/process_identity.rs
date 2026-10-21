@@ -257,6 +257,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-#[path = "platform/process_identity_zombie_tests.rs"]
-mod zombie_tests;

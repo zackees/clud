@@ -33,6 +33,8 @@ pub mod optimize;
 pub mod path_norm;
 pub mod process_identity;
 #[cfg(test)]
+mod process_identity_zombie_tests;
+#[cfg(test)]
 mod process_scan;
 pub mod process_tree;
 pub mod provider_auth;
