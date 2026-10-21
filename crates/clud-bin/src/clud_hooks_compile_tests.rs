@@ -294,3 +294,14 @@ fn a_repo_without_a_catch_all_matcher_still_routes_guarded_tools_to_the_dispatch
     }
     assert!(harness_commands_for_tool(&settings, "Read").is_empty());
 }
+
+#[test]
+fn deletion_safety_fragment_routes_the_users_prompt_to_the_dispatcher() {
+    // #1984: the prompt is where the user allows worktrees for a session.
+    let fragment = deletion_safety_fragment();
+    let event = crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT;
+    assert_eq!(
+        fragment["hooks"][event][0]["hooks"][0]["command"],
+        dispatcher_command(event)
+    );
+}

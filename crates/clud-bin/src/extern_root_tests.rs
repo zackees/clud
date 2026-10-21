@@ -28,7 +28,7 @@ fn checkouts_belong_beside_the_repo_not_inside_it() {
 fn a_repo_with_no_parent_has_no_sibling_to_derive() {
     // A repo at a filesystem root cannot have one placed beside it. Callers
     // have to handle this rather than be handed a wrong path.
-    let root = if cfg!(windows) {
+    let root = if crate::platform::host::WINDOWS {
         PathBuf::from("C:\\")
     } else {
         PathBuf::from("/")
@@ -54,7 +54,7 @@ fn the_legacy_location_is_still_known() {
 fn a_rootless_repo_still_reports_the_legacy_location() {
     // Losing the guard entirely because a sibling cannot be derived would
     // make clones *more* permissive than before, not less.
-    let root = if cfg!(windows) {
+    let root = if crate::platform::host::WINDOWS {
         PathBuf::from("C:\\")
     } else {
         PathBuf::from("/")

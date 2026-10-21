@@ -117,7 +117,7 @@ pub fn generate(rules: &[Rule]) -> Generated {
     );
     // #1667: the creation ledger needs a file identity, so `safe-mktemp`
     // refuses on Windows and the guidance is not offered there.
-    if cfg!(unix) {
+    if crate::platform::host::UNIX {
         instructions.push_str(&format!(
             " Make scratch dirs outside those locations with `{} <path>` so `{alias} -r` can remove them.",
             crate::safe_mktemp::COMMAND
@@ -308,7 +308,7 @@ mod tests {
         assert!(generated.instructions.contains("wipe"));
         assert_eq!(
             generated.instructions.contains("`safe-mktemp <path>`"),
-            cfg!(unix)
+            crate::platform::host::UNIX
         );
         assert_eq!(redirect_for_in(&rules, "wipe"), Some(("safe-wipe", None)));
         assert_eq!(redirect_for_in(&rules, "rm"), None);

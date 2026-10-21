@@ -5,18 +5,18 @@ pub(super) fn stdin_source_is_real_stdin<R: 'static>() -> bool {
 }
 
 pub(super) fn should_normalize_interactive_console_stdin(interactive_real_stdin: bool) -> bool {
-    cfg!(windows) && interactive_real_stdin
+    crate::platform::host::WINDOWS && interactive_real_stdin
 }
 
 pub(super) fn should_spawn_byte_stream_stdin_reader(
     interactive_real_stdin: bool,
     has_extra_rx: bool,
 ) -> bool {
-    !(cfg!(windows) && interactive_real_stdin && has_extra_rx)
+    !(crate::platform::host::WINDOWS && interactive_real_stdin && has_extra_rx)
 }
 
 pub(crate) fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         for byte in chunk {
             if *byte == 0x08 {
                 *byte = 0x7f;

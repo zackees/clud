@@ -89,6 +89,13 @@ pub fn deletion_safety_fragment() -> Value {
             "PreToolUse": [{
                 "matcher": guarded_tools_matcher(),
                 "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
+            }],
+            // #1984: the user's prompt may allow worktrees for the session.
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": dispatcher_command(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT),
+                }]
             }]
         }
     })
@@ -107,6 +114,7 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "ScheduleWakeup",
     "Monitor",
     "Agent",
+    "EnterWorktree",
     "Workflow",
     "AskUserQuestion",
     "Write",

@@ -734,24 +734,30 @@ fn git_bash_is_found_beside_git_and_in_program_files() {
 
 /// Runs on the Windows CI lane, whose runner (like any machine that runs
 /// Claude Code on Windows) has Git for Windows installed.
-#[cfg(windows)]
 #[test]
 fn chain_spec_finds_the_installed_git_bash_on_windows() {
+    if !crate::platform::host::WINDOWS {
+        return;
+    }
     let bash = locate_git_bash().expect("Git Bash is installed on the Windows runner");
     assert!(bash.is_file(), "{}", bash.display());
     let argv = argv_of(chain_spec("echo hi"));
     assert_eq!(&argv[1..], ["-c", "echo hi"]);
 }
 
-#[cfg(not(windows))]
 #[test]
 fn chain_spec_non_windows_uses_sh() {
+    if crate::platform::host::WINDOWS {
+        return;
+    }
     assert_eq!(argv_of(chain_spec("echo hi")), vec!["sh", "-c", "echo hi"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn the_chain_receives_the_session_json_on_stdin() {
+    if !crate::platform::host::UNIX {
+        return;
+    }
     let out = run_chain("cat", b"{\"session_id\":\"abc\"}").expect("chain ran");
     assert!(String::from_utf8_lossy(&out).contains("\"session_id\":\"abc\""));
 }

@@ -502,39 +502,5 @@ fn double_tap_window_ms_reads_env_var_with_bounds() {
     std::env::remove_var(ENV_DOUBLE_TAP_WINDOW_MS);
 }
 
-/// The guard is Windows-only by design — non-Windows users have
-/// always exited on the first SIGINT and the issue explicitly says
-/// non-Windows behavior should stay unchanged.
-#[cfg(not(windows))]
-#[test]
-fn double_tap_enabled_is_false_on_non_windows() {
-    let _guard = test_state_lock().lock().unwrap_or_else(|e| e.into_inner());
-    assert!(
-        !double_tap_enabled(),
-        "non-Windows must keep single-press semantics"
-    );
-}
-
-/// On Windows the guard is engaged by default and the opt-out env
-/// var disables it. Truthy values match the common conventions
-/// ("1"/"true"/"yes"/"on"); anything else (including the empty
-/// string) leaves the guard engaged.
-#[cfg(windows)]
-#[test]
-fn double_tap_enabled_respects_opt_out_env_var() {
-    let _guard = test_state_lock().lock().unwrap_or_else(|e| e.into_inner());
-    std::env::remove_var(ENV_DISABLE_DOUBLE_TAP);
-    assert!(double_tap_enabled(), "default on Windows must be enabled");
-    for truthy in ["1", "true", "TRUE", "Yes", "on"] {
-        std::env::set_var(ENV_DISABLE_DOUBLE_TAP, truthy);
-        assert!(!double_tap_enabled(), "{truthy:?} must disable the guard");
-    }
-    for falsy in ["", "0", "no", "off", "false", "garbage"] {
-        std::env::set_var(ENV_DISABLE_DOUBLE_TAP, falsy);
-        assert!(
-            double_tap_enabled(),
-            "{falsy:?} must leave the guard engaged"
-        );
-    }
-    std::env::remove_var(ENV_DISABLE_DOUBLE_TAP);
-}
+// The host-specific `double_tap_enabled` tests live in
+// `platform/{windows,unix}/ctrl_c_track.rs`.

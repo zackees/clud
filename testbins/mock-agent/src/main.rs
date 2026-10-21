@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_probe_request.json");
 
 mod codex_app_server;
+mod platform;
 mod serve;
 
 #[expect(
@@ -371,7 +372,7 @@ fn main() {
     }
 
     if let Some(path) = tool_shell_probe_to.as_ref() {
-        run_tool_shell_probe(&args[0], path);
+        platform::tool_shell_probe::run_tool_shell_probe(&args[0], path);
         return;
     }
 
@@ -980,68 +981,6 @@ fn run_unified_acceptance_probe(report_path: &Path, extra_turn: Option<&str>) ->
     report
 }
 
-/// Put stdin into raw mode (no canonical line buffering, no echo) when it is
-/// a terminal. No-op on non-Unix or when stdin is a pipe.
-#[cfg(unix)]
-fn set_stdin_raw_if_tty() {
-    use std::os::unix::io::AsRawFd;
-    let fd = io::stdin().as_raw_fd();
-    if unsafe { libc::isatty(fd) } == 0 {
-        return;
-    }
-    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
-        return;
-    }
-    unsafe { libc::cfmakeraw(&mut termios) };
-    let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
-}
-
-/// Windows twin of the POSIX `cfmakeraw` above (#1310). A console TUI such as
-/// Claude Code or Codex switches its input to VT mode: `ENABLE_VIRTUAL_
-/// TERMINAL_INPUT` on, line/echo/processed input off. Left in the default
-/// cooked mode, conhost turns the escape sequences the pump forwards into
-/// key events that `ReadFile` drops, and line-buffers input with `\r\n`, so
-/// the mock never sees the bytes a real child would.
-#[cfg(windows)]
-fn set_stdin_raw_if_tty() {
-    use std::ffi::c_void;
-    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
-    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
-    const ENABLE_LINE_INPUT: u32 = 0x0002;
-    const ENABLE_ECHO_INPUT: u32 = 0x0004;
-    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetStdHandle(std_handle: u32) -> *mut c_void;
-        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
-        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
-        fn GetLastError() -> u32;
-    }
-    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    let mut mode = 0u32;
-    if handle.is_null() || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-        trace("stdin console mode: not a console");
-        return; // not a console: a pipe needs no mode change
-    }
-    let raw = (mode & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
-        | ENABLE_VIRTUAL_TERMINAL_INPUT;
-    let ok = unsafe { SetConsoleMode(handle, raw) };
-    let error = if ok == 0 {
-        unsafe { GetLastError() }
-    } else {
-        0
-    };
-    let mut after = 0u32;
-    unsafe { GetConsoleMode(handle, &mut after) };
-    trace(&format!(
-        "stdin console mode {mode:#06x} -> requested {raw:#06x}, set ok={ok} err={error}, now {after:#06x}"
-    ));
-}
-
-#[cfg(not(any(unix, windows)))]
-fn set_stdin_raw_if_tty() {}
-
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
 /// Read stdin for up to `timeout_ms` after the input mode is final, or until
@@ -1057,7 +996,7 @@ fn read_stdin_timed(
     // slave, otherwise the kernel's canonical line discipline holds non-
     // newline-terminated bytes (like the F3 voice-mode transcript) forever
     // and they never reach the test's stdin capture.
-    set_stdin_raw_if_tty();
+    platform::stdin_mode::set_stdin_raw_if_tty();
     // #1310: tell the test its input mode is final. On Windows, ConPTY turns
     // input into key records as the bytes arrive, under the console mode of
     // that moment, so bytes sent before this point lose their escape
@@ -1200,83 +1139,6 @@ fn append_tree_log(path: &PathBuf, role: &str) {
         .expect("open tree log");
     use std::io::Write;
     writeln!(file, "{}", line).expect("write tree log");
-}
-
-#[cfg(windows)]
-fn run_tool_shell_probe(exe: &str, report_path: &Path) {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let pid_path = report_path.with_extension("pid");
-    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-    let script = format!(
-        "$p = Start-Process -FilePath {} \
-         -ArgumentList '--mock-helper-role','tool-leak','--mock-sleep-ms','30000' -PassThru; \
-         Set-Content -LiteralPath {} -Value $p.Id",
-        quote(exe),
-        quote(&pid_path.to_string_lossy()),
-    );
-    let status = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &script,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("spawn tool PowerShell");
-    assert!(status.success(), "tool PowerShell failed: {status}");
-
-    let pid: u32 = std::fs::read_to_string(&pid_path)
-        .expect("read leaked-client pid")
-        .trim()
-        .parse()
-        .expect("parse leaked-client pid");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut system = System::new();
-    let reaped = loop {
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        if system.process(Pid::from_u32(pid)).is_none() {
-            break true;
-        }
-        if Instant::now() >= deadline {
-            if let Some(process) = system.process(Pid::from_u32(pid)) {
-                let _ = process.kill();
-            }
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    let report = serde_json::json!({
-        "tool_shell_probe": {
-            "client_pid": pid,
-            "reaped": reaped,
-        }
-    });
-    if let Some(parent) = report_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(report_path, report.to_string()).expect("write tool-shell probe report");
-    println!("{report}");
-    std::process::exit(if reaped { 0 } else { 1 });
-}
-
-#[cfg(not(windows))]
-fn run_tool_shell_probe(_exe: &str, report_path: &Path) {
-    let report = serde_json::json!({
-        "tool_shell_probe": {
-            "unsupported": true,
-        }
-    });
-    std::fs::write(report_path, report.to_string()).expect("write tool-shell probe report");
-    println!("{report}");
 }
 
 use std::io::IsTerminal;

@@ -44,6 +44,10 @@ pub struct AnthropicCompatProvider {
     /// and the second half of the Windows target. Same continuity guarantee
     /// as `vault_service`.
     pub vault_account: &'static str,
+    /// API-key environment variable read as the last credential source when
+    /// neither the vault nor the fallback file holds a key (#1891). Read
+    /// only: clud never persists it.
+    pub api_key_env: &'static str,
     /// Anthropic-compatible base URL the child talks to, e.g.
     /// `https://api.deepseek.com/anthropic`.
     pub anthropic_base_url: &'static str,
@@ -79,6 +83,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         // drift silently, and drift here orphans stored keys.
         vault_service: crate::provider_auth::DEEPSEEK_VAULT_SERVICE,
         vault_account: crate::provider_auth::DEEPSEEK_VAULT_ACCOUNT,
+        api_key_env: "DEEPSEEK_API_KEY",
         anthropic_base_url: "https://api.deepseek.com/anthropic",
         credential_probe_url: "https://api.deepseek.com/user/balance",
         login_command: "clud auth login deepseek",
@@ -98,6 +103,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         cli_flag: "--kimi",
         vault_service: crate::provider_auth::KIMI_VAULT_SERVICE,
         vault_account: crate::provider_auth::KIMI_VAULT_ACCOUNT,
+        api_key_env: "KIMI_API_KEY",
         anthropic_base_url: "https://api.moonshot.ai/anthropic",
         credential_probe_url: "https://api.moonshot.ai/v1/models",
         login_command: "clud auth login kimi",
@@ -116,6 +122,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         cli_flag: "--openrouter",
         vault_service: crate::provider_auth::OPENROUTER_VAULT_SERVICE,
         vault_account: crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
+        api_key_env: "OPENROUTER_API_KEY",
         anthropic_base_url: "https://openrouter.ai/api",
         credential_probe_url: "https://openrouter.ai/api/v1/key",
         login_command: "clud auth login openrouter",

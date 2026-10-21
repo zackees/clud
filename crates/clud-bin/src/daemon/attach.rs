@@ -588,11 +588,7 @@ fn run_remote_interactive(
     // the daemon-owned PTY just like keystrokes. Held for the lifetime of
     // the interactive attach; the worker displacement thread refreshes
     // the registration as needed. No-op on POSIX.
-    #[cfg(windows)]
     let (_dnd_guard, dnd_rx) = crate::startup::try_register_console_drop_target_pty();
-    #[cfg(not(windows))]
-    let (_dnd_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) =
-        (None, None);
     let mut io = TerminalAttachIo {
         input: &mut input,
         writer: &writer,

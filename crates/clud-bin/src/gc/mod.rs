@@ -27,7 +27,7 @@ pub mod session_tmp;
 mod session_tmp_continuation;
 pub mod target_sweep;
 pub mod uv_cache;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod uv_cache_fixture;
 pub mod uv_cache_repair;
 pub mod worktree_root;

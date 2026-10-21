@@ -214,9 +214,11 @@ mod tests {
     /// archive's `.dist-info` but kept its pointer, so every install of that
     /// pin failed with "The wheel is invalid: Missing .dist-info directory"
     /// until the daily sweep invalidates the pointer and uv refetches.
-    #[cfg(unix)]
     #[test]
     fn sweep_invalidates_a_pointer_whose_archive_lost_its_dist_info() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         use crate::gc::uv_cache_fixture::{link_exists, wheel};
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("cache").join("uv");

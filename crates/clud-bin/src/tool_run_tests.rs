@@ -351,7 +351,7 @@ fn binary_magic_executes_directly() {
 fn cpp_executable_path_sits_next_to_source() {
     let source = Path::new("/tmp/tool.cpp");
     let exe = cpp_executable_path(source);
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         assert_eq!(exe, PathBuf::from("/tmp/tool.exe"));
     } else {
         assert_eq!(exe, PathBuf::from("/tmp/tool"));

@@ -23,7 +23,7 @@ pub fn handle(args: &Args) -> Option<i32> {
         eprintln!("[clud] --kitty-term cannot launch inside an existing desktop terminal");
         return Some(2);
     }
-    if let Some(error) = platform_error(cfg!(windows), std::env::consts::ARCH) {
+    if let Some(error) = platform_error(crate::platform::host::WINDOWS, std::env::consts::ARCH) {
         eprintln!("[clud] {error}");
         return Some(1);
     }

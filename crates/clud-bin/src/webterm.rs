@@ -98,7 +98,7 @@ fn companion_path() -> Result<PathBuf, String> {
         ));
     }
     let current = std::env::current_exe().map_err(|error| format!("locating clud: {error}"))?;
-    let file_name = if cfg!(windows) {
+    let file_name = if crate::platform::host::WINDOWS {
         "clud-webterm.exe"
     } else {
         "clud-webterm"

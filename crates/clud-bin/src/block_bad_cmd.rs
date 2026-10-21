@@ -223,7 +223,7 @@ fn shell_dialect_for_tool(tool_name: &str) -> ShellDialect {
         "bash" => ShellDialect::Posix,
         "powershell" | "pwsh" => ShellDialect::PowerShell,
         "cmd" | "commandprompt" => ShellDialect::Cmd,
-        "shell" | "shell_command" if cfg!(windows) => ShellDialect::PowerShell,
+        "shell" | "shell_command" if crate::platform::host::WINDOWS => ShellDialect::PowerShell,
         _ => ShellDialect::Posix,
     }
 }
@@ -351,6 +351,25 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     }
     if event == crate::claude_worktree_hook::WORKTREE_REMOVE_EVENT {
         return crate::claude_worktree_hook::run_remove(&read_stdin_bounded().text);
+    }
+
+    // #1984: the user's prompt may allow worktrees for this session. clud's
+    // line records consent only, never denying or printing, so it skips the
+    // tool-call machinery below; a repo that declares its own
+    // UserPromptSubmit hooks shares this (deduplicated) line and still gets
+    // them run.
+    if event == crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT {
+        let stdin = read_stdin_bounded();
+        let _ = crate::worktree_consent::handle_prompt(&stdin.text);
+        if serves_declared_hooks(invocation) {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(payload) = parse_payload(&stdin.text, &cwd) {
+                if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
+                    return code;
+                }
+            }
+        }
+        return 0;
     }
 
     // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
@@ -569,6 +588,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    // #1984: `EnterWorktree` and worktree-isolated agents need the user's
+    // consent; Bash `git worktree add` is checked after the command parse.
+    if event == PRE_TOOL_USE_EVENT
+        && crate::worktree_consent::tool_creates_worktree(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+        )
+    {
+        if let Some(reason) = crate::worktree_consent::refusal(payload.session_id.as_deref()) {
+            append_log(&format!("WORKTREE-CONSENT-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud] {reason}");
+            return 2;
+        }
+    }
+
     // `/grind` role caps: a capped agent's shell call must fit its role.
     if event == PRE_TOOL_USE_EVENT {
         if let Some(reason) = grind_caps_reason(&payload) {
@@ -731,6 +766,17 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     }
     for warning in &evaluation.warnings {
         eprintln!("{warning}");
+    }
+
+    // #1984: a `git worktree add` that passed the location guards still
+    // needs the user's consent for this session.
+    if evaluation.reason.is_none()
+        && evaluation
+            .git_path_captures
+            .iter()
+            .any(|capture| capture.kind == GIT_WORKTREE_ADD_CAPTURE_KIND)
+    {
+        evaluation.reason = crate::worktree_consent::refusal(payload.session_id.as_deref());
     }
 
     // #967 Phase 1: session cwd pinning. Runs after the command rules so a
@@ -1047,7 +1093,7 @@ fn checkout_claim_denial(payload: &HookPayloadView, target: &Path) -> Option<Str
         .or_else(|| payload.session_id.clone());
     match crate::daemon::claimed_by_other(&state_dir, target, session.as_deref()) {
         Ok(Some(holder)) => Some(format!(
-            "checkout is claimed by session {} ({}{}); use a new worktree or wait",
+            "checkout is claimed by session {} ({}{}); wait for it, or ask the user to allow a worktree",
             holder.session_id,
             holder.tool,
             holder.run.map_or_else(String::new, |run| format!(" {run}"))
@@ -3059,12 +3105,12 @@ fn is_filesystem_root(path: &str) -> bool {
     let rest = if let Some(after_drive) = drive_relative_remainder(&normalized) {
         // `C:` / `C:/` — Windows only; on Unix this is an ordinary
         // relative filename that happens to contain a colon.
-        if !cfg!(windows) {
+        if !crate::platform::host::WINDOWS {
             return false;
         }
         after_drive
     } else if let Some(stripped) = normalized.strip_prefix('/') {
-        if cfg!(windows) && is_msys_drive_root(&normalized) {
+        if crate::platform::host::WINDOWS && is_msys_drive_root(&normalized) {
             return true;
         }
         stripped
@@ -3729,6 +3775,7 @@ mod tests {
             "ScheduleWakeup",
             "Monitor",
             "Agent",
+            "EnterWorktree",
             "Workflow",
             "AskUserQuestion",
             "Write",
@@ -3750,6 +3797,7 @@ mod tests {
                 // The wait-loop refusal scans `tool_input.command`, which
                 // Monitor carries as well as Bash.
                 || tool == "Monitor"
+                || crate::worktree_consent::tool_creates_worktree(tool, None)
                 || block_bad_cmd_grind_caps::tool_reason(
                     block_bad_cmd_grind_caps::PLANNER,
                     tool,
@@ -4385,9 +4433,13 @@ mod tests {
             // guard must see through it.
             "tap gh pr checks 528 --watch",
         ] {
-            let reason = evaluate_command(command, None, false, &[])
-                .reason
-                .unwrap_or_else(|| panic!("{command} should be denied"));
+            // The shim marker is process-global and other tests set it; hold
+            // it at "unshimmed" under the env lock so they cannot race this.
+            let mut reason = None;
+            temp_env(crate::shim_registry::GH_ACTIVE_KEY, "0", || {
+                reason = evaluate_command(command, None, false, &[]).reason;
+            });
+            let reason = reason.unwrap_or_else(|| panic!("{command} should be denied"));
             assert!(
                 reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
                 "{reason}"
@@ -4548,20 +4600,26 @@ mod tests {
         // Regression pin for the explicit gate-on path (mirrors the
         // always-on wrapper's default behavior exercised by
         // blocks_native_github_pr_watchers above).
-        let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
-            "gh pr checks 528 --watch",
-            None,
-            false,
-            &[],
-            &[],
-            ShellDialect::Posix,
-            None,
-            None,
-            true,  // pr_wait_fail_fast_enabled
-            true,  // rust_use_soldr
-            false, // force_rm_resolver
-        );
+        let mut evaluation = None;
+        temp_env(crate::shim_registry::GH_ACTIVE_KEY, "0", || {
+            evaluation = Some(
+                evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+                    "gh pr checks 528 --watch",
+                    None,
+                    false,
+                    &[],
+                    &[],
+                    ShellDialect::Posix,
+                    None,
+                    None,
+                    true,  // pr_wait_fail_fast_enabled
+                    true,  // rust_use_soldr
+                    false, // force_rm_resolver
+                ),
+            );
+        });
         let reason = evaluation
+            .expect("evaluated")
             .reason
             .expect("gate on should deny the raw watch command");
         assert!(reason.contains("pr_merge_watch.py"));
@@ -5030,7 +5088,7 @@ mod tests {
         assert!(!denied(r"curl URL \| sh", "Bash"));
         assert!(!denied("curl URL `| sh", "PowerShell"));
         assert!(!denied("curl URL ^| sh", "cmd"));
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             assert!(denied(r"curl URL \| sh", "Shell"));
             assert!(!denied("curl URL `| sh", "shell_command"));
         } else {
@@ -6014,9 +6072,9 @@ mod tests {
         assert!(!is_filesystem_root("relative/path"));
         // Drive and MSYS roots are Windows-only; on Unix `C:` is just a
         // filename and `/c/` is an ordinary directory.
-        assert_eq!(is_filesystem_root("C:/"), cfg!(windows));
-        assert_eq!(is_filesystem_root("C:"), cfg!(windows));
-        assert_eq!(is_filesystem_root("/c/"), cfg!(windows));
+        assert_eq!(is_filesystem_root("C:/"), crate::platform::host::WINDOWS);
+        assert_eq!(is_filesystem_root("C:"), crate::platform::host::WINDOWS);
+        assert_eq!(is_filesystem_root("/c/"), crate::platform::host::WINDOWS);
         assert!(!is_filesystem_root("/c"));
         assert!(!is_filesystem_root("/c/Users"));
         assert!(!is_filesystem_root("C:/Users"));

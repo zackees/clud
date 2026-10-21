@@ -37,6 +37,8 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         failover_allow_metered: false,
         allowed_models: Vec::new(),
         provider_only: Vec::new(),
+        zdr: false,
+        no_data_collection: false,
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
         route: None,
@@ -162,6 +164,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &pinned,
         &Ambient {
             subagent_model: Some("deepseek-v4-pro".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(slot_wire(&admitted.slots.subagent), Some("deepseek-v4-pro"));
@@ -172,6 +175,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &pinned,
         &Ambient {
             subagent_model: Some("deepseek-flash".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(slot_wire(&refused.slots.subagent), Some("deepseek-v4-pro"));
@@ -183,6 +187,7 @@ fn a_pin_covers_every_slot_and_the_ambient_subagent_wins_only_inside_it() {
         &free,
         &Ambient {
             subagent_model: Some("some/ambient-model".to_string()),
+            ..Ambient::default()
         },
     );
     assert_eq!(unconstrained.allowlist, Vec::<String>::new());
@@ -975,8 +980,37 @@ fn a_provider_only_pin_is_the_routes_upstream_routing() {
         Some(ProviderRouting {
             only: vec!["deepinfra".to_string()],
             allow_fallbacks: false,
+            zdr: false,
+            data_collection: None,
         })
     );
+}
+
+#[test]
+fn openrouter_privacy_policy_survives_serialization() {
+    let policy = serde_json::json!({
+        "only": [], "allow_fallbacks": true, "zdr": true, "data_collection": "deny"
+    });
+    let routing: ProviderRouting = serde_json::from_value(policy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(routing).unwrap(), policy);
+}
+
+#[test]
+fn openrouter_privacy_flags_keep_fallbacks_until_a_provider_is_pinned() {
+    let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+    plan.zdr = true;
+    plan.no_data_collection = true;
+    let route = resolve(&plan, &Ambient::default());
+    let routing = route.upstream_routing.unwrap();
+    assert!(routing.zdr);
+    assert_eq!(routing.data_collection.as_deref(), Some("deny"));
+    assert!(routing.allow_fallbacks);
+    plan.provider_only.push("parasail/fp8".to_string());
+    let pinned = resolve(&plan, &Ambient::default())
+        .upstream_routing
+        .unwrap();
+    assert!(!pinned.allow_fallbacks);
+    assert!(pinned.zdr);
 }
 
 /// C14/D20: the bridge renders its slots and boundary from the route, and the
@@ -1102,4 +1136,24 @@ fn the_deepseek_native_route_names_its_environment_credential() {
         None,
         "dsh's credential is the environment, not clud's vault"
     );
+}
+
+#[test]
+fn the_direct_test_upstream_needs_the_integration_gate() {
+    // #1984: an end-to-end test points `clud --openrouter` at a scripted
+    // local model; nothing else may move a direct route's upstream.
+    let env = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect::<Vec<_>>()
+    };
+    let url = "http://127.0.0.1:9/api";
+    let gated = Ambient::from_child_env(&env(&[
+        ("CLUD_INTEGRATION_TESTS", "1"),
+        (TEST_DIRECT_UPSTREAM_ENV, url),
+    ]));
+    assert_eq!(gated.direct_upstream_url.as_deref(), Some(url));
+    let ungated = Ambient::from_child_env(&env(&[(TEST_DIRECT_UPSTREAM_ENV, url)]));
+    assert_eq!(ungated.direct_upstream_url, None);
 }

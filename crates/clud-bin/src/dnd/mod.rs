@@ -38,8 +38,7 @@
 //!   `WriteConsoleInputW`, PTY via the master writer).
 
 pub mod console_drop_target;
-#[cfg(any(windows, test))]
-mod drop_host;
+pub mod drop_host;
 pub mod dropfiles;
 pub mod injectors;
 
@@ -62,8 +61,7 @@ pub fn normalize_dropped_path(input: &str) -> String {
 
     s = unescape_shell_spaces(&s);
 
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         s = msys_to_windows_path(&s);
         s = collapse_double_backslashes(&s);
     }
@@ -181,12 +179,9 @@ fn hex_digit(b: u8) -> Option<u8> {
 /// drag-and-drop on POSIX. On Windows this is a no-op — backslash is a path
 /// separator, not an escape.
 fn unescape_shell_spaces(s: &str) -> String {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         s.to_string()
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         let bytes = s.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
         let mut i = 0;
@@ -210,7 +205,6 @@ fn unescape_shell_spaces(s: &str) -> String {
 
 /// `/c/Users/me/x.txt` → `C:\Users\me\x.txt`. Windows-only; on POSIX a
 /// path starting with `/c/` is a legitimate ordinary directory.
-#[cfg(windows)]
 fn msys_to_windows_path(s: &str) -> String {
     // Accept `/<letter>/...` or `/<letter>:/...`. Require exactly one char
     // between the first two slashes so we don't mistake `/cache/foo` for a
@@ -238,7 +232,6 @@ fn msys_to_windows_path(s: &str) -> String {
 /// Collapse `\\` inside paths to `\`. mintty sometimes emits shell-escaped
 /// paths with doubled backslashes. Applied only after we already recognize
 /// the string as a path (post quote-strip, post URI-decode).
-#[cfg(windows)]
 fn collapse_double_backslashes(s: &str) -> String {
     if !s.contains("\\\\") {
         return s.to_string();
@@ -318,15 +311,12 @@ mod tests {
     #[test]
     fn mintty_msys_posix_path_converts_to_windows_on_windows() {
         let dropped = "/c/Users/niteris/file.txt";
-        #[cfg(windows)]
-        {
+        if crate::platform::host::WINDOWS {
             assert_eq!(
                 normalize_dropped_path(dropped),
                 r"C:\Users\niteris\file.txt"
             );
-        }
-        #[cfg(not(windows))]
-        {
+        } else {
             // On real POSIX this is just an ordinary absolute path, not MSYS
             // — leave it alone.
             assert_eq!(normalize_dropped_path(dropped), "/c/Users/niteris/file.txt");
@@ -338,15 +328,12 @@ mod tests {
         // Some mintty builds paste paths with doubled backslashes (shell-safe
         // form). On Windows we collapse them to a single separator.
         let dropped = "C:\\\\Users\\\\niteris\\\\file.txt";
-        #[cfg(windows)]
-        {
+        if crate::platform::host::WINDOWS {
             assert_eq!(
                 normalize_dropped_path(dropped),
                 r"C:\Users\niteris\file.txt"
             );
-        }
-        #[cfg(not(windows))]
-        {
+        } else {
             // On POSIX this is just an opaque string — don't rewrite.
             assert_eq!(
                 normalize_dropped_path(dropped),
@@ -368,12 +355,9 @@ mod tests {
     #[test]
     fn macos_backslash_escaped_space_is_unescaped() {
         let dropped = "/Users/me/my\\ file.txt";
-        #[cfg(not(windows))]
-        {
+        if !crate::platform::host::WINDOWS {
             assert_eq!(normalize_dropped_path(dropped), "/Users/me/my file.txt");
-        }
-        #[cfg(windows)]
-        {
+        } else {
             // On Windows the byte sequence `\ ` is not a shell escape — it
             // is a literal backslash followed by a space, which can appear
             // inside a Windows path. Leave it alone.
@@ -392,12 +376,9 @@ mod tests {
     #[test]
     fn windows_file_uri_is_decoded() {
         let dropped = "file:///C:/Users/me/my%20file.txt";
-        #[cfg(windows)]
-        {
+        if crate::platform::host::WINDOWS {
             assert_eq!(normalize_dropped_path(dropped), r"C:\Users\me\my file.txt");
-        }
-        #[cfg(not(windows))]
-        {
+        } else {
             assert_eq!(normalize_dropped_path(dropped), "/C:/Users/me/my file.txt");
         }
     }

@@ -460,12 +460,23 @@ fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool 
     true
 }
 
+/// Whether `a` and `b` hold the same build. Windows std has no file identity,
+/// so a hardlinked or copied alias is recognized by its bytes; only this
+/// once-per-launch warning pays for the read.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    meta_a.len() == meta_b.len()
+        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+}
+
 /// The launch warning for a `clud-cmd-scan` that PATH finds first but that is
 /// not the running `clud` and sits where clud may not replace it: every hook
 /// in the session would run that other build's rules, silently (#1954).
 fn foreign_helper_warning(found: &Path, clud: &Path, owned: bool) -> Option<String> {
     let current = clud.canonicalize().ok()?;
-    if owned || crate::alias_link::is_alias_of(&current, found) {
+    if owned || crate::alias_link::is_alias_of(&current, found) || same_bytes(&current, found) {
         return None;
     }
     Some(format!(

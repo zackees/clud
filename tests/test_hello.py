@@ -719,6 +719,28 @@ def test_openrouter_free_ids_are_checked_against_the_offline_catalog() -> None:
     assert "per million input/output tokens (named on the command line)" in paid.stderr
 
 
+def test_openrouter_privacy_flags_reach_both_routes() -> None:
+    policies = [("--zdr",), ("--no-data-collection",), ("--zdr", "--no-data-collection")]
+    routes = [("--openrouter",), ("--unified", "--model", "openrouter-claude-sonnet")]
+    for flags in policies:
+        for route_flags in routes:
+            route = _dry_run_route(*route_flags, *flags)["route"]
+            routing = route["upstream_routing"]
+            assert routing["allow_fallbacks"] is True
+            if "--zdr" in flags:
+                assert routing["zdr"] is True
+            if "--no-data-collection" in flags:
+                assert routing["data_collection"] == "deny"
+            pinned = _dry_run_route(
+                *route_flags, *flags, "--provider-only", "parasail/fp8"
+            )["route"]["upstream_routing"]
+            assert pinned["only"] == ["parasail/fp8"]
+            assert pinned["allow_fallbacks"] is False
+        refused = _run("--dry-run", *flags, "-p", "hi")
+        assert refused.returncode == 2, (refused.stdout, refused.stderr)
+        assert "OpenRouter" in refused.stderr
+
+
 def test_provider_only_pins_openrouter_upstream_routing() -> None:
     """`--provider-only` reaches the plan for a direct OpenRouter launch and is
     refused everywhere else, or for a malformed slug, before any session."""

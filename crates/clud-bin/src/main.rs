@@ -34,8 +34,10 @@ fn main() {
     run(parse_args());
 }
 
-#[cfg(windows)]
 fn parse_args() -> args::Args {
+    if !clud::platform::host::WINDOWS {
+        return args::Args::parse_with_passthrough();
+    }
     // Clap builds the complete nested command tree while parsing argv. Keep
     // only that work off Windows' small default main-thread stack so adding a
     // maintenance command cannot make even `clud --help` overflow, while the
@@ -47,11 +49,6 @@ fn parse_args() -> args::Args {
         .expect("spawn clud argument parser")
         .join()
         .expect("clud argument parser panicked")
-}
-
-#[cfg(not(windows))]
-fn parse_args() -> args::Args {
-    args::Args::parse_with_passthrough()
 }
 
 /// The whole `clud` launch, as an ordered list of phases.
@@ -75,6 +72,11 @@ fn run(mut args: args::Args) {
         std::env::remove_var(runner::UNSAFE_MODE_ENV);
         if args.unsafe_mode {
             std::env::set_var(runner::UNSAFE_MODE_ENV, "1");
+        }
+        // #1984: `--worktree` asks for a worktree before any prompt exists;
+        // the flag is the user's consent, carried to every hook.
+        if clud::worktree_consent::launch_args_ask_for_worktree(&args.passthrough) {
+            std::env::set_var(clud::worktree_consent::ALLOW_ENV, "1");
         }
     }
     init_foreground_process(&args);
@@ -855,12 +857,12 @@ fn resolve_launch_target<'a>(
 /// injects it into every OpenRouter request it forwards (#1863). Nothing else
 /// can carry it.
 fn validate_provider_only(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
-    if args.provider_only.is_empty() {
+    if args.provider_only.is_empty() && !args.zdr && !args.no_data_collection {
         return;
     }
     if launch_target.model_provider != backend::ModelProvider::OpenRouter {
         eprintln!(
-            "[clud] error: --provider-only applies only to an OpenRouter launch \
+            "[clud] error: --provider-only, --zdr and --no-data-collection apply only to an OpenRouter launch \
              (direct or --unified)"
         );
         std::process::exit(2);
@@ -1198,11 +1200,11 @@ fn store_inline_api_key(args: &mut args::Args) {
         return;
     };
     match provider_auth::store_inline_api_key(descriptor, key.expose()) {
-        Ok(true) => eprintln!(
+        Ok(Some(backend)) => eprintln!(
             "{}",
-            provider_auth::inline_key_saved_notice(descriptor, key.expose())
+            provider_auth::inline_key_saved_notice(descriptor, key.expose(), backend)
         ),
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             eprintln!(
                 "{}: could not store the API key passed on the command line: {error}",

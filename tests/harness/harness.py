@@ -48,7 +48,7 @@ from typing import Any
 from tests import process
 from tests.shim_env import session_env
 
-ROOT =Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
 ENABLED = os.environ.get("CLUD_REAL_CLAUDE_TESTS") == "1"
@@ -461,6 +461,150 @@ class Harness:
                 e for e in (_json_or_none(line) for line in (result.stdout or "").splitlines()) if e
             ],
         )
+
+    # ---- running through clud ----------------------------------------------------
+
+    def clud_env(self, base_url: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Env for a real `clud --openrouter` launch against the mock (#1984).
+
+        The OpenRouter key comes from a test vault, the direct route's
+        upstream is the mock (`CLUD_TEST_DIRECT_UPSTREAM_URL`, debug builds
+        only), the key preflight asks the mock (404 = continue offline), and
+        the daemon is a disposable one in this world's state dir.
+        """
+        vault = self.root / "vault"
+        vault.mkdir(exist_ok=True)
+        (vault / "clud_openrouter--api_key_v1.secret").write_text(
+            "sk-or-v1-harness-fake-key-0000", encoding="utf-8"
+        )
+        registry = self.root / "registry"
+        registry.mkdir(exist_ok=True)
+        env = self.env(
+            {
+                "CLUD_INTEGRATION_TESTS": "1",
+                "CLUD_TEST_SECRET_STORE_DIR": str(vault),
+                "CLUD_TEST_DIRECT_UPSTREAM_URL": base_url,
+                "CLUD_TEST_CREDENTIAL_PROBE_URL": f"{base_url}/v1/key",
+                "CLUD_SERVER_SETTINGS": "0",
+                "CLUD_DAEMON_TEST_MODE": "1",
+                "CLUD_DAEMON_STATE_DIR": str(self.root / "daemon-state"),
+                "CLUD_SESSION_DB": str(registry / "sessions.redb"),
+                "CLUD_SESSION_LOCK": str(registry / "sessions.lock"),
+                "CLUD_NO_UNLOCK": "1",
+                "SOLDR_BROKER_AUTOSPAWN": "0",
+                "XDG_STATE_HOME": str(self.home / ".local" / "state"),
+                "XDG_CACHE_HOME": str(self.home / ".cache"),
+                "CLUD_HOOK_HOME": str(self.home),
+                **(extra or {}),
+            }
+        )
+        for name in ("ANTHROPIC_API_KEY", "CLUD_ALLOW_WORKTREES", "CLUD_UNSAFE_MODE"):
+            env.pop(name, None)
+        if extra:
+            env.update(extra)
+        return env
+
+    def _install_cmd_scan_alias(self) -> None:
+        # clud's own `--settings` fragment runs the bare `clud-cmd-scan`, so
+        # the build under test must answer to that name first on PATH.
+        alias = self.bin / f"clud-cmd-scan{EXE}"
+        shutil.copyfile(self.clud, alias)
+        alias.chmod(0o755)
+
+    def stop_daemon(self, env: dict[str, str]) -> None:
+        process.run(
+            [str(self.clud), "daemon", "stop"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+
+    def run_clud(
+        self,
+        prompt: str,
+        script: dict[str, Any],
+        *,
+        provider: str = "--openrouter",
+        extra_args: list[str] | None = None,
+        extra_env: dict[str, str] | None = None,
+        timeout: float = 120,
+    ) -> RunResult:
+        """One headless `clud <provider> -p` session against the scripted mock.
+
+        Unlike :meth:`run`, Claude Code is launched by clud itself, so clud's
+        launch-scoped `--settings` (its PreToolUse and UserPromptSubmit
+        hooks) and its route env are what the test exercises. The harness
+        recorder is merged in through `--settings` so `hooks.jsonl` still
+        sees every call. The process is killed on timeout, and the daemon it
+        started is stopped either way.
+        """
+        if self._session_used:
+            raise RuntimeError(
+                f"session {self.session_id} already ran; call new_session() before another run"
+            )
+        self._session_used = True
+        (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
+        self._install_cmd_scan_alias()
+        with self.backend(script) as base_url:
+            env = self.clud_env(base_url, extra_env)
+            argv = [
+                str(self.clud),
+                provider,
+                "-p",
+                prompt,
+                "--",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--settings",
+                str(self.settings(cmd_scan=False)),
+                "--session-id",
+                self.session_id,
+                *(extra_args or []),
+            ]
+            cwd = self.repo if self.repo.is_dir() else self.root
+            try:
+                result = process.run(
+                    argv, cwd=str(cwd), capture_output=True, text=True, env=env, timeout=timeout
+                )
+            finally:
+                self.stop_daemon(env)
+        return RunResult(
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+            requests=_jsonl(self.logs / "requests.jsonl"),
+            hooks=_jsonl(self.logs / "hooks.jsonl"),
+            events=[
+                e for e in (_json_or_none(line) for line in (result.stdout or "").splitlines()) if e
+            ],
+        )
+
+
+def tool_results(result: RunResult) -> list[dict[str, Any]]:
+    """Every `tool_result` block the session's JSONL stream reported."""
+    found: list[dict[str, Any]] = []
+    for event in result.events:
+        if event.get("type") != "user":
+            continue
+        content = (event.get("message") or {}).get("content")
+        if isinstance(content, list):
+            found.extend(
+                block
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "tool_result"
+            )
+    return found
+
+
+def tool_result_text(block: dict[str, Any]) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return json.dumps(content)
 
 
 def _json_or_none(line: str) -> dict[str, Any] | None:

@@ -78,6 +78,8 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         failover_allow_metered: false,
         allowed_models: Vec::new(),
         provider_only: Vec::new(),
+        zdr: false,
+        no_data_collection: false,
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
         route: None,
@@ -594,6 +596,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash[1m]
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/deepseek/--model [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
@@ -606,6 +609,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash[1m]
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/deepseek/--allow-model [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
@@ -617,6 +621,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   API_TIMEOUT_MS=600000
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/deepseek/--allow-model+ambient-subagent [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
@@ -628,6 +633,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   API_TIMEOUT_MS=600000
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/deepseek/--allow-model+disallowed-ambient-subagent [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
@@ -639,6 +645,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   API_TIMEOUT_MS=600000
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/kimi/default [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic
@@ -651,6 +658,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=1048576
   CLAUDE_CODE_SUBAGENT_MODEL=kimi-k3[1m]
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"kimi","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/openrouter/default [direct]
   ANTHROPIC_API_KEY=
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
@@ -665,6 +673,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
   CLAUDE_CODE_SUBAGENT_MODEL=~anthropic/claude-opus-latest
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"openrouter","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/openrouter/--provider-only [direct]
   ANTHROPIC_API_KEY=
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
@@ -680,6 +689,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
   CLAUDE_CODE_SUBAGENT_MODEL=~anthropic/claude-opus-latest
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"openrouter","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 --- direct/deepseek/inherited-previous-selection [direct]
   ANTHROPIC_AUTH_TOKEN=<vault-secret>
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
@@ -692,6 +702,7 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash[1m]
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
 "#;
 
 /// GOLDEN (#1854): the unified gateway's launch output today, the baseline
@@ -720,6 +731,7 @@ const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
   CLUD_GATEWAY_TOKEN=<gateway-token>
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"claude","routing_mode":"unified","version":1}
+  CLUD_WORKTREE_GATE=1
   gateway=UnifiedGatewayConfig { configured_routes: ["deepseek", "openrouter", "kimi"], codex_available: true, failover_rungs: 0 }
 --- unified/openrouter/--model-pin [unified]
   ANTHROPIC_BASE_URL=http://gateway.invalid
@@ -734,6 +746,7 @@ const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   CLAUDE_CODE_SUBAGENT_MODEL=clud-claude-openrouter-sonnet
   CLUD_GATEWAY_TOKEN=<gateway-token>
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"openrouter","routing_mode":"unified","version":1}
+  CLUD_WORKTREE_GATE=1
   gateway=UnifiedGatewayConfig { configured_routes: ["deepseek", "openrouter", "kimi"], codex_available: true, failover_rungs: 0 }
 --- unified/deepseek/unpinned [unified]
   ANTHROPIC_BASE_URL=http://gateway.invalid
@@ -748,6 +761,7 @@ const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   CLAUDE_CODE_SUBAGENT_MODEL=clud-claude-deepseek-flash
   CLUD_GATEWAY_TOKEN=<gateway-token>
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"unified","version":1}
+  CLUD_WORKTREE_GATE=1
   gateway=UnifiedGatewayConfig { configured_routes: ["deepseek", "openrouter", "kimi"], codex_available: true, failover_rungs: 0 }
 "#;
 
@@ -768,6 +782,7 @@ const CODEX_BRIDGE_GOLDEN: &str = r#"--- codex-bridge/codex/default [codex-bridg
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
   CLAUDE_CODE_MAX_CONTEXT_TOKENS=1050000
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"workers_use_sonnet; reserve_opus_for_planning_review_and_integration","resolved_models":{"opus":"clud-claude-codex-sol","sonnet":"clud-claude-codex-terra"},"roles":{"integrator":"opus","planner":"opus","reviewer":"opus","worker":"sonnet"}},"harness":"claude","model_provider":"codex","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
   bridge.default_model=None
   bridge.allowed_models=[]
 --- codex-bridge/codex/--model [codex-bridge]
@@ -781,6 +796,7 @@ const CODEX_BRIDGE_GOLDEN: &str = r#"--- codex-bridge/codex/default [codex-bridg
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
   CLAUDE_CODE_MAX_CONTEXT_TOKENS=1050000
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"workers_use_sonnet; reserve_opus_for_planning_review_and_integration","resolved_models":{"opus":"clud-claude-codex-sol","sonnet":"clud-claude-codex-terra"},"roles":{"integrator":"opus","planner":"opus","reviewer":"opus","worker":"sonnet"}},"harness":"claude","model_provider":"codex","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
   bridge.default_model=Some(ModelSpec { model: "gpt-5.6-terra", effort: None })
   bridge.allowed_models=[]
 --- codex-bridge/codex/--allow-model [codex-bridge]
@@ -794,6 +810,7 @@ const CODEX_BRIDGE_GOLDEN: &str = r#"--- codex-bridge/codex/default [codex-bridg
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
   CLAUDE_CODE_MAX_CONTEXT_TOKENS=1050000
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"workers_use_sonnet; reserve_opus_for_planning_review_and_integration","resolved_models":{"opus":"clud-claude-codex-sol","sonnet":"clud-claude-codex-terra"},"roles":{"integrator":"opus","planner":"opus","reviewer":"opus","worker":"sonnet"}},"harness":"claude","model_provider":"codex","routing_mode":"direct","version":1}
+  CLUD_WORKTREE_GATE=1
   bridge.default_model=None
   bridge.allowed_models=["codex-terra", "clud-claude-codex-sol", "clud-claude-codex-terra"]
 "#;

@@ -200,7 +200,7 @@ fn observer_ignores_non_f3_csi_sequences() {
 fn console_stdin_normalization_is_windows_only() {
     let mut chunk = vec![b'a', 0x08, 0x7f, b'z'];
     normalize_interactive_console_stdin_chunk(&mut chunk);
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         assert_eq!(chunk, vec![b'a', 0x7f, 0x7f, b'z']);
     } else {
         assert_eq!(chunk, vec![b'a', 0x08, 0x7f, b'z']);
@@ -290,7 +290,7 @@ fn extra_input_backspace_normalization_is_windows_only() {
     let mut paste = BracketedPasteNormalizer::new();
     let mut mouse = crate::toast::mouse::MouseFilter::new();
     let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, None);
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         assert_eq!(result.bytes, vec![b'a', 0x7f, b'z']);
     } else {
         assert_eq!(result.bytes, vec![b'a', 0x08, b'z']);
@@ -513,10 +513,11 @@ fn only_real_stdin_gets_interactive_console_policy() {
 /// console queue. Without this gate, the byte-stream reader's
 /// `ReadFile` call races with `ReadConsoleInputW` on the same queue
 /// and Shift+Enter events surface as `\r` instead of `\n`.
-#[cfg(windows)]
 #[test]
 fn windows_interactive_with_extra_rx_suppresses_byte_stream_reader() {
-    assert!(!should_spawn_byte_stream_stdin_reader(true, true));
+    if crate::platform::host::WINDOWS {
+        assert!(!should_spawn_byte_stream_stdin_reader(true, true));
+    }
 }
 
 /// Issue #188: without an `extra_rx`, nothing else is consuming the
@@ -540,11 +541,12 @@ fn piped_stdin_keeps_byte_stream_reader_even_with_extra_rx() {
 
 /// Issue #188: POSIX has no conhost / `ReadFile` modifier-stripping
 /// race, so the suppression must not apply there — the gate is
-/// `cfg!(windows)`-scoped.
-#[cfg(not(windows))]
+/// `platform::host::WINDOWS`-scoped.
 #[test]
 fn posix_keeps_byte_stream_reader_even_with_extra_rx() {
-    assert!(should_spawn_byte_stream_stdin_reader(true, true));
+    if !crate::platform::host::WINDOWS {
+        assert!(should_spawn_byte_stream_stdin_reader(true, true));
+    }
 }
 
 // ─── BracketedPasteNormalizer (issue #63 / #79) ────────────────────
@@ -1060,5 +1062,8 @@ fn malformed_csi_u_sequences_do_not_request_interrupt_or_panic() {
 #[test]
 fn cursor_queries_are_answered_only_without_an_interactive_console() {
     assert!(!should_answer_cursor_queries(true));
-    assert_eq!(should_answer_cursor_queries(false), cfg!(windows));
+    assert_eq!(
+        should_answer_cursor_queries(false),
+        crate::platform::host::WINDOWS
+    );
 }

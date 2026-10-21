@@ -25,6 +25,7 @@ mod process_utils;
 mod rp_broker;
 mod runtime_config;
 mod server;
+mod session_flags;
 mod session_state_sweep;
 mod session_tmp_sweep;
 mod sessions;
@@ -58,6 +59,7 @@ pub use http::{
     dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info,
     read_dashboard_port, DashboardInfo,
 };
+pub use session_flags::{session_flag_get, session_flag_set};
 /// `types` is private; re-export just the state-dir env-var name so
 /// `gc::delete_audit` (#893) resolves the same variable without a second
 /// definition of the string.
@@ -68,8 +70,7 @@ pub use types::ENV_STATE_DIR;
 #[cfg(test)]
 pub use cpu_alert_publish::SAMPLE_INTERVAL as CPU_SAMPLE_INTERVAL_FOR_TEST;
 pub use cpu_alert_publish::{metrics_snapshot_path, MetricsSnapshot};
-#[cfg(windows)]
-pub(crate) use daemon_events::log_event as log_structured_event;
+pub use daemon_events::log_event as log_structured_event;
 pub use http::{
     spawn_dashboard_telemetry_only, DashboardState, TelemetryEntry, TelemetryIngest,
     TelemetryPidDetail, TelemetryPidSummary, TelemetryStore,

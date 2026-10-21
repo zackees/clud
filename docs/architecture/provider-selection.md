@@ -340,6 +340,17 @@ rerouting to another provider or price. Any other route, or a malformed
 slug, is refused with exit 2, and `--dry-run` reports the pin as
 `provider_only`.
 
+`--zdr` restricts OpenRouter routing to zero-data-retention endpoints;
+`--no-data-collection` requests `provider.data_collection: "deny"`. Both are
+off by default and compose with `--provider-only`. Privacy flags alone keep
+fallbacks enabled among eligible endpoints; a provider pin disables fallbacks.
+The resolved policy appears in `route.upstream_routing` in `--dry-run`.
+Direct Claude launches merge it into `CLAUDE_CODE_EXTRA_BODY`, preserving
+unrelated top-level keys and refusing a malformed ambient JSON object. The
+unified gateway injects the same policy into OpenRouter requests. Other
+providers and harnesses without a supported request path reject these flags
+before reading credentials. These routing controls do not redact request text.
+
 Once a launch is resolved, every routing decision it made — backend, upstreams,
 slots, allowlist, discovery, context, effort, timeouts and the launch checks —
 lives in one `ResolvedRoute`: see [route-plan.md](route-plan.md).

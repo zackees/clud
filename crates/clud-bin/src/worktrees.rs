@@ -932,7 +932,7 @@ fn process_ref_matches_worktree(
 fn normalize_process_match_text(value: &str) -> String {
     let value = slash_separators(value);
     let value = value.strip_prefix("//?/").unwrap_or(&value);
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         value.to_ascii_lowercase()
     } else {
         value.to_owned()

@@ -96,6 +96,24 @@ pub struct Ambient {
     /// only on a constrained launch and only when the allowlist admits it
     /// (#1257): clud owns the boundary, the user chooses inside it.
     pub subagent_model: Option<String>,
+    /// #1984: a debug-build, integration-test-only replacement for a direct
+    /// route's upstream (`CLUD_TEST_DIRECT_UPSTREAM_URL`), so an end-to-end
+    /// test can point `clud --openrouter` at a scripted local model. Release
+    /// builds and ordinary runs never read it.
+    pub direct_upstream_url: Option<String>,
+}
+
+/// The direct-route test upstream variable; see [`Ambient::direct_upstream_url`].
+pub const TEST_DIRECT_UPSTREAM_ENV: &str = "CLUD_TEST_DIRECT_UPSTREAM_URL";
+
+fn test_direct_upstream(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let enabled =
+        cfg!(debug_assertions) && lookup("CLUD_INTEGRATION_TESTS").as_deref() == Some("1");
+    enabled
+        .then(|| lookup(TEST_DIRECT_UPSTREAM_ENV))
+        .flatten()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
 }
 
 impl Ambient {
@@ -109,6 +127,11 @@ impl Ambient {
                 .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
                 .map(|(_, value)| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            direct_upstream_url: test_direct_upstream(|key| {
+                env.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            }),
         }
     }
 
@@ -119,6 +142,7 @@ impl Ambient {
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            direct_upstream_url: test_direct_upstream(|key| std::env::var(key).ok()),
         }
     }
 }
@@ -296,6 +320,10 @@ pub struct EffortPolicy {
 pub struct ProviderRouting {
     pub only: Vec<String>,
     pub allow_fallbacks: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zdr: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
 }
 
 /// Whether a launch check is meaningful for a route, and why not when it is
@@ -370,7 +398,7 @@ impl ScrubKey {
 /// The per-OS rule for whether two environment-variable spellings name the
 /// same variable.
 pub fn os_env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -749,20 +777,15 @@ fn provider_only_verdict(route: &ResolvedRoute) -> CheckVerdict {
     let backend = route.backend;
     let openrouter = route.provider == ModelProvider::OpenRouter;
     let applicability = if route.upstream_routing.is_none() {
-        Applicability::NotApplicable("no --provider-only slugs on this launch".to_string())
-    } else if matches!(
-        backend,
-        RouteBackend::CodexBridge | RouteBackend::DeepSeekNative
-    ) {
+        Applicability::NotApplicable("no OpenRouter routing flags on this launch".to_string())
+    } else if !openrouter || !matches!(backend, RouteBackend::Direct | RouteBackend::Unified) {
         Applicability::Unsupported(
-            "--provider-only applies only to an OpenRouter launch clud routes".to_string(),
+            "--provider-only, --zdr and --no-data-collection apply only to an OpenRouter \
+             launch clud routes"
+                .to_string(),
         )
-    } else if openrouter {
-        Applicability::Applies
     } else {
-        Applicability::NotApplicable(
-            "only OpenRouter publishes an upstream routing object".to_string(),
-        )
+        Applicability::Applies
     };
     let refusal = match &applicability {
         Applicability::Unsupported(reason) => Some(reason.clone()),
@@ -857,7 +880,10 @@ fn direct_plan(
     BackendPlan {
         upstreams: vec![upstream_for(
             provider,
-            descriptor.anthropic_base_url,
+            ambient
+                .direct_upstream_url
+                .as_deref()
+                .unwrap_or(descriptor.anthropic_base_url),
             CredentialSource::Vault(provider),
         )],
         slots,
@@ -1048,7 +1074,7 @@ pub fn resolve_with_catalog(
                     )
                 }),
         },
-        upstream_routing: provider_routing(provider, &plan.provider_only),
+        upstream_routing: provider_routing(plan),
         timeout_ms: match backend {
             RouteBackend::Direct => DIRECT_TIMEOUT_MS.parse().ok(),
             RouteBackend::Unified | RouteBackend::CodexBridge => BRIDGE_TIMEOUT_MS.parse().ok(),
@@ -1412,17 +1438,19 @@ pub fn render_dsh(route: &ResolvedRoute) -> DshRender {
 
 /// OpenRouter's upstream routing object, when the launch asked for one.
 /// Validation of the slugs themselves stays where the refusal is printed.
-fn provider_routing(provider: ModelProvider, slugs: &[String]) -> Option<ProviderRouting> {
+pub(crate) fn provider_routing(plan: &LaunchPlan) -> Option<ProviderRouting> {
+    let slugs = &plan.provider_only;
     // The route records what the launch *asked* for, so a launch check can
     // classify it on every backend. Only OpenRouter can receive the object,
     // and the `provider_only` check refuses the rest before they launch.
-    let _ = provider;
-    if slugs.is_empty() {
+    if slugs.is_empty() && !plan.zdr && !plan.no_data_collection {
         return None;
     }
     Some(ProviderRouting {
         only: slugs.to_vec(),
-        allow_fallbacks: false,
+        allow_fallbacks: slugs.is_empty(),
+        zdr: plan.zdr,
+        data_collection: plan.no_data_collection.then(|| "deny".to_string()),
     })
 }
 

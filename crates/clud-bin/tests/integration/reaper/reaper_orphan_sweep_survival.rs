@@ -1,7 +1,7 @@
 //! Tier 2 of #674, completing the lifecycle matrix: the **cross-platform**
 //! reaper's three destructive entry points (#688).
 //!
-//! [`reaper_daemon_survival_windows`](./reaper_daemon_survival_windows.rs)
+//! [`reaper_daemon_survival_windows`](./platform/windows/reaper_daemon_survival_windows.rs)
 //! covers the Windows tool-shell reaper — the one whose blast radius is a
 //! single `cmd.exe` subtree. This file covers [`clud::orphan_reaper`], which
 //! runs on **every** foreground `clud` exit, on `clud slay`, and on the
@@ -312,15 +312,11 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
 /// distinguishes "the tag never made it onto the child" from "the scanner
 /// cannot read it" when the sweep cannot see the leaked client on CI.
 fn leaked_environ_text(pid: u32) -> String {
-    #[cfg(target_os = "linux")]
-    {
+    if clud::platform::host::LINUX {
         std::fs::read(format!("/proc/{pid}/environ"))
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_else(|error| format!("unreadable: {error}"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
+    } else {
         String::from("n/a (not linux)")
     }
 }

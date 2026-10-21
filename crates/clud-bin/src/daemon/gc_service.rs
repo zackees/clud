@@ -932,8 +932,16 @@ fn run_repo_worktree_phase(
     live_cwds: Vec<PathBuf>,
     config: RepoWorktreeGcConfig,
 ) -> usize {
+    if spare_reasons.repo_probe_in_flight() {
+        return 0;
+    }
     let live = canonicalize_live_cwds(live_cwds.clone());
-    let rows: Vec<RepoWorktreeRow> = spare_reasons.repo_worktrees().0.to_vec();
+    // A completed batch must refresh even when failed/spared rows remain.
+    let rows: Vec<RepoWorktreeRow> = if spare_reasons.repo_snapshot_needs_refresh() {
+        Vec::new()
+    } else {
+        spare_reasons.repo_worktrees().0.to_vec()
+    };
     let mut dispatched = 0usize;
     for row in rows {
         let live_now = entry_path_contains_live_cwd_path(&row.path, &live);
@@ -1017,10 +1025,11 @@ fn spawn_repo_worktree_probe(
                 &procs,
                 wt_root.as_deref(),
             );
-            let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
             // Issue #1610: size worktrees here, off the launch path, so the
             // launch banner only reads the cached result.
             refresh_worktree_size_cache(wt_root.as_deref());
+            // Release the probe slot only after all filesystem work is done.
+            let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
         });
     if spawned.is_err() {
         spare_reasons.repo_probe_finished();

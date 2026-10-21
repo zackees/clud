@@ -898,9 +898,11 @@ mod tests {
     /// race made deterministic: the old fixed 5 ms drain after exit returned
     /// an empty stdout here, which is how `git rev-list --count` read as
     /// nothing and a landed worktree was pinned as `unverifiable`.
-    #[cfg(unix)]
     #[test]
     fn probe_cmd_keeps_output_that_arrives_after_the_exit_code() {
+        if !crate::platform::host::UNIX {
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let (code, out) = probe_cmd(
             "sh",

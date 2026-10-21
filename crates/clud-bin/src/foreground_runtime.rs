@@ -491,7 +491,7 @@ impl ForegroundRuntime {
                 .ok_or(BridgeError::AnthropicCompatCredentials)?;
             refuse_blocked_free_model(descriptor, plan, &secret)?;
             crate::route_plan::render_direct_env(&route, &secret).apply(&mut env);
-            apply_provider_only(&mut env, descriptor, &plan.provider_only)?;
+            apply_upstream_routing(&mut env, descriptor, route.upstream_routing.as_ref())?;
             // #1257: discovery is off under a pin, so say why once instead of
             // leaving the picker silently short of gateway rows.
             let mut notices = Vec::new();
@@ -528,6 +528,17 @@ impl ForegroundRuntime {
         if claude_settings.is_some() && declared_hook_fragment(plan).is_some() {
             env.push((
                 crate::clud_hooks_compile::DISPATCH_ENV.to_string(),
+                "1".to_string(),
+            ));
+        }
+        // #1984: this launch registers the prompt hook that records worktree
+        // consent, so its hooks enforce it. Sessions clud did not launch this
+        // way never see the marker and are not gated.
+        // A nested launch decides afresh, like the unsafe marker.
+        env.retain(|(key, _)| key != crate::worktree_consent::GATE_ENV);
+        if plan.effective_harness().settings_surface().accepts_hooks() && !plan.unsafe_mode {
+            env.push((
+                crate::worktree_consent::GATE_ENV.to_string(),
                 "1".to_string(),
             ));
         }
@@ -603,7 +614,7 @@ impl ForegroundRuntime {
                 injection.session_pid,
                 &injection.state_dir,
                 chain.as_deref(),
-                cfg!(windows),
+                crate::platform::host::WINDOWS,
             ) else {
                 return false;
             };
@@ -670,7 +681,7 @@ impl ForegroundRuntime {
             &state_dir,
             route,
             recovery.as_deref(),
-            cfg!(windows),
+            crate::platform::host::WINDOWS,
         ) else {
             eprintln!(
                 "[clud] note: session history hooks skipped: clud's path cannot be quoted safely"
@@ -1016,20 +1027,20 @@ pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::Pl
 /// provider's reviewed catalog default.
 /// `--provider-only`: hand OpenRouter's `provider` routing object to Claude
 /// Code through `CLAUDE_CODE_EXTRA_BODY`, keeping any other keys already set.
-fn apply_provider_only(
+fn apply_upstream_routing(
     env: &mut Vec<(String, String)>,
     descriptor: &crate::provider_registry::AnthropicCompatProvider,
-    slugs: &[String],
+    routing: Option<&crate::route_plan::ProviderRouting>,
 ) -> Result<(), BridgeError> {
-    if slugs.is_empty() || descriptor.provider != ModelProvider::OpenRouter {
+    let Some(routing) = routing.filter(|_| descriptor.provider == ModelProvider::OpenRouter) else {
         return Ok(());
-    }
+    };
     let key = crate::openrouter_routing::EXTRA_BODY_ENV;
     let existing = env
         .iter()
         .find(|(candidate, _)| env_key_eq(candidate, key))
         .map(|(_, value)| value.clone());
-    let body = crate::openrouter_routing::extra_body(existing.as_deref(), slugs)
+    let body = crate::openrouter_routing::policy_body(existing.as_deref(), routing)
         .map_err(BridgeError::Model)?;
     set_env(env, key, &body);
     Ok(())
@@ -1815,8 +1826,8 @@ fn remove_user_settings_argument(command: &mut Vec<String>) {
     }
 }
 
-fn env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+pub(crate) fn env_key_eq(left: &str, right: &str) -> bool {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -1870,7 +1881,7 @@ impl SpawnAdapter<NativePtyProcess> for NativePtyAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
     use crate::command::LaunchPlan;
@@ -1881,6 +1892,47 @@ mod tests {
     /// Injectable fake so routing tests never touch the host's real native
     /// credential vault.
     struct FakeSecretStore(Option<String>);
+
+    struct UnreadSecretStore;
+
+    impl crate::provider_auth::SecretStore for UnreadSecretStore {
+        fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not read credentials")
+        }
+        fn set(&self, _secret: &str) -> Result<(), crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not write credentials")
+        }
+        fn delete(&self) -> Result<(), crate::provider_auth::SecretStoreError> {
+            panic!("a refused privacy policy must not delete credentials")
+        }
+    }
+
+    #[test]
+    fn unsupported_privacy_policies_refuse_before_credential_access() {
+        use crate::backend::RoutingMode::{Direct, Unified};
+
+        for (provider, harness, mode) in [
+            (ModelProvider::Claude, Backend::Claude, Direct),
+            (ModelProvider::Kimi, Backend::Claude, Direct),
+            (ModelProvider::Claude, Backend::Claude, Unified),
+            (ModelProvider::OpenRouter, Backend::DeepSeek, Direct),
+        ] {
+            for (zdr, no_data_collection) in [(true, false), (false, true)] {
+                let mut plan = plan(provider, harness);
+                plan.routing_mode = mode;
+                plan.zdr = zdr;
+                plan.no_data_collection = no_data_collection;
+                let result = ForegroundRuntime::start_with_secret_store(
+                    &plan,
+                    Vec::new(),
+                    &UnreadSecretStore,
+                );
+                assert!(
+                    matches!(result, Err(BridgeError::Model(reason)) if reason.contains("OpenRouter"))
+                );
+            }
+        }
+    }
 
     impl crate::provider_auth::SecretStore for FakeSecretStore {
         fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
@@ -1894,7 +1946,7 @@ mod tests {
         }
     }
 
-    fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
+    pub(crate) fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         LaunchPlan {
             unsafe_mode: false,
             command: vec![harness.executable_name().to_string()],
@@ -1923,6 +1975,8 @@ mod tests {
             failover_allow_metered: false,
             allowed_models: Vec::new(),
             provider_only: Vec::new(),
+            zdr: false,
+            no_data_collection: false,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,
@@ -1943,7 +1997,7 @@ mod tests {
         assert!(lookup(runtime.env(), "CLUD_ROUTE_CONTEXT").is_some());
     }
 
-    fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pub(crate) fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         env.iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
@@ -2770,46 +2824,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(&error, BridgeError::AnthropicCompatCredentials));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_overlay_treats_environment_keys_case_insensitively() {
-        let base = vec![
-            ("anthropic_api_key".to_string(), "ambient-key".to_string()),
-            ("Anthropic_Base_Url".to_string(), "old-url".to_string()),
-            ("anthropic_auth_token".to_string(), "old-token".to_string()),
-            ("api_timeout_ms".to_string(), "custom-timeout".to_string()),
-            (
-                "claude_code_disable_nonessential_traffic".to_string(),
-                "custom-traffic".to_string(),
-            ),
-        ];
-        let runtime =
-            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Claude), base).unwrap();
-        let env = runtime.env();
-        assert_eq!(lookup(env, "ANTHROPIC_API_KEY"), None);
-        assert_eq!(lookup(env, "ANTHROPIC_BASE_URL"), runtime.base_url());
-        assert_eq!(lookup(env, "ANTHROPIC_AUTH_TOKEN"), runtime.bearer_token());
-        assert_eq!(lookup(env, "api_timeout_ms"), Some("custom-timeout"));
-        assert_eq!(
-            lookup(env, "claude_code_disable_nonessential_traffic"),
-            None
-        );
-        assert_eq!(
-            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some("1")
-        );
-        assert_eq!(
-            lookup(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
-            Some("1050000")
-        );
-        assert_eq!(
-            env.iter()
-                .filter(|(key, _)| env_key_eq(key, "API_TIMEOUT_MS"))
-                .count(),
-            1
-        );
     }
 
     type RecordedEnvironment = Vec<(String, String)>;
@@ -3743,7 +3757,10 @@ mod tests {
             "CLAUDE_CODE_EXTRA_BODY".to_string(),
             r#"{"top_k":5}"#.to_string(),
         )];
-        apply_provider_only(&mut env, openrouter_descriptor(), &only).unwrap();
+        let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+        plan.provider_only = only.clone();
+        let routing = crate::route_plan::provider_routing(&plan);
+        apply_upstream_routing(&mut env, openrouter_descriptor(), routing.as_ref()).unwrap();
         let body: serde_json::Value =
             serde_json::from_str(lookup(&env, "CLAUDE_CODE_EXTRA_BODY").unwrap()).unwrap();
         assert_eq!(body["top_k"], 5);
@@ -3753,8 +3770,8 @@ mod tests {
         );
         // No flag, or another provider: the environment is untouched.
         let mut untouched = Vec::new();
-        apply_provider_only(&mut untouched, openrouter_descriptor(), &[]).unwrap();
-        apply_provider_only(&mut untouched, kimi_descriptor(), &only).unwrap();
+        apply_upstream_routing(&mut untouched, openrouter_descriptor(), None).unwrap();
+        apply_upstream_routing(&mut untouched, kimi_descriptor(), routing.as_ref()).unwrap();
         assert!(untouched.is_empty());
     }
 
@@ -4202,6 +4219,8 @@ mod tests {
             .map(|e| e.to_string())
             .collect();
         expected.insert("PreToolUse".to_string());
+        // #1984: the user's prompt may allow worktrees for the session.
+        expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
         assert_eq!(
             hooks
                 .keys()
@@ -4500,6 +4519,30 @@ mod tests {
 
         assert_eq!(settings_argument(&runtime), None);
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    #[test]
+    fn only_a_launch_that_registers_the_prompt_hook_gates_worktrees() {
+        // #1984: consent can only be recorded where clud's UserPromptSubmit
+        // line is registered; everywhere else the gate must stay off, and an
+        // inherited marker must not leak into a launch that has no prompt hook.
+        let gate = crate::worktree_consent::GATE_ENV;
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let inherited = vec![(gate.to_string(), "1".to_string())];
+
+        let claude = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        let runtime = ForegroundRuntime::start(&claude, Vec::new()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), Some("1"));
+
+        let mut unsafe_launch = claude.clone();
+        unsafe_launch.unsafe_mode = true;
+        let runtime = ForegroundRuntime::start(&unsafe_launch, inherited.clone()).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
+
+        let codex = plan_in(ModelProvider::Codex, Backend::Codex, repo.path());
+        let runtime = ForegroundRuntime::start(&codex, inherited).unwrap();
+        assert_eq!(lookup(runtime.env(), gate), None);
     }
 
     // ── #1189: Claude status-line injection ────────────────────────────────

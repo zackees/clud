@@ -78,8 +78,9 @@ the codebase stays portable.
   whitelists only the three stdio handles.
 
 - **File**: `crates/clud-bin/src/trampoline.rs` (`unlock_exe`,
-  `relay_child_and_wait`, and the RAII handle-flag guard
-  `windows_stdio::NonInheritableStdioGuard`). The daemon detach is
+  `relay_child_and_wait`); the RAII handle-flag guard
+  `windows_stdio::NonInheritableStdioGuard` is in
+  `crates/clud-bin/src/platform/windows/trampoline.rs`. The daemon detach is
   `spawn_detached_daemon` in `crates/clud-bin/src/daemon/client.rs`.
 
 - **POSIX behavior**: No-op. Unix lets you `unlink` a running binary; the
@@ -169,7 +170,7 @@ the codebase stays portable.
   the left columns. The bit stays session-scoped because it also stops LF
   from implying CR, and clud's own non-PTY output relies on that. A console
   that rejects the bit still gets VT processing. Regression tests:
-  `tests/integration/pty/console_wrap.rs` (native) and
+  `tests/integration/pty/platform/windows/console_wrap.rs` (native) and
   `tests/integration/pty/screen_fidelity.rs` (relay fidelity across a
   resize).
 
@@ -222,7 +223,7 @@ the codebase stays portable.
   - Ctrl+V may become a saved clipboard-image path; otherwise the upstream
     control byte passes through.
 
-- **File**: `crates/clud-bin/src/console_input.rs`
+- **File**: `crates/clud-bin/src/platform/windows/console_input.rs`
   (`spawn_console_input_reader`, `start_native_reader`,
   `translate_key_records`, `adapt_event_with_clipboard`) and the
   platform-neutral `crates/clud-bin/src/console_surrogates.rs`; construction
@@ -348,7 +349,7 @@ the codebase stays portable.
   - **Anything else** (legacy conhost, unknown hosts):
     `GetConsoleWindow()` only; no process snapshot is taken.
 
-- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs:386`
+- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs` (COM wiring in `crates/clud-bin/src/platform/windows/dnd/console_drop_target.rs`)
   (`register_console_drop_target`, Windows); `:394` (POSIX stub);
   `ConsoleDropTargetGuard` at `:335`; platform-agnostic dispatch at `:413`
   (`dispatch_dropfiles_to_injector`) and the effect decision at `:448`
@@ -396,8 +397,8 @@ the codebase stays portable.
   is then responsible for tearing the child tree down, which it does via
   quirk (i).
 
-- **File**: `crates/clud-bin/src/win_creation_flags.rs:40`
-  (`invisible_helper_flags`); `:56` (`invisible_helper_creationflags`);
+- **File**: `crates/clud-bin/src/win_creation_flags.rs:38`
+  (`invisible_helper_flags`); `:51` (`invisible_helper_creationflags`);
   `:88` (`new_process_group_flags`); `:108`
   (`user_facing_backend_creationflags`); the `CREATE_NO_WINDOW` literal
   anchored at `:25` and the `CREATE_NEW_PROCESS_GROUP` literal at `:35`.
@@ -446,9 +447,9 @@ the codebase stays portable.
 - **POSIX behavior**: Same `kill_tree` code path runs (`sysinfo` is
   cross-platform; `Signal::Kill` is SIGKILL on Unix; `process.kill()`
   is a redundant follow-up there but a no-op). `try_break_group` is a
-  no-op stub at `:125` — POSIX has no `CREATE_NEW_PROCESS_GROUP` concept
-  and the terminal already delivers SIGINT to clud's foreground process
-  group directly. The cross-platform test at `:202`
+  no-op stub in `platform/unix/process_tree.rs` — POSIX has no
+  `CREATE_NEW_PROCESS_GROUP` concept and the terminal already delivers
+  SIGINT to clud's foreground process group directly. The Unix test there
   (`kill_tree_terminates_real_descendant_on_unix`) spawns
   `sh -c 'sleep 30'` to mirror the `clud → cmd → child` shape and
   asserts the parent is reaped within 5 s.
@@ -616,8 +617,8 @@ the codebase stays portable.
   - `dnd::console_drop_target::ConsoleDropTargetGuard`
     (`dnd/console_drop_target.rs:335`) revokes each registered window
     and calls `OleUninitialize` on the same STA thread.
-  - `trampoline::windows_stdio::NonInheritableStdioGuard`
-    (`trampoline.rs`) restores `HANDLE_FLAG_INHERIT` on the three
+  - `windows_stdio::NonInheritableStdioGuard`
+    (`platform/windows/trampoline.rs`) restores `HANDLE_FLAG_INHERIT` on the three
     stdio handles after the runtime-cache relay's spawn returns.
 
 - **Single decision point for the `.cmd` rewrite.** `subprocess.rs` is the
@@ -628,9 +629,10 @@ the codebase stays portable.
 - **Single source of truth for `CREATE_NO_WINDOW`.** Every daemon-helper
   spawn imports from `win_creation_flags` rather than defining the
   `0x0800_0000` literal locally. The literal is anchored by
-  `create_no_window_value_matches_winapi` at `win_creation_flags.rs:125`
-  (Windows) and `invisible_helper_flags_is_zero_off_windows` at `:136`
-  (POSIX) so a typo in either branch fails CI.
+  `create_no_window_value_matches_winapi` in
+  `platform/windows/win_creation_flags_tests.rs` (Windows) and
+  `invisible_helper_flags_is_zero_off_windows` in
+  `platform/unix/win_creation_flags_tests.rs` (POSIX) so a typo in either branch fails CI.
 
 - **Best-effort, non-fatal startup.** The trampoline, the title keeper,
   the IDropTarget worker, and the `.old.*` GC are all wrapped so a
@@ -666,8 +668,8 @@ The other quirks (`trampoline::unlock_exe`,
 `dnd::console_drop_target::register_console_drop_target`,
 `process_tree::kill_tree` Windows tree shape) have `#[cfg(windows)]` tests
 that only run on the Windows x86 and ARM matrix jobs. The cross-platform
-side of `process_tree::kill_tree` is covered by the Unix-only test at
-`process_tree.rs:202` so the descendant-walk contract is enforced on every
+side of `process_tree::kill_tree` is covered by the Unix-only test in
+`platform/unix/process_tree.rs` so the descendant-walk contract is enforced on every
 host.
 
 ## See also

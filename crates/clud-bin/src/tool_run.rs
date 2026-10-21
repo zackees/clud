@@ -667,17 +667,13 @@ fn normalize_interpreter_path(path: &str) -> String {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
-    #[cfg(windows)]
+    // Windows always keeps the bare file name; elsewhere only the system bin
+    // directories are stripped.
+    if crate::platform::host::WINDOWS || path.starts_with("/bin/") || path.starts_with("/usr/bin/")
     {
         name.to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        if path.starts_with("/bin/") || path.starts_with("/usr/bin/") {
-            name.to_string()
-        } else {
-            path.to_string()
-        }
+    } else {
+        path.to_string()
     }
 }
 
@@ -708,7 +704,7 @@ fn is_cpp_source(path: &Path) -> bool {
 
 fn cpp_executable_path(source: &Path) -> PathBuf {
     let stem = source.file_stem().unwrap_or_default();
-    let exe_name = if cfg!(windows) {
+    let exe_name = if crate::platform::host::WINDOWS {
         format!("{}.exe", stem.to_string_lossy())
     } else {
         stem.to_string_lossy().into_owned()
@@ -843,12 +839,9 @@ fn first_install_path(stdout: &[u8]) -> Option<PathBuf> {
 }
 
 fn clangxx_names() -> &'static [&'static str] {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         &["clang++.exe", "clang-cl.exe"]
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         &["clang++", "clang"]
     }
 }
@@ -984,12 +977,9 @@ fn find_named_executable(dir: &std::path::Path, names: &[&str], depth: usize) ->
 /// Every venv ships `python` (`Scripts\\python.exe` on Windows), and clud
 /// standardizes on that name; see `ci/banned_python3.py`.
 fn python_executable_names() -> &'static [&'static str] {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         &["python.exe"]
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         &["python"]
     }
 }

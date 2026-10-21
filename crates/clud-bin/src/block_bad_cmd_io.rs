@@ -1,19 +1,16 @@
 use super::*;
 
 pub(super) fn read_stdin_bounded() -> StdinRead {
-    #[cfg(unix)]
-    {
-        if let Some(read) = read_stdin_nonblocking() {
-            return read;
-        }
+    if let Some(read) = read_stdin_nonblocking() {
+        return read;
     }
     read_stdin_threaded()
 }
 
-#[cfg(unix)]
+/// Poll a non-blocking stdin against the deadlines. `None` where stdin
+/// cannot be made non-blocking (always on Windows), so the caller uses the
+/// threaded reader.
 pub(super) fn read_stdin_nonblocking() -> Option<StdinRead> {
-    use std::os::fd::AsRawFd;
-
     let idle_timeout = float_env_duration(
         "CLUD_HOOK_STDIN_IDLE_TIMEOUT_SEC",
         DEFAULT_STDIN_READ_IDLE_TIMEOUT_SEC,
@@ -25,14 +22,7 @@ pub(super) fn read_stdin_nonblocking() -> Option<StdinRead> {
 
     let stdin = io::stdin();
     let mut stream = stdin.lock();
-    let fd = stream.as_raw_fd();
-    let old_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if old_flags < 0 {
-        return None;
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags | libc::O_NONBLOCK) } < 0 {
-        return None;
-    }
+    let nonblocking = crate::platform::block_bad_cmd_io::NonblockingStdin::enable(&stream)?;
 
     let mut chunks = Vec::<u8>::new();
     let mut log_messages = Vec::<String>::new();
@@ -71,7 +61,7 @@ pub(super) fn read_stdin_nonblocking() -> Option<StdinRead> {
         }
     }
 
-    let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags) };
+    nonblocking.restore();
     if let Some(reason) = incomplete_reason {
         log_messages.push(format!(
             "stdin_read_incomplete mode=nonblocking reason={reason} bytes={}",

@@ -101,7 +101,7 @@ pub fn npm_install_argv(npm: &str, prefix: &Path) -> Vec<String> {
 /// interrupted or failed install never leaves a half-written prefix and any
 /// other managed version stays usable.
 pub fn install(home: &Path) -> Result<PathBuf, String> {
-    let windows = cfg!(windows);
+    let windows = crate::platform::host::WINDOWS;
     let prefix = managed_prefix(home);
     let executable = bin_dir(&prefix).join(executable_name(windows));
     if executable.is_file() {
@@ -216,7 +216,11 @@ fn run_captured(
 }
 
 pub fn prepend_path(dir: &Path, path: Option<&str>) -> String {
-    let separator = if cfg!(windows) { ";" } else { ":" };
+    let separator = if crate::platform::host::WINDOWS {
+        ";"
+    } else {
+        ":"
+    };
     let dir = dir.to_string_lossy();
     match path.filter(|value| !value.is_empty()) {
         Some(rest) => format!("{dir}{separator}{rest}"),
@@ -225,7 +229,7 @@ pub fn prepend_path(dir: &Path, path: Option<&str>) -> String {
 }
 
 fn env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -236,7 +240,7 @@ fn env_key_eq(left: &str, right: &str) -> bool {
 /// Running the command is the consent; it writes only under the managed root.
 pub fn run_update() -> i32 {
     let result = home_dir().and_then(|home| {
-        let already = managed_executable(&home, cfg!(windows)).is_file();
+        let already = managed_executable(&home, crate::platform::host::WINDOWS).is_file();
         install(&home).map(|path| (already, path))
     });
     match result {
@@ -474,7 +478,11 @@ mod tests {
 
     #[test]
     fn prepend_path_puts_the_managed_bin_first() {
-        let sep = if cfg!(windows) { ";" } else { ":" };
+        let sep = if crate::platform::host::WINDOWS {
+            ";"
+        } else {
+            ":"
+        };
         assert_eq!(
             prepend_path(Path::new("/m"), Some("/usr/bin")),
             format!("/m{sep}/usr/bin")
@@ -635,7 +643,7 @@ mod tests {
     #[test]
     fn a_managed_dsh_runs_on_its_private_node() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = managed_executable(dir.path(), cfg!(windows));
+        let exe = managed_executable(dir.path(), crate::platform::host::WINDOWS);
         let exe = exe.to_string_lossy().into_owned();
         let mut env = vec![("PATH".to_string(), "/usr/bin".to_string())];
         prepare_child(

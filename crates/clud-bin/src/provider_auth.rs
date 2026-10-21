@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 use crate::args::{Args, Command, DeepseekAuthSubcommand};
 use crate::backend::{Backend, ModelProvider};
 use crate::command;
+use crate::platform::provider_auth as vault;
 use crate::provider_registry::{self, AnthropicCompatProvider};
 use crate::secret_redaction::mask_key;
 
@@ -43,8 +44,7 @@ pub const OPENROUTER_VAULT_ACCOUNT: &str = "api-key-v1";
 /// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
 /// exact composition on every platform, even though only the Windows
 /// Credential Manager path consumes it at runtime.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn vault_target(service: &str, account: &str) -> String {
+pub fn vault_target(service: &str, account: &str) -> String {
     format!("{service}/{account}")
 }
 
@@ -53,6 +53,10 @@ fn vault_target(service: &str, account: &str) -> String {
 pub enum SecretStoreError {
     Unavailable,
     Malformed,
+    /// The fallback credential file is readable by other users (#1891).
+    InsecureFile,
+    /// A fallback credential copy could not be removed.
+    CleanupFailed,
 }
 
 impl fmt::Display for SecretStoreError {
@@ -62,6 +66,12 @@ impl fmt::Display for SecretStoreError {
             Self::Malformed => {
                 formatter.write_str("API key is malformed; re-enter a key without whitespace")
             }
+            Self::CleanupFailed => formatter.write_str(
+                "an old fallback credential could not be removed; credential cleanup is incomplete",
+            ),
+            Self::InsecureFile => formatter.write_str(
+                "the credential file must be a regular file owned by you with owner-only access",
+            ),
         }
     }
 }
@@ -74,16 +84,62 @@ pub trait SecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError>;
     fn set(&self, secret: &str) -> Result<(), SecretStoreError>;
     fn delete(&self) -> Result<(), SecretStoreError>;
+
+    /// Which backend served the most recent successful operation, for
+    /// `auth status` and login messages. Plain stores are the native vault.
+    fn backend(&self) -> CredentialBackend {
+        CredentialBackend::NativeVault
+    }
+}
+
+/// Where a provider credential lives (#1891).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialBackend {
+    NativeVault,
+    File,
+    Env,
+}
+
+impl CredentialBackend {
+    /// Stable machine-readable `source` value in `auth status --json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeVault => "native_vault",
+            Self::File => "file",
+            Self::Env => "env",
+        }
+    }
+
+    /// Human-readable name used in status and login messages.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NativeVault => "native credential vault",
+            Self::File => "owner-only credential file (~/.clud/credentials)",
+            Self::Env => "environment variable",
+        }
+    }
 }
 
 /// Production adapter for the OS-native encrypted credential vault,
 /// parameterized on the vault identifiers so multiple providers (DeepSeek,
 /// and Kimi in Phase 2) can each hold a distinct record with no shared
-/// global state.
-pub struct NativeSecretStore {
+/// global state. It is the first link of [`NativeSecretStore`]'s chain.
+pub struct OsVaultStore {
     service: &'static str,
     account: &'static str,
 }
+
+impl OsVaultStore {
+    pub fn new(service: &'static str, account: &'static str) -> Self {
+        Self { service, account }
+    }
+}
+
+/// The production credential store: the OS-native vault first, then an
+/// owner-only file and, for reads, the provider's API-key environment
+/// variable (#1891), so a headless host with no unlocked Secret Service
+/// still works. See [`crate::credential_chain`].
+pub type NativeSecretStore = crate::credential_chain::FallbackSecretStore<OsVaultStore>;
 
 impl NativeSecretStore {
     /// DeepSeek-scoped convenience constructor. Kept with its exact prior
@@ -97,7 +153,25 @@ impl NativeSecretStore {
     /// General constructor taking explicit vault identifiers. Two instances
     /// built with different identifiers are fully independent records.
     pub fn new_for(service: &'static str, account: &'static str) -> Result<Self, SecretStoreError> {
-        Ok(Self { service, account })
+        let env_var = provider_registry::ANTHROPIC_COMPAT_PROVIDERS
+            .iter()
+            .find(|descriptor| {
+                descriptor.vault_service == service && descriptor.vault_account == account
+            })
+            .map(|descriptor| descriptor.api_key_env);
+        // The debug-only test vault already stands in for the native one, and
+        // its tests must not read the developer's real `~/.clud`.
+        let file = (!test_vault_active())
+            .then(crate::credential_chain::default_credentials_dir)
+            .flatten()
+            .map(|dir| test_vault_path(&dir, service, account));
+        Ok(crate::credential_chain::FallbackSecretStore::from_parts(
+            OsVaultStore::new(service, account),
+            service,
+            account,
+            file,
+            env_var,
+        ))
     }
 }
 
@@ -141,152 +215,7 @@ fn test_vault_path(dir: &std::path::Path, service: &str, account: &str) -> std::
     dir.join(format!("{}--{}.secret", safe(service), safe(account)))
 }
 
-#[cfg(not(windows))]
-fn with_native_vault<T: Send + 'static>(
-    service: &'static str,
-    account: &'static str,
-    operation: impl FnOnce(keyring::Entry) -> Result<T, SecretStoreError> + Send + 'static,
-) -> Result<T, SecretStoreError> {
-    let worker = std::thread::Builder::new()
-        .name("clud-vault".to_string())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let entry =
-                keyring::Entry::new(service, account).map_err(|_| SecretStoreError::Unavailable)?;
-            operation(entry)
-        })
-        .map_err(|_| SecretStoreError::Unavailable)?;
-    worker.join().unwrap_or(Err(SecretStoreError::Unavailable))
-}
-
-#[cfg(windows)]
-mod windows_vault {
-    use std::slice;
-
-    use std::ffi::c_void;
-
-    use zeroize::Zeroizing;
-
-    const CRED_TYPE_GENERIC: u32 = 1;
-    const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
-    const ERROR_NOT_FOUND: u32 = 1168;
-
-    #[repr(C)]
-    struct FileTime {
-        low: u32,
-        high: u32,
-    }
-
-    #[repr(C)]
-    struct Credential {
-        flags: u32,
-        credential_type: u32,
-        target_name: *mut u16,
-        comment: *mut u16,
-        last_written: FileTime,
-        blob_size: u32,
-        blob: *mut u8,
-        persist: u32,
-        attribute_count: u32,
-        attributes: *mut c_void,
-        target_alias: *mut u16,
-        user_name: *mut u16,
-    }
-
-    // Lowercase: xwin's vendored SDK (used by the cross-compiled CI build)
-    // normalizes lib filenames to lowercase, and lld-link on a case-sensitive
-    // host filesystem fails to find "Advapi32.lib". Native MSVC builds on
-    // Windows work with either case since NTFS is case-insensitive.
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn CredReadW(
-            target: *const u16,
-            credential_type: u32,
-            flags: u32,
-            credential: *mut *mut Credential,
-        ) -> i32;
-        fn CredWriteW(credential: *const Credential, flags: u32) -> i32;
-        fn CredDeleteW(target: *const u16, credential_type: u32, flags: u32) -> i32;
-        fn CredFree(buffer: *const c_void);
-    }
-
-    unsafe extern "system" {
-        fn GetLastError() -> u32;
-    }
-
-    use super::SecretStoreError;
-
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(Some(0)).collect()
-    }
-
-    fn is_missing() -> bool {
-        // SAFETY: GetLastError reads the current thread's Win32 failure code
-        // immediately after a Credential Manager call has returned false.
-        unsafe { GetLastError() == ERROR_NOT_FOUND }
-    }
-
-    pub fn get(target: &str) -> Result<Option<String>, SecretStoreError> {
-        let target = wide(target);
-        let mut credential = std::ptr::null_mut();
-        // SAFETY: `target` is NUL-terminated and Windows initializes the output
-        // pointer only on success, which we free after copying the blob.
-        let result = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
-        if result == 0 {
-            return if is_missing() {
-                Ok(None)
-            } else {
-                Err(SecretStoreError::Unavailable)
-            };
-        }
-        // SAFETY: `credential` was allocated by CredReadW. Its blob is valid
-        // for `CredentialBlobSize` bytes until the matching CredFree below.
-        let secret = unsafe {
-            let bytes = slice::from_raw_parts((*credential).blob, (*credential).blob_size as usize);
-            String::from_utf8(bytes.to_vec()).map_err(|_| SecretStoreError::Unavailable)
-        };
-        // SAFETY: the pointer came from CredReadW and is freed exactly once.
-        unsafe { CredFree(credential.cast::<std::ffi::c_void>()) };
-        secret.map(Some)
-    }
-
-    pub fn set(target: &str, secret: &str) -> Result<(), SecretStoreError> {
-        let mut target = wide(target);
-        let mut user = wide("clud");
-        let mut blob = Zeroizing::new(secret.as_bytes().to_vec());
-        // SAFETY: CREDENTIALW is a Win32 C struct containing only integer,
-        // pointer, and FILETIME fields, all of which permit zero initialization.
-        // The fields Credential Manager requires are set below before use.
-        let mut credential: Credential = unsafe { std::mem::zeroed() };
-        credential.credential_type = CRED_TYPE_GENERIC;
-        credential.target_name = target.as_mut_ptr();
-        credential.blob_size = blob
-            .len()
-            .try_into()
-            .map_err(|_| SecretStoreError::Unavailable)?;
-        credential.blob = blob.as_mut_ptr();
-        credential.persist = CRED_PERSIST_LOCAL_MACHINE;
-        credential.user_name = user.as_mut_ptr();
-        // SAFETY: every pointer in `credential` remains live for this call.
-        if unsafe { CredWriteW(&credential, 0) } == 0 {
-            Err(SecretStoreError::Unavailable)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn delete(target: &str) -> Result<(), SecretStoreError> {
-        let target = wide(target);
-        // SAFETY: `target` is NUL-terminated and lives for this call.
-        if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 || is_missing() {
-            Ok(())
-        } else {
-            Err(SecretStoreError::Unavailable)
-        }
-    }
-}
-
-impl SecretStore for NativeSecretStore {
+impl SecretStore for OsVaultStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
         if let Some(dir) = test_vault_dir() {
             return match std::fs::read_to_string(test_vault_path(&dir, self.service, self.account))
@@ -296,16 +225,7 @@ impl SecretStore for NativeSecretStore {
                 Err(_) => Err(SecretStoreError::Unavailable),
             };
         }
-        #[cfg(windows)]
-        return windows_vault::get(&vault_target(self.service, self.account));
-        #[cfg(not(windows))]
-        with_native_vault(self.service, self.account, |entry| {
-            match entry.get_password() {
-                Ok(secret) => Ok(Some(secret)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(_) => Err(SecretStoreError::Unavailable),
-            }
-        })
+        vault::get(self.service, self.account)
     }
 
     fn set(&self, secret: &str) -> Result<(), SecretStoreError> {
@@ -316,17 +236,7 @@ impl SecretStore for NativeSecretStore {
             )
             .map_err(|_| SecretStoreError::Unavailable);
         }
-        #[cfg(windows)]
-        return windows_vault::set(&vault_target(self.service, self.account), secret);
-        #[cfg(not(windows))]
-        {
-            let secret = Zeroizing::new(secret.to_owned());
-            with_native_vault(self.service, self.account, move |entry| {
-                entry
-                    .set_password(&secret)
-                    .map_err(|_| SecretStoreError::Unavailable)
-            })
-        }
+        vault::set(self.service, self.account, secret)
     }
 
     fn delete(&self) -> Result<(), SecretStoreError> {
@@ -337,15 +247,7 @@ impl SecretStore for NativeSecretStore {
                 Err(_) => Err(SecretStoreError::Unavailable),
             };
         }
-        #[cfg(windows)]
-        return windows_vault::delete(&vault_target(self.service, self.account));
-        #[cfg(not(windows))]
-        with_native_vault(self.service, self.account, |entry| {
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(_) => Err(SecretStoreError::Unavailable),
-            }
-        })
+        vault::delete(self.service, self.account)
     }
 }
 
@@ -378,9 +280,11 @@ impl PreflightError {
                 "{} credentials are not configured; run `{}`",
                 descriptor.display_name, descriptor.login_command
             ),
-            Self::Unavailable => {
-                "the native credential vault is unavailable; retry after unlocking it".to_string()
-            }
+            Self::Unavailable => format!(
+                "no usable credential store for {}: the native credential vault is unavailable \
+                 and ~/.clud/credentials could not be used; run `{}` or set {}",
+                descriptor.display_name, descriptor.login_command, descriptor.api_key_env
+            ),
             Self::Cancelled => {
                 format!("{} credential entry was cancelled", descriptor.display_name)
             }
@@ -515,23 +419,28 @@ fn probe_key_at(url: &str, key: &str) -> ProbeOutcome {
 }
 
 /// Store an API key passed on the command line (`clud --deepseek <API_KEY>`)
-/// in `descriptor`'s native-vault record. Returns whether the stored value
-/// changed, so the caller only announces a real update.
+/// in `descriptor`'s credential record. Returns the backend that took it when
+/// the stored value changed, so the caller only announces a real update.
 pub fn store_inline_api_key(
     descriptor: &'static AnthropicCompatProvider,
     key: &str,
-) -> Result<bool, SecretStoreError> {
+) -> Result<Option<CredentialBackend>, SecretStoreError> {
     let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)?;
-    store_inline_api_key_with(&store, key)
+    Ok(store_inline_api_key_with(&store, key)?.then(|| store.backend()))
 }
 
 /// The one line printed when a command-line key replaces the stored one
 /// (#1304). Shows only the last four characters.
-pub fn inline_key_saved_notice(descriptor: &AnthropicCompatProvider, key: &str) -> String {
+pub fn inline_key_saved_notice(
+    descriptor: &AnthropicCompatProvider,
+    key: &str,
+    backend: CredentialBackend,
+) -> String {
     format!(
-        "[clud] saved {} key {} to the native credential vault",
+        "[clud] saved {} key {} to the {}",
         descriptor.display_name,
-        crate::secret_redaction::mask_key(key)
+        crate::secret_redaction::mask_key(key),
+        backend.describe()
     )
 }
 
@@ -679,7 +588,7 @@ pub fn run_for(
         Ok(store) => store,
         Err(error) => {
             eprintln!(
-                "{}-auth: {error}; retry after unlocking the vault",
+                "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                 descriptor.settings_id
             );
             return 2;
@@ -768,13 +677,19 @@ fn handle_secret_key(
     }
 }
 
-fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fingerprint: &str) {
+fn write_credential_status(
+    stdout: &mut dyn Write,
+    backend: CredentialBackend,
+    json: bool,
+    status: &str,
+    fingerprint: &str,
+) {
     if json {
         let _ = writeln!(
             stdout,
             "{}",
             serde_json::json!({
-                "source": "native_vault",
+                "source": backend.as_str(),
                 "configured": true,
                 "status": status,
                 "fingerprint": fingerprint,
@@ -783,7 +698,8 @@ fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fin
     } else {
         let _ = writeln!(
             stdout,
-            "source: native credential vault\nstatus: {status}\nstored key: {fingerprint}"
+            "source: {}\nstatus: {status}\nstored key: {fingerprint}",
+            backend.describe()
         );
     }
 }
@@ -814,16 +730,24 @@ fn run_with_probe(
             };
             match store.set(&secret) {
                 Ok(()) => {
+                    if store.backend() == CredentialBackend::File {
+                        eprintln!(
+                            "{}-auth: the native credential vault is unavailable; \
+                             using the owner-only fallback file instead",
+                            descriptor.settings_id
+                        );
+                    }
                     let _ = writeln!(
                         stdout,
-                        "{} API key stored in the native credential vault",
-                        descriptor.display_name
+                        "{} API key stored in the {}",
+                        descriptor.display_name,
+                        store.backend().describe()
                     );
                     0
                 }
                 Err(error) => {
                     eprintln!(
-                        "{}-auth: {error}; retry after unlocking the vault",
+                        "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                         descriptor.settings_id
                     );
                     2
@@ -836,23 +760,36 @@ fn run_with_probe(
                     let _ = writeln!(
                         stdout,
                         "{}",
-                        serde_json::json!({"source": "native_vault", "configured": true})
+                        serde_json::json!({"source": store.backend().as_str(), "configured": true})
                     );
                     0
                 }
                 Ok(()) => {
                     let _ = writeln!(
                         stdout,
-                        "source: native credential vault\nstatus: configured"
+                        "source: {}\nstatus: configured",
+                        store.backend().describe()
                     );
                     0
                 }
                 Err(PreflightError::Malformed { fingerprint }) => {
-                    write_credential_status(stdout, *json, "malformed", &fingerprint);
+                    write_credential_status(
+                        stdout,
+                        store.backend(),
+                        *json,
+                        "malformed",
+                        &fingerprint,
+                    );
                     2
                 }
                 Err(PreflightError::Rejected { fingerprint, .. }) => {
-                    write_credential_status(stdout, *json, "rejected", &fingerprint);
+                    write_credential_status(
+                        stdout,
+                        store.backend(),
+                        *json,
+                        "rejected",
+                        &fingerprint,
+                    );
                     2
                 }
                 Err(_) => {
@@ -863,20 +800,21 @@ fn run_with_probe(
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::json!({"source": "native_vault", "configured": false})
+                    serde_json::json!({"source": store.backend().as_str(), "configured": false})
                 );
                 1
             }
             Ok(None) => {
                 let _ = writeln!(
                     stdout,
-                    "source: native credential vault\nstatus: login required"
+                    "source: {}\nstatus: login required",
+                    store.backend().describe()
                 );
                 1
             }
             Err(error) => {
                 eprintln!(
-                    "{}-auth: {error}; retry after unlocking the vault",
+                    "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                     descriptor.settings_id
                 );
                 2
@@ -890,14 +828,14 @@ fn run_with_probe(
             Ok(()) => {
                 let _ = writeln!(
                     stdout,
-                    "{} API key removed from the native credential vault",
+                    "{} API key removed from the native credential vault and fallback file",
                     descriptor.display_name
                 );
                 0
             }
             Err(error) => {
                 eprintln!(
-                    "{}-auth: {error}; retry after unlocking the vault",
+                    "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                     descriptor.settings_id
                 );
                 2
@@ -1321,30 +1259,12 @@ mod tests {
             ),
             Ok(())
         );
-        let notice = inline_key_saved_notice(descriptor, new);
+        let notice = inline_key_saved_notice(descriptor, new, CredentialBackend::NativeVault);
         assert_eq!(
             notice,
             "[clud] saved OpenRouter key ****wxyz to the native credential vault"
         );
         assert!(!notice.contains("1111"));
-    }
-
-    /// Windows stores keys through Credential Manager directly (not the
-    /// `keyring` crate). Round-trip a key through the real API so a Windows
-    /// regression in the storage path fails CI rather than a user's launch.
-    #[cfg(windows)]
-    #[test]
-    fn windows_credential_manager_round_trips_an_api_key() {
-        let target = format!("clud.test-inline-api-key/{}", std::process::id());
-        let key = "sk-0123456789abcdef0123456789abcdef";
-        if let Err(error) = windows_vault::set(&target, key) {
-            eprintln!("SKIP: Credential Manager unavailable on this runner: {error}");
-            return;
-        }
-        let read = windows_vault::get(&target);
-        let _ = windows_vault::delete(&target);
-        assert_eq!(read, Ok(Some(key.to_string())));
-        assert_eq!(windows_vault::get(&target), Ok(None));
     }
 
     #[test]
@@ -1404,7 +1324,9 @@ mod tests {
         );
         assert_eq!(
             PreflightError::Unavailable.describe(descriptor),
-            "the native credential vault is unavailable; retry after unlocking it"
+            "no usable credential store for DeepSeek: the native credential vault is \
+             unavailable and ~/.clud/credentials could not be used; run `clud auth login \
+             deepseek` or set DEEPSEEK_API_KEY"
         );
         assert_eq!(
             PreflightError::Cancelled.describe(descriptor),

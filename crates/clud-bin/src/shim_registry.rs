@@ -199,7 +199,7 @@ pub fn invoked_name(argv0: &OsStr) -> Option<String> {
 
 /// The on-disk file name for `name` on this platform.
 pub fn file_name(name: &str) -> String {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         format!("{name}.exe")
     } else {
         name.to_string()
@@ -404,20 +404,13 @@ pub fn executable(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         // A Windows App Execution Alias (the Store `python.exe`) is a reparse
         // point that cannot be followed, yet CreateProcess runs it.
-        return cfg!(windows) && path.symlink_metadata().is_ok_and(|meta| !meta.is_dir());
+        return crate::platform::host::WINDOWS
+            && path.symlink_metadata().is_ok_and(|meta| !meta.is_dir());
     };
     if !metadata.is_file() {
         return false;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    crate::platform::shim_fs::has_exec_bit(&metadata)
 }
 
 #[cfg(test)]
@@ -429,11 +422,7 @@ mod tests {
     fn write_exe(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(path, 0o755).unwrap();
     }
 
     fn path_of(dirs: &[&Path]) -> OsString {
@@ -499,7 +488,10 @@ mod tests {
             let windows = format!(r"C:\u\.clud\state\rm-shim\{name}.EXE");
             assert_eq!(lookup(OsStr::new(&windows)).map(|s| s.name), Some(name));
         }
-        assert_eq!(file_name("git").ends_with(".exe"), cfg!(windows));
+        assert_eq!(
+            file_name("git").ends_with(".exe"),
+            crate::platform::host::WINDOWS
+        );
     }
 
     /// #1486 acceptance 5: a target inside an alias directory is never

@@ -92,6 +92,12 @@ pub struct LaunchPlan {
     /// (`--provider-only`); empty leaves OpenRouter's routing alone.
     #[serde(default)]
     pub provider_only: Vec<String>,
+    /// Require OpenRouter zero-data-retention endpoints.
+    #[serde(default)]
+    pub zdr: bool,
+    /// Exclude OpenRouter endpoints that collect request data.
+    #[serde(default)]
+    pub no_data_collection: bool,
     /// True when `allowed_models` came from the *previous* model selection
     /// (no `--model` / `--allow-model` on the command line), not from an
     /// explicit pin (#1257). The runtime announces exactly that case as a
@@ -156,6 +162,8 @@ mod tests {
             failover_allow_metered: false,
             allowed_models: Vec::new(),
             provider_only: Vec::new(),
+            zdr: false,
+            no_data_collection: false,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,

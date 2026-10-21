@@ -88,6 +88,10 @@ source-job = "ci.yml:static"
 lanes = ["static", "dylint", "clippy", "build", "unit"]
 
 [[gate.replay.jobs]]
+source-job = "ci.yml:cache-maint"
+lanes = ["dylint", "build", "unit"]
+
+[[gate.replay.jobs]]
 source-job = "ci.yml:static-checks"
 lanes = ["static"]
 
