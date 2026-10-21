@@ -13,7 +13,8 @@ use windows::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    EqualSid, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION,
+    EqualSid, GetTokenInformation, IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid,
+    DACL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -104,6 +105,14 @@ fn verify_acl(file: &File) -> io::Result<()> {
 }
 
 fn is_current_owner(owner: PSID) -> io::Result<bool> {
+    // Windows may make Administrators the default owner for an elevated
+    // creator. Administrators are already an OS trust boundary, like Unix
+    // root; the protected owner-only DACL is still required below.
+    // https://learn.microsoft.com/windows/win32/secauthz/owner-of-a-new-object
+    // SAFETY: owner points into the live descriptor returned by GetSecurityInfo.
+    if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) }.as_bool() {
+        return Ok(true);
+    }
     let mut token = HANDLE::default();
     // SAFETY: GetCurrentProcess returns a valid pseudo-handle and token is a
     // valid output; TOKEN_QUERY is read-only and the handle is closed below.
