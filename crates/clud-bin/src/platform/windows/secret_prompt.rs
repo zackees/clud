@@ -8,7 +8,11 @@ pub fn configure(options: &mut eframe::NativeOptions) {
     setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
     // The system FXC compiler avoids adding a dxcompiler DLL to the install.
     // wgpu's adapter enumeration includes Windows' software WARP adapter.
-    setup.instance_descriptor.backend_options.dx12.shader_compiler = eframe::wgpu::Dx12Compiler::Fxc;
+    setup
+        .instance_descriptor
+        .backend_options
+        .dx12
+        .shader_compiler = eframe::wgpu::Dx12Compiler::Fxc;
     options.wgpu_options.wgpu_setup = WgpuSetup::CreateNew(setup);
 }
 

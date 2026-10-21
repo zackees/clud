@@ -10,7 +10,7 @@ pub fn graphics_available() -> bool {
     if !super::host::LINUX {
         return true;
     }
-    let present = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let present = |name| std::env::var(name).ok().is_some_and(|value| !value.is_empty());
     // Match winit's backend choice: Wayland wins when both displays exist.
     available_with(
         present("WAYLAND_DISPLAY") || present("WAYLAND_SOCKET"),
@@ -20,9 +20,7 @@ pub fn graphics_available() -> bool {
 }
 
 fn available_with(wayland: bool, x11: bool, mut load: impl FnMut(&CStr) -> bool) -> bool {
-    (wayland || x11)
-        && load(c"libxkbcommon.so.0")
-        && (wayland || load(c"libxkbcommon-x11.so.0"))
+    (wayland || x11) && load(c"libxkbcommon.so.0") && (wayland || load(c"libxkbcommon-x11.so.0"))
 }
 
 fn can_load(name: &CStr) -> bool {
