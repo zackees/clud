@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::daemon::gc_service::extern_repo::probe_cmd;
-use crate::daemon::gc_service::repo_worktree::RepoWorktreeState;
+use crate::daemon::gc_service::repo_worktree::{RepoWorktreeState, RepoWorktreeVerdict};
 
 fn run_git(cwd: &Path, args: &[&str]) -> String {
     match probe_cmd("git", cwd, args, Duration::from_secs(30)) {

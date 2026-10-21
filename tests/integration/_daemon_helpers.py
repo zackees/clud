@@ -571,6 +571,27 @@ def process_identity_is_alive(pid: int, start_time: int) -> bool:
         return True
 
 
+def _recorded_process(pid: int | None, start_time: int | None) -> psutil.Process | None:
+    """Retain a verified identity before shutdown makes OS inspection unreliable."""
+    if pid is None or start_time is None:
+        return None
+    try:
+        recorded = psutil.Process(pid)
+        return recorded if int(recorded.create_time()) == start_time else None
+    except psutil.Error:
+        return None
+
+
+def _wait_for_recorded_process_exit(recorded: psutil.Process | None) -> None:
+    if recorded is None:
+        return
+    try:
+        recorded.wait(timeout=5)
+    except psutil.Error:
+        # The final identity check remains authoritative, including access denial.
+        pass
+
+
 def _daemon_cleanup_diagnostics(
     state_dir: Path,
     *,
@@ -585,8 +606,8 @@ def _daemon_cleanup_diagnostics(
         if start_time is not None and start_time > 0 and process_identity_is_alive(pid, start_time):
             try:
                 command_line = " ".join(psutil.Process(pid).cmdline())
-            except (psutil.Error, OSError):
-                command_line = "<unavailable>"
+            except (psutil.Error, OSError) as inspection_error:
+                command_line = f"<unavailable: {inspection_error!r}>"
             details.append(f"live command line: {command_line}")
     if result is not None:
         details.extend(
@@ -643,6 +664,7 @@ def stop_daemon(
                 )
             ) from error
 
+    recorded = _recorded_process(pid, start_time)
     env = dict(base_env or os.environ)
     env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
     try:
@@ -664,6 +686,8 @@ def stop_daemon(
             )
         ) from error
 
+    if result.returncode == 0:
+        _wait_for_recorded_process_exit(recorded)
     identity_alive = (
         pid is not None and start_time is not None and process_identity_is_alive(pid, start_time)
     )
