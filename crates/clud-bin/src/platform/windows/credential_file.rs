@@ -98,10 +98,20 @@ fn verify_acl(file: &File) -> io::Result<()> {
     })?;
     // Accept only the protected single-owner ACL written by fs_private, or
     // its equivalent explicit current-owner SID. Extra/inherited ACEs fail closed.
-    if acl != "D:P(A;;FA;;;OW)" && acl != format!("D:P(A;;FA;;;{owner_sid})") {
+    if !is_owner_only_acl(&acl, &owner_sid) {
         return Err(insecure());
     }
     Ok(())
+}
+
+/// Windows retains auto-inheritance bookkeeping flags even after protection.
+/// Require protection and the exact single-owner ACE, independent of those flags.
+fn is_owner_only_acl(acl: &str, owner_sid: &str) -> bool {
+    let Some((flags, ace)) = acl.strip_prefix("D:").and_then(|acl| acl.split_once('(')) else {
+        return false;
+    };
+    let flags = flags.replace("AR", "").replace("AI", "");
+    flags == "P" && (ace == "A;;FA;;;OW)" || ace == format!("A;;FA;;;{owner_sid})"))
 }
 
 fn is_current_owner(owner: PSID) -> io::Result<bool> {
@@ -174,6 +184,28 @@ mod tests {
     use windows::Win32::Security::{
         GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
     };
+
+    #[test]
+    fn owner_only_acl_accepts_bookkeeping_but_rejects_extra_access() {
+        let owner = "S-1-5-21-123-456-789-1001";
+        for flags in ["P", "PAI", "PAR", "PARAI"] {
+            assert!(is_owner_only_acl(&format!("D:{flags}(A;;FA;;;OW)"), owner));
+            assert!(is_owner_only_acl(
+                &format!("D:{flags}(A;;FA;;;{owner})"),
+                owner
+            ));
+        }
+        for acl in [
+            "D:AI(A;;FA;;;OW)",
+            "D:P(A;;FA;;;WD)",
+            "D:P(A;;FA;;;OW)(A;;FR;;;WD)",
+            "D:P(A;ID;FA;;;OW)",
+            "D:PNO_ACCESS_CONTROL(A;;FA;;;OW)",
+            "D:P",
+        ] {
+            assert!(!is_owner_only_acl(acl, owner), "{acl}");
+        }
+    }
 
     #[test]
     fn a_written_private_file_is_readable_but_a_broadened_dacl_is_refused() {

@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::daemon::gc_service::extern_repo::probe_cmd;
-use crate::daemon::gc_service::repo_worktree::RepoWorktreeState;
+use crate::daemon::gc_service::repo_worktree::{RepoWorktreeState, RepoWorktreeVerdict};
 
 fn run_git(cwd: &Path, args: &[&str]) -> String {
     match probe_cmd("git", cwd, args, Duration::from_secs(30)) {
@@ -517,6 +517,11 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
         (Pinned, "not empty".to_string())
     );
 
+    // A probe may hold a Git child cwd open; do not dispatch deletion yet.
+    assert!(spare_reasons.begin_repo_probe());
+    assert_eq!(phase(&mut spare_reasons), 0);
+    spare_reasons.repo_probe_finished();
+
     // The race: an agent starts using the reservation after the probe.
     fs::write(race.join("new.txt"), "fresh work\n").unwrap();
 
@@ -524,6 +529,10 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
         phase(&mut spare_reasons),
         2,
         "the two cached reclaimable rows"
+    );
+    assert!(
+        !spare_reasons.begin_repo_probe(),
+        "a new probe must wait for pending deletions"
     );
     let outcomes = expect_reclaims(&rx, &mut spare_reasons, 2);
     assert!(
@@ -548,4 +557,58 @@ fn a_real_tick_reclaims_only_old_empty_reservations() {
         "keep me\n"
     );
     assert!(wt_root.is_dir(), "the root is never a removal target");
+}
+
+#[test]
+fn spared_and_failed_batches_refresh_before_the_next_reclaim() {
+    for outcome in [
+        ReclaimOutcome::Spared("now not empty".to_string()),
+        ReclaimOutcome::Failed("sharing violation".to_string()),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Registry::open_at(&tmp.path().join("gc.redb")).unwrap();
+        let mut state = SpareReasons::new();
+        let path = tmp.path().join("reservation").to_string_lossy().to_string();
+        state.replace_repo_worktrees(
+            vec![RepoWorktreeRow {
+                path: path.clone(),
+                repo_root: String::new(),
+                branch: None,
+                tip: None,
+                mtime_unix: 0,
+                verdict: RepoWorktreeVerdict {
+                    state: RepoWorktreeState::Reclaimable,
+                    reason: "reserved-unused".to_string(),
+                },
+                reservation: true,
+            }],
+            0,
+        );
+        state.begin_repo_reclaim(path.clone());
+        assert!(!state.begin_repo_probe());
+        apply_repo_worktree_reclaimed(&mut state, &path, &outcome);
+        assert!(state.repo_snapshot_needs_refresh());
+        let (pool_tx, pool_rx) = mpsc::channel();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        assert_eq!(
+            run_repo_worktree_phase(
+                &registry,
+                &pool_tx,
+                &completion_tx,
+                None,
+                &mut state,
+                Vec::new(),
+                RepoWorktreeGcConfig {
+                    mode: ReclaimMode::Delete,
+                    delete_remote: false,
+                    wt_root: None,
+                },
+            ),
+            0
+        );
+        assert!(matches!(pool_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        apply_repo_snapshot(&completion_rx, &mut state);
+        assert!(!state.repo_snapshot_needs_refresh());
+        assert!(state.begin_repo_probe());
+    }
 }

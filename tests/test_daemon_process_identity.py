@@ -51,3 +51,35 @@ def test_inaccessible_identity_still_fails_cleanup_conservatively(monkeypatch):
 
     monkeypatch.setattr(psutil, "Process", denied)
     assert _daemon_helpers.process_identity_is_alive(123, 1_700_000_000)
+
+
+def test_shutdown_wait_uses_the_original_verified_process(monkeypatch):
+    original = RecordedProcess(psutil.STATUS_SLEEPING)
+    waits = []
+    original.wait = lambda *, timeout: waits.append(timeout)
+    monkeypatch.setattr(psutil, "Process", lambda _pid: original)
+    retained = _daemon_helpers._recorded_process(123, 1_700_000_000)
+    monkeypatch.setattr(psutil, "Process", lambda _pid: pytest.fail("PID re-opened"))
+    _daemon_helpers._wait_for_recorded_process_exit(retained)
+    assert waits == [5]
+
+
+def test_shutdown_never_waits_on_a_recycled_identity(monkeypatch):
+    original = RecordedProcess(psutil.STATUS_SLEEPING)
+    original.wait = lambda **_kwargs: pytest.fail("waited on recycled PID")
+    monkeypatch.setattr(psutil, "Process", lambda _pid: original)
+    retained = _daemon_helpers._recorded_process(123, 1_700_000_001)
+    assert retained is None
+    _daemon_helpers._wait_for_recorded_process_exit(retained)
+
+
+def test_shutdown_wait_timeout_keeps_the_final_live_check(monkeypatch):
+    original = RecordedProcess(psutil.STATUS_SLEEPING)
+
+    def timeout(*, timeout):
+        raise psutil.TimeoutExpired(timeout, pid=123)
+
+    original.wait = timeout
+    monkeypatch.setattr(psutil, "Process", lambda _pid: original)
+    _daemon_helpers._wait_for_recorded_process_exit(original)
+    assert _daemon_helpers.process_identity_is_alive(123, 1_700_000_000)
