@@ -184,17 +184,21 @@ def test_native_secret_window_can_render_and_deliver(tmp_path: Path) -> None:
         "CLUD_TEST_SECRET_PROMPT_GUI": "1",
     }
     argv = [CLUD, "secret", "--multiline", "--to-file", str(destination)]
+    required = env.get("CLUD_REQUIRE_SECRET_GUI") == "1"
     if sys.platform == "linux" and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
         xvfb = shutil.which("xvfb-run")
         if xvfb is None:
+            assert not required, "native GUI coverage requires xvfb-run on a headless Linux runner"
             pytest.skip("a desktop or xvfb-run is required for the native window probe")
         argv = [xvfb, "-a", *argv]
     result = process.run(argv, capture_output=True, text=True, timeout=30, env=env)
-    if result.returncode == 1 and "No graphical secret prompt is available" in result.stderr:
+    diagnostics = result.stdout + result.stderr
+    if result.returncode == 1 and "No graphical secret prompt is available" in diagnostics:
+        assert not required, diagnostics
         pytest.skip("native runner has no supported graphics context")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, diagnostics
     assert result.stdout.strip() == "stored"
-    assert "FAKE_NATIVE_PRIVATE_KEY" not in result.stdout + result.stderr
+    assert "FAKE_NATIVE_PRIVATE_KEY" not in diagnostics
     assert destination.read_text() == source.read_text()
 
 

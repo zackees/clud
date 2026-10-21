@@ -10,6 +10,9 @@ use zeroize::Zeroizing;
 use super::{Failure, Options, Secret};
 
 pub(super) fn prompt(options: &Options) -> Result<Secret, Failure> {
+    if !crate::platform::secret_prompt::graphics_available() {
+        return Err(Failure::Unavailable);
+    }
     let outcome = Rc::new(RefCell::new(None));
     let returned = Rc::clone(&outcome);
     let options = options.clone();
@@ -25,12 +28,13 @@ pub(super) fn prompt(options: &Options) -> Result<Secret, Failure> {
     let mut secret = Zeroizing::new(fixture.unwrap_or_default());
     let mut first_frame = true;
     let mut painted = false;
-    let native = eframe::NativeOptions {
+    let mut native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([520.0, if options.multiline { 300.0 } else { 180.0 }])
             .with_resizable(false),
         ..Default::default()
     };
+    crate::platform::secret_prompt::configure(&mut native);
     let result = eframe::run_ui_native(&title, native, move |ui, _frame| {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(&options.label);
@@ -62,7 +66,12 @@ pub(super) fn prompt(options: &Options) -> Result<Secret, Failure> {
             }
         });
     });
-    result.map_err(|_| Failure::Unavailable)?;
+    if let Err(error) = result {
+        if super::test_mode() && std::env::var_os("CLUD_TEST_SECRET_PROMPT_GUI").is_some() {
+            eprintln!("native window test initialization failed: {error}");
+        }
+        return Err(Failure::Unavailable);
+    }
     let value = outcome.borrow_mut().take();
     value.ok_or(Failure::Cancelled)
 }

@@ -43,6 +43,15 @@ serialization surface. No credential value is accepted on the command line.
 A missing desktop or unavailable graphics context fails clearly; this command
 does not fall back to echoing input in a terminal or asking through chat.
 
+On Linux, the desktop runtime needs libxkbcommon; X11 additionally needs
+libxkbcommon-x11. clud checks these before entering winit, whose X11 keyboard
+loader otherwise panics on a missing library. A Wayland session does not
+require the X11 library, including when XWayland also sets `DISPLAY`.
+Linux CI installs the runtime and Xvfb so the native window probe executes.
+Windows uses wgpu's Direct3D 12 backend, which can use the system WARP software
+adapter. Its FXC shader compiler requires no additional compiler DLL. macOS
+and Linux retain the OpenGL renderer.
+
 The automatically discoverable `clud-secret` bundled skill documents sink
 selection and status-only verification. Prompting does not itself authorize
 logging into an unrelated service. Credentials already pasted into chat should
@@ -56,3 +65,5 @@ and inspect masked widget output without opening a desktop window. A separate
 native-window probe renders and delivers a fake multiline value on graphical
 runners, using xvfb-run on Linux when available; headless skips do not establish
 native window coverage.
+The native CI setup sets `CLUD_REQUIRE_SECRET_GUI=1`: there a missing display,
+runtime or graphics context fails the probe rather than skipping coverage.

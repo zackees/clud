@@ -29,3 +29,9 @@ then is reaped before the assertions. No production wait API is introduced.
 `unix/credential_file.rs` and `windows/credential_file.rs` validate the opened
 credential file before reading: ownership, regular-file identity, and private
 permissions or a protected owner-only DACL. `mod.rs` selects the host tree.
+
+`unix/secret_prompt.rs` checks the Linux keyboard runtime before entering
+winit, avoiding a loader panic on minimal desktops. It follows winit's
+Wayland-first selection; the other hosts retain typed graphics initialization.
+Windows selects the Direct3D 12 renderer with the system FXC compiler; Unix
+selects OpenGL.

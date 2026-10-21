@@ -74,7 +74,7 @@ fn report(result: Result<(), Failure>) -> i32 {
                 "{}",
                 match error {
                     Failure::Unavailable =>
-                        "No graphical secret prompt is available; retry in a desktop session.",
+                        "No graphical secret prompt is available; use a desktop with its native graphics libraries installed.",
                     Failure::Invalid =>
                         "The credential is empty, too large or invalid for this input mode.",
                     _ => "Could not deliver the credential to the requested sink.",
