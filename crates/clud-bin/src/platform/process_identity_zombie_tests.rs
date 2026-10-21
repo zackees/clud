@@ -44,4 +44,3 @@ fn an_unreaped_zombie_is_not_a_live_identity() {
     assert_eq!(observed, None, "the direct probe must exclude a zombie");
     assert_eq!(batched, None, "the batched probe must exclude a zombie");
 }
-
