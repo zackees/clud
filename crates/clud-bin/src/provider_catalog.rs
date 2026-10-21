@@ -79,6 +79,15 @@ const ANTHROPIC_EFFORTS: &[EffortLevel] = &[
     EffortLevel::XHigh,
     EffortLevel::Max,
 ];
+// https://developers.openai.com/api/docs/models/gpt-6.1-sol
+// Sol 6.1 supports reasoning at these five levels; `none` is not supported.
+const SOL_6_1_EFFORTS: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::XHigh,
+    EffortLevel::Max,
+];
 /// Kimi K3 documents exactly three reasoning-effort levels -- low, high, and
 /// max (default max). Deliberately NOT `ANTHROPIC_EFFORTS`: medium and xhigh
 /// are not part of K3's contract and must be rejected before an upstream
@@ -170,6 +179,22 @@ pub const MODELS: &[CatalogModel] = &[
         supported_efforts: ALL_CODEX_EFFORTS,
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Medium),
+        default_context_window: None,
+        provider_default: false,
+        claude_max_context_tokens: Some(1_050_000),
+        claude_compact_window: None,
+        supports_images: true,
+    },
+    CatalogModel {
+        cli_id: "codex-sol-6.1",
+        provider: ModelProvider::Codex,
+        wire_id: "gpt-6.1-sol",
+        discovery_id: Some("clud-claude-codex-sol-6-1"),
+        display_name: "Codex Sol 6.1 (OpenAI)",
+        legacy_aliases: &["sol-6.1"],
+        supported_efforts: SOL_6_1_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: false,
         claude_max_context_tokens: Some(1_050_000),
@@ -1282,6 +1307,34 @@ mod reachability_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sol_6_1_has_its_own_model_and_supported_efforts() {
+        let model = model_by_any_id("gpt-6.1-sol").expect("registered Sol 6.1");
+        assert_eq!(model.cli_id, "codex-sol-6.1");
+        assert_eq!(model.default_effort, Some(EffortLevel::Low));
+        assert_eq!(model.claude_max_context_tokens, Some(1_050_000));
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let selection = resolve(
+                Some(ModelProvider::Codex),
+                Some("gpt-6.1-sol"),
+                Some(effort),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(selection.wire_model.as_deref(), Some("gpt-6.1-sol"));
+        }
+        assert!(matches!(
+            resolve(
+                Some(ModelProvider::Codex),
+                Some("gpt-6.1-sol"),
+                Some("none"),
+                None
+            ),
+            Err(SelectionError::UnsupportedEffort { .. })
+        ));
+    }
 
     /// Issue #955: an adapter must never have to choose between duplicate
     /// defaults or restate a provider's context ceiling outside this table.

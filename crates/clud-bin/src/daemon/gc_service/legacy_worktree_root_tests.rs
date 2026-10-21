@@ -60,8 +60,9 @@ fn an_idle_worktree_moves_and_git_follows_it() {
     assert!(!old.exists(), "{log:?}");
     let list = run_git(&repo, &["worktree", "list", "--porcelain"]);
     assert!(
-        list.contains(&crate::path_norm::display_slash(&moved))
-            || list.contains(&moved.to_string_lossy().into_owned()),
+        list.lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .any(|path| crate::path_norm::same_path(Path::new(path), &moved)),
         "git still records the old path: {list}"
     );
     assert_eq!(

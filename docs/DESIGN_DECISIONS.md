@@ -6085,6 +6085,8 @@ target is already unusable, and only under uv's own locks.
 
 ## DD-149: a configured soldr version is a minimum; a launch never downgrades soldr
 
+*Superseded by [DD-173](#dd-173-soldr-cannot-be-pinned-a-version-setting-is-ignored-with-a-warning): a version setting is now ignored entirely.*
+
 **Context:** DD-014 made a numeric `rust.version` / `optimize.rust.soldr_version`
 an exact pin. `soldr_activate` reconciled it on every launch: whenever the
 installed version differed from the pin it ran
@@ -6860,3 +6862,66 @@ fights the user's PATH. Documenting Codex as unguarded: the audit shows the
 loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
 session whose user opted out of the global entry or whose files are malformed,
 at the cost of scanning a Bash call twice.
+
+
+## DD-172: safe-rm trashes HOME files and tool data dirs outside the roots
+
+**Context (#1956, #1957).** The creation ledger records only `safe-mktemp`. A
+file an agent wrote under `$HOME` with Write, `cp` or `install` (a stale
+`.desktop` entry, a wrong Claude Code memory file) was refused, so agents
+overwrote it in place or left a manual cleanup list for the user.
+
+**Decision.** Outside the roots, a single file or symlink is trashed only
+strictly inside a tool or app data dir (`~/.claude`, `~/.codex`, `~/.cache`,
+`~/.local/share`), and a directory is trashed only strictly inside a tool
+data dir (`~/.claude`, `~/.codex`, `~/.cache`). Personal data folders
+(`~/Documents` and the other XDG user dirs) and a credentials/settings
+denylist are refused outright, as is any directory containing a denylisted
+path. Home itself stays refused.
+
+**Why.** A single file is bounded, recoverable from the trash for 72 hours,
+and audited. A recursive delete is not bounded: one wrong `-r` under home can
+take a project or years of documents, so directories stay limited to dirs
+that hold regenerable tool data. Keys, credentials and settings are not
+recoverable in the way that matters: a deleted key is a lockout, and a
+deleted clud settings file silently drops the user's overrides.
+
+**Rejected.** Any single file under home (the first cut of this rule: it
+reached the source files of every other repo under `~/dev`, which no
+#1956/#1957 case needs). Every subfolder of home (the owner's first proposal: one wrong
+`safe-rm -r ~/Documents` would be a loss the trash may not cover, since big
+trees are copied there). Extending the ledger to every Write/Edit/redirect
+(more plumbing, and still misses files from earlier sessions). A slug-matched
+exception for only the current project's memory dir (#1957's first draft,
+superseded once `~/.claude` became deletable).
+
+
+## DD-173: soldr cannot be pinned; a version setting is ignored with a warning
+
+**Context.** DD-149 kept `rust.version` / `optimize.rust.soldr_version` as a
+floor. A numeric value still had two effects: it could force an install of
+that version's floor, and it turned off the daily rolling-latest refresh, so a
+repo or user that once wrote a pin stayed on an old soldr indefinitely. Old
+soldr protocols then ran beside current brokers and CI wrappers on a shared
+machine and broke them, the same failure class as stale `bosn==` pins in
+other repos' gate scripts.
+
+**Decision.** clud no longer honors any soldr version setting. When a settings
+layer (`.clud/settings.json`, `.clud/settings.local.json` or ~/.clud/settings.json)
+carries a numeric soldr version, launch prints one yellow warning saying the
+pin is ignored and to remove it, then behaves exactly as if no version were
+set: it uses the installed soldr, installs one if missing, upgrades one below
+the `soldr shims` floor, and refreshes to the latest release daily.
+`clud optimize rust --soldr-version X` prints the same warning and persists
+nothing; neither settings writer emits `soldr_version` any more. A newer soldr
+is still never downgraded.
+
+**Why.** Rolling latest is already the policy everywhere else (DD-120); the
+setting was the last way to opt out of it, and every use of that opt-out seen
+so far was a stale pin nobody remembered writing. A warning rather than a
+parse error keeps an old settings file from disarming its other rules.
+
+**Rejected.** Keeping the floor semantics (a stale floor still froze the
+refresh). Rewriting the user's settings file to drop the key (clud does not
+edit settings it did not write). Failing the launch on a pin (too harsh for a
+value that is now simply unused).

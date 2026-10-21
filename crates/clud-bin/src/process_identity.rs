@@ -86,13 +86,17 @@ impl ProcessIdentity {
 
     /// Read the identity of `pid` out of an already-refreshed snapshot.
     ///
-    /// `None` means no running process holds that PID, including a zombie: it
-    /// has exited and only awaits reaping, as Windows' `STILL_ACTIVE` check
-    /// already treats an exited process.
+    /// `None` means the PID is absent or its process has terminated (including
+    /// an unreaped Unix zombie, which retains its PID and start time).
     pub fn observe_in(system: &System, pid: u32) -> Option<Self> {
         system
             .process(Pid::from_u32(pid))
-            .filter(|process| is_running(process.status()))
+            .filter(|process| {
+                !matches!(
+                    process.status(),
+                    ProcessStatus::Zombie | ProcessStatus::Dead
+                )
+            })
             .map(|process| Self::new(pid, process.start_time()))
     }
 
@@ -200,26 +204,9 @@ pub fn start_time_of(pid: u32) -> u64 {
         .unwrap_or(UNKNOWN_START_TIME)
 }
 
-/// Whether a process in `status` is still running. A just-SIGKILLed daemon
-/// stays a zombie until its parent or init reaps it; counting it as alive made
-/// `clud daemon stop` dial its closed port once liveness became a single-PID
-/// lookup, which no longer outlasts the reap (#1981).
-fn is_running(status: ProcessStatus) -> bool {
-    !matches!(status, ProcessStatus::Zombie | ProcessStatus::Dead)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn exited_processes_are_not_running() {
-        assert!(!is_running(ProcessStatus::Zombie));
-        assert!(!is_running(ProcessStatus::Dead));
-        assert!(is_running(ProcessStatus::Run));
-        assert!(is_running(ProcessStatus::Sleep));
-        assert!(is_running(ProcessStatus::Stop));
-    }
 
     // Every case below uses synthetic identities. Forcing the OS to actually
     // recycle a PID is not something a test can do deterministically, so the
@@ -295,19 +282,24 @@ mod tests {
 
     #[test]
     fn an_exited_process_is_dead_even_while_its_handle_remains_open() {
+        use std::io::Write;
+
         #[cfg(windows)]
         let mut child = std::process::Command::new("cmd")
-            .args(["/C", "exit", "0"])
+            .args(["/C", "set /p token= & exit /b 0"])
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("spawn short-lived Windows child");
         #[cfg(not(windows))]
         let mut child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
+            .args(["-c", "read token; exit 0"])
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("spawn short-lived Unix child");
 
         let identity =
             ProcessIdentity::observe(child.id()).expect("child identity before waiting for exit");
+        child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
         assert!(child.wait().expect("wait for child").success());
         assert!(
             !identity.is_live(),
@@ -315,3 +307,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "platform/process_identity_zombie_tests.rs"]
+mod zombie_tests;

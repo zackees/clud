@@ -1292,8 +1292,17 @@ def run_watch(watcher, tmp_path, monkeypatch, polls: list[dict], required, *, re
 
 
 def scoped_cancel(watcher, monkeypatch, case: dict, scope: dict[str, int]) -> list[int]:
+    # The failing run's jobs (obs-rust/obs-studio#13): none still in progress,
+    # so these cases pin only the run scope. In-flight jobs are covered in
+    # test_pr_merge_watch_inflight_cancel.py.
     monkeypatch.setattr(
-        watcher, "gh_json", lambda *args: {"workflow_runs": case["workflow_runs"]}
+        watcher,
+        "gh_json",
+        lambda *args: (
+            {"jobs": []}
+            if "/jobs" in args[-1]
+            else {"workflow_runs": case["workflow_runs"]}
+        ),
     )
     cancelled: list[int] = []
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from ci.check_windows_wheel import (
     _is_clud_script_exe,
     _is_kitty_bundle_exe,
+    check_no_debug_symbols,
     check_wheel,
     forbidden_imports,
     has_common_controls_v6_manifest,
@@ -306,3 +307,47 @@ def test_webterm_without_a_common_controls_manifest_fails(tmp_path: Path):
 
     assert len(errors) == 1
     assert "Common Controls v6" in errors[0]
+
+
+def test_release_rejects_symbol_sidecars(tmp_path: Path):
+    wheel = tmp_path / "clud-2.8.31-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud.data/data/clud-kittyterm/GUI.PDB", b"symbols")
+    errors = check_no_debug_symbols(wheel)
+    assert len(errors) == 1
+    assert "symbol sidecar" in errors[0]
+
+
+def test_release_rejects_embedded_debug_in_bundled_dll(tmp_path: Path):
+    data = bytearray(_make_pe_with_imports(["KERNEL32.dll"]))
+    coff = struct.unpack_from("<I", data, 0x3C)[0] + 4
+    section = coff + 20 + struct.unpack_from("<H", data, coff + 16)[0]
+    data[section : section + 8] = b".debug\0\0"
+    wheel = tmp_path / "clud-2.8.31-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud.data/data/clud-kittyterm/mesa/opengl32.dll", data)
+    errors = check_no_debug_symbols(wheel)
+    assert len(errors) == 1
+    assert "embedded debug" in errors[0]
+
+
+def test_release_accepts_windows_runtime_without_debug_symbols(tmp_path: Path):
+    wheel = tmp_path / "clud-2.8.31-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud.data/scripts/clud.exe", _make_pe_with_imports(["KERNEL32.dll"]))
+    assert check_no_debug_symbols(wheel) == []
+
+
+def test_release_rejects_long_coff_debug_section_names(tmp_path: Path):
+    data = bytearray(_make_pe_with_imports(["KERNEL32.dll"]))
+    coff = struct.unpack_from("<I", data, 0x3C)[0] + 4
+    section = coff + 20 + struct.unpack_from("<H", data, coff + 16)[0]
+    data[section : section + 8] = b"/4\0\0\0\0\0\0"
+    struct.pack_into("<II", data, coff + 8, len(data), 0)
+    data.extend(struct.pack("<I", 16) + b".debug_info\0")
+    wheel = tmp_path / "clud-2.8.31-py3-none-win_arm64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud.data/scripts/clud.exe", data)
+    errors = check_no_debug_symbols(wheel)
+    assert len(errors) == 1
+    assert ".debug_info" in errors[0]

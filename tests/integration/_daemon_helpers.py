@@ -558,6 +558,10 @@ def process_identity_is_alive(pid: int, start_time: int) -> bool:
             return False
         if start_time <= 0:
             raise ValueError("process identity requires a positive start time")
+        # is_running() also returns True for unreaped Unix zombies (#1993).
+        # Their PID/start time survive after the listener and process are gone.
+        if process.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+            return False
         return int(process.create_time()) == start_time
     except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return False

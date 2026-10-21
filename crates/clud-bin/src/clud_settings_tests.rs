@@ -816,13 +816,17 @@ fn saves_rust_optimize_settings() {
 
     assert_eq!(
         load_rust_optimize_settings_at(home.path()).unwrap(),
-        Some(settings)
+        Some(RustOptimizeSettings {
+            soldr_version: "latest".to_string(),
+            ..settings
+        }),
+        "a soldr pin is never persisted"
     );
     let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
     let json: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(json["optimize"]["rust"]["use_soldr_shims"], true);
     assert_eq!(json["optimize"]["rust"]["install_soldr"], false);
-    assert_eq!(json["optimize"]["rust"]["soldr_version"], "1.2.3");
+    assert!(json["optimize"]["rust"].get("soldr_version").is_none());
 }
 
 #[test]

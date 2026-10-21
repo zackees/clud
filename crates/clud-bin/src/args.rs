@@ -862,7 +862,7 @@ pub enum Command {
             value_parser = clap::value_parser!(bool),
         )]
         use_soldr_shims: bool,
-        /// soldr release version to install and persist.
+        /// Ignored with a warning: soldr cannot be pinned and always follows latest.
         #[arg(long = "soldr-version", default_value = "latest")]
         soldr_version: String,
     },

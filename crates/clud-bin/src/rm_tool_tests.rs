@@ -165,7 +165,8 @@ fn roots_come_from_the_env_or_the_git_checkout() {
 fn refuses_roots_home_outside_and_git_metadata() {
     let w = world();
     std::fs::create_dir_all(w.root.join(".git")).unwrap();
-    std::fs::write(w.home.join("notes"), b"x").unwrap();
+    let notes = w.home.parent().unwrap().join("notes");
+    std::fs::write(&notes, b"x").unwrap();
     let mut roots = w.roots();
     let refused =
         |raw: &str, roots: &mut Roots| resolve(raw, &w.root, Some(&w.home), roots).unwrap_err();
@@ -178,7 +179,7 @@ fn refuses_roots_home_outside_and_git_metadata() {
     assert!(refused("sub/..", &mut roots).contains("name it directly"));
     assert!(refused("/", &mut roots).contains("name it directly"));
     assert!(refused(".git", &mut roots).contains("git metadata"));
-    assert!(refused(w.home.join("notes").to_str().unwrap(), &mut roots).contains("outside"));
+    assert!(refused(notes.to_str().unwrap(), &mut roots).contains("outside"));
     assert!(refused("", &mut roots).contains("empty"));
     // Home and its ancestors are never roots, however the session started.
     let value = std::env::join_paths([w.home.clone(), w.root.clone()]).unwrap();
@@ -217,7 +218,7 @@ fn refuses_roots_home_outside_and_git_metadata() {
 #[test]
 fn a_symlinked_parent_that_leaves_the_roots_is_refused_and_a_final_link_is_removed_as_a_link() {
     let w = world();
-    let outside = w.home.join("outside");
+    let outside = w.home.parent().unwrap().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("keep"), b"precious").unwrap();
     std::os::unix::fs::symlink(&outside, w.root.join("escape")).unwrap();
@@ -1114,3 +1115,7 @@ fn only_a_component_named_exactly_venv_is_exempt() {
         assert!(dir.exists());
     }
 }
+
+#[cfg(test)]
+#[path = "rm_tool_home_files_tests.rs"]
+mod home_files_tests;
