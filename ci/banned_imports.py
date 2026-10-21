@@ -350,7 +350,9 @@ def main() -> int:
     # On Windows an open handle keeps the PID reserved, which is precisely the
     # condition under test; NativeProcess manages its handle internally and does
     # not guarantee it survives `wait()`, so wrapping this would delete the
-    # scenario rather than exercise it.
+    # scenario rather than exercise it. #1993 also needs a raw unreaped child
+    # for an_unreaped_zombie_is_not_a_live_identity: NativeProcess reaps it and
+    # would erase the zombie state the identity probe must reject.
     # subprocess_capture_lifecycle_windows.rs is exempt (#634) — its compiled
     # fixture must spawn a descendant before any containment is attached. The
     # production side of the same test goes through ManagedSubprocess; using it

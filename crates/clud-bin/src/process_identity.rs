@@ -32,7 +32,7 @@
 //! case explicitly so a reader can tell "not recorded" from "recorded as 0".
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessStatus, System};
 
 #[cfg(not(windows))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
@@ -86,10 +86,14 @@ impl ProcessIdentity {
 
     /// Read the identity of `pid` out of an already-refreshed snapshot.
     ///
-    /// `None` means no process currently holds that PID.
+    /// `None` means the PID is absent or its process has terminated (including
+    /// an unreaped Unix zombie, which retains its PID and start time).
     pub fn observe_in(system: &System, pid: u32) -> Option<Self> {
         system
             .process(Pid::from_u32(pid))
+            .filter(|process| {
+                !matches!(process.status(), ProcessStatus::Zombie | ProcessStatus::Dead)
+            })
             .map(|process| Self::new(pid, process.start_time()))
     }
 
@@ -271,6 +275,49 @@ mod tests {
         let real = ProcessIdentity::observe(pid).expect("this process is running");
         let impostor = ProcessIdentity::new(pid, real.start_time.wrapping_add(1));
         assert!(!impostor.is_live());
+    }
+
+    /// #1993: an unreaped daemon still has a PID and start time, but no
+    /// listener or executable code remains. Hold that exact state with
+    /// waitid(WNOWAIT), since NativeProcess would reap the child itself.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unreaped_zombie_is_not_a_live_identity() {
+        use std::io::Write;
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "read token; exit 0"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn child waiting for release");
+        let identity = ProcessIdentity::observe(child.id()).expect("live child identity");
+        child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
+        // SAFETY: siginfo_t may be zero-initialized, the out pointer is valid,
+        // and waitid targets our own child without reaping its exit status.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: the child is ours and the initialized siginfo out pointer is valid.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        let was_live = identity.is_live();
+        let observed = ProcessIdentity::observe(identity.pid);
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(identity.pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let batched = ProcessIdentity::observe_in(&system, identity.pid);
+        assert!(child.wait().expect("reap child after observations").success());
+        assert_eq!(waited, 0, "waitid must leave an exited child unreaped");
+        assert!(!was_live, "an unreaped zombie must not be considered running");
+        assert_eq!(observed, None, "the direct probe must exclude a zombie");
+        assert_eq!(batched, None, "the batched probe must exclude a zombie");
     }
 
     #[test]
