@@ -359,7 +359,9 @@ which test tier a change belongs in — lives in
   (issue #558). A bare PID is not a stable handle: Windows reissues numbers
   promptly, so "the PID is alive" and "that process is alive" are different
   questions. Records written before the field existed carry
-  `UNKNOWN_START_TIME` and fall back to a PID-only comparison.
+  `UNKNOWN_START_TIME` and fall back to a PID-only comparison. Terminated
+  states are not live; the native zombie regression lives under
+  [`platform/`](platform/README.md).
 - `process_scan.rs` - clud's own host **environment** pass on `sysinfo 0.37`
   (#673 Phase 7): `scan_env()` answers both env questions from one snapshot,
   and `DaemonMarkerCache` reads each identity's environment once, ever, over a
