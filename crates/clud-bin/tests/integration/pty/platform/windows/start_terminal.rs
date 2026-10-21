@@ -71,10 +71,7 @@ fn check_started_terminal(request: &str) {
                 .display()
                 .to_string(),
         ),
-        (
-            running_process::ORIGINATOR_ENV_VAR.to_string(),
-            originator,
-        ),
+        (running_process::ORIGINATOR_ENV_VAR.to_string(), originator),
         ("MSYS2_ARG_CONV_EXCL".to_string(), "*".to_string()),
     ]) {
         env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
@@ -102,10 +99,11 @@ fn check_started_terminal(request: &str) {
         terminal: None,
     };
     fixture.process.start_impl().unwrap();
-    fixture.tracker.as_ref().unwrap().register_backend(
-        fixture.process.pid().unwrap().unwrap(),
-        "bash.exe",
-    );
+    fixture
+        .tracker
+        .as_ref()
+        .unwrap()
+        .register_backend(fixture.process.pid().unwrap().unwrap(), "bash.exe");
     let terminal = wait_for_terminal(&fixture.process);
     fixture.terminal = Some(terminal);
     fixture.process.close_impl().unwrap();
@@ -114,11 +112,8 @@ fn check_started_terminal(request: &str) {
         terminal.is_live(),
         "explicitly opened Command Prompt died with clud cleanup"
     );
-    let facts = clud::reaper_facts::collect_host_facts(
-        &[terminal.pid],
-        &Default::default(),
-        Vec::new(),
-    );
+    let facts =
+        clud::reaper_facts::collect_host_facts(&[terminal.pid], &Default::default(), Vec::new());
     // The explicit launch must also declare persistence for later orphan sweeps.
     let scan = clud::process_scan::scan_env("CLUD");
     assert!(scan.declared_daemons.contains(&terminal.pid));
@@ -142,7 +137,9 @@ fn start_cmd_survives_pty_close_and_foreground_cleanup() {
 
 #[test]
 fn start_intercepts_only_a_bare_cmd_request() {
-    use running_process::{CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+    use running_process::{
+        CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let mut env: Vec<(String, String)> = std::env::vars().collect();
@@ -167,7 +164,13 @@ start '' cmd.exe
 start notepad.exe
 "#;
     let child = NativeProcess::new(ProcessConfig {
-        command: CommandSpec::Argv(vec![git_bash().display().to_string(), "--noprofile".into(), "--norc".into(), "-c".into(), script.into()]),
+        command: CommandSpec::Argv(vec![
+            git_bash().display().to_string(),
+            "--noprofile".into(),
+            "--norc".into(),
+            "-c".into(),
+            script.into(),
+        ]),
         cwd: None,
         env: Some(env),
         capture: true,
