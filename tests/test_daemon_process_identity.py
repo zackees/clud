@@ -31,7 +31,12 @@ def test_zombie_is_not_a_live_daemon_identity(monkeypatch, status):
 
 @pytest.mark.parametrize(
     "status",
-    [psutil.STATUS_RUNNING, psutil.STATUS_SLEEPING, psutil.STATUS_STOPPED, psutil.STATUS_DISK_SLEEP],
+    [
+        psutil.STATUS_RUNNING,
+        psutil.STATUS_SLEEPING,
+        psutil.STATUS_STOPPED,
+        psutil.STATUS_DISK_SLEEP,
+    ],
 )
 def test_live_or_stopped_daemon_identity_is_preserved(monkeypatch, status):
     process = RecordedProcess(status)
