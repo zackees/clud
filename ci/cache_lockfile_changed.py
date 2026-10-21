@@ -12,15 +12,16 @@ changed a lockfile. ci.toml's ``lockfile = true`` families are ``compile``
 too because a toolchain bump changes what every cached target contains even
 when no lockfile line moved.
 
-The parent is deliberately ``HEAD^`` on whatever ref this job checked out,
-which is why ``cache-maint`` checks out with ``fetch-depth: 2``. This lives in
-``ci/`` rather than as an inline ``run:`` block because GEN-005 caps the shell
-budget of a workflow step at a single command.
+The base is the push event's ``before`` SHA, so a multi-commit push covers
+all incoming commits. Missing event data or an unavailable shallow-checkout
+base conservatively requires pruning rather than trusting the last commit.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -30,31 +31,46 @@ ROOT = Path(__file__).resolve().parent.parent
 WATCHED = ("Cargo.lock", "uv.lock", "rust-toolchain.toml")
 
 
-def main() -> int:
-    # ci.process.run is the sanctioned wrapper: `subprocess` is a BANNED
-    # import in this repository (ci/banned_imports.py, PY-003), and every
-    # process spawn goes through running-process so the pinned toolchain and
-    # cache apply.
+def push_base() -> str | None:
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        return None
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    before = event.get("before")
+    if not isinstance(before, str) or not re.fullmatch(r"[0-9a-f]{40}", before):
+        return None
+    return before if before != "0" * 40 else None
+
+
+def lockfiles_changed() -> bool:
+    base = push_base()
+    if base is None:
+        print("push base unavailable; conservatively requiring pre-pruning", file=sys.stderr)
+        return True
     proc = run(
-        ["git", "diff", "--name-only", "HEAD^", "HEAD", "--", *WATCHED],
+        ["git", "diff", "--name-only", base, "HEAD", "--", *WATCHED],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     if proc.returncode != 0:
-        # No parent commit (a shallow or first commit) or another git error.
-        # Never red the run over a probe: treat conservatively as "changed" so
-        # the forecast runs rather than silently skipping the prune.
         print(
-            f"ci/cache_lockfile_changed.py: git diff failed (rc={proc.returncode}): "
-            f"{proc.stderr.strip()} -- treating as changed (conservative)",
+            f"lockfile comparison failed (rc={proc.returncode}): {proc.stderr.strip()}; "
+            "conservatively requiring pre-pruning",
             file=sys.stderr,
         )
-        changed = True
-    else:
-        changed = bool(proc.stdout.strip())
+        return True
+    return bool(proc.stdout.strip())
 
+
+def main() -> int:
+    changed = lockfiles_changed()
     print(f"lockfile-changed: {changed} (watched: {', '.join(WATCHED)})")
     gh_out = os.environ.get("GITHUB_OUTPUT")
     if gh_out:

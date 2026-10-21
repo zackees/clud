@@ -288,7 +288,7 @@ jobs:
       contents: read
       actions: write
     steps:
-      # fetch-depth 2 so `HEAD^` exists for ci/cache_lockfile_changed.py.
+      # A missing push base in this shallow checkout triggers conservative pruning.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.static.outputs.source_ref }}
@@ -302,17 +302,19 @@ jobs:
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
+      - name: Set up maintenance runtime
+        uses: ./.github/actions/setup-exec
       # Pre-pruning spends live deletes, so it must only happen on a push that
       # actually changed a lockfile.
       - name: Detect a lockfile change
         id: lockfile
-        run: python -m ci.cache_lockfile_changed
+        run: '"$VENV_PY" -m ci.cache_lockfile_changed'
       - name: Pre-prune superseded lockfile-keyed cache entries
         if: steps.lockfile.outputs.changed == 'true'
         env:
           PYTHONPATH: .ci-lint
           GITHUB_TOKEN: ${{ github.token }}
-        run: python -m ci_lint cache preprune --repo . --lockfile-changed --max-deletes 50
+        run: '"$VENV_PY" -m ci_lint cache preprune --repo . --lockfile-changed --max-deletes 50'
 
   # ---------------------------------------------------------------- dylint --
   # Dylint is required in every mode. The reusable workflow runs the custom
@@ -326,6 +328,7 @@ jobs:
     needs: [static, cache-maint]
     if: >-
       ${{ always() && !cancelled()
+          && needs.static.result == 'success'
           && (needs.cache-maint.result == 'success' || needs.cache-maint.result == 'skipped')
           && needs.static.outputs.skip_dylint != 'true' }}
     uses: ./.github/workflows/_dylint.yml
@@ -376,6 +379,7 @@ jobs:
     # skipped cache-maint (every non-push run) must not skip this writer.
     if: >-
       ${{ always() && !cancelled()
+          && needs.static.result == 'success'
           && (needs.cache-maint.result == 'success' || needs.cache-maint.result == 'skipped')
           && needs.static.outputs.mode != ''
           && needs.static.outputs.skip_build-linux-x64 != 'true' }}
