@@ -115,3 +115,32 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
     assert any(row["role"] == "gate:b:resume" and row["n"] > boundary for row in result.requests)
     assert any(row["role"] == "planner:b" and row["n"] > boundary for row in result.requests)
     assert any(row["role"] == "planner:c" and row["n"] > boundary for row in result.requests)
+
+
+@pytest.mark.parametrize("orchestrated", [False, True])
+@pytest.mark.parametrize("reason", ["no-overlap", "deferred-group"])
+def test_stage_deferral_never_creates_publication_resume(
+    harness: Harness, orchestrated: bool, reason: str,
+) -> None:
+    h = harness
+    plan = {"stages": [{"stage": "feature", "group": "next", "children": ["b"]}],
+            "rules": {"no_overlap": "bugs_only"}, "deferred_groups": []}
+    if reason == "no-overlap":
+        plan["waiting_on_pr"] = 90
+    else:
+        plan["deferred_groups"] = [{"group": "next", "children": ["b"]}]
+    args = {"plan": plan, "plan_url": "https://github.com/o/r/issues/1#issuecomment-1"}
+    if orchestrated:
+        args["orchestration"] = {"session_repo": "o/r", "session_root": str(h.repo),
+                                 "goals": [{"id": "b", "repo": "o/r", "main": "main",
+                                            "blockers": []}]}
+    before = h.git("status", "--porcelain")
+    result = h.run("Preserve the stage deferral without scheduling publication checks.",
+                   _script(h, "sequential", _goals("b"), [], **args))
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    assert {row["role"] for row in result.requests} == {"main"}
+    told = _told(result)
+    assert "deferred" in told, told[-4000:]
+    assert "grind-publication-resume/v1" not in told, told[-4000:]
+    assert h.git("status", "--porcelain") == before
