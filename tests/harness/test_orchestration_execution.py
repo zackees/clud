@@ -66,7 +66,7 @@ def test_approved_merge_dependency_gates_planning(
         assert "Upstream results (approved blockers):" in downstream
         state = h.read_gh_state()
         upstream_pr = next(pr for pr in state["prs"] if pr["head"] == "grind/a")
-        assert upstream_pr["url"] in downstream
+        assert f"https://github.com/o/r/pull/{upstream_pr['number']}" in downstream
         independent = json.dumps(result.first_request("planner:c")["messages"])
         assert "Upstream results (approved blockers):" not in independent
     else:

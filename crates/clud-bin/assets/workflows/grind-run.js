@@ -604,9 +604,22 @@ const bugDepsOf = (g) => {
 const goalIdOf = {}
 args.goals.forEach(g => { goalIdOf[idKey(g.id)] = g.id })
 
+// Only approved dependencies belong in a goal's context. Their outcomes are
+// recorded before the landed promise settles, so even parallel planners see
+// the final upstream PR and result rather than a guessed branch or URL.
+const upstreamContext = (g) => {
+  const approved = RUN_GOALS.get(String(g.id))
+  if (!approved || !approved.blockers.length) return ''
+  const results = approved.blockers.map(b => ({
+    goal: b.goal, repo: RUN_GOALS.get(b.goal).repo, condition: b.when,
+    result: outcome[b.goal] || null,
+  }))
+  return `\nUpstream results (approved blockers):\n${JSON.stringify(results, null, 1)}`
+}
+
 const ctx = (g) => `${REPO_HEADER} Mode: ${args.mode}. Local CI (act): ${CI ? `on, lane ${args.lane || '(pick from ci.yml)'}` : 'off'}.\nGoal ${g.id}: ${g.title}\n${g.brief}` +
   (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
-  featureCheckout(g)
+  featureCheckout(g) + upstreamContext(g)
 const others = (g) => args.goals.filter(o => o.id !== g.id).map(o => `${o.id}: ${o.title}`).join('\n') || '(none)'
 
 const plan = (g) => light(() => agent(
