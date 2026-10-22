@@ -521,6 +521,18 @@ clud's hook refuses the router a second `git worktree add`, any
 `gh issue close --repo <github-repo>` (or `gh api … -f state=closed`), merging the feature PR,
 and deleting a `grind/*` branch.
 
+### Publication resumption
+
+When a result contains `resume.schema: "grind-publication-resume/v1"`, the
+run is waiting for publication. Retain the complete original approved
+Workflow arguments and the actual `runId` and `scriptPath` returned by that
+launch in `<facts>.orchestration_resume`, together with the returned manifest.
+Never invent references or remove completed goals from the arguments.
+Report the deferred goals and their gate evidence, then follow the publication
+resumption section of `../grind-cron/SKILL.md`. Keep the facts, claims and
+preflight record until resumption settles. Do not start the next stage, land
+the feature PR, or run Finish cleanup while this manifest remains.
+
 ## 5. Finish (always, as the very last step)
 
 After the last workflow call returns (both stage calls, when there are
