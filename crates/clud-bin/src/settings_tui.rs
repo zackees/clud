@@ -733,6 +733,7 @@ mod tests {
         assert_eq!(
             patch_from_menu(&menu),
             clud_settings::GlobalSettingsPatch {
+                openrouter_zdr: None,
                 block_cd: None,
                 model_provider: Some(ModelProvider::Codex),
                 harness: Some(HarnessSelection::Claude),
@@ -771,6 +772,7 @@ mod tests {
         assert_eq!(
             patch_from_menu(&menu),
             clud_settings::GlobalSettingsPatch {
+                openrouter_zdr: None,
                 block_cd: None,
                 model_provider: None,
                 harness: None,
