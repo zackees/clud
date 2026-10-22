@@ -4203,19 +4203,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unsafe_claude_settings_keep_user_hooks_without_clud_deletion_denies() {
+    fn unsafe_claude_settings_keep_user_hooks_and_settings_authority() {
         let mut launch = plan(ModelProvider::Claude, Backend::Claude);
         launch.unsafe_mode = true;
         let user_hook = serde_json::json!({
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user-check"}]}]}
         });
         let (settings, _) = compose_launch_settings_document(&launch, user_hook).unwrap();
-        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(
             settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             "user-check"
         );
-        assert!(settings.pointer("/permissions/deny").is_none());
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            crate::clud_hooks_compile::DISPATCHER_BINARY
+        );
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(crate::clud_hooks_compile::SETTINGS_FILE_DENIES)
+        );
     }
 
     #[test]

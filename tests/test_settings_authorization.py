@@ -123,6 +123,8 @@ def test_raw_settings_writes_cannot_borrow_forged_authority(tmp_path: Path, tool
     original = settings.read_bytes()
     world[1]["CLUD_SETTINGS_APPROVED"] = "1"
     world[1]["CLUD_SETTINGS_APPROVAL"] = json.dumps({"approved": True, "target": str(settings)})
+    world[1]["CLUD_UNSAFE_MODE"] = "1"
+    world[1]["CLUD_ALLOW_ALL_CMDS"] = "1"
     if tool in {"Bash", "exec_command", "functions.exec_command"}:
         key = "command" if tool == "Bash" else "cmd"
         tool_input: object = {
