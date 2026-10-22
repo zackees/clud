@@ -68,7 +68,8 @@ def _scan(
     "command",
     [
         "gh issue list --repo zackees/clud --search 'safe_rm.extra_roots ~/.clud/settings.json'",
-        "cat > issue-draft.md <<'EOF'\nDocument ~/.clud/settings.json and safe_rm.extra_roots.\nEOF",
+        "cat > issue-draft.md <<'EOF'\n"
+        "Document ~/.clud/settings.json and safe_rm.extra_roots.\nEOF",
     ],
     ids=["read-only-forge-search", "scratch-heredoc-data"],
 )

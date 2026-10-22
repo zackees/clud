@@ -1642,7 +1642,7 @@ fn write_settings(path: &Path, document: &Value) -> Result<(), SettingsError> {
             error: error.to_string(),
         })?;
     body.push('\n');
-    fs::write(path, body)?;
+    crate::fs_private::write_private_atomic(path, body.as_bytes())?;
     Ok(())
 }
 
