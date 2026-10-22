@@ -506,8 +506,13 @@ mod tests {
         let schemas = orchestration_tool_schemas(&request);
         assert_eq!(schemas.len(), 2);
         assert_eq!(schemas[0]["name"], "Workflow");
-        assert_eq!(schemas[1]["input_schema"]["properties"]["cwd"]["type"], "string");
-        assert!(!serde_json::to_string(&schemas).unwrap().contains("unrelated"));
+        assert_eq!(
+            schemas[1]["input_schema"]["properties"]["cwd"]["type"],
+            "string"
+        );
+        assert!(!serde_json::to_string(&schemas)
+            .unwrap()
+            .contains("unrelated"));
         assert!(orchestration_tool_schemas(&json!({})).is_empty());
     }
 
