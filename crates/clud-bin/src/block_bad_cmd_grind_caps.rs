@@ -1663,6 +1663,60 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_is_the_capped_router_exception() {
+        let role = "grind-orchestrator";
+        assert!(is_grind_role(role));
+        let input = serde_json::json!({"subagent_type": role});
+        assert!(agent_spawn_reason("Agent", Some(&input), None).is_none());
+        for internal in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+            let input = serde_json::json!({"subagent_type": internal});
+            assert!(agent_spawn_reason("Agent", Some(&input), None).is_some());
+        }
+    }
+
+    #[test]
+    fn orchestrator_never_writes_or_builds_in_any_run_mode() {
+        let role = "grind-orchestrator";
+        for parallel in [false, true] {
+            let facts = run(parallel, true);
+            for command in [
+                "git -C /sister switch -c x",
+                "git -C /sister fetch origin",
+                "git worktree add /new -b x",
+                "cargo build",
+                "gh issue comment 12 --body changed",
+                "gh api repos/o/r/issues -X POST",
+                "gh api repos/o/r/issues -f title=changed",
+                "git log --output=changed",
+                "echo changed > file",
+                "cat <<'EOF' > file\nchanged\nEOF",
+            ] {
+                assert!(!allowed(role, command, &facts), "{command}");
+            }
+            for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "AskUserQuestion"] {
+                assert!(tool_reason(role, tool, &facts).is_some(), "{tool}");
+            }
+        }
+    }
+
+    #[test]
+    fn orchestrator_inspects_multiple_repositories() {
+        let facts = run(false, false);
+        for command in [
+            "git -C /primary log --oneline -5",
+            "git -C /sister ls-remote origin HEAD",
+            "git -C /sister worktree list --porcelain",
+            "gh issue view 12 --repo o/primary",
+            "gh issue view 13 --repo o/sister",
+            "gh api repos/o/sister/releases/latest",
+            "gh release view v1 --repo o/sister",
+            "cat /sister/CLAUDE.md",
+        ] {
+            assert!(allowed("grind-orchestrator", command, &facts), "{command}");
+        }
+    }
+
+    #[test]
     fn planner_reads_but_does_not_build() {
         let facts = run(false, false);
         assert!(allowed(PLANNER, "git -C /r log --oneline -5", &facts));
