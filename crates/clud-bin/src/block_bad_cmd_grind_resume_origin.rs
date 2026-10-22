@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{HookPayloadView, MIN_VERSION};
 
@@ -14,7 +14,11 @@ fn path(payload: &HookPayloadView, run: &str) -> Option<PathBuf> {
         return None;
     }
     let directory = payload.transcript_path.as_ref()?.with_extension("");
-    if !std::fs::symlink_metadata(&directory).ok()?.file_type().is_dir() {
+    if !std::fs::symlink_metadata(&directory)
+        .ok()?
+        .file_type()
+        .is_dir()
+    {
         return None;
     }
     Some(directory.join(format!("grind-resume-{run}.json")))
@@ -33,8 +37,11 @@ pub(super) fn record(payload: &HookPayloadView, raw: &Value, version: [u64; 3]) 
     if bytes.len() as u64 > MAX_RECEIPT {
         return None;
     }
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-        .open(path(payload, run)?).ok()?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path(payload, run)?)
+        .ok()?;
     file.write_all(&bytes).ok()?;
     Some(())
 }
@@ -42,7 +49,8 @@ pub(super) fn record(payload: &HookPayloadView, raw: &Value, version: [u64; 3]) 
 pub(super) fn allows(payload: &HookPayloadView) -> bool {
     read(payload).is_some_and(|receipt| {
         let input = payload.tool_input.as_ref();
-        let version: Option<[u64; 3]> = receipt.get("version")
+        let version: Option<[u64; 3]> = receipt
+            .get("version")
             .and_then(|version| serde_json::from_value(version.clone()).ok());
         receipt.get("schema").and_then(Value::as_str) == Some("grind-native-cache/v1")
             && receipt.get("session").and_then(Value::as_str) == payload.session_id.as_deref()
@@ -53,13 +61,21 @@ pub(super) fn allows(payload: &HookPayloadView) -> bool {
 }
 
 fn read(payload: &HookPayloadView) -> Option<Value> {
-    let run = payload.tool_input.as_ref()?.get("resumeFromRunId")?.as_str()?;
+    let run = payload
+        .tool_input
+        .as_ref()?
+        .get("resumeFromRunId")?
+        .as_str()?;
     let path = path(payload, run)?;
     if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
         return None;
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_RECEIPT + 1).read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_RECEIPT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.len() as u64 > MAX_RECEIPT {
         return None;
     }
