@@ -189,11 +189,11 @@ def test_h12_clud_do_prompt_and_slash_do_agree(harness: Harness, target: str) ->
             assert json.dumps(line)[1:-1] in text, line
 
 
-def test_h13_clud_do_seed_goal_do_renders_the_same_prompt(harness: Harness) -> None:
-    # `clud do <url>` seeds exactly `/goal /do <url>`. /goal takes the rest of
-    # the line as its condition, so `/do` is NOT expanded there: the model
-    # reads "/do <url>" and loads the skill itself with the Skill tool. That
-    # load must render the same prompt.
+def test_h13_goal_seed_does_not_bypass_explicit_only_do_policy(harness: Harness) -> None:
+    # /goal does not expand the nested /do. The old model-side load is now
+    # deliberately refused by the explicit-only policy (#1510). #2013 tracks
+    # the CLI launch handoff; direct explicit /do rendering stays covered by
+    # H1-H12 rather than treating this denied tool call as a rendered prompt.
     _gh(harness)
     script = {
         "default_text": "ACK",
@@ -212,5 +212,5 @@ def test_h13_clud_do_seed_goal_do_renders_the_same_prompt(harness: Harness) -> N
     first = result.first_request("main")
     assert f"/do {ISSUE}" in json.dumps(first.get("messages"))
     after_skill = json.dumps([r.get("messages") for r in result.requests if r.get("turn") == 1])
-    assert "rendered for this checkout by `clud do-prompt`" in after_skill, after_skill[-3000:]
-    assert "Verdict: `default`" in after_skill
+    assert "cannot be used with Skill tool due to disable-model-invocation" in after_skill
+    assert "rendered for this checkout by `clud do-prompt`" not in after_skill

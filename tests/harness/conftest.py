@@ -6,7 +6,14 @@ import pytest
 
 from tests.harness.harness import ENABLED, Harness
 
-pytestmark = pytest.mark.real_claude
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Directory conftest marks must be attached to actual collected items."""
+    root = Path(__file__).parent
+    for item in items:
+        if item.path.is_relative_to(root):
+            item.add_marker(pytest.mark.real_claude)
 
 
 @pytest.fixture

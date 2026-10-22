@@ -31,6 +31,7 @@ import re
 import shutil
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -430,7 +431,7 @@ def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str
     return run_streamed(argv, child_env, pytest_log_path(suite))
 
 
-def report_pytest_exit(returncode: int) -> bool:
+def report_pytest_exit(returncode: int, *, allow_empty: bool = True) -> bool:
     """Print what the exit code means, and say whether it counts as success.
 
     #994: `Process completed with exit code 1` is the whole story a reader
@@ -438,10 +439,27 @@ def report_pytest_exit(returncode: int) -> bool:
     or was killed. One line of interpretation is the difference between
     "is this mine?" costing a log download and costing nothing.
     """
-    ok = _pytest_ok(returncode)
+    ok = _pytest_ok(returncode) and (allow_empty or returncode != _PYTEST_NO_TESTS_COLLECTED)
     if not ok:
         print(f"::error::pytest {describe_pytest_exit(returncode)}", file=sys.stderr)
     return ok
+
+
+def required_harness_result(returncode: int, report: Path) -> bool:
+    """A required harness lane needs actual executed tests, not setup alone."""
+    if not report_pytest_exit(returncode, allow_empty=False):
+        return False
+    try:
+        cases = ET.parse(report).getroot().iter("testcase")
+        executed = sum(case.find("skipped") is None for case in cases)
+    except (OSError, ET.ParseError):
+        print("::error::required harness suite has no valid JUnit report", file=sys.stderr)
+        return False
+    if not executed:
+        print("::error::required harness suite executed zero tests", file=sys.stderr)
+        return False
+    print(f"required harness suite executed {executed} tests", flush=True)
+    return True
 
 
 @dataclass(frozen=True)
@@ -546,10 +564,11 @@ def main(argv: list[str] | None = None) -> int:
         env["CLUD_REAL_CLAUDE_TESTS"] = "1"
         return (
             0
-            if report_pytest_exit(
+            if required_harness_result(
                 run_pytest(
                     "real_claude", env, ["-v", "tests/harness", *args.pytest_args], suite="harness"
-                )
+                ),
+                pytest_junit_path("harness"),
             )
             else 1
         )
