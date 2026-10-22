@@ -33,9 +33,9 @@ def record_outcomes(h: Harness, monkeypatch: pytest.MonkeyPatch, output: Path) -
         path = original(**kwargs)
         data = json.loads(path.read_text())
         for event in ("PostToolUse", "PostToolUseFailure"):
-            data["hooks"][event] = [{
+            data["hooks"].setdefault(event, []).append({
                 "matcher": "*", "hooks": [{"type": "command", "command": command}],
-            }]
+            })
         path.write_text(json.dumps(data))
         return path
 
