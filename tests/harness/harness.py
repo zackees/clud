@@ -526,6 +526,7 @@ class Harness:
         script: dict[str, Any],
         *,
         provider: str = "--openrouter",
+        model: str | None = None,
         extra_args: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
@@ -551,6 +552,7 @@ class Harness:
             argv = [
                 str(self.clud),
                 provider,
+                *(["--model", model] if model else []),
                 "-p",
                 prompt,
                 "--",
