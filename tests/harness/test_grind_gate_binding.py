@@ -1,10 +1,15 @@
 """Native gate hooks must bind one approved check to one actual workflow agent."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Any
+
 import pytest
 
-from tests.harness.harness import Harness
+from tests.harness.harness import EXE, Harness
 from tests.harness.test_grind import _after, _bash, _no_notes, _structured
+from tests.harness.test_workflow_gate_evidence import record_outcomes
 
 ROLE = "GATE_BINDING_CAPABILITY_FIXTURE"
 
@@ -110,3 +115,60 @@ def test_native_gate_cannot_report_ready_without_executing_check(harness: Harnes
     assert any(row.get("role") == "gate"
                and row.get("step", {}).get("text") == "UNPROVED_READY_REJECTED"
                for row in result.requests), result.requests
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_native_gate_readiness_matches_executed_outcome(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, succeeds: bool,
+) -> None:
+    h = harness
+    install_probe(h)
+    (h.config / "workflows" / "gate-binding-probe.js").write_text(
+        "export const meta = {name: 'gate-binding-probe', description: 'Gate outcome'}\n"
+        "return await agent('Inspect gate left', {agentType: 'grind-gate', "
+        "label: 'gate:downstream:0', schema: {type: 'object', required: ['ready'], "
+        "properties: {ready: {type: 'boolean'}}}})\n"
+    )
+    command = "echo VERIFIED_NATIVE_GATE_SUCCESS" if succeeds else "test 1 = 2"
+    h.write_run_facts({"phase": "execute", "orchestration": {
+        "session_repo": "o/r", "session_root": str(h.repo),
+        "goals": [{"id": "downstream", "repo": "o/r", "blockers": [
+            {"goal": "upstream", "when": "released", "check": command},
+        ]}],
+    }})
+    output = h.logs / "gate-native-outcomes.jsonl"
+    record_outcomes(h, monkeypatch, output)
+    original = h.settings
+
+    def settings(**kwargs: Any) -> Path:
+        path = original(**kwargs)
+        data = json.loads(path.read_text())
+        scanner = h.clud.parent / ("clud-cmd-scan" + EXE)
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            data["hooks"][event].append({"matcher": "Bash", "hooks": [{
+                "type": "command", "command": f'"{scanner}" --event {event}',
+            }]})
+        path.write_text(json.dumps(data))
+        return path
+
+    monkeypatch.setattr(h, "settings", settings)
+    result = h.run("Check native gate readiness against execution.", {"roles": [
+        {"name": "gate", "match": ROLE, "steps": [
+            _bash(command),
+            _after({"is_error": not succeeds}, _structured({"ready": True})),
+            _after({"is_error": True}, _structured({"ready": False})),
+        ]},
+        {"name": "main", "steps": [
+            {"tool_use": {"name": "Workflow", "input": {
+                "name": "gate-binding-probe", "args": {},
+            }}},
+            {"text": "GATE_NATIVE_OUTCOME_DONE"},
+        ]},
+    ]})
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    outcomes = [json.loads(line) for line in output.read_text().splitlines()]
+    reports = [row for row in outcomes if row.get("agent_type") == "grind-gate"
+               and row.get("tool_name") == "StructuredOutput"
+               and row.get("event") == "PostToolUse"]
+    assert [row["tool_input"]["ready"] for row in reports] == [succeeds], outcomes
