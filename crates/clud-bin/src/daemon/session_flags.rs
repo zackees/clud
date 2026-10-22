@@ -38,6 +38,10 @@ pub(super) enum SessionFlagRequest {
         session_id: String,
         key: String,
     },
+    LoopPlanMode {
+        session_id: String,
+        event: crate::loop_plan_mode::Event,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +60,14 @@ impl SessionFlagRegistry {
     pub(super) fn respond(&self, request: SessionFlagRequest) -> SessionFlagReply {
         let mut flags = self.flags.lock().expect("session flags poisoned");
         match request {
+            SessionFlagRequest::LoopPlanMode { session_id, event } => {
+                let session = flags.entry(session_id).or_default();
+                let key = crate::loop_plan_mode::FLAG_KEY;
+                if let Some(value) = crate::loop_plan_mode::transition(session.remove(key), event) {
+                    session.insert(key.to_string(), value);
+                }
+                SessionFlagReply::Set
+            }
             SessionFlagRequest::Set {
                 session_id,
                 key,
@@ -131,6 +143,25 @@ fn unexpected_reply() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "unexpected session flag reply")
 }
 
+/// Atomically apply a scheduling event; concurrent hooks never overwrite
+/// another job's state with a read/modify/write from a stale snapshot.
+pub fn session_loop_event(
+    state_dir: &Path,
+    session_id: &str,
+    event: crate::loop_plan_mode::Event,
+) -> io::Result<()> {
+    match session_flag_rpc(
+        state_dir,
+        &SessionFlagRequest::LoopPlanMode {
+            session_id: session_id.to_string(),
+            event,
+        },
+    )? {
+        SessionFlagReply::Set => Ok(()),
+        SessionFlagReply::Get { .. } => Err(unexpected_reply()),
+    }
+}
+
 fn session_flag_rpc(
     state_dir: &Path,
     request: &SessionFlagRequest,
@@ -174,6 +205,28 @@ mod tests {
         assert_eq!(get(&registry, "a", "worktrees"), Some(json!(true)));
         assert_eq!(get(&registry, "b", "worktrees"), None);
         assert_eq!(get(&registry, "a", "other"), None);
+    }
+
+    #[test]
+    fn concurrent_cron_creates_preserve_every_job() {
+        let registry = SessionFlagRegistry::default();
+        let workers: Vec<_> = (0..20)
+            .map(|index| {
+                let registry = registry.clone();
+                std::thread::spawn(move || {
+                    registry.respond(SessionFlagRequest::LoopPlanMode {
+                        session_id: "loop".to_string(),
+                        event: crate::loop_plan_mode::Event::Created(format!("job-{index}")),
+                    })
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let state = get(&registry, "loop", crate::loop_plan_mode::FLAG_KEY).unwrap();
+        assert_eq!(state["jobs"].as_array().unwrap().len(), 20);
+        assert!(get(&registry, "other", crate::loop_plan_mode::FLAG_KEY).is_none());
     }
 
     #[test]

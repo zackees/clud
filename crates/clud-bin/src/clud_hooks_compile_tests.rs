@@ -285,7 +285,7 @@ fn a_repo_without_a_catch_all_matcher_still_routes_guarded_tools_to_the_dispatch
     });
     merge_hook_settings(&mut settings, &deletion_safety_fragment()).unwrap();
     // The /loop stop, a grind planner's Write, a grind Agent spawn.
-    for tool in ["ScheduleWakeup", "Write", "Agent", "Bash"] {
+    for tool in ["EnterPlanMode", "ScheduleWakeup", "Write", "Agent", "Bash"] {
         let commands = harness_commands_for_tool(&settings, tool);
         assert!(
             commands.iter().any(|c| c == DISPATCHER_BINARY),

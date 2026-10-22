@@ -26,6 +26,8 @@ def main() -> int:
         "tool_input": event.get("tool_input"),
         "prompt": event.get("prompt"),
     }
+    if "tool_response" in event:
+        record["tool_response"] = event["tool_response"]
     with open(sys.argv[1], "a", encoding="utf-8") as log:
         log.write(json.dumps(record) + "\n")
     return 0

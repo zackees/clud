@@ -300,7 +300,10 @@ class Harness:
         env.update(extra or {})
         return env
 
-    def settings(self, *, cmd_scan: bool = True, answers: dict[str, Any] | None = None) -> Path:
+    def settings(
+        self, *, cmd_scan: bool = True, answers: dict[str, Any] | None = None,
+        record_scheduler: bool = False,
+    ) -> Path:
         """A `--settings` file: the recorder, then clud's real command guard.
 
         Project `.claude/settings.json` hooks do not fire under an isolated
@@ -333,6 +336,11 @@ class Harness:
                 "UserPromptSubmit": [{"hooks": [{"type": "command", "command": record}]}],
             }
         }
+        if record_scheduler:
+            settings["hooks"]["PostToolUse"] = [{
+                "matcher": "CronCreate|CronDelete|ScheduleWakeup",
+                "hooks": [{"type": "command", "command": record}],
+            }]
         path = self.root / "settings.json"
         path.write_text(json.dumps(settings, indent=1), encoding="utf-8")
         return path
@@ -526,6 +534,8 @@ class Harness:
         script: dict[str, Any],
         *,
         provider: str = "--openrouter",
+        model: str | None = None,
+        record_scheduler: bool = False,
         extra_args: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
@@ -551,6 +561,7 @@ class Harness:
             argv = [
                 str(self.clud),
                 provider,
+                *(["--model", model] if model else []),
                 "-p",
                 prompt,
                 "--",
@@ -558,7 +569,7 @@ class Harness:
                 "stream-json",
                 "--verbose",
                 "--settings",
-                str(self.settings(cmd_scan=False)),
+                str(self.settings(cmd_scan=False, record_scheduler=record_scheduler)),
                 "--session-id",
                 self.session_id,
                 *(extra_args or []),
@@ -579,6 +590,84 @@ class Harness:
             events=[
                 e for e in (_json_or_none(line) for line in (result.stdout or "").splitlines()) if e
             ],
+        )
+
+
+    def run_clud_interactive(
+        self, prompt: str, script: dict[str, Any], *, model: str, finished: str,
+        timeout: float = 90,
+    ) -> RunResult:
+        """Run the real interactive Claude surface in an owned PTY (#1844).
+
+        Print mode omits EnterPlanMode, so it cannot validate its denial.
+        Only disposable fixture configs accept onboarding/trust dialogs.
+        """
+        from running_process import PseudoTerminalProcess
+
+        if self._session_used:
+            raise RuntimeError("call new_session() before another run")
+        self._session_used = True
+        (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
+        self._install_cmd_scan_alias()
+        preferences = {
+            "hasCompletedOnboarding": True,
+            "theme": "dark",
+            "bypassPermissionsModeAccepted": True,
+            "customApiKeyResponses": {
+                "approved": ["fixture-api-key-canary", "fixture-api-key-canary"[-20:]],
+                "rejected": [],
+            },
+            "projects": {str(self.repo): {"hasTrustDialogAccepted": True}},
+        }
+        for path in (self.home / ".claude.json", self.config / ".claude.json"):
+            path.write_text(json.dumps(preferences), encoding="utf-8")
+        settings = self.settings(cmd_scan=False, record_scheduler=True)
+        document = json.loads(settings.read_text(encoding="utf-8"))
+        document["skipDangerousModePermissionPrompt"] = True
+        settings.write_text(json.dumps(document), encoding="utf-8")
+        with self.backend(script) as base_url:
+            # Free models enable the unified redaction gateway. Its client
+            # auth still needs a fixture Claude key, while upstream auth
+            # comes from the isolated OpenRouter vault. Every possible
+            # upstream stays on the scripted loopback backend.
+            env = self.clud_env(base_url, {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
+                "ANTHROPIC_API_KEY": "fixture-api-key-canary",
+                "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": base_url,
+            })
+            argv = [
+                str(self.clud), "--openrouter", "--model", model, "--", prompt,
+                "--settings", str(settings), "--session-id", self.session_id,
+            ]
+            child = None
+            try:
+                child = PseudoTerminalProcess(argv, cwd=self.repo, env=env, cols=160, rows=40)
+                child.expect("Launch setup scope", timeout=30)
+                child.write("\r")  # The default highlighted choice is session-only.
+                child.expect(finished, timeout=timeout)
+                child.write("/exit\r")
+                child.expect("Background", timeout=15)
+                child.write("\r")  # Confirm Exit and stop tasks, the default.
+                code = child.wait(timeout=15)
+                output = child.output_text
+            except Exception as error:
+                output = child.output_text if child is not None else ""
+                raise AssertionError(
+                    f"interactive harness failed: {error}\n{output[-6000:]}"
+                ) from error
+            finally:
+                if child is not None:
+                    if child.poll() is None:
+                        child.kill()
+                    child.close()
+                self.stop_daemon(env)
+        return RunResult(
+            returncode=code, stdout=output, stderr="",
+            requests=_jsonl(self.logs / "requests.jsonl"),
+            hooks=_jsonl(self.logs / "hooks.jsonl"), events=[],
         )
 
 

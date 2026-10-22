@@ -27,6 +27,7 @@ fn plan(
 ) -> LaunchPlan {
     LaunchPlan {
         unsafe_mode: false,
+        allow_plan_mode: false,
         command: vec![
             executable.to_string_lossy().into_owned(),
             "--mock-stream-json".to_string(),

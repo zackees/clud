@@ -11,6 +11,7 @@ use crate::command::LaunchPlan;
 fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
     LaunchPlan {
         unsafe_mode: false,
+        allow_plan_mode: false,
         command: vec![harness.executable_name().to_string()],
         iterations: 1,
         backend: harness,

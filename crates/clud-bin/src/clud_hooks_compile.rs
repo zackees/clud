@@ -96,6 +96,16 @@ pub fn deletion_safety_fragment() -> Value {
                     "type": "command",
                     "command": dispatcher_command(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT),
                 }]
+            }],
+            "PostToolUse": [{
+                "matcher": "CronCreate|CronDelete|ScheduleWakeup",
+                "hooks": [{ "type": "command", "command": dispatcher_command("PostToolUse") }]
+            }],
+            "Stop": [{
+                "hooks": [{ "type": "command", "command": dispatcher_command("Stop") }]
+            }],
+            "SessionEnd": [{
+                "hooks": [{ "type": "command", "command": dispatcher_command("SessionEnd") }]
             }]
         }
     })
@@ -109,6 +119,7 @@ pub fn deletion_safety_fragment() -> Value {
 /// `block_bad_cmd`'s `every_rule_tool_reaches_the_dispatcher` keeps this in
 /// step with the rules.
 pub const GUARDED_TOOLS: &[&str] = &[
+    "EnterPlanMode",
     "Bash",
     "PowerShell",
     "ScheduleWakeup",

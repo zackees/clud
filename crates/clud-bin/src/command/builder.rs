@@ -923,6 +923,7 @@ fn build_launch_plan_for_target_at(
 
     let mut plan = LaunchPlan {
         unsafe_mode: args.unsafe_mode,
+        allow_plan_mode: args.allow_plan_mode,
         command: cmd,
         iterations,
         backend,

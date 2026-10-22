@@ -361,6 +361,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     if event == crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT {
         let stdin = read_stdin_bounded();
         let _ = crate::worktree_consent::handle_prompt(&stdin.text);
+        crate::loop_plan_mode::observe(event, &stdin.text);
         if serves_declared_hooks(invocation) {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             if let Some(payload) = parse_payload(&stdin.text, &cwd) {
@@ -394,6 +395,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         && block_bad_cmd_gate::gate_mode() == block_bad_cmd_gate::GateMode::Enforce;
 
     let stdin = read_stdin_bounded();
+    crate::loop_plan_mode::observe(event, &stdin.text);
     for message in &stdin.log_messages {
         append_log(message);
     }
@@ -538,6 +540,13 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // #1949: on a non-Claude route, refuse a `/loop` stop before the loop
     // ever scheduled a second round. Refused once; a repeated stop passes.
     if event == PRE_TOOL_USE_EVENT {
+        if payload.tool_name == "EnterPlanMode" {
+            if let Some(reason) = crate::loop_plan_mode::refusal(payload.session_id.as_deref()) {
+                println!("{}", deny_json(reason));
+                eprintln!("[clud] {reason}");
+                return 2;
+            }
+        }
         if let Some(reason) = block_bad_cmd_loop_stop::reason(
             &payload.tool_name,
             payload.tool_input.as_ref(),
@@ -3770,6 +3779,7 @@ mod tests {
         use crate::clud_hooks_compile::GUARDED_TOOLS;
         let facts = block_bad_cmd_grind_caps::RunFacts::default();
         let candidates = [
+            "EnterPlanMode",
             "Bash",
             "PowerShell",
             "ScheduleWakeup",
@@ -3792,6 +3802,7 @@ mod tests {
         ];
         for tool in candidates {
             let ruled = block_bad_cmd_gate::gates_tool(tool)
+                || tool == "EnterPlanMode"
                 || creates_agents(tool)
                 || tool == block_bad_cmd_loop_stop::SCHEDULE_WAKEUP
                 // The wait-loop refusal scans `tool_input.command`, which

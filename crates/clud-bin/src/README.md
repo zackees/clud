@@ -74,6 +74,10 @@ restoration and count-only status. See
 
 ## Top-Level Modules
 
+`loop_plan_mode.rs` tracks native `/loop` and scheduler activity through
+daemon session flags and prevents automatic `EnterPlanMode` while it is
+active (#1844). See [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#loop-scoped-plan-mode).
+
 Entry and orchestration:
 
 - `main.rs` - process entry: launch clock, trampoline unlock, console title
