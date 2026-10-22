@@ -56,6 +56,11 @@ in this same session. Each tick starts with `clud grind-facts path`, reads
 `orchestration_resume`, and calls the native Workflow with its saved actual
 `scriptPath` and `resumeFromRunId: <saved runId>`. Pass the complete original
 approved arguments, changing only `gateEpochs` to the manifest's map.
+Graph resumption requires Claude Code >= 2.1.306 with branch-local native
+caches. If the hook refuses an older or unidentified runtime, retain
+`orchestration_resume` and its original launch references, report the missing
+capability, and stop this loop without Finish. Update the harness before
+explicit resumption; never bypass the refusal or replay completed goals.
 Completed native agent calls retain their cache keys; only deferred gate
 observations receive new epochs. Do not create a replacement workflow script,
 assert completed-goal results, re-run intake, or poll from a shell.
