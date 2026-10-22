@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from tests.harness.harness import Harness, tool_result_text, tool_results
+import json
+
+import pytest
+
+from tests.harness.harness import Harness
 
 MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
+@pytest.mark.timeout(180)
 def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> None:
     script = {
         "default_text": "CONTINUED_AFTER_PLAN_DENIAL",
@@ -43,20 +48,17 @@ def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> 
             }
         ],
     }
-    result = harness.run_clud(
+    result = harness.run_clud_interactive(
         "Schedule the maintenance task and implement it",
         script,
         model=MODEL,
-        extra_env={"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"},
-        record_scheduler=True,
+        finished="CONTINUED_AFTER_PLAN_DENIAL",
     )
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
     failed = [request for request in result.requests if "MOCK_EXPECT_FAILED" in str(request)]
     scheduling = [hook for hook in result.hooks if hook.get("event") == "PostToolUse"]
     assert not failed, str(scheduling)[-4000:]
-    assert any(
-        block.get("is_error") and "loop-plan-mode" in tool_result_text(block)
-        for block in tool_results(result)
-    ), result.stdout[-4000:]
+    assert any(hook.get("tool_name") == "EnterPlanMode" for hook in result.hooks)
+    assert any("loop-plan-mode" in json.dumps(request) for request in result.requests)
     assert (harness.repo / "loop-continued.txt").read_text() == "continued"
     assert "CONTINUED_AFTER_PLAN_DENIAL" in result.stdout

@@ -593,6 +593,63 @@ class Harness:
         )
 
 
+    def run_clud_interactive(
+        self, prompt: str, script: dict[str, Any], *, model: str, finished: str,
+        timeout: float = 90,
+    ) -> RunResult:
+        """Run the real interactive Claude surface in an owned PTY (#1844).
+
+        Print mode omits EnterPlanMode, so it cannot validate its denial.
+        Only disposable fixture configs accept onboarding/trust dialogs.
+        """
+        from running_process import PseudoTerminalProcess
+
+        if self._session_used:
+            raise RuntimeError("call new_session() before another run")
+        self._session_used = True
+        (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
+        self._install_cmd_scan_alias()
+        preferences = {
+            "hasCompletedOnboarding": True,
+            "theme": "dark",
+            "bypassPermissionsModeAccepted": True,
+            "projects": {str(self.repo): {"hasTrustDialogAccepted": True}},
+        }
+        for path in (self.home / ".claude.json", self.config / ".claude.json"):
+            path.write_text(json.dumps(preferences), encoding="utf-8")
+        settings = self.settings(cmd_scan=False, record_scheduler=True)
+        document = json.loads(settings.read_text(encoding="utf-8"))
+        document["skipDangerousModePermissionPrompt"] = True
+        settings.write_text(json.dumps(document), encoding="utf-8")
+        with self.backend(script) as base_url:
+            env = self.clud_env(base_url, {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"})
+            argv = [
+                str(self.clud), "--openrouter", "--model", model, "--", prompt,
+                "--settings", str(settings), "--session-id", self.session_id,
+            ]
+            child = None
+            try:
+                child = PseudoTerminalProcess(argv, cwd=self.repo, env=env, cols=160, rows=40)
+                child.expect(finished, timeout=timeout)
+                child.write("/exit\r")
+                code = child.wait(timeout=15)
+                output = child.output_text
+            except Exception as error:
+                output = child.output_text if child is not None else ""
+                raise AssertionError(f"interactive harness failed: {error}\n{output[-6000:]}") from error
+            finally:
+                if child is not None:
+                    if child.poll() is None:
+                        child.kill()
+                    child.close()
+                self.stop_daemon(env)
+        return RunResult(
+            returncode=code, stdout=output, stderr="",
+            requests=_jsonl(self.logs / "requests.jsonl"),
+            hooks=_jsonl(self.logs / "hooks.jsonl"), events=[],
+        )
+
+
 def tool_results(result: RunResult) -> list[dict[str, Any]]:
     """Every `tool_result` block the session's JSONL stream reported."""
     found: list[dict[str, Any]] = []
