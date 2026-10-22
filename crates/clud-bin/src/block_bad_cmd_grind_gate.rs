@@ -68,20 +68,28 @@ fn directory(path: &Path) -> Result<(), String> {
 
 fn native_label(payload: &HookPayloadView) -> Result<String, String> {
     let session = payload.session_id.as_deref().ok_or("missing session id")?;
-    let agent = payload.agent_id.as_deref().ok_or("missing native agent id")?;
+    let agent = payload
+        .agent_id
+        .as_deref()
+        .ok_or("missing native agent id")?;
     if !crate::grind_facts::valid_session_id(session)
         || !crate::grind_facts::valid_session_id(agent)
     {
         return Err("invalid native identity".into());
     }
-    let transcript = payload.transcript_path.as_deref().ok_or("missing transcript path")?;
+    let transcript = payload
+        .transcript_path
+        .as_deref()
+        .ok_or("missing transcript path")?;
     if !transcript.is_absolute()
         || transcript.file_name() != Some(std::ffi::OsStr::new(&format!("{session}.jsonl")))
     {
         return Err("transcript does not identify this parent session".into());
     }
     if !std::fs::symlink_metadata(transcript)
-        .map_err(|e| e.to_string())?.file_type().is_file()
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_file()
     {
         return Err("session transcript is not a regular file".into());
     }
@@ -135,23 +143,37 @@ fn read_label(path: &Path) -> Result<String, String> {
     if value.get("agentType").and_then(Value::as_str) != Some(block_bad_cmd_grind_caps::GATE) {
         return Err("native metadata role differs from grind-gate".into());
     }
-    value.get("description").and_then(Value::as_str)
+    value
+        .get("description")
+        .and_then(Value::as_str)
         .filter(|label| !label.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| "missing native task label".into())
 }
 
 fn approved_check(graph: &Value, label: &str) -> Result<String, String> {
-    let repo = graph.get("session_repo").and_then(Value::as_str)
-        .filter(|repo| !repo.is_empty()).ok_or("missing approved session repository")?;
-    let goals = graph.get("goals").and_then(Value::as_array).ok_or("missing approved goals")?;
+    let repo = graph
+        .get("session_repo")
+        .and_then(Value::as_str)
+        .filter(|repo| !repo.is_empty())
+        .ok_or("missing approved session repository")?;
+    let goals = graph
+        .get("goals")
+        .and_then(Value::as_array)
+        .ok_or("missing approved goals")?;
     if goals.len() > MAX_GOALS {
         return Err("approved graph exceeds gate lookup limit".into());
     }
     let mut check = None;
     for goal in goals {
-        let id = goal.get("id").and_then(Value::as_str).ok_or("missing approved goal id")?;
-        let blockers = goal.get("blockers").and_then(Value::as_array).ok_or("missing blockers")?;
+        let id = goal
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing approved goal id")?;
+        let blockers = goal
+            .get("blockers")
+            .and_then(Value::as_array)
+            .ok_or("missing blockers")?;
         if blockers.len() > MAX_BLOCKERS {
             return Err("approved goal exceeds blocker lookup limit".into());
         }
@@ -165,14 +187,20 @@ fn approved_check(graph: &Value, label: &str) -> Result<String, String> {
             if goal.get("repo").and_then(Value::as_str) != Some(repo) {
                 return Err("gate belongs to a different repository session".into());
             }
-            if !matches!(blocker.get("when").and_then(Value::as_str),
-                Some("released" | "tag" | "published"))
-            {
+            if !matches!(
+                blocker.get("when").and_then(Value::as_str),
+                Some("released" | "tag" | "published")
+            ) {
                 return Err("gate is not an approved publication condition".into());
             }
-            check = Some(blocker.get("check").and_then(Value::as_str)
-                .filter(|command| !command.trim().is_empty())
-                .ok_or("missing approved check")?.to_owned());
+            check = Some(
+                blocker
+                    .get("check")
+                    .and_then(Value::as_str)
+                    .filter(|command| !command.trim().is_empty())
+                    .ok_or("missing approved check")?
+                    .to_owned(),
+            );
         }
     }
     check.ok_or_else(|| "native task label has no approved gate".into())
@@ -211,19 +239,32 @@ mod tests {
                     {"goal": "right", "when": "published", "check": "echo CHECK_RIGHT"}
                 ]}]
             }});
-            let fixture = Self { root, payload, facts };
+            let fixture = Self {
+                root,
+                payload,
+                facts,
+            };
             fixture.metadata("wf-one", "left-agent", "gate:downstream:0");
             fixture.metadata("wf-one", "right-agent", "gate:downstream:1");
             fixture
         }
 
         fn metadata(&self, workflow: &str, agent: &str, label: &str) -> std::path::PathBuf {
-            let directory = self.root.path().join("session/subagents/workflows").join(workflow);
+            let directory = self
+                .root
+                .path()
+                .join("session/subagents/workflows")
+                .join(workflow);
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join(format!("agent-{agent}.meta.json"));
-            std::fs::write(&path, json!({
-                "agentType": block_bad_cmd_grind_caps::GATE, "description": label
-            }).to_string()).unwrap();
+            std::fs::write(
+                &path,
+                json!({
+                    "agentType": block_bad_cmd_grind_caps::GATE, "description": label
+                })
+                .to_string(),
+            )
+            .unwrap();
             path
         }
 
@@ -251,7 +292,15 @@ mod tests {
         fixture.facts["orchestration"]["goals"][0]["blockers"][0]["check"] =
             json!(fixture.payload.command);
         assert!(fixture.allowed());
-        for tool in ["cmd", "PowerShell", "powershell", "pwsh", "shell", "exec_command", "bash"] {
+        for tool in [
+            "cmd",
+            "PowerShell",
+            "powershell",
+            "pwsh",
+            "shell",
+            "exec_command",
+            "bash",
+        ] {
             fixture.payload.tool_name = tool.into();
             assert!(!fixture.allowed(), "{tool}");
             assert!(reason(&fixture.payload).is_some(), "{tool}");
@@ -261,7 +310,11 @@ mod tests {
     #[test]
     fn check_text_is_exact_and_remains_read_only() {
         let mut fixture = Fixture::new();
-        for command in ["echo CHECK_LEFT; true", "echo CHECK_LEFT > output", " echo CHECK_LEFT"] {
+        for command in [
+            "echo CHECK_LEFT; true",
+            "echo CHECK_LEFT > output",
+            " echo CHECK_LEFT",
+        ] {
             fixture.payload.command = command.into();
             assert!(!fixture.allowed(), "{command}");
         }
@@ -274,10 +327,14 @@ mod tests {
     #[test]
     fn missing_or_mismatched_native_identity_is_denied() {
         let fixture = Fixture::new();
-        for (session, agent) in [(None, Some("left-agent")), (Some("session"), None),
-            (Some("../session"), Some("left-agent")), (Some("session"), Some("../left-agent")),
-            (Some("other-session"), Some("left-agent")), (Some("session"), Some("unknown"))]
-        {
+        for (session, agent) in [
+            (None, Some("left-agent")),
+            (Some("session"), None),
+            (Some("../session"), Some("left-agent")),
+            (Some("session"), Some("../left-agent")),
+            (Some("other-session"), Some("left-agent")),
+            (Some("session"), Some("unknown")),
+        ] {
             let mut payload = fixture.payload.clone();
             payload.session_id = session.map(str::to_owned);
             payload.agent_id = agent.map(str::to_owned);
@@ -300,9 +357,12 @@ mod tests {
 
     #[test]
     fn malformed_role_and_oversized_metadata_fail_closed() {
-        for data in ["{}".into(), "not json".into(), "x".repeat(8193),
-            json!({"agentType": "grind-worker", "description": "gate:downstream:0"}).to_string()]
-        {
+        for data in [
+            "{}".into(),
+            "not json".into(),
+            "x".repeat(8193),
+            json!({"agentType": "grind-worker", "description": "gate:downstream:0"}).to_string(),
+        ] {
             let fixture = Fixture::new();
             let path = fixture.metadata("wf-one", "left-agent", "gate:downstream:0");
             std::fs::write(path, data).unwrap();
@@ -312,9 +372,12 @@ mod tests {
 
     #[test]
     fn session_root_repository_phase_and_condition_must_match() {
-        for change in [json!({"root": "/other"}), json!({"repo": "o/other"}),
-            json!({"phase": "plan"}), json!({"condition": "merged"})]
-        {
+        for change in [
+            json!({"root": "/other"}),
+            json!({"repo": "o/other"}),
+            json!({"phase": "plan"}),
+            json!({"condition": "merged"}),
+        ] {
             let mut fixture = Fixture::new();
             if let Some(root) = change.get("root") {
                 fixture.facts["orchestration"]["session_root"] = root.clone();
@@ -326,7 +389,8 @@ mod tests {
                 fixture.facts["phase"] = phase.clone();
             }
             if let Some(condition) = change.get("condition") {
-                fixture.facts["orchestration"]["goals"][0]["blockers"][0]["when"] = condition.clone();
+                fixture.facts["orchestration"]["goals"][0]["blockers"][0]["when"] =
+                    condition.clone();
             }
             assert!(!fixture.allowed(), "{change}");
         }
@@ -336,7 +400,10 @@ mod tests {
     fn duplicate_approved_labels_and_excess_workflows_are_denied() {
         let mut fixture = Fixture::new();
         let goal = fixture.facts["orchestration"]["goals"][0].clone();
-        fixture.facts["orchestration"]["goals"].as_array_mut().unwrap().push(goal);
+        fixture.facts["orchestration"]["goals"]
+            .as_array_mut()
+            .unwrap()
+            .push(goal);
         assert!(!fixture.allowed());
         let fixture = Fixture::new();
         for index in 0..MAX_WORKFLOWS {

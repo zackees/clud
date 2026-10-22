@@ -562,9 +562,7 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
 /// front, in one round before prework. The planner never writes files, in
 /// either phase, and neither does the prework agent.
 pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option<String> {
-    if role == GATE
-        && !matches!(tool_name, "Bash" | "StructuredOutput")
-    {
+    if role == GATE && !matches!(tool_name, "Bash" | "StructuredOutput") {
         return Some(format!(
             "{GATE} may only execute its bound check and report the result"
         ));
