@@ -11,10 +11,12 @@ from pathlib import Path, PureWindowsPath
 from urllib.request import Request, urlopen
 
 import pytest
+from running_process import PseudoTerminalProcess
 
 from ci.installer_candidate import TARGETS
 from ci.installer_public_evidence import require_evidence, require_guest_evidence
-from installer.catalog import ONLINE_URL, verify_direct_executable
+from installer.catalog import ONLINE_URL, verify_direct_executable, version_key
+from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
 
@@ -68,20 +70,105 @@ def public_bytes(url: str, limit: int = 200 * 1024 * 1024) -> bytes:
     return data
 
 
+def assert_public_latest_install(
+    binary: Path,
+    env: dict[str, str],
+    destination: Path,
+    version: str,
+    digest: str,
+    transcript: Path,
+) -> None:
+    """Choose the latest-default release in the shipped interactive picker."""
+    process = PseudoTerminalProcess([str(binary), "--installer"], env=env, capture=True)
+    try:
+        process.expect("Install clud", timeout=30)
+        process.write("\x1b[B\r")
+        process.expect("Choose a clud release", timeout=120)
+        process.write("\r")
+        process.expect(f"Install clud {version} at this destination?", timeout=30)
+        process.write("\x1b[A\r")
+        assert process.wait(timeout=120) == 0, process.output_text
+        assert "verified fresh name-based lookup" in process.output_text
+    finally:
+        if process.poll() is None:
+            process.kill()
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(process.output_text, encoding="utf-8")
+        process.close()
+    assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+    installed = run_process(
+        [str(destination), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr.decode(errors="replace")
+    assert installed.stdout.strip() == f"clud {version}".encode()
+
+
+def assert_older_installer_discovery(
+    catalog: dict,
+    os_name: str,
+    arch: str,
+    env: dict[str, str],
+    destination: Path,
+    version: str,
+    digest: str,
+    directory: Path,
+) -> dict:
+    """A fixed older public executable must discover and install today's stable."""
+    prior_version = "2.8.30"
+    assert version_key(prior_version) < version_key(version)
+    release = next(row for row in catalog["releases"] if row["version"] == prior_version)
+    matches = [
+        row for row in release["platforms"]
+        if row["platform"]["os"] == os_name
+        and row["platform"]["arch"] == arch
+        and row["asset"]["media_type"] == "application/octet-stream"
+        and (os_name != "linux" or row["variant"] == {"flavor": "static-musl"})
+    ]
+    assert len(matches) == 1, matches
+    asset = matches[0]["asset"]
+    payload = public_bytes(asset["urls"][0])
+    assert len(payload) == asset["size_bytes"]
+    assert hashlib.sha256(payload).hexdigest() == asset["sha256"]
+    verify_direct_executable(payload, os_name, arch, public_executable_flavor(matches[0]))
+    binary = directory / asset["filename"]
+    binary.write_bytes(payload)
+    binary.chmod(0o755)
+    source = run_process(
+        [str(binary), "--version"], env=env, capture_output=True, timeout=15, check=False
+    )
+    assert source.returncode == 0, source.stderr.decode(errors="replace")
+    assert source.stdout.strip() == f"clud {prior_version}".encode()
+    transcript = Path(os.environ["CLUD_PUBLIC_EVIDENCE"]).with_suffix(".older.terminal.log")
+    assert_public_latest_install(binary, env, destination, version, digest, transcript)
+    return {
+        "source_version": prior_version,
+        "source_sha256": asset["sha256"],
+        "source_url": asset["urls"][0],
+        "selected_version": version,
+        "installed_sha256": digest,
+        "transcript": transcript.name,
+    }
+
+
 def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     tag = "2.10.0"
     expected = {}
     rows = []
     for target, (os_name, arch, _kind, _suffix) in TARGETS.items():
         url = f"https://github.com/zackees/clud/releases/download/{tag}/clud-{tag}-{target}"
-        expected[target] = {"version": tag, "sha256": "a" * 64, "size_bytes": 100, "url": url}
+        digest = "c" * 64 if target == "aarch64-unknown-linux-musl" else "a" * 64
+        expected[target] = {"version": tag, "sha256": digest, "size_bytes": 100, "url": url}
         rows.append({
             "mode": "candidate",
             "tag": tag,
             "version": tag,
             "os": os_name,
             "arch": arch,
-            "sha256": "a" * 64,
+            "sha256": digest,
             "size_bytes": 100,
             "asset_url": url,
             "resolved_path": "/user/bin/clud",
@@ -95,19 +182,59 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     nixos = [
         {
             "mode": "candidate", "tag": tag, "version": tag, "host_arch": arch,
-            "sha256": "a" * 64, "resolved_path": "/home/alice/.local/bin/clud",
+            "nix_ld": state,
+            "sha256": expected[f"{arch}-unknown-linux-musl"]["sha256"],
+            "resolved_path": "/home/alice/.local/bin/clud",
         }
         for arch in ("x86_64", "aarch64")
+        for state in ("disabled", "enabled")
     ]
     distros = [
         {
             "mode": "candidate", "tag": tag, "version": tag,
-            "host_arch": "x86_64", "distro": distro, "sha256": "a" * 64,
+            "host_arch": arch, "distro": distro,
+            "sha256": expected[f"{arch}-unknown-linux-musl"]["sha256"],
             "resolved_path": "/home/alice/.local/bin/clud",
         }
-        for distro in ("archlinux", "fedora", "alpine")
+        for distro, arch in (
+            ("archlinux", "x86_64"), ("alpine", "x86_64"),
+            ("ubuntu", "x86_64"), ("ubuntu", "aarch64"),
+            ("debian", "x86_64"), ("debian", "aarch64"),
+            ("fedora", "x86_64"), ("fedora", "aarch64"),
+        )
     ]
     require_guest_evidence(nixos, distros, expected, "candidate", tag)
+    for index in range(len(nixos)):
+        with pytest.raises(ValueError, match="missing"):
+            require_guest_evidence(
+                nixos[:index] + nixos[index + 1:], distros, expected, "candidate", tag
+            )
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence([*nixos[:-1], nixos[0]], distros, expected, "candidate", tag)
+    for index in range(len(distros)):
+        with pytest.raises(ValueError, match="missing"):
+            require_guest_evidence(
+                nixos, distros[:index] + distros[index + 1:], expected, "candidate", tag
+            )
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence(nixos, [*distros[:-1], distros[0]], expected, "candidate", tag)
+    wrong_arch = {**distros[-1], "sha256": expected["x86_64-unknown-linux-musl"]["sha256"]}
+    with pytest.raises(ValueError, match="differs"):
+        require_guest_evidence(
+            nixos,
+            [*distros[:-1], wrong_arch],
+            expected,
+            "candidate",
+            tag,
+        )
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence(
+            nixos,
+            [row for row in distros if row["distro"] != "debian"],
+            expected,
+            "candidate",
+            tag,
+        )
     with pytest.raises(ValueError, match="missing"):
         require_guest_evidence(nixos[:-1], distros, expected, "candidate", tag)
     with pytest.raises(ValueError, match="differs"):
@@ -187,22 +314,19 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+    older_installer = {}
+    if mode == "released":
+        assert_public_latest_install(
+            binary, env, destination, version, digest,
+            Path(os.environ["CLUD_PUBLIC_EVIDENCE"]).with_suffix(".latest.terminal.log"),
+        )
+        older_installer = assert_older_installer_discovery(
+            catalog, os_name, arch, env, destination, version, digest, tmp_path
+        )
 
     if os_name == "windows":
-        script = (
-            '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
-            '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
-            '$env:Path="$u;$m"; '
-            '$c=Get-Command clud -CommandType Application -ErrorAction Stop; '
-            'Write-Output $c.Source; Write-Output (& $c.Source --version)'
-        )
-        lookup = run_process(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env,
-            capture_output=True,
-            timeout=25,
-            check=False,
-        )
+        shell_evidence = assert_windows_shell_activation(env, destination, version)
+        lines = [shell_evidence["powershell-7"], f"clud {version}"]
     else:
         shell = "/bin/zsh" if os_name == "darwin" else "/bin/bash"
         fresh_env = {**env, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
@@ -214,8 +338,8 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
             timeout=25,
             check=False,
         )
-    assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
-    lines = lookup.stdout.decode(errors="replace").strip().splitlines()
+        assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
+        lines = lookup.stdout.decode(errors="replace").strip().splitlines()
     assert_public_lookup(lines, destination, version, os_name)
     evidence = {
         "mode": mode,
@@ -227,7 +351,10 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
         "size_bytes": len(payload),
         "asset_url": asset["urls"][0],
         "resolved_path": lines[0],
+        "older_installer": older_installer,
     }
+    if os_name == "windows":
+        evidence["shell_lookup"] = shell_evidence
     output = Path(os.environ["CLUD_PUBLIC_EVIDENCE"])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")

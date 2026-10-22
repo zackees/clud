@@ -7,11 +7,42 @@ use std::process::Command; // running-process: command-builder
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use running_process::{spawn_with_env_policy, EnvironmentPolicy, SpawnStdio, StdioSource};
 use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 
 const USER_ENVIRONMENT: &str = "Environment";
+
+pub fn terminal_commands(destination: &Path) -> Result<Vec<(&'static str, String)>, String> {
+    let bin = destination.parent().ok_or("missing install directory")?;
+    let value = bin.to_str().ok_or("install directory is not UTF-8")?;
+    if value.contains([';', '\0', '\n', '\r']) {
+        return Err("install directory cannot be represented in a Windows Path".into());
+    }
+    let literal = value.replace('\'', "''");
+    let powershell = format!(
+        "if (-not ([string]$env:Path).StartsWith('{literal};', [StringComparison]::OrdinalIgnoreCase)) {{ $env:Path = '{literal};' + $env:Path }}"
+    );
+    // A child cannot modify its parent cmd environment. Open a nested cmd with
+    // the activated environment; encoding keeps cmd's %/! expansion away from
+    // the literal directory, including when delayed expansion is enabled.
+    let script = format!("{powershell}; & \"$env:SystemRoot\\System32\\cmd.exe\" /D /V:OFF");
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = STANDARD.encode(bytes);
+    let quoted = shell_words::quote(value);
+    Ok(vec![
+        ("PowerShell", powershell),
+        (
+            "Command Prompt (new shell in this terminal)",
+            format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}"),
+        ),
+        (
+            "Git Bash",
+            format!("export PATH=\"$(cygpath -u -- {quoted}):$PATH\"; hash -r"),
+        ),
+    ])
+}
 
 /// The Windows activation plan: the HKCU User Path before and after.
 #[derive(Debug, Clone)]
@@ -302,6 +333,27 @@ fn run_baseline(script: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_activation_preserves_literal_directory_through_outer_cmd_expansion() {
+        let destination = Path::new("C:\\space's %PATH% !bang 雪\\bin\\clud.exe");
+        let commands = terminal_commands(destination).unwrap();
+        let encoded = commands[1].1.split_whitespace().last().unwrap();
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let words: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let script = String::from_utf16(&words).unwrap();
+        assert!(script.contains("C:\\space''s %PATH% !bang 雪\\bin;"));
+        assert!(script.ends_with("cmd.exe\" /D /V:OFF"));
+        assert!(!commands[1].1.contains(['%', '!']));
+    }
+
+    #[test]
+    fn terminal_commands_refuse_windows_path_separators() {
+        assert!(terminal_commands(Path::new("C:\\bad;path\\bin\\clud.exe")).is_err());
+    }
 
     #[test]
     fn user_path_prepend_keeps_long_expandable_value() {

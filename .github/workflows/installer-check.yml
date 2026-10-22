@@ -5,6 +5,18 @@ on:
   # Keep labeled/unlabeled so toggling the label starts or cancels acceptance.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact published tag to verify without changing releases.
+        required: true
+        type: string
+      mode:
+        description: Public prerelease candidate or canonical stable catalog.
+        required: true
+        default: released
+        type: choice
+        options: [candidate, released]
   workflow_call:
     inputs:
       release_tag:
@@ -72,6 +84,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-catalog
+          overwrite: true
           path: candidate-fixture/catalog.json
           if-no-files-found: error
 
@@ -99,6 +112,7 @@ jobs:
     env:
       CLUD_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       CLUD_CANDIDATE_TARGET: ${{ matrix.target }}
+      CLUD_TEST_REQUIRE_INSTALLER_SHELLS: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,6 +134,17 @@ jobs:
         run: |
           python -m pip install pytest==9.0.3 running-process==4.10.1
           if [ "$RUNNER_OS" = Windows ]; then python -m pip install pywinpty==3.0.5; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y fish zsh
+          elif [ "$RUNNER_OS" = macOS ]; then
+            brew install fish
+          fi
+          if [ "$RUNNER_OS" != Windows ]; then
+            command -v bash
+            command -v fish
+            command -v zsh
+          fi
       - name: Verify artifact identity and expose exact binary
         shell: bash
         run: |
@@ -169,17 +194,20 @@ jobs:
           mkdir -p candidate-evidence
           python -m pytest -q \
             tests/test_installer_candidate_ci.py::test_native_candidate_installs_by_name_and_writes_host_evidence \
-            tests/test_installer_native_entry.py
+            tests/test_installer_native_entry.py \
+            tests/test_installer_repair.py \
+            tests/test_installer_activation_commands.py
       - name: Retain candidate host evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: candidate-evidence-${{ matrix.target }}
+          overwrite: true
           path: candidate-evidence/*
           if-no-files-found: warn
 
   candidate-nixos:
-    name: Real NixOS VM ${{ matrix.target }}
+    name: Real NixOS VM ${{ matrix.target }} nix-ld=${{ matrix.nix_ld }}
     needs: candidate-catalog
     if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     timeout-minutes: 30
@@ -189,8 +217,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            nix_ld: disabled
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            nix_ld: disabled
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nix_ld: enabled
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nix_ld: enabled
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -234,13 +270,14 @@ jobs:
           nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
           nix-build ci/nixos/candidate-test.nix --no-out-link \
             --argstr nixpkgs "$nixpkgs" \
+            --arg nixLd "${{ matrix.nix_ld == 'enabled' && 'true' || 'false' }}" \
             --argstr candidate "$PWD/candidate/$CANDIDATE_FILENAME" \
             --argstr fixture "$PWD/candidate-fixture" \
             --argstr version "$CANDIDATE_VERSION" \
             --argstr digest "$CANDIDATE_SHA256"
 
   candidate-distros:
-    name: Same musl bytes on ${{ matrix.distro }}
+    name: Same musl bytes on ${{ matrix.distro }} ${{ matrix.arch }}
     needs: candidate-catalog
     if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     timeout-minutes: 30
@@ -249,12 +286,54 @@ jobs:
       matrix:
         include:
           - distro: archlinux
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: archlinux@sha256:f3691b4dde62ba4c4b6f0ae2c1fbf28e8c0c8c4b9a35c7e06dc1f70e21aa29f6
           - distro: fedora
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
           - distro: alpine
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
-    runs-on: ubuntu-24.04
+          - distro: ubuntu
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
+            image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+          - distro: ubuntu
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+          - distro: debian
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
+            image: debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+          - distro: debian
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+          - distro: fedora
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -262,7 +341,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: candidate-x86_64-unknown-linux-musl
+          name: candidate-${{ matrix.target }}
           path: candidate
       - uses: actions/download-artifact@v4
         with:
@@ -271,12 +350,13 @@ jobs:
       - name: Verify exact shared asset and stage fixture
         env:
           SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_TARGET: ${{ matrix.target }}
         run: |
           python - <<'PY'
           import json, os, pathlib, shutil, tomllib
           from ci.installer_candidate import verify_artifact
           version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
-          metadata = verify_artifact(pathlib.Path('candidate'), 'x86_64-unknown-linux-musl', os.environ['SOURCE_SHA'], version)
+          metadata = verify_artifact(pathlib.Path('candidate'), os.environ['CANDIDATE_TARGET'], os.environ['SOURCE_SHA'], version)
           fixture_asset = pathlib.Path('candidate-fixture/assets') / metadata['filename']
           fixture_asset.parent.mkdir(parents=True, exist_ok=True)
           shutil.copy2(pathlib.Path('candidate') / metadata['filename'], fixture_asset)
@@ -287,12 +367,12 @@ jobs:
       - name: Install and resolve on clean nonroot distribution
         run: |
           set -euo pipefail
-          test "$(uname -m)" = x86_64
-          docker run --rm --platform linux/amd64 \
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          docker run --rm --platform '${{ matrix.platform }}' \
             --mount "type=bind,src=$PWD/candidate,dst=/candidate,readonly" \
             --mount "type=bind,src=$PWD/candidate-fixture,dst=/fixture,readonly" \
             --mount "type=bind,src=$PWD/ci/installer_distro_guest.sh,dst=/guest.sh,readonly" \
-            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$CANDIDATE_VERSION" "$CANDIDATE_SHA256"
+            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$CANDIDATE_VERSION" "$CANDIDATE_SHA256" '${{ matrix.arch }}'
 
   candidate-dsh:
     # #1829: clud installs DeepSeek Harness into its private prefix from an
@@ -435,11 +515,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-evidence-${{ inputs.mode }}-${{ matrix.target }}
-          path: public-evidence/*.json
+          overwrite: true
+          path: public-evidence/
           if-no-files-found: error
 
   public-nixos:
-    name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }}
+    name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }} nix-ld=${{ matrix.nix_ld }}
     if: inputs.release_tag != ''
     timeout-minutes: 30
     strategy:
@@ -448,8 +529,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            nix_ld: disabled
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            nix_ld: disabled
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nix_ld: enabled
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nix_ld: enabled
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -483,6 +572,7 @@ jobs:
           nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
           driver=$(nix-build ci/nixos/public-test.nix -A config.driver --no-out-link \
             --argstr nixpkgs "$nixpkgs" \
+            --arg nixLd "${{ matrix.nix_ld == 'enabled' && 'true' || 'false' }}" \
             --argstr tag "$RELEASE_TAG" \
             --argstr version "$PUBLIC_VERSION" \
             --argstr digest "$PUBLIC_SHA256" \
@@ -494,12 +584,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}
+          name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}-${{ matrix.nix_ld }}
+          overwrite: true
           path: public-nixos-evidence.txt
           if-no-files-found: warn
 
   public-distros:
-    name: Public ${{ inputs.mode }} on ${{ matrix.distro }}
+    name: Public ${{ inputs.mode }} on ${{ matrix.distro }} ${{ matrix.arch }}
     if: inputs.release_tag != ''
     timeout-minutes: 30
     strategy:
@@ -507,24 +598,67 @@ jobs:
       matrix:
         include:
           - distro: archlinux
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: archlinux@sha256:f3691b4dde62ba4c4b6f0ae2c1fbf28e8c0c8c4b9a35c7e06dc1f70e21aa29f6
           - distro: fedora
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
           - distro: alpine
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
             image: alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
-    runs-on: ubuntu-24.04
+          - distro: ubuntu
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
+            image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+          - distro: ubuntu
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+          - distro: debian
+            arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            target: x86_64-unknown-linux-musl
+            image: debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+          - distro: debian
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+          - distro: fedora
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            target: aarch64-unknown-linux-musl
+            image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve exact anonymous public musl digest
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           MODE: ${{ inputs.mode }}
+          HOST_ARCH: ${{ matrix.arch }}
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
           from ci.installer_public_catalog import resolve
-          asset = resolve(os.environ['MODE'], os.environ['RELEASE_TAG'], 'linux', 'x86_64')
+          asset = resolve(os.environ['MODE'], os.environ['RELEASE_TAG'], 'linux', os.environ['HOST_ARCH'])
           with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
               env.write(f"PUBLIC_VERSION={asset['version']}\nPUBLIC_SHA256={asset['sha256']}\n")
           print(asset)
@@ -533,18 +667,21 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           MODE: ${{ inputs.mode }}
+          HOST_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          docker run --rm --platform linux/amd64 \
+          test "$(uname -m)" = "$HOST_ARCH"
+          docker run --rm --platform '${{ matrix.platform }}' \
             --mount "type=bind,src=$PWD/ci/installer_public_distro_guest.sh,dst=/guest.sh,readonly" \
-            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$MODE" "$RELEASE_TAG" "$PUBLIC_VERSION" "$PUBLIC_SHA256" \
+            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$MODE" "$RELEASE_TAG" "$PUBLIC_VERSION" "$PUBLIC_SHA256" "$HOST_ARCH" \
             2>&1 | tee public-distro.log
           grep -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log > public-distro-evidence.txt
       - name: Retain public distribution guest evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: public-distro-evidence-${{ inputs.mode }}-${{ matrix.distro }}
+          name: public-distro-evidence-${{ inputs.mode }}-${{ matrix.distro }}-${{ matrix.arch }}
+          overwrite: true
           path: public-distro-evidence.txt
           if-no-files-found: warn
 
@@ -567,6 +704,7 @@ jobs:
             tests/test_installer_catalog.py \
             tests/test_installer_candidate_ci.py \
             tests/test_installer_public_ci.py \
+            tests/test_installer_windows_shells.py \
             tests/test_public_release.py \
             tests/test_installer_verify_site.py \
             tests/test_installer_verify_native_assets.py \
@@ -650,6 +788,7 @@ jobs:
           PUBLIC_NIXOS: ${{ needs.public-nixos.result }}
           PUBLIC_DISTROS: ${{ needs.public-distros.result }}
           MODE: ${{ inputs.mode }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           test "$CATALOG" = success
           test "$CATALOG_UNIT" = success
@@ -658,5 +797,5 @@ jobs:
           test "$PUBLIC_NIXOS" = success
           test "$PUBLIC_DISTROS" = success
           case "$MODE" in candidate|released) ;; *) exit 1 ;; esac
-          python -m ci.installer_public_evidence public-evidence "$MODE" '${{ inputs.release_tag }}' \
+          python -m ci.installer_public_evidence public-evidence "$MODE" "$RELEASE_TAG" \
             --nixos public-nixos-evidence --distros public-distro-evidence

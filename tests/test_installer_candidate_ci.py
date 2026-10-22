@@ -7,6 +7,7 @@ import io
 import json
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 
@@ -20,8 +21,10 @@ from ci.installer_candidate import (
     require_evidence,
     verify_artifact,
 )
+from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
+from tests.test_installer_public_ci import assert_public_latest_install
 from tests.test_installer_verify_native_assets import native_payload
 
 SOURCE_SHA = "a" * 40
@@ -160,8 +163,13 @@ def test_pr_workflow_declares_every_native_candidate_lane() -> None:
     ).read_text(encoding="utf-8")
     for target in REQUIRED_TARGETS:
         assert target in workflow
+    assert "workflow_dispatch:" in workflow
     assert "candidate-host:" in workflow
     assert "candidate-aggregate:" in workflow
+    host = workflow.split("  candidate-host:", 1)[1].split("\n  candidate-", 1)[0]
+    assert "CLUD_TEST_REQUIRE_INSTALLER_SHELLS: '1'" in host
+    for shell in ("bash", "fish", "zsh"):
+        assert f"command -v {shell}" in host
     assert "if: always()" in workflow
 
 
@@ -172,10 +180,40 @@ def test_pr_workflow_requires_real_nixos_and_linux_distributions() -> None:
     assert "candidate-nixos:" in workflow
     assert "ubuntu-24.04-arm" in workflow
     assert "candidate-distros:" in workflow
-    for distribution in ("archlinux", "fedora", "alpine"):
+    for distribution in ("archlinux", "fedora", "alpine", "debian"):
         assert distribution in workflow
     assert "CANDIDATE_NIXOS" in workflow
     assert "CANDIDATE_DISTROS" in workflow
+
+
+@pytest.mark.parametrize("job", ["candidate-distros", "public-distros"])
+def test_distribution_matrix_runs_every_required_architecture_on_matching_hosts(job: str) -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow)
+    assert block is not None
+    rows = re.findall(
+        r"(?m)^          - distro: (\w+)\n"
+        r"            arch: (\w+)\n"
+        r"            runner: (\S+)\n"
+        r"            platform: (\S+)\n"
+        r"            target: (\S+)\n"
+        r"            image: (\S+)",
+        block.group(1),
+    )
+    assert len(rows) == 8
+    assert {(distro, arch) for distro, arch, *_ in rows} == {
+        ("archlinux", "x86_64"), ("alpine", "x86_64"),
+        ("ubuntu", "x86_64"), ("ubuntu", "aarch64"),
+        ("debian", "x86_64"), ("debian", "aarch64"),
+        ("fedora", "x86_64"), ("fedora", "aarch64"),
+    }
+    for _distro, arch, runner, docker_platform, target, image in rows:
+        assert runner == ("ubuntu-24.04-arm" if arch == "aarch64" else "ubuntu-24.04")
+        assert docker_platform == ("linux/arm64" if arch == "aarch64" else "linux/amd64")
+        assert target == f"{arch}-unknown-linux-musl"
+        assert re.fullmatch(r"[\w/:.-]+@sha256:[0-9a-f]{64}", image)
 
 
 def test_pr_workflow_gates_on_the_managed_dsh_lane() -> None:
@@ -186,6 +224,28 @@ def test_pr_workflow_gates_on_the_managed_dsh_lane() -> None:
     assert "tests/test_dsh_managed_install.py" in workflow
     assert "DSH_MANAGED_ACCEPTANCE: '1'" in workflow
     assert '"$CANDIDATE_DSH"' in workflow
+
+
+@pytest.mark.parametrize("job", ["candidate-nixos", "public-nixos"])
+def test_nixos_matrix_requires_both_loader_states_on_both_architectures(job: str) -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow)
+    assert block is not None
+    rows = re.findall(
+        r"(?m)^          - runner: (\S+)\n"
+        r"            target: (\S+)\n"
+        r"            nix_ld: (\w+)",
+        block.group(1),
+    )
+    assert len(rows) == 4
+    assert set(rows) == {
+        (runner, f"{arch}-unknown-linux-musl", state)
+        for runner, arch in (("ubuntu-24.04", "x86_64"), ("ubuntu-24.04-arm", "aarch64"))
+        for state in ("disabled", "enabled")
+    }
+    assert '--arg nixLd "${{ matrix.nix_ld' in block.group(1)
 
 
 def test_native_candidate_installs_by_name_and_writes_host_evidence(
@@ -269,21 +329,13 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
     finally:
         fixture_asset.write_bytes(original_asset)
 
+    assert_public_latest_install(
+        binary, env, destination, version, metadata["sha256"],
+        Path(os.environ["CLUD_CANDIDATE_EVIDENCE"]).with_suffix(".latest.terminal.log"),
+    )
     if actual_os == "windows":
-        script = (
-            '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
-            '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
-            '$env:Path="$u;$m"; '
-            "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
-            "Write-Output $c.Source; Write-Output (& $c.Source --version)"
-        )
-        lookup = run_process(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env,
-            capture_output=True,
-            timeout=25,
-            check=False,
-        )
+        shell_evidence = assert_windows_shell_activation(env, destination, version)
+        lines = [shell_evidence["powershell-7"], f"clud {version}"]
     else:
         shell = "/bin/zsh" if actual_os == "darwin" else "/bin/bash"
         fresh_env = {**env, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
@@ -295,8 +347,8 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
             timeout=25,
             check=False,
         )
-    assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
-    lines = lookup.stdout.decode(errors="replace").strip().splitlines()
+        assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
+        lines = lookup.stdout.decode(errors="replace").strip().splitlines()
     assert len(lines) == 2, lines
     assert Path(lines[0]) == destination
     assert lines[1] == f"clud {version}"
@@ -311,6 +363,8 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
         "version_output": lines[1],
         "result": "success",
     }
+    if actual_os == "windows":
+        evidence["shell_lookup"] = shell_evidence
     Path(os.environ["CLUD_CANDIDATE_EVIDENCE"]).write_text(
         json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )

@@ -1,0 +1,48 @@
+"""#1467: mandatory installer lanes cannot silently skip supported shells."""
+
+from pathlib import Path
+
+import pytest
+
+from ci.env import scrub_clud_session_env
+from tests import test_installer_native_entry as native
+
+SHELL_CASES = [
+    native.test_bash_fresh_login_and_interactive_lookup,
+    native.test_existing_user_bin_and_first_bash_login_file,
+    native.test_fish_custom_xdg_uses_nonuniversal_snippet,
+    native.test_zsh_custom_zdotdir_activation,
+]
+
+
+def run_required_scenario(scenario, tmp_path: Path) -> None:
+    try:
+        scenario(tmp_path)
+    except pytest.skip.Exception as error:
+        raise AssertionError("mandatory acceptance skipped its supported shell") from error
+
+
+@pytest.mark.parametrize("scenario", SHELL_CASES, ids=lambda case: case.__name__)
+def test_required_acceptance_fails_when_a_supported_shell_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario
+) -> None:
+    monkeypatch.setenv("CLUD_TEST_REQUIRE_INSTALLER_SHELLS", "1")
+    monkeypatch.setattr(native.shutil, "which", lambda _name: None)
+    with pytest.raises(pytest.fail.Exception, match="required installer acceptance shell"):
+        run_required_scenario(scenario, tmp_path)
+
+
+@pytest.mark.parametrize("scenario", SHELL_CASES, ids=lambda case: case.__name__)
+def test_optional_developer_acceptance_can_skip_an_unavailable_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario
+) -> None:
+    monkeypatch.delenv("CLUD_TEST_REQUIRE_INSTALLER_SHELLS", raising=False)
+    monkeypatch.setattr(native.shutil, "which", lambda _name: None)
+    with pytest.raises(pytest.skip.Exception, match="unavailable"):
+        scenario(tmp_path)
+
+
+def test_required_shell_policy_survives_pytest_session_environment_scrubbing() -> None:
+    env = {"CLUD_TEST_REQUIRE_INSTALLER_SHELLS": "1"}
+    scrub_clud_session_env(env)
+    assert env == {"CLUD_TEST_REQUIRE_INSTALLER_SHELLS": "1"}

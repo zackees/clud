@@ -4,4 +4,5 @@ pub mod activation;
 pub mod catalog;
 pub mod entry;
 pub mod picker;
+mod result;
 pub mod transaction;

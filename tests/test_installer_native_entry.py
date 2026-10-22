@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import select
 import shutil
@@ -12,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from running_process import PseudoTerminalProcess
 
 from tests.process import run as run_process
 
@@ -30,6 +32,35 @@ def clud_binary() -> Path:
     return path
 
 
+def required_shell(name: str) -> str:
+    shell = shutil.which(name)
+    if shell is not None:
+        return shell
+    if os.environ.get("CLUD_TEST_REQUIRE_INSTALLER_SHELLS") == "1":
+        pytest.fail(f"required installer acceptance shell is unavailable: {name}")
+    pytest.skip(f"{name} is unavailable")
+
+
+def assert_fresh_shell_lookup(shell: str, env: dict[str, str], installed: Path) -> None:
+    version = run_process(
+        [str(clud_binary()), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    ).stdout.strip()
+    for mode in ("-lc", "-ic", "-lic"):
+        fresh = run_process(
+            [shell, mode, "command -v clud; clud --version"],
+            env=env,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert fresh.returncode == 0, fresh.stderr.decode(errors="replace")
+        assert fresh.stdout.splitlines() == [os.fsencode(installed), version]
+
+
 def isolated_env(home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -37,6 +68,17 @@ def isolated_env(home: Path) -> dict[str, str]:
         env["USERPROFILE"] = str(home)
         env.pop("LOCALAPPDATA", None)
     return env
+
+
+def installer_json(result, status: str, code: int, committed: bool) -> dict:
+    assert result.returncode == code, result.stderr.decode(errors="replace")
+    report = json.loads(result.stdout)
+    assert len(result.stdout.splitlines()) == 1, result.stdout
+    assert report["schema"] == "clud-installer-result/v1"
+    assert report["status"] == status
+    assert report["exit_code"] == code
+    assert report["binary_committed"] is committed
+    return report
 
 
 @pytest.fixture
@@ -108,6 +150,7 @@ def assert_crlf(output: bytes) -> None:
     [
         (["--installer"], 2),
         (["--installer", "--install-current"], 2),
+        (["--installer", "--install-current", "--no-modify-path"], 2),
         (["--installer", "--install-version", "2.8.14"], 2),
     ],
 )
@@ -167,6 +210,100 @@ def test_no_tty_refusal_preserves_windows_user_path() -> None:
         assert after == before
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX startup files")
+def test_install_only_preserves_profiles_and_reports_activation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    profiles = {
+        home / ".bash_profile": b"# preserve login configuration\n",
+        home / ".bashrc": b"# preserve non-UTF8 configuration: \xff\n",
+    }
+    for path, content in profiles.items():
+        path.write_bytes(content)
+        path.chmod(0o400)
+    env = isolated_env(home)
+    env["SHELL"] = required_shell("bash")
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes", "--no-modify-path"],
+        env=env, capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    destination = home / ".local" / "bin" / "clud"
+    assert destination.is_file()
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    for path, content in profiles.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_mode & 0o777 == 0o400
+    assert b"activation required" in result.stderr.lower()
+    assert b"verified fresh name-based lookup" not in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows User registry")
+def test_install_only_preserves_windows_user_path(installer_target) -> None:
+    import winreg
+
+    env, destination = installer_target
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            before = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            before = None
+        result = run_process(
+            [str(clud_binary()), "--installer", "--install-current", "--yes", "--no-modify-path"],
+            env=env, capture_output=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert destination.is_file()
+        try:
+            after = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            after = None
+        assert after == before
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    assert b"activation required" in result.stderr.lower()
+    assert b"verified fresh name-based lookup" not in result.stderr
+
+
+@pytest.mark.parametrize(("flags", "status", "verified"), [
+    ([], "complete", True),
+    (["--no-modify-path"], "activation_required", False),
+])
+def test_installer_json_reports_committed_state(installer_target, flags, status, verified) -> None:
+    env, destination = installer_target
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes", "--installer-json",
+         *flags],
+        env=env, capture_output=True, timeout=30, check=False,
+    )
+    report = installer_json(result, status, 0, True)
+    assert report["activation_verified"] is verified
+    assert Path(report["destination"]).resolve() == destination.resolve()
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    version = run_process([str(clud_binary()), "--version"], capture_output=True, check=True)
+    assert report["version"] == version.stdout.decode().strip().split()[-1]
+
+
+@pytest.mark.parametrize(("flags", "status"), [
+    (["--install-current"], "refused"),
+    (["--install-version", "not-a-version", "--yes"], "failed"),
+])
+def test_installer_json_distinguishes_refusal_and_failure(tmp_path, flags, status) -> None:
+    home = tmp_path / "home"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--installer-json", *flags],
+        env=isolated_env(home), input=b"", capture_output=True, timeout=15, check=False,
+    )
+    report = installer_json(result, status, 2, False)
+    assert report["activation_verified"] is False
+    assert not home.exists(), "structured reporting must not add pre-consent writes"
+
+
 def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:
     env, destination = installer_target
     env["HTTPS_PROXY"] = "http://127.0.0.1:1"
@@ -219,9 +356,7 @@ def test_interrupted_commit_restores_backup_before_reinstall(installer_target) -
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
 def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
-    shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("bash is unavailable")
+    shell = required_shell("bash")
     home = tmp_path / "home with spaces and 'quotes' $dollars"
     home.mkdir(mode=0o700)
     env = isolated_env(home)
@@ -260,9 +395,7 @@ def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
 def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
-    shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("bash is unavailable")
+    shell = required_shell("bash")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     bin_dir = home / "bin"
@@ -289,9 +422,7 @@ def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX fish startup files")
 def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
-    shell = shutil.which("fish")
-    if shell is None:
-        pytest.skip("fish is unavailable")
+    shell = required_shell("fish")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     config = home / "custom config"
@@ -311,13 +442,12 @@ def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
     assert snippet.is_file()
     assert "fish_add_path --path --move --" in snippet.read_text()
     assert not (config / "fish" / "fish_variables").exists()
+    assert_fresh_shell_lookup(shell, env, home / ".local" / "bin" / "clud")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX zsh startup files")
 def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
-    shell = shutil.which("zsh")
-    if shell is None:
-        pytest.skip("zsh is unavailable")
+    shell = required_shell("zsh")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     dotdir = home / "custom zsh"
@@ -335,6 +465,7 @@ def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert (dotdir / ".zprofile").is_file()
     assert (dotdir / ".zshrc").is_file()
+    assert_fresh_shell_lookup(shell, env, home / ".local" / "bin" / "clud")
 
 
 def test_exact_older_release_downloads_selected_executable(installer_target) -> None:
@@ -458,3 +589,76 @@ def test_explicit_menu_escape_through_conpty(tmp_path: Path) -> None:
         assert not home.exists()
     finally:
         process.close(force=True)
+
+
+@pytest.mark.parametrize("cancel", ["\x1b", "\x03"])
+def test_first_run_offer_defaults_to_not_now_and_cancels_without_writes(
+    tmp_path: Path, cancel: str,
+) -> None:
+    home = tmp_path / "untouched-home"
+    env = isolated_env(home)
+    env["PATH"] = ""
+    before = browser_user_path_snapshot()
+    process = PseudoTerminalProcess([str(clud_binary())], env=env, capture=True)
+    try:
+        process.expect("[x] Not now", timeout=30)
+        assert "[ ] Install this version" in process.output_text
+        process.write(cancel)
+        # running-process reports a child's interrupt exit as an exception.
+        with pytest.raises(KeyboardInterrupt):
+            process.wait(timeout=30)
+        assert process.poll() == 130, process.output_text
+        assert not home.exists(), process.output_text
+        assert browser_user_path_snapshot() == before
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+@pytest.mark.parametrize("opener_fails", [False, True])
+def test_browser_menu_uses_canonical_url_without_installing(
+    tmp_path: Path, opener_fails: bool,
+) -> None:
+    if not os.environ.get("CLUD_INSTALLER_CI_FIXTURE_DIR"):
+        pytest.skip("requires the candidate's compile-time browser fixture")
+    home = tmp_path / "untouched-home"
+    log = tmp_path / "opened-url"
+    if opener_fails:
+        log = tmp_path / "missing-parent" / "opened-url"
+    env = isolated_env(home)
+    env["CLUD_INSTALLER_CI_BROWSER_LOG"] = str(log)
+    before = browser_user_path_snapshot()
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer"], env=env, capture=True,
+    )
+    page = "https://zackees.github.io/clud/install/index.html"
+    try:
+        process.expect("Install clud", timeout=30)
+        process.write("\x1b[B\x1b[B\r")
+        assert process.wait(timeout=30) == int(opener_fails), process.output_text
+        assert page in process.output_text
+        if opener_fails:
+            assert "could not open browser" in process.output_text
+            assert not log.exists()
+        else:
+            assert log.read_text(encoding="utf-8") == page
+        assert not home.exists(), process.output_text
+        assert browser_user_path_snapshot() == before
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+def browser_user_path_snapshot():
+    """Windows HOME overrides do not isolate the real per-user registry."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            return winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return None

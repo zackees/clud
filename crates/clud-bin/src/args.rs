@@ -299,6 +299,10 @@ pub struct Args {
     #[arg(long = "installer")]
     pub installer: bool,
 
+    /// Emit a structured installer outcome on stdout (explicit choice required).
+    #[arg(long = "installer-json", requires = "installer")]
+    pub installer_json: bool,
+
     /// Select the invoking executable for installation.
     #[arg(
         long = "install-current",
@@ -315,6 +319,10 @@ pub struct Args {
         conflicts_with = "install_current"
     )]
     pub install_version: Option<String>,
+
+    /// Install the executable without changing shell profiles or User PATH.
+    #[arg(long = "no-modify-path", requires = "installer")]
+    pub no_modify_path: bool,
 
     /// Issue #83: allow `--clean-worktrees` to remove dirty / unpushed
     /// worktrees. Locked worktrees are still preserved.
@@ -1755,7 +1763,9 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--redact-secrets",
         "--no-redact-secrets",
         "--installer",
+        "--installer-json",
         "--install-current",
+        "--no-modify-path",
         "--continue",
         "--claude",
         "--codex",

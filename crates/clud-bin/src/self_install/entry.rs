@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use crate::args::Args;
 
+use super::activation::{self, ActivationPlan};
 use super::catalog::{Arch, Catalog, GnuEligibility, Host, Os, ResolvedAsset, VersionChoice};
 use super::picker::{self, ConfirmChoice, MenuChoice, ReleaseChoice};
+use super::result::Outcome;
 use super::transaction;
 
 const CATALOG_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
@@ -21,6 +23,21 @@ pub enum Request {
     Exact(String),
 }
 
+#[derive(Clone, Copy)]
+struct InstallOptions {
+    yes: bool,
+    modify_path: bool,
+}
+
+impl Default for InstallOptions {
+    fn default() -> Self {
+        Self {
+            yes: false,
+            modify_path: true,
+        }
+    }
+}
+
 pub fn explicit_request(args: &Args) -> Result<Option<Request>, String> {
     if !args.installer {
         return Ok(None);
@@ -30,7 +47,8 @@ pub fn explicit_request(args: &Args) -> Result<Option<Request>, String> {
     let mut words = args.raw_argv.iter().skip(1);
     while let Some(word) = words.next() {
         match word.as_str() {
-            "--installer" | "--install-current" | "--yes" | "-y" => {}
+            "--installer" | "--installer-json" | "--install-current" | "--no-modify-path"
+            | "--yes" | "-y" => {}
             "--install-version" => {
                 words.next().ok_or("--install-version requires a version")?;
             }
@@ -40,6 +58,9 @@ pub fn explicit_request(args: &Args) -> Result<Option<Request>, String> {
     }
     if args.yes && !args.install_current && args.install_version.is_none() {
         return Err("--yes requires --install-current or --install-version".into());
+    }
+    if args.installer_json && !args.install_current && args.install_version.is_none() {
+        return Err("--installer-json requires --install-current or --install-version".into());
     }
     if args.install_current {
         Ok(Some(Request::Current))
@@ -66,12 +87,29 @@ pub fn should_offer(args: &Args, stdin_tty: bool, stderr_tty: bool, path_has_clu
 
 /// Run an explicit installer request before launch setup has side effects.
 pub fn run_explicit(args: &Args) -> Option<i32> {
-    match explicit_request(args) {
-        Ok(None) => None,
-        Ok(Some(request)) => Some(run_request(request, args.yes, false)),
+    let outcome = match explicit_request(args) {
+        Ok(None) => return None,
+        Ok(Some(request)) => run_request(
+            request,
+            InstallOptions {
+                yes: args.yes,
+                modify_path: !args.no_modify_path,
+            },
+            false,
+        ),
         Err(error) => {
             eprintln!("clud installer: {error}");
-            Some(2)
+            Outcome::failed(2, "invalid_request")
+        }
+    };
+    if !args.installer_json {
+        return Some(outcome.exit_code());
+    }
+    match outcome.write_json(io::stdout().lock()) {
+        Ok(()) => Some(outcome.exit_code()),
+        Err(error) => {
+            eprintln!("clud installer: cannot write structured outcome: {error}");
+            Some(1)
         }
     }
 }
@@ -93,7 +131,7 @@ pub fn run_auto_offer(args: &Args) -> Option<i32> {
     }
     match picker::prompt_menu(true) {
         Ok(MenuChoice::NotNow) => None,
-        Ok(choice) => Some(run_menu_choice(choice)),
+        Ok(choice) => Some(run_menu_choice(choice, InstallOptions::default()).exit_code()),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Some(130),
         Err(error) => {
             eprintln!("clud installer: {error}");
@@ -102,47 +140,49 @@ pub fn run_auto_offer(args: &Args) -> Option<i32> {
     }
 }
 
-fn run_request(request: Request, yes: bool, automatic: bool) -> i32 {
+fn run_request(request: Request, options: InstallOptions, automatic: bool) -> Outcome {
     match request {
         Request::Menu => {
             if !terminal_available() {
                 eprintln!("clud installer: a terminal is required without an explicit install choice and --yes");
-                return 2;
+                return Outcome::refused(2, "terminal_required");
             }
             match picker::prompt_menu(automatic) {
-                Ok(choice) => run_menu_choice(choice),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => 130,
+                Ok(choice) => run_menu_choice(choice, options),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    Outcome::refused(130, "cancelled")
+                }
                 Err(error) => {
                     eprintln!("clud installer: {error}");
-                    1
+                    Outcome::failed(1, "menu_failed")
                 }
             }
         }
-        Request::Current => run_selected(InstallIntent::CurrentExecutable, yes),
+        Request::Current => run_selected(InstallIntent::CurrentExecutable, options),
         Request::Exact(version) => {
-            if !yes && !terminal_available() {
+            if !options.yes && !terminal_available() {
                 eprintln!("clud installer: a terminal or --yes is required before installation");
-                return 2;
+                return Outcome::refused(2, "consent_required");
             }
             let catalog = match fetch_catalog() {
                 Ok(catalog) => catalog,
                 Err(error) => {
                     eprintln!("clud installer: {error}");
-                    return 1;
+                    return Outcome::failed(1, "catalog_unavailable");
                 }
             };
             let host = match host() {
                 Ok(host) => host,
                 Err(error) => {
                     eprintln!("clud installer: {error}");
-                    return 1;
+                    return Outcome::failed(1, "unsupported_host");
                 }
             };
             match catalog.resolve(VersionChoice::Exact(version), host) {
-                Ok(asset) => run_selected(InstallIntent::Published(asset), yes),
+                Ok(asset) => run_selected(InstallIntent::Published(asset), options),
                 Err(error) => {
                     eprintln!("clud installer: {error}");
-                    1
+                    Outcome::failed(1, "version_unavailable")
                 }
             }
         }
@@ -155,97 +195,207 @@ pub enum InstallIntent {
     Published(ResolvedAsset),
 }
 
-fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
-    if !yes && !terminal_available() {
+fn run_selected(intent: InstallIntent, options: InstallOptions) -> Outcome {
+    if !options.yes && !terminal_available() {
         eprintln!("clud installer: a terminal or --yes is required before installation");
-        return 2;
+        return Outcome::refused(2, "consent_required");
     }
-    let plan = match transaction::plan(intent) {
+    let plan = match transaction::plan(intent, options.modify_path) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("clud installer: {error}");
-            return 1;
+            return Outcome::failed(1, "planning_failed");
         }
     };
     eprintln!("{}", plan.description());
-    if !yes {
-        let label = format!("Install clud {} at this destination?", plan.version);
-        match picker::prompt_confirm(label) {
-            Ok(ConfirmChoice::NotNow) => return 0,
-            Ok(ConfirmChoice::Cancelled) => return 130,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => return 130,
-            Err(error) => {
-                eprintln!("clud installer: {error}");
-                return 1;
-            }
-            Ok(ConfirmChoice::Proceed) => {}
-        }
+    if let Some(refusal) = confirm_installation(&plan, options.yes) {
+        return refusal;
     }
     let activation = plan.activation.clone();
     let version = plan.version.clone();
+    let destination = plan.destination.clone();
     match transaction::execute(plan) {
         Ok(()) => {
-            match activation.apply_and_verify(&version) {
-                Ok(()) => {
-                    eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("clud installer: binary committed, but activation failed: {error}");
-                    1
-                }
-            }
+            let outcome =
+                finish_activation(activation, &version, !options.yes && terminal_available());
+            print_terminal_commands(&destination);
+            outcome.committed(&version, &destination)
         }
         Err(error) => {
             eprintln!("clud installer: {error}");
-            1
+            Outcome::failed(1, "installation_failed").selected(&version, &destination)
         }
     }
 }
 
-fn run_menu_choice(choice: MenuChoice) -> i32 {
+fn confirm_installation(plan: &transaction::InstallPlan, yes: bool) -> Option<Outcome> {
+    if yes {
+        return None;
+    }
+    let label = format!("Install clud {} at this destination?", plan.version);
+    let outcome = match picker::prompt_confirm(label) {
+        Ok(ConfirmChoice::Proceed) => return None,
+        Ok(ConfirmChoice::NotNow) => Outcome::refused(0, "declined"),
+        Ok(ConfirmChoice::Cancelled) => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
+        Err(error) => {
+            eprintln!("clud installer: {error}");
+            Outcome::failed(1, "confirmation_failed")
+        }
+    };
+    Some(outcome.selected(&plan.version, &plan.destination))
+}
+
+fn print_terminal_commands(destination: &std::path::Path) {
+    match activation::terminal_commands(destination) {
+        Ok(commands) => {
+            eprintln!("Activate a terminal by running the command for your shell:");
+            for (shell, command) in commands {
+                eprintln!("{shell}: {command}");
+            }
+        }
+        Err(error) => eprintln!("clud installer: manual activation guidance unavailable: {error}"),
+    }
+}
+
+fn finish_activation(
+    activation: Option<ActivationPlan>,
+    version: &str,
+    ask_repair: bool,
+) -> Outcome {
+    let Some(activation) = activation else {
+        eprintln!(
+            "clud installer: installed clud {version}; activation required (--no-modify-path)"
+        );
+        return Outcome::activation_required();
+    };
+    if let Err(error) = activation.apply_and_verify(version) {
+        eprintln!("clud installer: binary committed, but activation failed: {error}");
+        return if ask_repair {
+            offer_activation_repair(&activation, version)
+        } else {
+            Outcome::failed(1, "activation_failed")
+        };
+    }
+    activation_result(Ok(()), version)
+}
+
+fn offer_activation_repair(previous: &ActivationPlan, version: &str) -> Outcome {
+    let repair = match activation::plan(&previous.destination) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("clud installer: cannot safely plan activation repair: {error}");
+            return Outcome::failed(1, "repair_planning_failed");
+        }
+    };
+    eprintln!(
+        "Additional activation repair plan:\n{}",
+        repair.description()
+    );
+    execute_approved_repair(
+        version,
+        || picker::prompt_repair("Approve this additional activation repair?".into()),
+        || repair.apply_and_verify(version),
+    )
+}
+
+fn execute_approved_repair(
+    version: &str,
+    prompt: impl FnOnce() -> io::Result<ConfirmChoice>,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> Outcome {
+    match prompt() {
+        Ok(ConfirmChoice::Proceed) => activation_result(apply(), version),
+        Ok(ConfirmChoice::NotNow) => Outcome::refused(1, "repair_declined"),
+        Ok(ConfirmChoice::Cancelled) => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
+        Err(error) => {
+            eprintln!("clud installer: repair confirmation failed: {error}");
+            Outcome::failed(1, "confirmation_failed")
+        }
+    }
+}
+
+fn activation_result(result: Result<(), String>, version: &str) -> Outcome {
+    match result {
+        Ok(()) => {
+            eprintln!(
+                "clud installer: installed clud {version} and verified fresh name-based lookup"
+            );
+            Outcome::complete()
+        }
+        Err(error) => {
+            eprintln!("clud installer: binary committed, but activation repair failed: {error}");
+            Outcome::failed(1, "activation_failed")
+        }
+    }
+}
+
+fn run_menu_choice(choice: MenuChoice, options: InstallOptions) -> Outcome {
     match choice {
-        MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, false),
-        MenuChoice::Releases => run_releases(),
+        MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, options),
+        MenuChoice::Releases => run_releases(options),
         MenuChoice::Browser => {
-            open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()))
+            let code = open_download_page();
+            if code == 0 {
+                Outcome::browser_opened()
+            } else {
+                Outcome::failed(code, "browser_open_failed")
+            }
         }
-        MenuChoice::NotNow => 0,
-        MenuChoice::Cancelled => 130,
+        MenuChoice::NotNow => Outcome::refused(0, "declined"),
+        MenuChoice::Cancelled => Outcome::refused(130, "cancelled"),
     }
 }
 
-fn run_releases() -> i32 {
+fn run_releases(options: InstallOptions) -> Outcome {
     let catalog = match fetch_catalog() {
         Ok(catalog) => catalog,
         Err(error) => {
             eprintln!("clud installer: {error}");
-            return 1;
+            return Outcome::failed(1, "catalog_unavailable");
         }
     };
     let host = match host() {
         Ok(host) => host,
         Err(error) => {
             eprintln!("clud installer: {error}");
-            return 1;
+            return Outcome::failed(1, "unsupported_host");
         }
     };
     let releases = catalog.compatible_releases(host);
     if releases.is_empty() {
         eprintln!("clud installer: no complete release is compatible with this host");
-        return 1;
+        return Outcome::failed(1, "no_compatible_release");
     }
     match picker::prompt_releases(releases, catalog.latest_stable_version()) {
         Ok(ReleaseChoice::Selected(selected)) => {
-            run_selected(InstallIntent::Published(selected.asset), false)
+            run_selected(InstallIntent::Published(selected.asset), options)
         }
-        Ok(ReleaseChoice::Cancelled) => 130,
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => 130,
+        Ok(ReleaseChoice::Cancelled) => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
         Err(error) => {
             eprintln!("clud installer: {error}");
-            1
+            Outcome::failed(1, "release_picker_failed")
         }
     }
+}
+
+// Candidate-only injection exercises the real menu and URL/failure reporting
+// without opening a browser on the acceptance runner. Release binaries do not
+// recognize the variable or replace their OS browser opener.
+fn open_download_page() -> i32 {
+    #[cfg(feature = "installer-ci-fixture")]
+    if let Some(log) = std::env::var_os("CLUD_INSTALLER_CI_BROWSER_LOG") {
+        return open_page_with(|url| std::fs::write(log, url).map_err(|error| error.to_string()));
+    }
+    open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()))
 }
 
 fn open_page_with(open: impl FnOnce(&str) -> Result<(), String>) -> i32 {
@@ -409,6 +559,88 @@ mod tests {
     }
 
     #[test]
+    fn install_only_is_claimed_for_current_exact_and_menu_requests() {
+        use clap::Parser;
+
+        for (flags, expected) in [
+            (vec!["--installer", "--no-modify-path"], Request::Menu),
+            (
+                vec![
+                    "--installer",
+                    "--install-current",
+                    "--no-modify-path",
+                    "--yes",
+                ],
+                Request::Current,
+            ),
+            (
+                vec![
+                    "--installer",
+                    "--install-version",
+                    "2.8.14",
+                    "--no-modify-path",
+                ],
+                Request::Exact("2.8.14".into()),
+            ),
+        ] {
+            let mut argv = vec!["clud"];
+            argv.extend(flags);
+            let parsed = Args::try_parse_from(argv).expect("install-only flags must parse");
+            assert!(parsed.no_modify_path);
+            assert_eq!(explicit_request(&parsed).unwrap(), Some(expected));
+        }
+        let split = parse(&[
+            "clud",
+            "--installer",
+            "--install-current",
+            "--no-modify-path",
+        ]);
+        assert!(split.no_modify_path);
+        assert!(split.passthrough.is_empty());
+        assert_eq!(explicit_request(&split).unwrap(), Some(Request::Current));
+        assert!(Args::try_parse_from(["clud", "--no-modify-path"]).is_err());
+    }
+
+    #[test]
+    fn repair_refusal_and_cancellation_never_apply_changes() {
+        for (choice, status) in [(ConfirmChoice::NotNow, 1), (ConfirmChoice::Cancelled, 130)] {
+            assert_eq!(
+                execute_approved_repair("2.8.14", || Ok(choice), || panic!("unapproved write"))
+                    .exit_code(),
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn approved_repair_has_exactly_one_attempt_even_when_it_fails() {
+        let attempts = std::cell::Cell::new(0);
+        let status = execute_approved_repair(
+            "2.8.14",
+            || Ok(ConfirmChoice::Proceed),
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("profile changed again".into())
+            },
+        );
+        assert_eq!(status.exit_code(), 1);
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn failed_repair_confirmation_never_applies_changes() {
+        assert_eq!(
+            execute_approved_repair(
+                "2.8.14",
+                || Err(io::Error::from(io::ErrorKind::Interrupted)),
+                || panic!("unapproved write")
+            )
+            .exit_code(),
+            130
+        );
+    }
+
+    #[test]
     fn invalid_installer_combinations_fail_in_clap() {
         use clap::Parser;
         assert!(Args::try_parse_from(["clud", "--install-current"]).is_err());
@@ -421,6 +653,22 @@ mod tests {
             "2.8.14"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn structured_output_is_scoped_and_never_leaks_to_the_backend() {
+        use clap::Parser;
+        let current = parse(&[
+            "clud",
+            "--installer",
+            "--install-current",
+            "--installer-json",
+        ]);
+        assert!(current.installer_json);
+        assert!(current.passthrough.is_empty());
+        assert_eq!(explicit_request(&current).unwrap(), Some(Request::Current));
+        assert!(Args::try_parse_from(["clud", "--installer-json"]).is_err());
+        assert!(explicit_request(&parse(&["clud", "--installer", "--installer-json"])).is_err());
     }
 
     #[test]
