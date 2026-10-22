@@ -178,14 +178,16 @@ hand; a model must never pick them up from an ordinary prompt.
   directly. The router reads `grind-intake` and `grind-cron` as files next to
   its own directory instead of invoking them.
 - **The agent types** ignore that frontmatter, so they're still listed to the
-  model. clud's PreToolUse hook refuses any `Agent` call whose
-  `subagent_type` is `grind-*`. The workflow's `agent()` spawns don't go
+  model. clud's PreToolUse hook refuses direct `Agent` calls to the internal
+  execution roles. `grind-orchestrator` is the read-only router exception.
+  The workflow's `agent()` spawns don't go
   through the `Agent` tool, so the workflow is unaffected.
   `CLUD_ALLOW_GRIND_AGENTS=1` lifts the block for testing a role by hand.
-- **Each agent carries its procedure.** A hidden skill can't be loaded with
+- **Each execution agent carries its procedure.** A hidden skill can't be loaded with
   the `Skill` tool or `skills:` preload, so `claude_files.rs` writes each
   agent file with its leaf skill's body appended. The skill remains the
-  single source.
+  single source. The standalone orchestrator instructions live in its agent
+  definition; it has no duplicate leaf skill.
 
 ### Router questions
 
