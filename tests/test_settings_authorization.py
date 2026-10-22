@@ -110,6 +110,7 @@ def test_controlled_settings_change_refuses_without_a_user_approval_surface(tmp_
     assert settings.read_bytes() == original
 
 
+@pytest.mark.parametrize("bypass", ["none", "owner", "unsafe", "both"])
 @pytest.mark.parametrize(
     "tool",
     [
@@ -117,14 +118,18 @@ def test_controlled_settings_change_refuses_without_a_user_approval_surface(tmp_
         "NotebookEdit", "apply_patch", "functions.apply_patch",
     ],
 )
-def test_raw_settings_writes_cannot_borrow_forged_authority(tmp_path: Path, tool: str) -> None:
+def test_raw_settings_writes_cannot_borrow_forged_authority(
+    tmp_path: Path, tool: str, bypass: str
+) -> None:
     world = _world(tmp_path)
     settings = world[3]
     original = settings.read_bytes()
     world[1]["CLUD_SETTINGS_APPROVED"] = "1"
     world[1]["CLUD_SETTINGS_APPROVAL"] = json.dumps({"approved": True, "target": str(settings)})
-    world[1]["CLUD_UNSAFE_MODE"] = "1"
-    world[1]["CLUD_ALLOW_ALL_CMDS"] = "1"
+    if bypass in {"unsafe", "both"}:
+        world[1]["CLUD_UNSAFE_MODE"] = "1"
+    if bypass in {"owner", "both"}:
+        world[1]["CLUD_ALLOW_ALL_CMDS"] = "1"
     if tool in {"Bash", "exec_command", "functions.exec_command"}:
         key = "command" if tool == "Bash" else "cmd"
         tool_input: object = {
