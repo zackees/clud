@@ -227,9 +227,12 @@ Graph resumption requires Claude Code 2.1.306 or newer: the old 2.1.282 runtime
 used a shared rolling cache chain whose keys changed when parallel cached
 calls completed in a different order. The PreToolUse hook checks the latest
 matching session-version record in a bounded tail of the harness transcript.
-An older, missing or unrecognized version refuses graph resumption. Keep the
-deferred manifest and launch references, report the unsupported runtime, and
-do not run Finish; update the harness before explicit resumption. The check
+An older, missing or unrecognized version refuses graph launch or resumption.
+Native PostToolUse launch receipts also bind each cache to its originating
+supported runtime, session, run ID and script path. A runtime upgrade does not
+migrate an old cache; missing or incompatible provenance refuses resumption.
+Keep the deferred manifest and launch references, report the unsupported
+capability, and do not run Finish or restart completed goals. The check
 uses the same harness-owned transcript trust boundary as native gate identity.
 
 ### Grind skills require explicit invocation

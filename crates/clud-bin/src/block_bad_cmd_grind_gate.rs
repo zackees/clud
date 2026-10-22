@@ -33,6 +33,7 @@ pub(super) fn rewrite(payload: &HookPayloadView) -> Result<String, String> {
 }
 
 pub(super) fn observe(event: &str, raw: &Value, payload: &HookPayloadView) {
+    resume::observe(event, raw, payload);
     if payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE)
         || payload.tool_name != "Bash"
     {

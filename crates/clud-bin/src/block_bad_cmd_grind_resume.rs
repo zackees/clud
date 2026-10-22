@@ -9,34 +9,56 @@ use super::super::HookPayloadView;
 const MAX_TRANSCRIPT_TAIL: u64 = 256 * 1024;
 const MIN_VERSION: [u64; 3] = [2, 1, 306];
 
+#[path = "block_bad_cmd_grind_resume_origin.rs"]
+mod origin;
+
 pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
     if payload.tool_name != "Workflow" {
-        return None;
-    }
-    let input = payload.tool_input.as_ref()?;
-    if input.get("resumeFromRunId").is_none_or(Value::is_null) {
         return None;
     }
     let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
     reason_for(payload, facts.facts())
 }
 
+fn graph_call(payload: &HookPayloadView, facts: Option<&Value>) -> bool {
+    payload.tool_input.as_ref().is_some_and(|input| {
+        input.pointer("/args/orchestration").is_some_and(Value::is_object)
+    }) || facts.is_some_and(|facts| facts.get("orchestration").is_some_and(Value::is_object))
+}
+
+pub(super) fn observe(event: &str, raw: &Value, payload: &HookPayloadView) {
+    if event != "PostToolUse" || payload.tool_name != "Workflow" {
+        return;
+    }
+    let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
+    if graph_call(payload, facts.facts()) && reason_for(payload, facts.facts()).is_none() {
+        if let Some(version) = transcript_version(payload) {
+            let _ = origin::record(payload, raw, version);
+        }
+    }
+}
+
 fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String> {
-    let input = payload.tool_input.as_ref()?;
-    let graph = input.pointer("/args/orchestration").is_some_and(Value::is_object)
-        || facts.is_some_and(|facts| facts.get("orchestration").is_some_and(Value::is_object));
-    if !graph {
+    if !graph_call(payload, facts) {
         return None;
     }
     let version = transcript_version(payload);
     if version.is_some_and(|version| version >= MIN_VERSION) {
-        return None;
+        let input = payload.tool_input.as_ref()?;
+        if input.get("resumeFromRunId").is_none_or(Value::is_null) || origin::allows(payload) {
+            return None;
+        }
+        return Some("Graph resume refused: the originating Workflow cache has no verified \
+            supported-runtime receipt. A runtime upgrade does not migrate old cache keys. \
+            Keep orchestration_resume and its manifest; report unsupported cache provenance. \
+            Do not run Finish, bypass the refusal, or restart completed goals.".into());
     }
     Some("Graph resumption requires Claude Code >= 2.1.306 with branch-local native caches; \
           this session's runtime is older or could not be verified. Keep orchestration_resume \
           and its deferred manifest, report the missing capability, and do not run Finish or \
-          replay completed work. Update the harness before explicit resumption."
-        .into())
+          replay completed work. Updating the harness does not migrate an old run's cache."
+            .into(),
+    )
 }
 
 fn transcript_version(payload: &HookPayloadView) -> Option<[u64; 3]> {
@@ -45,8 +67,7 @@ fn transcript_version(payload: &HookPayloadView) -> Option<[u64; 3]> {
         return None;
     }
     let path = payload.transcript_path.as_deref()?;
-    if !path.is_absolute()
-        || path.file_name()? != std::ffi::OsStr::new(&format!("{session}.jsonl"))
+    if !path.is_absolute() || path.file_name()? != std::ffi::OsStr::new(&format!("{session}.jsonl"))
     {
         return None;
     }
@@ -58,20 +79,26 @@ fn transcript_version(payload: &HookPayloadView) -> Option<[u64; 3]> {
     let offset = metadata.len().saturating_sub(MAX_TRANSCRIPT_TAIL);
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut bytes = Vec::new();
-    file.take(MAX_TRANSCRIPT_TAIL).read_to_end(&mut bytes).ok()?;
+    file.take(MAX_TRANSCRIPT_TAIL)
+        .read_to_end(&mut bytes)
+        .ok()?;
     // Discard a partial first record before decoding, including a partial UTF-8 character.
     let complete = if offset > 0 {
         &bytes[bytes.iter().position(|byte| *byte == b'\n')? + 1..]
     } else {
         &bytes
     };
-    complete.split(|byte| *byte == b'\n').rev().find_map(|line| {
-        let row: Value = serde_json::from_slice(line).ok()?;
-        if row.get("sessionId").and_then(Value::as_str) != Some(session) {
-            return None;
-        }
-        row.get("version").map(|version| version.as_str().and_then(parse_version))
-    })?
+    complete
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .find_map(|line| {
+            let row: Value = serde_json::from_slice(line).ok()?;
+            if row.get("sessionId").and_then(Value::as_str) != Some(session) {
+                return None;
+            }
+            row.get("version")
+                .map(|version| version.as_str().and_then(parse_version))
+        })?
 }
 
 fn parse_version(value: &str) -> Option<[u64; 3]> {
@@ -114,12 +141,20 @@ mod tests {
         let path = root.path().join("session.jsonl");
         let payload = payload(&path);
         let manifest = json!({"orchestration_resume": {"remaining_goals": ["b", "c"]}});
-        for version in [json!("2.1.282"), json!("2.1.305"), json!("unknown"), Value::Null] {
+        for version in [
+            json!("2.1.282"),
+            json!("2.1.305"),
+            json!("unknown"),
+            Value::Null,
+        ] {
             std::fs::write(&path, record(version, "session")).unwrap();
             let denial = reason_for(&payload, Some(&manifest)).unwrap();
             assert!(denial.contains("2.1.306"));
             assert!(denial.contains("Keep orchestration_resume"));
-            assert_eq!(manifest["orchestration_resume"]["remaining_goals"], json!(["b", "c"]));
+            assert_eq!(
+                manifest["orchestration_resume"]["remaining_goals"],
+                json!(["b", "c"])
+            );
         }
         std::fs::write(&path, "{}\n").unwrap();
         assert!(reason_for(&payload, None).is_some());
@@ -131,16 +166,46 @@ mod tests {
         let path = root.path().join("session.jsonl");
         let payload = payload(&path);
         for version in ["2.1.306", "2.2.0", "3.0.0"] {
-            let content = "x".repeat(MAX_TRANSCRIPT_TAIL as usize + 1) + "\n"
+            let content = "x".repeat(MAX_TRANSCRIPT_TAIL as usize + 1)
+                + "\n"
                 + &record(json!("2.1.282"), "session")
                 + &record(json!(version), "session")
                 + &record(json!("0.0.0"), "another-session");
             std::fs::write(&path, content).unwrap();
-            assert!(reason_for(&payload, None).is_none());
+            assert_eq!(transcript_version(&payload), parse_version(version));
+            assert!(reason_for(&payload, None).is_some()); // Unknown origin is unsafe after upgrade.
         }
         std::fs::write(&path, record(json!("2.1.306"), "session")
             + &record(json!("unknown"), "session")).unwrap();
         assert!(reason_for(&payload, None).is_some());
+    }
+
+    #[test]
+    fn only_native_supported_origin_receipts_allow_resume_after_upgrade() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        std::fs::create_dir(root.path().join("session")).unwrap();
+        std::fs::write(&path, record(json!("2.1.306"), "session")).unwrap();
+        let mut payload = payload(&path);
+        payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
+        assert!(reason_for(&payload, None).is_none());
+        let response = json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
+        observe("PreToolUse", &response, &payload);
+        payload.tool_input = Some(json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
+            "args": {"orchestration": {}}}));
+        assert!(reason_for(&payload, None).is_some());
+        payload.tool_input.as_mut().unwrap().as_object_mut().unwrap().remove("resumeFromRunId");
+        observe("PostToolUse", &response, &payload);
+        payload.tool_input.as_mut().unwrap()["resumeFromRunId"] = json!("wf-new");
+        assert!(reason_for(&payload, None).is_none());
+        payload.tool_input.as_mut().unwrap()["scriptPath"] = json!("/another/script.js");
+        assert!(reason_for(&payload, None).is_some());
+        payload.tool_input.as_mut().unwrap()["scriptPath"] = json!("/native/script.js");
+        let receipt = root.path().join("session/grind-resume-wf-new.json");
+        let mut old: Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        old["version"] = json!([2, 1, 282]);
+        std::fs::write(receipt, old.to_string()).unwrap();
+        assert!(reason_for(&payload, None).unwrap().contains("does not migrate"));
     }
 
     #[test]
