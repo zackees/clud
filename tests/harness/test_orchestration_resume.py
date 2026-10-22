@@ -153,9 +153,10 @@ def test_native_resume_only_reobserves_deferred_branch(
         assert "WAKE_DEFERRED_GRAPH" in json.dumps(resumed_request["messages"][-1])
     assert _merged(h) == [f"grind/{goal}" for goal in ("a", "b", "c", "d", "e")]
     for row in result.requests:
-        if row["role"] in ("gate:e", "planner:a", "worker:a", "integrator:a", "lander:a:0",
-                           "planner:d", "worker:d", "integrator:d", "lander:d:0",
-                           "planner:e", "worker:e", "integrator:e", "lander:e:0"):
+        if row["role"] in ("gate:e", "planner:a", "worker:a", "reviewer:a", "integrator:a",
+                           "lander:a:0", "planner:d", "worker:d", "reviewer:d", "integrator:d",
+                           "lander:d:0", "planner:e", "worker:e", "reviewer:e", "integrator:e",
+                           "lander:e:0"):
             assert row["n"] < boundary, row["role"]
     assert any(row["role"] == "gate:b:resume" and row["n"] > boundary for row in result.requests)
     assert any(row["role"] == "planner:b" and row["n"] > boundary for row in result.requests)
