@@ -91,7 +91,7 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
         return h.run_clud_interactive(
             '/loop WAKE_DEFERRED_GRAPH remaining_goals=["b","c"]', script,
             model="nvidia/nemotron-3-ultra-550b-a55b:free",
-            finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180,
+            finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180, confirm_background_exit=False,
         )
     except AssertionError:
         requests = h.logs / "requests.jsonl"
