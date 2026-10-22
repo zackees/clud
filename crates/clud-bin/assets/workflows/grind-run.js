@@ -22,6 +22,9 @@ export const meta = {
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
 //   maxAgents?: 4, maxFixRounds?: 10, agentErrors?: 3,   // agentErrors: tool-misuse allowance, apart from fix rounds (#1331)
 //   planOnly?: true, meta?: '<meta issue number>',
+//   orchestration?: { session_repo: 'owner/repo', goals: [
+//     { id, repo, main, checkout?: 'local' | 'worktree', blockers: [{goal, when, check?}] }
+//   ], proposed_goals: [], risks: [] }, // run graph, separate from grind-plan/v1 stages
 //   base?: 'main',   // default base branch for goals in no plan stage; omitted = main
 //                    // a plan stage's `base` wins for its children (#1409)
 //   // Stages (#1409): the router starts grind-run once per stage. The bug-stage
@@ -61,6 +64,58 @@ if (!args || !args.repo || !Array.isArray(args.goals) || (!args.goals.length && 
 if (!args.planOnly && args.mode !== 'parallel' && args.mode !== 'sequential') {
   throw new Error(`grind mode must be "parallel" or "sequential" (got ${JSON.stringify(args.mode)}); cron mode is driven by /grind-cron`)
 }
+
+// Validate the entire graph before classification, prework, or any goal agent.
+// This is structural validation. A local checkout still requires a clean-tree
+// check, and worktree creation still requires the session's explicit consent.
+const nonempty = (s) => typeof s === 'string' && s.trim().length > 0
+const graphGoal = (g, sessionRepo) => {
+  if (!g || !nonempty(g.id)) throw new Error('run plan: every goal needs an id')
+  if (!nonempty(g.repo) || !nonempty(g.main)) throw new Error(`goal ${g.id}: repo and main are required`)
+  if (!/^[^\s/]+\/[^\s/]+$/.test(g.repo)) throw new Error(`goal ${g.id}: repo must be owner/name`)
+  const checkout = g.checkout || (g.repo === sessionRepo ? 'local' : 'worktree')
+  if (checkout !== 'local' && checkout !== 'worktree') throw new Error(`goal ${g.id}: unknown checkout ${JSON.stringify(checkout)}`)
+  if (checkout === 'local' && g.repo !== sessionRepo) throw new Error(`goal ${g.id}: a sister repo must use a worktree`)
+  if (!Array.isArray(g.blockers)) throw new Error(`goal ${g.id}: blockers must be an array`)
+  return { ...g, checkout }
+}
+const graphBlocker = (blocker, goal, ids) => {
+  if (!blocker || !ids.has(blocker.goal)) throw new Error(`unknown goal ${JSON.stringify(blocker && blocker.goal)} in blockers of ${goal.id}`)
+  if (!['merged', 'released', 'tag', 'published'].includes(blocker.when)) throw new Error(`unknown condition ${JSON.stringify(blocker.when)}`)
+  if (blocker.when !== 'merged' && !nonempty(blocker.check)) throw new Error(`blocker ${blocker.goal} → ${goal.id} (${blocker.when}) has no check`)
+}
+const graphOrder = (goals, ids) => {
+  const done = new Set()
+  const active = []
+  const ordered = []
+  const visit = (id) => {
+    if (done.has(id)) return
+    const cycle = active.indexOf(id)
+    if (cycle >= 0) throw new Error(`dependency cycle: ${[...active.slice(cycle), id].join(' → ')}`)
+    active.push(id)
+    const goal = ids.get(id)
+    goal.blockers.forEach(b => visit(b.goal))
+    active.pop()
+    done.add(id)
+    ordered.push(goal)
+  }
+  goals.forEach(g => visit(g.id))
+  return ordered
+}
+const validateRunPlan = (plan) => {
+  if (!plan || !nonempty(plan.session_repo)) throw new Error('run plan: session_repo is required')
+  if (!Array.isArray(plan.goals) || !plan.goals.length) throw new Error('run plan: goals must be a nonempty array')
+  const goals = plan.goals.map(g => graphGoal(g, plan.session_repo))
+  const ids = new Map()
+  goals.forEach(g => {
+    if (ids.has(g.id)) throw new Error(`duplicate goal ${JSON.stringify(g.id)}`)
+    ids.set(g.id, g)
+  })
+  goals.forEach(g => g.blockers.forEach(b => graphBlocker(b, g, ids)))
+  return { ...plan, goals: graphOrder(goals, ids) }
+}
+if (args.orchestration !== undefined) validateRunPlan(args.orchestration)
+
 const REPO = args.repo
 const MAIN = args.main || 'main'
 // The checkout path and the forge identity serve different purposes (#1897).
