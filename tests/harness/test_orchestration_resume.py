@@ -113,7 +113,9 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("mode,scheduled", [("parallel", False), ("sequential", False), ("parallel", True)])
+@pytest.mark.parametrize(("mode", "scheduled"), [
+    ("parallel", False), ("sequential", False), ("parallel", True),
+])
 def test_native_resume_only_reobserves_deferred_branch(
     harness: Harness, monkeypatch, mode: str, scheduled: bool,
 ) -> None:
@@ -191,6 +193,69 @@ def test_native_resume_only_reobserves_deferred_branch(
     assert any(row["role"] == "gate:b:resume" and row["n"] > boundary for row in result.requests)
     assert any(row["role"] == "planner:b" and row["n"] > boundary for row in result.requests)
     assert any(row["role"] == "planner:c" and row["n"] > boundary for row in result.requests)
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("mode", ["parallel", "sequential"])
+def test_native_resume_preserves_completed_work_across_three_generations(
+    harness: Harness, monkeypatch, mode: str,
+) -> None:
+    h = harness
+    graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
+        {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
+        {"id": "b", "repo": "o/r", "main": "main", "blockers": [
+            {"goal": "a", "when": "released", "check": "gh release view v-b --repo o/r"},
+        ]},
+        {"id": "c", "repo": "o/r", "main": "main", "blockers": [
+            {"goal": "b", "when": "released", "check": "gh release view v-c --repo o/r"},
+        ]},
+        {"id": "d", "repo": "o/r", "main": "main", "blockers": []},
+    ], "proposed_goals": [], "risks": []}
+    state = h.read_gh_state()
+    state["release_after_views"] = {tag: {
+        "after": 1, "release": {"publishedAt": "2026-10-22T00:00:00Z"},
+    } for tag in ("v-b", "v-c")}
+    h.write_gh_state(state)
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    captured = capture_resume_input(h, monkeypatch)
+    (h.logs / "next-gate-epochs.json").write_text(json.dumps([
+        {"b": 1, "c": 1}, {"b": 1, "c": 2},
+    ]))
+    roles = [role for goal in ("a", "b", "c", "d") for role in _goal_roles(h, goal)]
+    roles.extend([
+        gate_role("gate:b:0", "b", "v-b", False, 0),
+        gate_role("gate:b:1", "b", "v-b", True, 1),
+        gate_role("gate:c:1", "c", "v-c", False, 1),
+        gate_role("gate:c:2", "c", "v-c", True, 2),
+    ])
+    script = _script(h, mode, _goals("a", "b", "c", "d"), roles,
+                     orchestration=graph, gateAttempts=1)
+    resume = {"tool_use": {"name": "Workflow", "input_file": str(captured)}}
+    script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>", "steps": [
+        {"text": "unused"}, {"text": "unused"}, resume,
+        _after({"is_error": False}, {"text": "GENERATION_ONE_STARTED"}), resume,
+        _after({"is_error": False}, {"text": "GENERATION_TWO_STARTED"}),
+        {"text": "THREE_GENERATIONS_COMPLETE"},
+    ]})
+    result = h.run("Resume both publication gates without repeating completed work.",
+                   script, timeout=210)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    outputs = workflow_results(result)
+    assert len(outputs) == 3, outputs
+    assert outputs[0]["resume"]["remaining_goals"] == ["b", "c"]
+    assert outputs[1]["resume"]["remaining_goals"] == ["c"]
+    assert outputs[1]["resume"]["gateEpochs"] == {"b": 1, "c": 2}
+    assert "resume" not in outputs[2]
+    assert _merged(h) == [f"grind/{goal}" for goal in ("a", "b", "c", "d")]
+    for goal in ("a", "b", "c", "d"):
+        for role in ("planner", "worker", "reviewer", "integrator"):
+            turns = [row for row in result.requests
+                     if row["role"] == f"{role}:{goal}" and row.get("turn") == 0]
+            assert len(turns) == 1, (goal, role, turns)
+    for gate in ("gate:b:0", "gate:b:1", "gate:c:1", "gate:c:2"):
+        assert len([row for row in result.requests
+                    if row["role"] == gate and row.get("turn") == 0]) == 1, gate
 
 
 @pytest.mark.parametrize("orchestrated", [False, True])
