@@ -601,3 +601,66 @@ def test_body_file_from_stdin_and_path(world, capsys, monkeypatch, tmp_path):
     assert state["issues"]["1"]["comments"][0]["body"] == plan
     number = out.strip().rsplit("/", 1)[-1]
     assert state["issues"][number]["body"] == "evidence\nRefs #1\n"
+
+
+def _two_repositories() -> dict:
+    return {
+        "repo": "o/primary",
+        "repositories": {
+            name: {"repo": name, "default_branch": branch, "prs": [], "issues": {
+                "7": {"title": name, "body": marker, "state": "open", "comments": []},
+            }}
+            for name, branch, marker in [
+                ("o/primary", "master", "PRIMARY_REPO_ISSUE"),
+                ("o/sister", "main", "SISTER_REPO_ISSUE"),
+            ]
+        },
+    }
+
+
+@pytest.mark.parametrize("selection", [
+    ["issue", "view", "7", "--repo", "o/sister"],
+    ["issue", "view", "7", "--repo=o/sister"],
+    ["-R", "o/sister", "issue", "view", "7"],
+    ["-Ro/sister", "issue", "view", "7"],
+    ["issue", "view", "https://github.com/o/sister/issues/7"],
+])
+def test_repo_selection_does_not_conflate_issue_numbers(world, capsys, selection):
+    world(_two_repositories())
+    code, out, _ = _run(capsys, *selection, "--json", "title,body,url")
+    assert code == 0
+    value = json.loads(out)
+    assert value["body"] == "SISTER_REPO_ISSUE"
+    assert value["url"] == "https://github.com/o/sister/issues/7"
+
+
+def test_repository_mutations_preserve_other_repositories(world, capsys):
+    world(_two_repositories())
+    argv = ["issue", "comment", "7", "--repo", "o/sister", "--body", "sister only"]
+    code, out, _ = _run(capsys, *argv)
+    assert code == 0
+    assert out.startswith("https://github.com/o/sister/issues/7#")
+    state = _state(world)
+    assert state["repositories"]["o/primary"]["issues"]["7"]["comments"] == []
+    assert state["repositories"]["o/sister"]["issues"]["7"]["comments"][0]["body"] == "sister only"
+    assert state["calls"] == [argv]
+
+
+def test_rest_endpoints_select_their_repository(world, capsys):
+    world(_two_repositories())
+    code, out, _ = _run(capsys, "api", "repos/o/sister/issues/7", "--jq", ".body")
+    assert code == 0
+    assert out.strip() == "SISTER_REPO_ISSUE"
+    code, out, _ = _run(capsys, "repo", "view", "o/primary", "--json", "defaultBranchRef")
+    assert code == 0
+    assert json.loads(out)["defaultBranchRef"]["name"] == "master"
+
+
+def test_unknown_repository_does_not_fall_back_to_primary(world, capsys):
+    world(_two_repositories())
+    code, _, error = _run(capsys, "issue", "view", "7", "--repo", "o/unknown")
+    assert code != 0
+    assert "unknown fixture repository o/unknown" in error
+    state = _state(world)
+    assert len(state["calls"]) == 1
+    assert state["repositories"] == _two_repositories()["repositories"]
