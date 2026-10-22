@@ -18,9 +18,14 @@ const MAX_BYTES: u64 = 16384;
 fn path(payload: &HookPayloadView) -> Result<PathBuf, String> {
     // Resolve trusted metadata first, including the session/agent id checks.
     native_label(payload)?;
-    let transcript = payload.transcript_path.as_ref().ok_or("missing transcript")?;
+    let transcript = payload
+        .transcript_path
+        .as_ref()
+        .ok_or("missing transcript")?;
     let agent = payload.agent_id.as_deref().ok_or("missing agent")?;
-    Ok(transcript.with_extension("").join(format!("gate-{agent}.json")))
+    Ok(transcript
+        .with_extension("")
+        .join(format!("gate-{agent}.json")))
 }
 
 fn binding(payload: &HookPayloadView, facts: &Value) -> Result<Value, String> {
@@ -41,7 +46,10 @@ fn encode(value: &Value) -> Result<Vec<u8>, String> {
 
 pub(super) fn claim(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
     let bytes = encode(&json!({"binding": binding(payload, facts)?, "outcome": "pending"}))?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path(payload)?)
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path(payload)?)
         .map_err(|e| format!("one check attempt per gate agent: {e}"))?;
     file.lock_exclusive().map_err(|e| e.to_string())?;
     file.write_all(&bytes).map_err(|e| e.to_string())
@@ -49,15 +57,25 @@ pub(super) fn claim(payload: &HookPayloadView, facts: &Value) -> Result<(), Stri
 
 fn open(payload: &HookPayloadView, write: bool) -> Result<File, String> {
     let path = path(payload)?;
-    if !std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?.file_type().is_file() {
+    if !std::fs::symlink_metadata(&path)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_file()
+    {
         return Err("gate evidence is not a regular file".into());
     }
-    OpenOptions::new().read(true).write(write).open(path).map_err(|e| e.to_string())
+    OpenOptions::new()
+        .read(true)
+        .write(write)
+        .open(path)
+        .map_err(|e| e.to_string())
 }
 
 fn read(file: &mut File) -> Result<Value, String> {
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err("gate evidence exceeds its size limit".into());
     }
@@ -65,7 +83,10 @@ fn read(file: &mut File) -> Result<Value, String> {
 }
 
 pub(super) fn observe(
-    event: &str, raw: &Value, payload: &HookPayloadView, facts: &Value,
+    event: &str,
+    raw: &Value,
+    payload: &HookPayloadView,
+    facts: &Value,
 ) -> Result<(), String> {
     if !matches!(event, "PostToolUse" | "PostToolUseFailure") {
         return Ok(());
@@ -80,7 +101,10 @@ pub(super) fn observe(
         return Err("gate outcome does not match its pending check".into());
     }
     let success = event == "PostToolUse"
-        && raw.pointer("/tool_response/interrupted").and_then(Value::as_bool) == Some(false);
+        && raw
+            .pointer("/tool_response/interrupted")
+            .and_then(Value::as_bool)
+            == Some(false);
     state["outcome"] = json!(if success { "success" } else { "failure" });
     let bytes = encode(&state)?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -89,8 +113,12 @@ pub(super) fn observe(
 }
 
 pub(super) fn report(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
-    let ready = payload.tool_input.as_ref().and_then(|input| input.get("ready"))
-        .and_then(Value::as_bool).ok_or("gate report requires a boolean ready field")?;
+    let ready = payload
+        .tool_input
+        .as_ref()
+        .and_then(|input| input.get("ready"))
+        .and_then(Value::as_bool)
+        .ok_or("gate report requires a boolean ready field")?;
     let expected = binding(payload, facts)?;
     // An explicit not-ready report cannot release dependent work.
     if !ready {

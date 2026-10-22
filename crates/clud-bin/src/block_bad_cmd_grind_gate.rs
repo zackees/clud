@@ -304,8 +304,13 @@ mod tests {
         evidence::claim(&fixture.payload, &fixture.facts).unwrap();
         assert!(evidence::claim(&fixture.payload, &fixture.facts).is_err());
         assert!(evidence::report(&report, &fixture.facts).is_err());
-        evidence::observe("PostToolUse", &json!({"tool_response": {"interrupted": false}}),
-                          &fixture.payload, &fixture.facts).unwrap();
+        evidence::observe(
+            "PostToolUse",
+            &json!({"tool_response": {"interrupted": false}}),
+            &fixture.payload,
+            &fixture.facts,
+        )
+        .unwrap();
         assert!(evidence::report(&report, &fixture.facts).is_ok());
         fixture.facts["orchestration"]["goals"][0]["blockers"][0]["check"] = json!("echo CHANGED");
         assert!(evidence::report(&report, &fixture.facts).is_err());
@@ -315,7 +320,10 @@ mod tests {
     fn failed_interrupted_and_unknown_outcomes_cannot_release_a_gate() {
         for (event, response) in [
             ("PostToolUseFailure", json!({})),
-            ("PostToolUse", json!({"tool_response": {"interrupted": true}})),
+            (
+                "PostToolUse",
+                json!({"tool_response": {"interrupted": true}}),
+            ),
             ("PostToolUse", json!({})),
         ] {
             let fixture = Fixture::new();
