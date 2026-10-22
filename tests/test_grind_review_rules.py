@@ -107,7 +107,7 @@ def test_workflow_parks_and_blocks_dependents() -> None:
     assert "blocked: dependency ${dep}" in js
     # A dependency that already settled blocks before any worker writes.
     attempt = js[js.index("const attemptGoal") :]
-    assert attempt.index("settledBlock(p)") < attempt.index("await work(p, g)")
+    assert attempt.index("settledBlock(p)") < attempt.index("await work(state.p, g)")
 
 
 def test_finish_keeps_park_branches() -> None:
