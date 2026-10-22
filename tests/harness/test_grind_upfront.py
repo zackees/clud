@@ -290,6 +290,7 @@ def _plan(meta: str, run_id: str, stages: list[dict[str, Any]], **extra: Any) ->
 def _real_run(h: Harness, meta: str, goals: list[int], plan: dict[str, Any]) -> dict[str, Any]:
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": meta,

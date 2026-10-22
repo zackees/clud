@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-prework
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 You record the plan; you do not make it.
 
 You change no code, so the RED -> GREEN rule for code changes applies later,
@@ -30,7 +32,7 @@ backtick fence and never unescape anything.
    `printf '%s'` into `gh`:
 
    ```bash
-   printf '%s' '<the body, exactly as given>' | gh issue comment <meta> --repo <repo> --body-file -
+   printf '%s' '<the body, exactly as given>' | gh issue comment <meta> --repo <github-repo> --body-file -
    ```
 
    The body holds no single quote, so single quotes keep every character

@@ -27,3 +27,11 @@ for controlled process sessions. Its watchdog scenario invokes the real clud
 tool wrapper with a blocked local uv fixture. GitHub reads not replaced by the
 fixture fail immediately. This tests the documented execution procedure, not
 a real Codex agent or automatic goal resumption.
+
+`grind_workflow_probe.mjs` executes the production `grind-run.js` body in a
+controlled async JavaScript host (#1897). It removes only the metadata export
+keyword and supplies deterministic agent replies. Prompts and feature-landing
+commands are captured without model, shell-tool or GitHub requests. It tests
+workflow data flow rather than the real Claude Workflow host. The companion
+Python tests also exercise real hook caps, task separators and offline waiter
+resumption, with a fork/upstream command-target fixture.

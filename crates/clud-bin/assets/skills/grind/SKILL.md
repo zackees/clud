@@ -70,8 +70,13 @@ reconcile on a schedule; setting one up is out of scope for this run.
 ## 1. Intake
 
 Read `../grind-intake/SKILL.md`, next to this skill's base directory, and follow it with the user's argument (the leaf skills are hidden from the model, so they are read rather than invoked). It returns the goal list
-(`[{id, title, brief}]`) in order, plus the `meta` issue, the repository root
-and its default branch (`main` or `master`).
+(`[{id, title, brief}]`) in order, plus the `meta` issue, the repository root,
+the resolved `github_repo` (`OWNER/REPO`) and its default branch (`main` or
+`master`). Use that slug as `<github-repo>` in every repository-scoped `gh`
+command; API endpoints use its owner/name directly. Keep the checkout path in
+`repo` and the forge slug in `github_repo`. Preserve the same slug in
+`plan.repo` and every workflow call. If either identity is missing or they
+disagree, stop before delegating; never fall back to a fork's gh default.
 
 Intake always resolves the input to a meta issue: it creates or attaches one
 for a prompt or issue list, or converts a multi-part issue after asking. That
@@ -98,7 +103,7 @@ After intake resolves the meta issue `T`, write `<facts>` as:
 
 clud's command hook then denies the planner Write/Edit, `git worktree add`
 and `git push`. Start the Workflow named `grind-run` with args
-`{repo, main, meta, goals, planOnly: true}` and relay its output. The
+`{repo, github_repo, main, meta, goals, planOnly: true}` and relay its output. The
 Workflow tool returns at once and its result arrives later as a task
 notification: end your turn and do nothing else until it arrives.
 
@@ -117,7 +122,7 @@ The workflow also returns `path` and a one-line `message`:
   shown in the question round.
 
 **No overlap.** Before the question round, run
-`gh pr list --state open --base <main> --search 'head:grind/meta-' --json number,headRefName,isDraft`
+`gh pr list --repo <github-repo> --state open --base <main> --search 'head:grind/meta-' --json number,headRefName,isDraft`
 (`T` is the top meta issue). A PR is a feature PR *under `T`* when its head
 is `grind/meta-<X>-…` and `X` is `T` or one of `T`'s sub-issues
 (`gh api repos/<o>/<r>/issues/<T>/sub_issues`): in a meta of metas the
@@ -125,7 +130,7 @@ feature branch carries its sub-meta's number (section 2b).
 
 **Live or abandoned.** A run that stalls or whose session ends leaves its
 feature PR open, and nothing else ever closes it (#1819). So for each
-feature PR under `T`, read `gh pr view <n> --json commits,updatedAt,body`
+feature PR under `T`, read `gh pr view --repo <github-repo> <n> --json commits,updatedAt,body`
 and `clud grind-facts owner <n>`, which lists every run whose facts record
 that PR with `idle_secs`, the time since that run's last tool call (the hook
 refreshes the facts file on every lookup). The PR is *abandoned* when no
@@ -217,7 +222,7 @@ after it, by the main session or anyone else.
   under `T`; it replaces the Regroup item, which a bugs-only plan skips):
   show the 1b evidence; options **Close #<n> and run the feature stage**
   (Recommended) and **Keep #<n>; bugs-only this run**. On Close, after the
-  round and before prework: `gh pr close <n> --delete-branch --comment
+  round and before prework: `gh pr close --repo <github-repo> <n> --delete-branch --comment
   "Closing: abandoned by grind run <id> (no goal landed); run <run-id>
   takes over."`; if `.clud/grind/worktrees/feature` still holds that
   branch, check it has no unpushed work (`/clud-git`) and remove it with
@@ -300,10 +305,10 @@ question round and before prework:
   Grind-made sub-metas are kept as groups as they are: no rewrite, and their
   children are never re-parented.
 - Reuse user-made (unmarked) sub-metas first, in place: rewrite each with
-  `gh issue edit <n> --title ... --body-file <f>`, where the new body starts
+  `gh issue edit --repo <github-repo> <n> --title ... --body-file <f>`, where the new body starts
   with `<!-- grind:v1 -->` and ends with
   `<details><summary>Previous content</summary>\n\n<old body>\n\n</details>`.
-  Only groups beyond the reused count get new issues: `gh issue create` with
+  Only groups beyond the reused count get new issues: `gh issue create --repo <github-repo>` with
   the marker body and label `grind:meta`, then
   `gh api -X POST repos/<o>/<r>/issues/<T>/sub_issues -F sub_issue_id=<id>`.
   `sub_issue_id` is always the issue's REST `id`
@@ -400,7 +405,7 @@ agent gets that comment's URL. Nobody edits the plan comment.
 - Parallel or sequential: start the Workflow named `grind-run` once per
   stage, because the feature branch is cut only after the bug stage ends.
   1. **Bug stage** (always, even when it has no children): args
-     `{repo, main, mode, goals, ci, scripts, plan, meta, base: <main>,
+     `{repo, github_repo, main, mode, goals, ci, scripts, plan, meta, base: <main>,
      problem_reporting, models: {planner, worker, reviewer, integrator}}`,
      where `plan` is the 3b object and `goals` are the bug-stage children
      only (`[]` for an all-feature plan: the call then only posts the plan).
@@ -454,7 +459,7 @@ branch contains every bug fix that merged:
    unless step 3 carried changes, so first give it an opening commit:
    `git -C <worktree> commit --allow-empty -m "grind: open feature branch for run <run-id> (#<M>)"`
    and push it. Then
-   `gh pr create --draft --base <main> --head grind/meta-<M>-<run-id>`. The
+   `gh pr create --repo <github-repo> --draft --base <main> --head grind/meta-<M>-<run-id>`. The
    body starts with `Closes #<meta>` (plus `Closes #<original>` when intake
    converted an original issue), followed by a goals table (goal, goal PR,
    status). For a meta of metas, `<meta>` is the feature group's sub-meta;
@@ -473,7 +478,7 @@ integrator merges it into the feature branch before the next feature goal
 (`git merge --no-ff origin/<main>` in the feature worktree); nobody rebases
 the feature branch. While `<facts>` records the feature,
 clud's hook refuses the router a second `git worktree add`, any
-`gh issue close` (or `gh api … -f state=closed`), merging the feature PR,
+`gh issue close --repo <github-repo>` (or `gh api … -f state=closed`), merging the feature PR,
 and deleting a `grind/*` branch.
 
 ## 5. Finish (always, as the very last step)
@@ -486,7 +491,7 @@ two), whether or not every goal merged:
    bug (`blocked: bug #N did not land`) next to that bug. For a feature
    stage, by `feature_merge`:
    - `later`: when every feature goal landed, mark the feature PR ready
-     (`gh pr ready <fpr>`) but never merge it; report it as waiting for the
+     (`gh pr ready --repo <github-repo> <fpr>`) but never merge it; report it as waiting for the
      user. If a goal did not land, leave it a draft and say which.
    - `comment`: post one result comment on the meta issue (branch, goals
      landed, feature PR) and keep the PR draft.
@@ -505,17 +510,17 @@ two), whether or not every goal merged:
    dedupe by kind + summary + related_issue. Then,
    by the plan's `problem_reporting`:
    - `issue`: create the label first if missing
-     (`gh label create grind:followup --force`). For each problem, search for
+     (`gh label create --repo <github-repo> grind:followup --force`). For each problem, search for
      an existing follow-up with the same title
-     (`gh issue list --state all --label grind:followup --search '<summary> in:title'`)
+     (`gh issue list --repo <github-repo> --state all --label grind:followup --search '<summary> in:title'`)
      and skip duplicates; otherwise run
-     `gh issue create --title '<kind>: <summary>' --label grind:followup --body-file <f>`,
+     `gh issue create --repo <github-repo> --title '<kind>: <summary>' --label grind:followup --body-file <f>`,
      where the body holds the evidence, `Refs #<meta>`, and the marker
      `<!-- grind:followup meta=<meta> stage=<bugs|feature> feature-pr=<n or none> -->`
      (`stage=bugs` when the problem's goal was a bug-stage goal or the run
      has no feature stage). NEVER attach a follow-up as a sub-issue of the
      meta issue, and never add it to the meta's Tracks list.
-   - `comment`: one `gh issue comment` per problem on its `related_issue`,
+   - `comment`: one `gh issue comment --repo <github-repo>` per problem on its `related_issue`,
      or on the meta issue when there is none, after the same duplicate
      search.
 
@@ -565,7 +570,7 @@ two), whether or not every goal merged:
 | Node | Role | Caps |
 |---|---|---|
 | `/grind-intake` | router | main session |
-| `/grind-prework` | `grind-prework` | read-only git/gh; `gh issue comment` on the meta issue only; no edits, worktrees or builds |
+| `/grind-prework` | `grind-prework` | read-only git/gh; `gh issue comment --repo <github-repo>` on the meta issue only; no edits, worktrees or builds |
 | `/grind-plan` | `grind-planner` | read-only git/gh; `git worktree add` in parallel mode |
 | `/grind-plan` (plan-only) | `grind-planner` | read-only git/gh; no Write/Edit, worktree or push |
 | `/grind-work` | `grind-worker` | read/write assigned files; read-only `gh`; web search |
@@ -573,7 +578,7 @@ two), whether or not every goal merged:
 | `/grind-integrate` | `grind-integrator` | full shell, one at a time; no `bosn`, containers only via `act`, no new worktrees |
 | `/grind-land` | `grind-lander` | `gh pr`, `pr_merge_watch`, `git push`; no edits |
 | `/grind-cron` | router | main session |
-| Finish: file problems | router | main session; the only node that runs `gh issue create` (`grind:followup` issues) |
+| Finish: file problems | router | main session; the only node that runs `gh issue create --repo <github-repo>` (`grind:followup` issues) |
 
 Tools are capped by each agent type's `tools:` list; shell commands by
 clud's PreToolUse hook, keyed on the agent type.

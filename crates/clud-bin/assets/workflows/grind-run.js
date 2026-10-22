@@ -15,7 +15,8 @@ export const meta = {
 }
 
 // args: {
-//   repo: '/abs/repo', main: 'main', mode: 'parallel' | 'sequential',
+//   repo: '/abs/repo', github_repo: 'owner/name', main: 'main', mode: 'parallel' | 'sequential',
+//   // github_repo may be omitted when plan.repo supplies the same forge identity.
 //   goals: [{ id, title, brief }], ci: false, lane?: 'job-id',
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
@@ -62,6 +63,25 @@ if (!args.planOnly && args.mode !== 'parallel' && args.mode !== 'sequential') {
 }
 const REPO = args.repo
 const MAIN = args.main || 'main'
+// The checkout path and the forge identity serve different purposes (#1897).
+// Validate the explicit/recorded identity before any agent can act on a fork.
+const githubRepository = (value) => {
+  const invalid = () => new Error('GitHub repository must be an explicit OWNER/REPO in github_repo or plan.repo')
+  if (typeof value !== 'string') throw invalid()
+  const slug = value.trim()
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+$/.test(slug)
+    || slug.split('/').some(part => part === '.' || part === '..')) throw invalid()
+  return slug
+}
+const suppliedRepository = args.github_repo === undefined ? null : githubRepository(args.github_repo)
+const recordedRepository = args.plan?.repo === undefined ? null : githubRepository(args.plan.repo)
+if (suppliedRepository && recordedRepository
+  && suppliedRepository.toLowerCase() !== recordedRepository.toLowerCase()) {
+  throw new Error('GitHub repository disagrees with the recorded plan')
+}
+const GITHUB_REPO = suppliedRepository || recordedRepository
+if (!GITHUB_REPO) throw new Error('GitHub repository is missing: pass github_repo or plan.repo as OWNER/REPO')
+const REPO_HEADER = `Repo: ${REPO} (default branch ${MAIN}).\nGitHub repository: ${GITHUB_REPO}. Pass --repo ${GITHUB_REPO} to gh issue/pr/run/label/search/workflow commands and the PR waiter. Put this repository directly in gh api endpoints.`
 const PARALLEL = args.mode === 'parallel'
 const CI = !!args.ci
 const MAX_AGENTS = Math.max(1, Math.floor(args.maxAgents ?? 4))
@@ -302,7 +322,7 @@ const PREWORK = { type: 'object', required: ['posted'], properties: {
 if (args.planOnly) {
   phase('Classify')
   const c = await agent(
-    `Follow your built-in /grind-plan procedure in PLAN-ONLY mode (read-only: no Write/Edit, no worktree, no push, no branch).\n\nRepo: ${REPO} (default branch ${MAIN}). Meta issue: #${args.meta}.\nChildren of the meta issue:\n` +
+    `Follow your built-in /grind-plan procedure in PLAN-ONLY mode (read-only: no Write/Edit, no worktree, no push, no branch).\n\n${REPO_HEADER} Meta issue: #${args.meta}.\nChildren of the meta issue:\n` +
     args.goals.map(g => `${g.id}: ${g.title}\n${g.brief}`).join('\n\n') +
     `\n\nClassify every child as bug or feature, name the feature groups and whether they are independent, which feature children depend on which bugs, and the dependency order. Classify every child listed above exactly once, using its id as given; set confident to false if any child cannot be placed. Return it through StructuredOutput.`,
     opts('planner', 'classify', 'Classify', CLASSIFY))
@@ -343,7 +363,7 @@ if (PLAN_URL) {
     return { stopped: 'prework', note, problems: allProblems() }
   }
   const pw = collect(await agent(
-    `Follow your built-in /grind-prework procedure.\n\nRepo: ${REPO} (default branch ${MAIN}). Meta issue: #${args.plan.meta}.\n` +
+    `Follow your built-in /grind-prework procedure.\n\n${REPO_HEADER} Meta issue: #${args.plan.meta}.\n` +
     `Post these ${bodies.length} comment bod${bodies.length === 1 ? 'y' : 'ies'} verbatim, in order:\n\n` +
     bodies.map((b, i) => `--- body ${i + 1} of ${bodies.length} ---\n${b}`).join('\n\n'),
     opts('prework', 'prework', 'Prework', PREWORK)), 'prework', 'prework')
@@ -459,13 +479,13 @@ const featureLandNote = (g) => {
   const original = args.plan && args.plan.original
   const marker = (goalPr) => `<!-- grind:v1 feature-pr=#${fpr} branch=${FEATURE.branch}${goalPr ? ` goal-pr=#${goalPr}` : ''} run=${FEATURE_RUN_ID || '<run-id>'} -->`
   const others = [meta, original].filter(Boolean).map(n => `#${n}`)
-  return `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --admin --merge\` (never --delete-branch), never into ${MAIN}.\n` +
+  return `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --admin --merge --repo ${GITHUB_REPO}\` (never --delete-branch), never into ${MAIN}.\n` +
     `Once it has merged, record the landing so issue #${g.id} is never lost (#1393):\n` +
-    `1. gh label create ${ON_FEATURE} --force\n` +
-    `2. gh issue edit ${g.id} --add-label ${ON_FEATURE}` + (others.length ? `, and the same for ${others.join(' and ')}` : '') + `.\n` +
-    `3. gh issue comment ${g.id} --body 'Landed on feature branch ${FEATURE.branch} via #<n>; closes when feature PR #${fpr} merges into ${MAIN}. ${marker('<n>')}'` +
-    (others.length ? `. For ${others.join(' and ')}: read its comments (gh issue view <m> --json comments) and, only if none has a marker with feature-pr=#${fpr}, post one: ${marker(null)}` : '') + `.\n` +
-    `4. gh pr view ${fpr} --json body, then gh pr edit ${fpr} --body '<body>' with a \`Closes #${g.id}\` line added and the goals table row for #${g.id} updated; keep every other line, including the other Closes lines. ` +
+    `1. gh label create ${ON_FEATURE} --force --repo ${GITHUB_REPO}\n` +
+    `2. gh issue edit ${g.id} --add-label ${ON_FEATURE} --repo ${GITHUB_REPO}` + (others.length ? `, and the same for ${others.join(' and ')}` : '') + `.\n` +
+    `3. gh issue comment ${g.id} --repo ${GITHUB_REPO} --body 'Landed on feature branch ${FEATURE.branch} via #<n>; closes when feature PR #${fpr} merges into ${MAIN}. ${marker('<n>')}'` +
+    (others.length ? `. For ${others.join(' and ')}: read its comments (gh issue view <m> --json comments --repo ${GITHUB_REPO}) and, only if none has a marker with feature-pr=#${fpr}, post one: ${marker(null)}` : '') + `.\n` +
+    `4. gh pr view ${fpr} --json body --repo ${GITHUB_REPO}, then gh pr edit ${fpr} --repo ${GITHUB_REPO} --body '<body>' with a \`Closes #${g.id}\` line added and the goals table row for #${g.id} updated; keep every other line, including the other Closes lines. ` +
     `View it again and repeat the edit if \`Closes #${g.id}\` is missing (another lander may have edited the body at the same time).\n` +
     `Never gh issue close; the feature PR's Closes lines close the issues when it merges into ${MAIN}.`
 }
@@ -485,7 +505,7 @@ const bugDepsOf = (g) => {
 const goalIdOf = {}
 args.goals.forEach(g => { goalIdOf[idKey(g.id)] = g.id })
 
-const ctx = (g) => `Repo: ${REPO} (default branch ${MAIN}). Mode: ${args.mode}. Local CI (act): ${CI ? `on, lane ${args.lane || '(pick from ci.yml)'}` : 'off'}.\nGoal ${g.id}: ${g.title}\n${g.brief}` +
+const ctx = (g) => `${REPO_HEADER} Mode: ${args.mode}. Local CI (act): ${CI ? `on, lane ${args.lane || '(pick from ci.yml)'}` : 'off'}.\nGoal ${g.id}: ${g.title}\n${g.brief}` +
   (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
   featureCheckout(g)
 const others = (g) => args.goals.filter(o => o.id !== g.id).map(o => `${o.id}: ${o.title}`).join('\n') || '(none)'
@@ -786,11 +806,11 @@ if (!FEATURE.pr) {
 } else if (FEATURE_MERGE === 'auto') {
   phase('Land')
   const l = collect(await agent(
-    `Follow your built-in /grind-land procedure for the FEATURE PR.\n\nRepo: ${REPO} (default branch ${MAIN}).` +
+    `Follow your built-in /grind-land procedure for the FEATURE PR.\n\n${REPO_HEADER}` +
     (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
     `\nFeature PR: ${FEATURE.pr}\nFeature branch: ${FEATURE.branch}\n\n` +
-    `1. gh pr ready ${FEATURE.pr}\n2. Wait for CI with github/pr_merge_watch.\n` +
-    `3. gh pr merge ${FEATURE.pr} --merge (no --admin, no --squash, no --delete-branch).\n` +
+    `1. gh pr ready ${FEATURE.pr} --repo ${GITHUB_REPO}\n2. Wait for CI with github/pr_merge_watch.\n` +
+    `3. gh pr merge ${FEATURE.pr} --merge --repo ${GITHUB_REPO} (no --admin, no --squash, no --delete-branch).\n` +
     `If a review is required and missing, return status 'gave_up' with summary 'waiting for review'; do not retry.`,
     opts('lander', 'land:feature', 'Land', LAND)), 'lander', 'feature')
   feature.merged = !!(l && l.status === 'merged')

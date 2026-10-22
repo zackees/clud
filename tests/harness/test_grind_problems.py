@@ -184,6 +184,7 @@ def _script(
     """
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": META,

@@ -7,8 +7,8 @@ const metadataExport = 'export const meta =';
 if (source.split(metadataExport).length !== 2) {
   throw new Error('expected exactly one workflow metadata export');
 }
-// Workflow hosts execute the body as an async function, allowing its top-level
-// return. Remove only the metadata export keyword; execute the production body.
+// This controlled host wraps the body in an async function, allowing its
+// top-level return. Remove only the metadata export keyword.
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const execute = new AsyncFunction(
   'args', 'agent', 'log', 'phase', 'parallel',
@@ -20,11 +20,30 @@ const agent = async (prompt, options) => {
   if (options.label === 'classify') {
     return {
       confident: true,
-      children: config.args.goals.map(goal => ({ id: goal.id, kind: 'bug' })),
+      children: config.args.goals.map(goal => ({ id: goal.id, track: 'bug' })),
       groups: [],
+      order: config.args.goals.map(goal => goal.id),
     };
   }
-  throw new Error('unexpected agent in classification probe');
+  const replies = {
+    'grind-prework': {
+      posted: true,
+      plan_url: 'https://github.com/fork/project/issues/10#issuecomment-1',
+      part_urls: ['https://github.com/fork/project/issues/10#issuecomment-1'],
+    },
+    'grind-planner': {
+      checkout: config.args.repo, branch: 'grind/12', depends_on: [], verify: 'true',
+      tasks: [{ id: 't1', files: ['src/a.rs'], instructions: 'controlled task' }],
+    },
+    'grind-worker': { files_touched: ['src/a.rs'], summary: 'controlled work' },
+    'grind-reviewer': { approved: true, summary: 'controlled review' },
+    'grind-integrator': {
+      pushed: true, pr_url: 'https://github.com/fork/project/pull/34', summary: 'controlled push',
+    },
+    'grind-lander': { status: 'merged', summary: 'controlled landing' },
+  };
+  if (!(options.agentType in replies)) throw new Error('unexpected agent in workflow probe');
+  return replies[options.agentType];
 };
 try {
   const result = await execute(

@@ -4,9 +4,10 @@ description: Internal to the grind-run workflow; do not delegate to it (clud's h
 tools: Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->
+Use the prompt's GitHub repository OWNER/REPO for repository-scoped gh commands (--repo) and the PR waiter. Keep the checkout path separate; report missing identity before acting.
 You are the /grind planner. Follow the `/grind-plan` procedure below for the goal in your prompt.
 Your shell is capped by clud's hook to read-only git and gh plus `git worktree add` in parallel mode; do not try to build, lint or test.
-Never poll. To wait, run the command in the background and wait for the notification. clud's hook refuses `while`/`until` loops, sleeping `for` loops, `tail -f` and `watch` (#1880).
+Never poll. Choose waiting from declared tools: keep one live process session and wait on it, use supported background completion, or use a bounded foreground waiter. Follow the watch-recovery contract in /grind-land; clud's hook refuses `while`/`until` loops, sleeping `for` loops, `tail -f` and `watch` (#1880).
 When the run has `./lint` / `./test` scripts, verify holds only the goal's focused test; the integrator runs the scripts.
 In plan-only mode (the prompt says PLAN-ONLY) you only classify: no worktree, branch, write or push; the hook enforces it.
 

@@ -253,6 +253,7 @@ def _goal_roles(h: Harness, goal: str) -> list[dict[str, Any]]:
 def _workflow(h: Harness, meta: str, goals: list[str], plan: dict[str, Any]) -> dict[str, Any]:
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": meta,

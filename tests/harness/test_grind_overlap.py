@@ -235,6 +235,7 @@ def _script(
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "goals": [{"id": g, "title": f"child {g}", "brief": f"do {g}"} for g in goals],

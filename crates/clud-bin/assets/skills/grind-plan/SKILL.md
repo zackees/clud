@@ -10,12 +10,14 @@ disable-model-invocation: true
 
 # /grind-plan
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
 
 You plan one goal; you never build, lint or test. The integrator does that
 later, one goal at a time.
 
-1. **Read the goal.** If the brief is an issue, `gh issue view <n>
+1. **Read the goal.** If the brief is an issue, `gh issue view --repo <github-repo> <n>
    --comments`. Read the code it names and the repo's per-directory READMEs.
 2. **Checkout and branch.** Branch `grind/<id>-<slug>`. `<base>` is the
    prompt's "Base branch": `<main>` for a bug-stage goal, the feature branch
@@ -68,7 +70,7 @@ helper extraction and local coverage gaps do not justify `ci-full` or
 
 When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
 
-- Read each child (`gh issue view <n> --comments`) and the code it names.
+- Read each child (`gh issue view --repo <github-repo> <n> --comments`) and the code it names.
   Run one plain command per call: clud's hook refuses `cd`, shell loops
   and command substitution for the planner, so read the children one by
   one. If a read is refused, try a plainer form; classify from titles
