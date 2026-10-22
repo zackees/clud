@@ -459,6 +459,7 @@ fn test_bridge_leaves_ask_user_question_alone() {
 fn test_allow_plan_mode_restores_plan_mode_on_the_bridge() {
     let args = parse(&["clud", "--allow-plan-mode"]);
     let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(p.allow_plan_mode);
     assert!(p.command.iter().any(|a| a == "--disallowedTools=Task"));
     // And the flag itself must not leak to the backend as passthrough.
     assert!(!p.command.iter().any(|a| a == "--allow-plan-mode"));

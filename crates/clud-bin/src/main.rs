@@ -1702,6 +1702,7 @@ fn print_dry_run_and_exit(
     let json = serde_json::json!({
         "command": clud::secret_redaction::redact_args(&dry_run_command),
         "unsafe_mode": plan.unsafe_mode,
+        "allow_plan_mode": plan.allow_plan_mode,
         "iterations": plan.iterations,
         "backend": backend.executable_name(),
         "routing_mode": launch_target.routing_mode.as_str(),

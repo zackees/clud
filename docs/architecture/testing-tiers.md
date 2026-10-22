@@ -46,6 +46,12 @@ test ─ Harness ─ claude -p … (real Claude Code, isolated config)
   `CLUD_TEST_DIRECT_UPSTREAM_URL` (with `CLUD_INTEGRATION_TESTS=1`) points the
   direct route at the scripted mock. `tool_results()` reads the JSONL stream's
   `tool_result` blocks. Example: `test_worktree_consent_e2e.py`.
+- **Interactive tool surfaces:** `Harness.run_clud_interactive` launches
+  the reported model in an owned PTY with disposable onboarding/trust
+  preferences. The loop plan-mode test uses this path because print mode
+  omits `EnterPlanMode`. It verifies the actual hook, the denial delivered
+  to the model, and a subsequent file write. The PTY and isolated daemon
+  are closed even when a bounded expect fails.
 - **Assertions** read three logs: the requests that reached the model, the
   hook calls (with each call's `agent_type`), and the world state (git refs,
   fake-GitHub PRs).

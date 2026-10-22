@@ -32,6 +32,9 @@ pub struct LaunchPlan {
     /// Explicit per-launch opt-out of clud's agent safety policy.
     #[serde(default)]
     pub unsafe_mode: bool,
+    /// Explicit opt-out of the runtime loop-scoped plan-mode guard.
+    #[serde(default)]
+    pub allow_plan_mode: bool,
     pub iterations: u32,
     pub backend: Backend,
     #[serde(default)]
@@ -143,6 +146,7 @@ mod tests {
     ) -> LaunchPlan {
         LaunchPlan {
             unsafe_mode: false,
+            allow_plan_mode: false,
             command: vec![effective.executable_name().to_string()],
             iterations: 1,
             backend: effective,

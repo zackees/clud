@@ -31,6 +31,10 @@ routing are documented at
 
 ## Key items
 
+`LaunchPlan.allow_plan_mode` carries the explicit runtime-loop opt-out to
+foreground and daemon workers. It does not override `--unattended`'s launch
+deny. See [loop-scoped plan mode](../../../../docs/architecture/hook-dispatch.md#loop-scoped-plan-mode).
+
 - `build_launch_plan_for_target(args, target, backend_path) -> LaunchPlan` — production path
 - `build_launch_plan(args, backend, backend_path) -> LaunchPlan` — native compatibility/test wrapper
 - `has_noninteractive_prompt(args, backend) -> bool`
