@@ -97,10 +97,12 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
                 "latest": str(row.get("messages", [])[-1:])[-1200:],
             }))
         hooks = h.logs / "hooks.jsonl"
-        records = [json.loads(line) for line in hooks.read_text().splitlines()] if hooks.exists() else []
+        records = ([json.loads(line) for line in hooks.read_text().splitlines()]
+                   if hooks.exists() else [])
         for row in [row for row in records if row.get("tool_name") == "Workflow"][-4:]:
             print("NATIVE_RESUME_HOOK_METADATA", json.dumps({key: row.get(key) for key in (
-                "event", "session_id", "transcript_path", "transcript_versions", "transcript_read_error",
+                "event", "session_id", "transcript_path",
+                "transcript_versions", "transcript_read_error",
             )}))
         for transcript in list(h.config.glob("projects/*/*.jsonl"))[:3]:
             rows = [json.loads(line) for line in transcript.read_text().splitlines()]
@@ -256,6 +258,25 @@ def test_native_resume_preserves_completed_work_across_three_generations(
     for gate in ("gate:b:0", "gate:b:1", "gate:c:1", "gate:c:2"):
         assert len([row for row in result.requests
                     if row["role"] == gate and row.get("turn") == 0]) == 1, gate
+
+
+@pytest.mark.parametrize("field", ["gateEpoch", "gateEpochs"])
+def test_graph_resume_history_is_bounded_before_agents(harness: Harness, field: str) -> None:
+    h = harness
+    graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
+        {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
+    ], "proposed_goals": [], "risks": []}
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    script = _script(h, "sequential", _goals("a"), [], orchestration=graph,
+                     **{field: 1000000000 if field == "gateEpoch" else {"a": 1000000000}})
+    before = h.git("status", "--porcelain")
+    result = h.run("Reject an excessive replay history before launching agents.", script)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    assert {row["role"] for row in result.requests} == {"main"}
+    notices = workflow_notices(result)
+    assert notices, result.stdout[-3000:]
+    assert field in str(notices), notices
+    assert h.git("status", "--porcelain") == before
 
 
 @pytest.mark.parametrize("orchestrated", [False, True])
