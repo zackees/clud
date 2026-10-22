@@ -37,16 +37,29 @@ pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<Str
             .and_then(|input| input.get("cmd"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&payload.command);
-        let cwd = payload.tool_input.as_ref()
+        let cwd = payload
+            .tool_input
+            .as_ref()
             .and_then(|input| input.get("workdir"))
             .and_then(serde_json::Value::as_str)
             .map(|path| payload.cwd.join(path));
-        let dialect = payload.tool_input.as_ref()
+        let dialect = payload
+            .tool_input
+            .as_ref()
             .and_then(|input| input.get("shell"))
             .and_then(serde_json::Value::as_str)
-            .map_or_else(|| super::shell_dialect_for_tool(if tool == "exec_command" { "shell" } else { &tool }), |shell| {
-                super::shell_dialect_for_tool(&super::block_bad_cmd_shell::program_name(shell))
-            });
+            .map_or_else(
+                || {
+                    super::shell_dialect_for_tool(if tool == "exec_command" {
+                        "shell"
+                    } else {
+                        &tool
+                    })
+                },
+                |shell| {
+                    super::shell_dialect_for_tool(&super::block_bad_cmd_shell::program_name(shell))
+                },
+            );
         return reason_in(
             command,
             dialect,
