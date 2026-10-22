@@ -12,10 +12,10 @@ from tests.harness.test_orchestration_resume import capture_resume_input, native
 from tests.harness.workflow_results import workflow_results
 
 
-@pytest.mark.parametrize("parallel_mode", [False, True])
+@pytest.mark.parametrize("scheduling", ["sequential", "parallel", "promise_all"])
 @pytest.mark.parametrize("native_writes", [False, True])
 def test_native_cache_replays_every_stage_of_two_chains(
-    harness: Harness, monkeypatch, parallel_mode: bool, native_writes: bool,
+    harness: Harness, monkeypatch, scheduling: str, native_writes: bool,
 ) -> None:
     h = harness
     captured = capture_resume_input(h, monkeypatch)
@@ -26,8 +26,11 @@ def test_native_cache_replays_every_stage_of_two_chains(
         "tools: [Read, Write, Bash]\n---\n"
         "CACHE_CHAIN_PROBE_ROLE\n"
     )
-    run = ("return await parallel([() => chain('a'), () => chain('d')]);" if parallel_mode
-           else "return [await chain('a'), await chain('d')];")
+    run = {
+        "sequential": "return [await chain('a'), await chain('d')];",
+        "parallel": "return await parallel([() => chain('a'), () => chain('d')]);",
+        "promise_all": "return await Promise.all([chain('a'), chain('d')]);",
+    }[scheduling]
     (h.config / "workflows" / "cache-chain-probe.js").write_text(
         "export const meta = {name: 'cache-chain-probe', description: 'Native chain cache', "
         "phases: [{title: 'Stage 0', detail: 'First observation'}, "
