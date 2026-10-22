@@ -211,5 +211,5 @@ def test_unmet_publication_gate_defers_transitive_dependents_only(
     assert _merged(h) == ["grind/a", "grind/d"]
     told = _told(result)
     for goal in ("b", "c"):
-        pattern = rf'goal\\\\*"\s*:\s*\\\\*"{goal}\\\\*".{{0,200}}?status\\\\*"\s*:\s*\\\\*"deferred'
+        pattern = rf'goal\\*"\s*:\s*\\*"{goal}\\*".{{0,200}}?status\\*"\s*:\s*\\*"deferred'
         assert re.search(pattern, told, re.DOTALL), told[-4000:]
