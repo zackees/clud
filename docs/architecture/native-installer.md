@@ -76,3 +76,8 @@ Operators can rerun the read-only public checks using the existing
 `installer-check.yml` workflow's manual dispatch, with an exact `release_tag`
 and `mode` (`candidate` or `released`). This validates downloaded assets and
 the catalog; it does not publish, promote, delete or modify a release.
+Released-mode host acceptance executes both an exact-version installation
+and `--install-version latest`, checking the selected installed executable's
+digest and reported version against the independently fetched public catalog.
+Candidate mode retains exact-version selection because the stable channel
+must continue to point at the previous public release.

@@ -68,6 +68,30 @@ def public_bytes(url: str, limit: int = 200 * 1024 * 1024) -> bytes:
     return data
 
 
+def assert_public_latest_install(
+    binary: Path, env: dict[str, str], destination: Path, version: str, digest: str
+) -> None:
+    """Exercise channel selection and independently verify its installed bytes."""
+    result = run_process(
+        [str(binary), "--installer", "--install-version", "latest", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+    installed = run_process(
+        [str(destination), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr.decode(errors="replace")
+    assert installed.stdout.strip() == f"clud {version}".encode()
+
+
 def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     tag = "2.10.0"
     expected = {}
@@ -219,6 +243,8 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+    if mode == "released":
+        assert_public_latest_install(binary, env, destination, version, digest)
 
     if os_name == "windows":
         script = (
