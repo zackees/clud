@@ -129,7 +129,7 @@ snapshots. They do not claim a real Claude Workflow or model integration.
 
 ## The DAG
 
-`/grind` is a router over bundled skills, one bundled workflow, and seven
+`/grind` is a router over bundled skills, one bundled workflow, and eight
 capped agent types:
 
 ```
@@ -152,7 +152,7 @@ The sections below follow that order: [routing](#input-routing), the
 | Asset | Source | Installed to |
 |---|---|---|
 | Skills `grind`, `grind-intake`, `grind-prework`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
-| Agents `grind-orchestrator`, `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
+| Agents `grind-orchestrator`, `grind-gate`, `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
 | Workflow `grind-run` | `crates/clud-bin/assets/workflows/grind-run.js` (`claude_files.rs`) | `~/.claude/workflows/` |
 
 Each workflow agent runs as its `grind-<role>` type and is told to invoke
@@ -180,7 +180,7 @@ returns an explicit blocked result for missing-stage dependencies, external
 publication evidence or a sister repository needing its own session; it must
 not treat those conditions as successful merges or execute in the wrong root.
 
-The reserved `grind-gate` role denies shell execution by default. Its hook can
+The internal `grind-gate` role defaults to Haiku and denies shell execution without a binding. Its hook can
 bind an exact read-only native Bash check from run facts' approved `orchestration` graph to
 a native workflow task labeled `gate:<downstream-id>:<blocker-index>`. Lookup
 uses the hook's parent-session transcript path and agent ID, searches at most
@@ -783,6 +783,8 @@ The rationale is in
 
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
+| `grind-orchestrator` | Read, Grep, Glob, Bash | AST-validated read-only inspection; no fetch, edits, builds or checkouts |
+| `grind-gate` | Bash | exactly one assigned read-only Bash check, bound to native agent identity and approved run facts; not yet invoked by `grind-run` |
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit); `clud grind-facts task` to record each task's files |
 | `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the run facts' meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh`; `safe-rm` on literal paths inside its task's directories ([rm-tools.md](rm-tools.md#location-policy)) |
