@@ -7,6 +7,8 @@ import pytest
 
 from tests.harness.harness import Harness
 from tests.harness.test_grind import (
+    _after,
+    _bash,
     _by_role,
     _goal_roles,
     _goals,
@@ -15,6 +17,7 @@ from tests.harness.test_grind import (
     _script,
     _structured,
 )
+from tests.harness.test_grind_gate_binding import install_outcome_guard
 
 
 def report_upstream_artifacts(roles: list[dict]) -> None:
@@ -114,3 +117,46 @@ def test_reported_release_artifacts_do_not_open_publication_gate(
     assert not any(role.endswith(":b") or role.startswith("lander:b:") for role in ran)
     assert not (h.repo / "b.txt").exists()
     assert _merged(h) == ["grind/a", "grind/c"]
+
+
+def test_successful_native_publication_check_opens_dependent_goal(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness
+    command = "echo APPROVED_PUBLICATION_OBSERVED"
+    graph = {
+        "session_repo": "o/r", "session_root": str(h.repo),
+        "goals": [
+            {"id": "a", "repo": "o/r", "main": "main", "checkout": "local", "blockers": []},
+            {"id": "b", "repo": "o/r", "main": "main", "checkout": "local", "blockers": [
+                {"goal": "a", "when": "released", "check": command},
+            ]},
+        ],
+        "proposed_goals": [], "risks": [],
+    }
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    output = install_outcome_guard(h, monkeypatch)
+    roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), {
+        "name": "gate:b", "match": "You are the /grind gate checker", "steps": [
+            _bash(command),
+            _after({"is_error": False}, _structured({
+                "ready": True, "evidence": "APPROVED_PUBLICATION_OBSERVED",
+            })),
+        ],
+    }]
+    result = h.run("Execute the approved publication gate before downstream planning.",
+                   _script(h, "sequential", _goals("a", "b"), roles, orchestration=graph),
+                   timeout=300)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    ran = _by_role(result)
+    assert "gate:b" in ran, ran
+    assert max(ran["lander:a:0"]) < min(ran["gate:b"])
+    assert max(ran["gate:b"]) < min(ran["planner:b"])
+    assert _merged(h) == ["grind/a", "grind/b"]
+    checks = [row for row in result.hooks if row.get("agent_type") == "grind-gate"
+              and row.get("tool_name") == "Bash"]
+    assert [row["tool_input"]["command"] for row in checks] == [command], checks
+    outcomes = [json.loads(line) for line in output.read_text().splitlines()]
+    assert any(row.get("event") == "PostToolUse" and row.get("agent_type") == "grind-gate"
+               and row.get("tool_name") == "Bash" for row in outcomes), outcomes
