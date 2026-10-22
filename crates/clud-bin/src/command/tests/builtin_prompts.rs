@@ -148,7 +148,10 @@ fn test_do_command_on_a_meta_issue_seeds_grind() {
 #[test]
 fn test_build_do_prompt_preserves_the_whole_rendered_contract() {
     let procedure = "Verdict: stale_merged\nrepair \"quotes\"; $(touch sentinel) &\nFinish";
-    assert_eq!(build_do_prompt(Some(procedure)), format!("/goal {procedure}"));
+    assert_eq!(
+        build_do_prompt(Some(procedure)),
+        format!("/goal {procedure}")
+    );
 }
 
 #[test]
