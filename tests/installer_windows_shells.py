@@ -12,6 +12,17 @@ def ps_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def git_bash_executable(git: Path) -> Path:
+    """Resolve Bash within the Git installation, including bundled toolchains."""
+    root = git.parent.parent
+    bash = root / "bin" / "bash.exe"
+    if not bash.is_file() and git.parent.name.casefold() == "bin":
+        if root.name.casefold() in {"mingw32", "mingw64", "ucrt64", "clangarm64", "usr"}:
+            bash = root.parent / "bin" / "bash.exe"
+    assert bash.is_file(), f"Git Bash is missing beside {git}: {bash}"
+    return bash
+
+
 def windows_shell_commands() -> dict[str, list[str]]:
     """Resolve shell executables before replacing the inherited runner PATH."""
     resolved = {name: shutil.which(name) for name in ("powershell.exe", "pwsh.exe", "cmd.exe")}
@@ -19,9 +30,7 @@ def windows_shell_commands() -> dict[str, list[str]]:
         assert executable, f"required installer acceptance shell is missing: {name}"
     git = shutil.which("git.exe")
     assert git, "Git for Windows is required for Git Bash installer acceptance"
-    # Git's cmd/git.exe and bin/git.exe both live one directory below its root.
-    bash = Path(git).parent.parent / "bin" / "bash.exe"
-    assert bash.is_file(), f"Git Bash is missing beside {git}: {bash}"
+    bash = git_bash_executable(Path(git))
     powershell_lookup = (
         "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
         "Write-Output $c.Source; & $c.Source --version; exit $LASTEXITCODE"

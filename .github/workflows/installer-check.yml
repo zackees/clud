@@ -697,6 +697,7 @@ jobs:
             tests/test_installer_catalog.py \
             tests/test_installer_candidate_ci.py \
             tests/test_installer_public_ci.py \
+            tests/test_installer_windows_shells.py \
             tests/test_public_release.py \
             tests/test_installer_verify_site.py \
             tests/test_installer_verify_native_assets.py \
