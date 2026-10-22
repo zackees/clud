@@ -16,11 +16,14 @@ def main() -> int:
     if event.get("tool_name") != "Workflow" or original.get("resumeFromRunId"):
         return 0
     response = event.get("tool_response")
-    if not isinstance(response, dict) or not response.get("runId") or not response.get("scriptPath"):
+    if (not isinstance(response, dict)
+            or not response.get("runId") or not response.get("scriptPath")):
         return 0
     epochs = json.loads(Path(sys.argv[1]).read_text())
     args = {**original["args"], "gateEpochs": epochs}
-    payload = {"scriptPath": response["scriptPath"], "resumeFromRunId": response["runId"], "args": args}
+    payload = {
+        "scriptPath": response["scriptPath"], "resumeFromRunId": response["runId"], "args": args,
+    }
     target = Path(sys.argv[2])
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload))
