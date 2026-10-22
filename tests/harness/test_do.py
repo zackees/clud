@@ -258,6 +258,7 @@ def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, targe
     text = result.prompt_text("main")
     _rendered(text)
     assert "Verdict: `stale_merged`" in text
+    assert "A session-scoped Stop hook is now active" in text
     assert "812" in text
     assert "RED" in text
     assert "GREEN" in text
@@ -291,6 +292,7 @@ def test_h15_explicit_cli_meta_handoff_reads_the_router(harness: Harness) -> Non
     _rendered(text)
     assert "Verdict: `default`" in text
     assert META in text
+    assert "A session-scoped Stop hook is now active" in text
     assert str(router) in text
     assert "Workflow" in text
     after_read = json.dumps([r.get("messages") for r in result.requests if r.get("turn") == 1])
