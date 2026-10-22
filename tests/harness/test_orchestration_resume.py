@@ -176,8 +176,11 @@ def test_stage_deferral_never_creates_publication_resume(
     assert h.git("status", "--porcelain") == before
 
 
-def test_native_resume_replays_one_unchanged_agent(harness: Harness, monkeypatch) -> None:
-    """Separate the runtime cache contract from grind's parallel execution."""
+@pytest.mark.parametrize("change_args", [False, True])
+def test_native_resume_replays_one_unchanged_agent(
+    harness: Harness, monkeypatch, change_args: bool,
+) -> None:
+    """Separate agent-cache behavior from parallelism and argument changes."""
     h = harness
     captured = capture_resume_input(h, monkeypatch)
     (h.config / "workflows").mkdir(exist_ok=True)
@@ -203,7 +206,8 @@ def test_native_resume_replays_one_unchanged_agent(harness: Harness, monkeypatch
         ]},
         {"name": "main", "steps": [
             {"tool_use": {"name": "Workflow", "input": {
-                "name": "resume-cache-probe", "args": {},
+                "name": "resume-cache-probe",
+                "args": {} if change_args else {"gateEpochs": {"b": 1, "c": 1}},
             }}},
             {"text": "CACHE_PROBE_STARTED"},
         ]},
