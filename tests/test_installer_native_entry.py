@@ -604,7 +604,10 @@ def test_first_run_offer_defaults_to_not_now_and_cancels_without_writes(
         process.expect("[x] Not now", timeout=30)
         assert "[ ] Install this version" in process.output_text
         process.write(cancel)
-        assert process.wait(timeout=30) == 130, process.output_text
+        # running-process reports a child's interrupt exit as an exception.
+        with pytest.raises(KeyboardInterrupt):
+            process.wait(timeout=30)
+        assert process.poll() == 130, process.output_text
         assert not home.exists(), process.output_text
         assert browser_user_path_snapshot() == before
     finally:
