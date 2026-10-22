@@ -44,7 +44,7 @@ fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String
     if !graph_call(payload, facts) {
         return None;
     }
-    let version = transcript_version(payload);
+    let version = verified_version(payload);
     if version.is_some_and(|version| version >= MIN_VERSION) {
         let input = payload.tool_input.as_ref()?;
         if input.get("resumeFromRunId").is_none_or(Value::is_null) {
@@ -80,6 +80,21 @@ fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String
           replay completed work. Updating the harness does not migrate an old run's cache."
             .into(),
     )
+}
+
+// Native hook groups run concurrently with asynchronous transcript persistence.
+// Give absent metadata a small bounded flush window; a known old version is
+// refused immediately, and an unverified version never authorizes execution.
+fn verified_version(payload: &HookPayloadView) -> Option<[u64; 3]> {
+    let mut version = transcript_version(payload);
+    for delay in [10, 20, 40, 80, 160] {
+        if version.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        version = transcript_version(payload);
+    }
+    version
 }
 
 fn transcript_version(payload: &HookPayloadView) -> Option<[u64; 3]> {
@@ -275,6 +290,22 @@ mod tests {
             .with_extension("")
             .join("grind-resume-wf-new.json")
             .is_file());
+    }
+
+    #[test]
+    fn initial_admission_waits_for_native_transcript_metadata_to_flush() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let mut payload = payload(&path);
+        payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
+        assert!(transcript_version(&payload).is_none());
+        let target = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::fs::write(target, record(json!("2.1.306"), "session")).unwrap();
+        });
+        assert!(reason_for(&payload, None).is_none());
+        writer.join().unwrap();
     }
 
     #[test]
