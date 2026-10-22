@@ -561,6 +561,7 @@ impl ForegroundRuntime {
         if let Some(entry) = hook_roots_env_value(plan) {
             env.push(entry);
         }
+        set_env(&mut env, crate::loop_plan_mode::ALLOW_ENV, if plan.allow_plan_mode { "1" } else { "0" });
         apply_route_context(&mut env, plan);
         Ok(Self {
             env,
@@ -1962,6 +1963,7 @@ pub(crate) mod tests {
     pub(crate) fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         LaunchPlan {
             unsafe_mode: false,
+            allow_plan_mode: false,
             command: vec![harness.executable_name().to_string()],
             iterations: 1,
             backend: harness,
@@ -4235,6 +4237,7 @@ pub(crate) mod tests {
         expected.insert("PreToolUse".to_string());
         // #1984: the user's prompt may allow worktrees for the session.
         expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
+        expected.extend(["PostToolUse".to_string(), "Stop".to_string(), "SessionEnd".to_string()]);
         assert_eq!(
             hooks
                 .keys()

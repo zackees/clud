@@ -43,7 +43,12 @@ def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> 
             }
         ],
     }
-    result = harness.run_clud("Schedule the maintenance task and implement it", script, model=MODEL)
+    result = harness.run_clud(
+        "Schedule the maintenance task and implement it",
+        script,
+        model=MODEL,
+        extra_env={"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"},
+    )
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
     failed = [request for request in result.requests if "MOCK_EXPECT_FAILED" in str(request)]
     assert not failed, failed

@@ -19,6 +19,7 @@ fn plan(executable: PathBuf, cwd: &Path, args: Vec<String>) -> LaunchPlan {
     command.extend(args);
     LaunchPlan {
         unsafe_mode: false,
+        allow_plan_mode: false,
         command,
         iterations: 1,
         backend: Backend::Claude,

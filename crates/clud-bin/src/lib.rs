@@ -83,6 +83,7 @@ pub mod log_event;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;
+pub mod loop_plan_mode;
 pub mod multicall;
 pub mod openrouter_catalog;
 pub mod openrouter_free;

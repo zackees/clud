@@ -44,6 +44,7 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
     use crate::backend::{HarnessSelection, PreferenceSource};
     LaunchPlan {
         unsafe_mode: false,
+        allow_plan_mode: false,
         command: vec![harness.executable_name().to_string()],
         iterations: 1,
         backend: harness,

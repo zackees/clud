@@ -14,6 +14,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
     WorkerLaunchSpec {
         plan: LaunchPlan {
             unsafe_mode: true,
+            allow_plan_mode: false,
             command: vec!["claude".to_string()],
             iterations: 1,
             backend: Backend::Claude,
