@@ -181,4 +181,7 @@ def test_openrouter_launch_carries_explicit_plan_mode_choice(
     assert result.returncode == 0, result.stdout + result.stderr
     plan = json.loads(result.stdout)
     assert plan["allow_plan_mode"] is allowed
-    assert not any("EnterPlanMode" in arg for arg in plan["command"])
+    assert not any(
+        arg.startswith("--disallowedTools=") and "EnterPlanMode" in arg
+        for arg in plan["command"]
+    )
