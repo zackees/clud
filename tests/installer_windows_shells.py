@@ -6,7 +6,7 @@ import json
 import shutil
 from pathlib import Path, PureWindowsPath
 
-from tests.process import CREATE_NEW_CONSOLE
+from tests.process import CREATE_NEW_CONSOLE, TimeoutExpired
 from tests.process import run as run_process
 
 
@@ -32,7 +32,9 @@ def windows_shell_commands() -> dict[str, list[str]]:
     powershell_lookup = (
         "$ErrorActionPreference='Stop'; "
         "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        "[Console]::Error.WriteLine('installer shell probe: PowerShell started'); "
         "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
+        "[Console]::Error.WriteLine('installer shell probe: clud resolved'); "
         "Write-Output $c.Source; & $c.Source --version; exit $LASTEXITCODE"
     )
     return {
@@ -90,15 +92,25 @@ def assert_windows_shell_activation(
     fresh = persisted_windows_environment(env)
     evidence = {}
     for shell, command in commands.items():
-        result = run_process(
-            command,
-            env=fresh,
-            capture_output=True,
-            timeout=30,
-            check=False,
-            # Keep cmd's explicit UTF-8 code page local to its own console.
-            creationflags=CREATE_NEW_CONSOLE if shell == "cmd" else 0,
-        )
+        # Fresh Windows PowerShell 5.1 intermittently exceeds 30 seconds on
+        # the native ARM runner. Keep a bounded cold-start allowance without
+        # retries or relaxing the exact path/version assertions below.
+        timeout = 90 if shell == "powershell-5.1" else 30
+        try:
+            result = run_process(
+                command,
+                env=fresh,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                # Keep cmd's explicit UTF-8 code page local to its own console.
+                creationflags=CREATE_NEW_CONSOLE if shell == "cmd" else 0,
+            )
+        except TimeoutExpired as exc:
+            raise AssertionError(
+                f"{shell} activation exceeded {timeout}s; "
+                f"stdout={exc.stdout!r}; stderr={exc.stderr!r}"
+            ) from exc
         assert result.returncode == 0, (shell, result.stderr.decode(errors="replace"))
         lines = result.stdout.decode("utf-8-sig").strip().splitlines()
         assert len(lines) >= 2, (shell, lines)
