@@ -890,15 +890,15 @@ including these caps.
 
 ## `clud do [url-or-goal]` — Implement to a Merged PR
 
-Launches an interactive agent session seeded with `/goal /do <target>`. `/goal`
-keeps the session going until the bundled
+Launches an interactive agent session seeded with `/goal <rendered procedure>`.
+`/goal` keeps the session going until the bundled
 [`/do`](crates/clud-bin/assets/skills/do/SKILL.md) contract is met: the work lands
 in merged PRs, referenced issues are closed, and the checkout is clean and
-rebased. A single issue URL, a PR, or a free-form goal all go to `/do`.
+rebased. A single issue URL, a PR, or a free-form goal all get the `/do` contract.
 
-`/do`'s prompt is rendered when it's invoked, whether by `clud do` or by typing
-`/do <target>` in Claude Code. It runs `clud do-prompt`, which checks the
-current branch first:
+`clud do` renders the procedure before launching the harness. Typing
+`/do <target>` in Claude Code runs `clud do-prompt`, using the same renderer.
+Both check the current branch first:
 - On the default branch, it starts there.
 - On a branch with an open PR, or one named for the issue, it continues there.
 - On a branch whose PR merged, or that has no commits, it tells the agent to
@@ -907,8 +907,13 @@ current branch first:
   doing anything.
 
 A GitHub issue with open sub-issues is a meta issue. clud checks this with
-`gh` before launch and seeds `/goal /grind <url>` instead, so the children are
-worked through [`/grind`](docs/architecture/grind.md). If clud can't tell (no
+`gh` before launch and includes an explicit handoff to read the installed
+[`grind` router](docs/architecture/grind.md), so the children are worked through
+its workflow. Meta launches require the Claude harness and a foreground
+interactive session; a missing Workflow tool or bundled agents stops the handoff.
+Neither launch relies on nested slash-command expansion or model-side Skill
+invocation; do/grind invocation policies remain explicit-only.
+If clud can't tell (no
 `gh`, not signed in, offline, or a non-GitHub issue URL), it refuses to launch;
 set `CLUD_DO_KIND=single` or `CLUD_DO_KIND=meta` to choose yourself.
 With no target, an interactive foreground launch prompts for a URL or goal before

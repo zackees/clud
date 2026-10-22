@@ -576,7 +576,7 @@ def test_dry_run_codex() -> None:
 @pytest.mark.parametrize(
     ("verb", "target", "prompt_fragment"),
     [
-        ("do", "https://github.com/zackees/clud/issues/1036", "/goal /do https://"),
+        ("do", "https://github.com/zackees/clud/issues/1036", "Read the issue and implement it"),
         ("up", None, "codeup"),
         ("rebase", None, "git fetch"),
         ("fix", None, "linting"),
@@ -892,8 +892,9 @@ def test_do_dotted_free_form_goal_is_not_misclassified_as_a_url() -> None:
     result = _run("--dry-run", "--codex", "do", "README.md")
     assert result.returncode == 0, result.stderr
     prompt = json.loads(result.stdout)["command"][-1]
-    # The target passes through untouched; `/do` decides URL vs goal.
-    assert prompt == "/goal /do README.md"
+    assert prompt.startswith("/goal ")
+    assert "The goal: README.md" in prompt
+    assert "Read the issue and implement it" not in prompt
 
 
 def test_dry_run_deepseek() -> None:
@@ -1897,13 +1898,20 @@ def test_dry_run_rebase() -> None:
     assert "rebase" in prompt.lower()
 
 
-def test_dry_run_do_seeds_goal_do_for_a_single_issue() -> None:
+def test_dry_run_do_seeds_the_rendered_goal_for_a_single_issue() -> None:
     result = _run("--dry-run", "--codex", "do", "https://github.com/o/r/issues/1")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["command"][-1] == "/goal /do https://github.com/o/r/issues/1"
+    seed = json.loads(result.stdout)["command"][-1]
+    assert seed.startswith("/goal ")
+    assert "rendered for this checkout" in seed
+    assert "https://github.com/o/r/issues/1" in seed
+    assert "Read the issue and implement it" in seed
+    assert not seed.startswith("/goal /do ")
 
 
-def _run_do_with_kind(kind: str | None, target: str) -> process.CompletedProcess[str]:
+def _run_do_with_kind(
+    kind: str | None, target: str, *, harness: str = "codex"
+) -> process.CompletedProcess[str]:
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
@@ -1914,7 +1922,7 @@ def _run_do_with_kind(kind: str | None, target: str) -> process.CompletedProcess
         if kind is not None:
             env["CLUD_DO_KIND"] = kind
         return process.run(
-            [str(launch), "--dry-run", "--codex", "do", target],
+            [str(launch), "--dry-run", "--codex", "--harness", harness, "do", target],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1922,12 +1930,24 @@ def _run_do_with_kind(kind: str | None, target: str) -> process.CompletedProcess
         )
 
 
-def test_dry_run_do_seeds_goal_grind_for_a_meta_issue() -> None:
-    result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1")
+def test_dry_run_do_delivers_meta_handoff_through_claude() -> None:
+    result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1", harness="claude")
     assert result.returncode == 0, result.stderr
-    assert (
-        json.loads(result.stdout)["command"][-1] == "/goal /grind https://github.com/o/r/issues/1"
-    )
+    seed = json.loads(result.stdout)["command"][-1]
+    assert seed.startswith("/goal ")
+    assert "rendered for this checkout" in seed
+    assert "This is a meta issue" in seed
+    assert "Workflow" in seed
+    assert not seed.startswith("/goal /grind ")
+
+
+@pytest.mark.parametrize("harness", ["codex", "deepseek"])
+def test_do_meta_refuses_harnesses_without_workflow(harness: str) -> None:
+    result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1", harness=harness)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "requires the Claude harness" in result.stderr
+    assert "Workflow" in result.stderr
 
 
 def test_do_refuses_when_it_cannot_tell_whether_an_issue_is_meta() -> None:

@@ -213,10 +213,15 @@ pub struct Args {
     pub dry_run: bool,
 
     /// Set by `main` for `clud do`: the target is a meta issue (it has open
-    /// native sub-issues), so the prompt seeds `/grind` instead of `/do`.
+    /// native sub-issues), so the launch requires grind's harness capabilities.
     /// Never a CLI flag; see `command::do_kind`.
     #[arg(skip)]
     pub do_meta: bool,
+
+    /// Live `/do` procedure prepared before launch setup. Never a CLI flag:
+    /// the builder wraps this text in `/goal`, without nested skill expansion.
+    #[arg(skip)]
+    pub do_rendered_prompt: Option<String>,
 
     #[arg(long = "detach", conflicts_with = "dry_run")]
     pub detach: bool,

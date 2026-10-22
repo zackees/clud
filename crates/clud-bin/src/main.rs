@@ -625,8 +625,8 @@ fn resolve_do_target(args: &mut args::Args) {
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
-    // A meta issue seeds `/grind`, anything else `/do`. Deciding needs a
-    // GitHub query; when it cannot be answered, refuse rather than guess.
+    // Classify before setup and render the live contract directly: /goal
+    // treats nested slash commands as text, and Skill(do) is explicit-only.
     if let Some(args::Command::Do {
         target: Some(target),
     }) = &args.command
@@ -637,7 +637,11 @@ fn resolve_do_target(args: &mut args::Args) {
             command::do_kind::query_sub_issues,
         );
         match kind {
-            Ok(kind) => args.do_meta = kind == command::do_kind::DoKind::Meta,
+            Ok(kind) => {
+                args.do_meta = kind == command::do_kind::DoKind::Meta;
+                args.do_rendered_prompt =
+                    Some(command::do_prompt::render_current(target, &Ok(kind)));
+            }
             Err(error) => {
                 eprintln!("[clud] error: {error}");
                 std::process::exit(2);
