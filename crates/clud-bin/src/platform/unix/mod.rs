@@ -56,6 +56,7 @@ pub mod shim_fs;
 pub mod shim_main;
 pub mod shim_telemetry;
 pub mod startup;
+pub mod start_terminal;
 pub mod subprocess;
 pub mod trampoline;
 pub mod usage_ledger;
