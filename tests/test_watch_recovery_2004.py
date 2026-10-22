@@ -152,8 +152,9 @@ def test_require_help_describes_precedence_and_all_check_scope(tmp_path: Path) -
                          env=watcher_env(tmp_path, "green", controlled=False), cwd=tmp_path,
                          capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert "overrides branch protection" in result.stdout
-    assert "all reported checks" in result.stdout
+    help_text = " ".join(result.stdout.split())
+    assert "overrides branch protection" in help_text
+    assert "all reported checks" in help_text
 
 
 def test_exec_workdir_resolves_the_actual_script_not_a_decoy(tmp_path: Path) -> None:

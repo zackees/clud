@@ -67,6 +67,13 @@ FAILING_HEAD = watcher.HeadChecks(
 )
 
 
+# Scope decisions use the production REST verdict, not its degraded rollup fallback.
+SCOPE_HEAD = watcher.HeadChecks(
+    [_check(1, "linux", "completed", "success"), _check(2, "macos", "in_progress", None)],
+    FAILING_HEAD.workflow_runs,
+)
+
+
 def gate(*_args, **_kwargs):
     if scenario == "fail":
         checks = [
@@ -96,7 +103,8 @@ def gate(*_args, **_kwargs):
         human_review_ids=frozenset(),
         coderabbit_probe=watcher.CodeRabbitProbe("not_detected", 0),
         coderabbit=coderabbit,
-        head_checks=FAILING_HEAD if scenario == "fail" else None,
+        head_checks=(FAILING_HEAD if scenario == "fail"
+                     else SCOPE_HEAD if scenario == "scope" else None),
     )
 
 
