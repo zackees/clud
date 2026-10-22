@@ -3604,8 +3604,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--require",
         default=None,
-        help="regex of check names to treat as required when branch "
-        "protection is absent or inaccessible",
+        help="regex of check names to treat as required; overrides branch protection. "
+        "Use --require '.*' to wait for all reported checks, including advisory lanes. "
+        "Without this option, use branch-required checks (all reported checks when "
+        "protection is absent or inaccessible)",
     )
     # Cancellation control
     p.add_argument(

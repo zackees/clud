@@ -20,3 +20,10 @@ environments. All resulting paths are under a temporary home inside bosn.
 alias by `tests/test_gh_shim.py`. It runs the actual bundled PR watcher with
 network edges replaced by deterministic failure, review, and no-checks
 snapshots, recording scoped cancellation under the test's temporary directory.
+
+For #2004, the same offline watcher fixture also covers green, timeout and
+required-versus-advisory scope, with an optional deterministic stdin handshake
+for controlled process sessions. Its watchdog scenario invokes the real clud
+tool wrapper with a blocked local uv fixture. GitHub reads not replaced by the
+fixture fail immediately. This tests the documented execution procedure, not
+a real Codex agent or automatic goal resumption.

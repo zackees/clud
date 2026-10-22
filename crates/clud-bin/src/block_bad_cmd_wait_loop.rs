@@ -2,8 +2,8 @@
 //!
 //! Every hand-written wait invents a completion check on a stand-in (a process
 //! list, a word in output, a status string) and nothing forces it to give up.
-//! The harness's background-task notification tracks the real process exit,
-//! so it is the only general way to wait. See
+//! A supported process-session wait or background completion notification
+//! tracks the real process exit. Select from verified tool capabilities. See
 //! DD-168 in `docs/DESIGN_DECISIONS.md` for the `sleep` threshold.
 
 use super::block_bad_cmd_wait_scan::{
@@ -17,7 +17,7 @@ use crate::shell_ast::{Invocation, Script};
 pub(super) const WAIT_LOOP_RULE_ID: &str = "hand-written-wait";
 
 /// The replacement every refusal names verbatim.
-pub(super) const WAIT_REPLACEMENT: &str = "Never poll. To wait, run the command with `run_in_background` and wait for its completion notification, or use a waiting tool with its own deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`).";
+pub(super) const WAIT_REPLACEMENT: &str = "Never poll. Select declared execution capabilities, not a tool name (a normalized Bash call may be Codex). If exec_command exposes a persistent process session plus write_stdin, start once and use write_stdin with empty input and bounded waits on the same session until exit. A live session or observation timeout is incomplete, not success. If run_in_background and a completion notification are exposed, use them. With bounded foreground execution only, use a waiter deadline below the tool cap. If capabilities are unclear, verify a harmless local process or report the missing capability; never invent tools. This refusal alone is not a goal blocker. Use a waiting tool with its own deadline: `clud ci`, `bosn ci run --wait`, or `pr_merge_watch`.";
 
 /// Longest `sleep` allowed outside a loop and not chained to a status poll.
 const MAX_STANDALONE_SLEEP_SECS: f64 = 60.0;
@@ -276,7 +276,7 @@ fn scan_script(script: &Script, scan: ScanContext<'_>, depth: usize) -> Option<F
 }
 
 /// How to run the blessed PR watcher, named in every PR/CI refusal.
-pub(super) const PR_WATCH_USAGE: &str = "For a PR, run `clud tool run github/pr_merge_watch.py <PR> [--repo OWNER/NAME] [--timeout SECS]` with `run_in_background` and wait for its completion notification: it returns the moment a required check fails, review activity arrives, the PR merges or closes, or the timeout fires. For local CI use `clud ci` or `bosn ci run --wait`. Moving the loop into `timeout`, `nohup`, `bash -c`, `eval`, a Monitor call, a written script or Python is the same hand-written wait (zackees/clud#1972).";
+pub(super) const PR_WATCH_USAGE: &str = "For a PR start `clud tool run github/pr_merge_watch.py -- <PR> --repo OWNER/NAME --timeout 540` once. The default scope is branch-required checks; use `--require '.*'` for all reported checks (overrides branch protection), and `--no-cancel` if runs must remain intact. Exit 0/green continues the already-authorized next action only for the selected scope; 1/2 require failure/review diagnosis; 64 means correct the command. Exit 4 is incomplete: revalidate the same CI and watch again after this process exits. Exit 124 with status in-progress is a resumable watchdog result: reuse the same args after the wrapper has stopped the process. Never restart a live session. A blocked goal needs the runtime's supported resume action; if none is available, report that user resume is needed rather than claiming it is active.";
 
 /// The refusal for a hand-written wait, unless an audited
 /// `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>` accepts it.

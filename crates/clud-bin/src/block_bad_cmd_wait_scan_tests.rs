@@ -95,7 +95,7 @@ fn pr_refusals_say_how_to_run_pr_merge_watch() {
     });
     let reason = reason.expect("refused");
     assert!(
-        reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
+        reason.contains("clud tool run github/pr_merge_watch.py -- <PR>"),
         "{reason}"
     );
     assert!(reason.contains("hand-written-wait"), "{reason}");
@@ -323,4 +323,26 @@ fn codex_watch_payload_keeps_command_and_recovery_capabilities() {
         .reason.expect("native watch refused");
     assert!(reason.contains("write_stdin"), "{reason}");
     assert!(reason.contains("run_in_background"), "{reason}");
+}
+
+#[test]
+fn execution_payload_uses_declared_fields_without_guessing_the_harness() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for tool in ["Bash", "functions.exec_command"] {
+        let raw = serde_json::json!({
+            "tool_name": tool,
+            "tool_input": {"command": "echo ignored", "cmd": "gh run watch 123",
+                "workdir": "nested", "shell": "pwsh"}
+        });
+        let view = parse_payload_value(&raw, dir.path()).expect("payload");
+        if tool == "Bash" {
+            assert_eq!(view.command, "echo ignored");
+            assert_eq!(view.cwd, dir.path());
+            assert_eq!(shell_dialect_for_payload(&view), ShellDialect::Posix);
+        } else {
+            assert_eq!(view.command, "gh run watch 123");
+            assert_eq!(view.cwd, dir.path().join("nested"));
+            assert_eq!(shell_dialect_for_payload(&view), ShellDialect::PowerShell);
+        }
+    }
 }

@@ -25,7 +25,7 @@ const MAX_SUBSTITUTION_RECURSION_DEPTH: usize = crate::shell_ast::MAX_DEPTH;
 /// command text — see zackees/clud#519 comment thread for why: a
 /// `VAR=x cmd` prefix is the command's own environment, not the hook's.
 const BAD_CMD_OVERRIDE_ENV: &str = "CLUD_BAD_CMD_OVERRIDE";
-const PR_WATCH_REPLACEMENT: &str = "clud tool run github/pr_merge_watch.py <PR>";
+const SHELL_COMMAND_KEYS: &[&str] = &["command", "script"];
 
 pub const STDIN_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const STDIN_READ_MAX_BYTES: usize = 1024 * 1024;
@@ -219,13 +219,28 @@ enum ShellDialect {
 }
 
 fn shell_dialect_for_tool(tool_name: &str) -> ShellDialect {
-    match tool_name.to_ascii_lowercase().as_str() {
+    match block_bad_cmd_gate::tool_basename(tool_name).as_str() {
         "bash" => ShellDialect::Posix,
         "powershell" | "pwsh" => ShellDialect::PowerShell,
         "cmd" | "commandprompt" => ShellDialect::Cmd,
-        "shell" | "shell_command" if crate::platform::host::WINDOWS => ShellDialect::PowerShell,
+        "shell" | "shell_command" | "exec_command" if crate::platform::host::WINDOWS => ShellDialect::PowerShell,
         _ => ShellDialect::Posix,
     }
+}
+
+
+/// Only exec_command declares a shell override; an extra Bash field is not authority.
+fn shell_dialect_for_payload(payload: &HookPayloadView) -> ShellDialect {
+    let tool = block_bad_cmd_gate::tool_basename(&payload.tool_name);
+    if tool == "exec_command" {
+        if let Some(shell) = payload.tool_input.as_ref()
+            .and_then(|input| input.get("shell"))
+            .and_then(Value::as_str)
+        {
+            return shell_dialect_for_tool(&block_bad_cmd_shell::program_name(shell));
+        }
+    }
+    shell_dialect_for_tool(&tool)
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +606,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             &payload.tool_name,
             payload.tool_input.as_ref(),
             &payload.command,
-            shell_dialect_for_tool(&payload.tool_name),
+            shell_dialect_for_payload(&payload),
             &payload.cwd,
         ) {
             append_log(&format!("CLAUDE-WORKTREES-BLOCKED: {reason}"));
@@ -678,7 +693,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // refused with an actionable safe-rm message.
     let posix_shell = event == PRE_TOOL_USE_EVENT
         && block_bad_cmd_gate::gates_tool(&payload.tool_name)
-        && shell_dialect_for_tool(&payload.tool_name) == ShellDialect::Posix;
+        && shell_dialect_for_payload(&payload) == ShellDialect::Posix;
     let mut deletion_rewrite = None;
     if posix_shell {
         if let Some(decision) = block_bad_cmd_rm_redirect::redirect(&payload.command) {
@@ -717,7 +732,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     {
         let targets = match git_mutation_targets(
             effective_command,
-            shell_dialect_for_tool(&payload.tool_name),
+            shell_dialect_for_payload(&payload),
             &payload.cwd,
         ) {
             Ok(targets) => targets,
@@ -764,7 +779,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         allow_hybrid_uv_run,
         &config.bad_commands,
         &config.bad_pipelines,
-        shell_dialect_for_tool(&payload.tool_name),
+        shell_dialect_for_payload(&payload),
         repo_root.as_deref(),
         worktree_root.as_deref(),
         pr_wait_fail_fast_enabled,
@@ -854,8 +869,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             );
             return 2;
         };
-        let Some(command) = input.get_mut("command").filter(|value| value.is_string()) else {
-            let reason = "Blocked unsafe removal: tool_input.command was missing or not a string, so the hook could not rewrite it safely. Retry using a validated literal path directly.";
+        let Some(command) = command_text_mut(input, &payload.tool_name) else {
+            let reason = "Blocked unsafe removal: tool_input had no string command, script or cmd, so the hook could not rewrite it safely. Retry using a validated literal path directly.";
             println!("{}", deny_json(reason));
             eprintln!(
                 "[block-bad-cmd hook] refusing to run {:?}: {reason}",
@@ -873,7 +888,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         // rest.
         let decision = if rewrite_only_covers_removals(
             &payload.command,
-            shell_dialect_for_tool(&payload.tool_name),
+            shell_dialect_for_payload(&payload),
         ) {
             allow_with_updated_input_json(updated_input)
         } else {
@@ -898,8 +913,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         let Some(mut updated) = payload.tool_input.clone() else {
             return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without tool_input");
         };
-        let Some(command) = updated.get_mut("command") else {
-            return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without command");
+        let Some(command) = updated.as_object_mut().and_then(|input| command_text_mut(input, &payload.tool_name)) else {
+            return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without a string command, script or cmd");
         };
         *command = Value::String(rewritten);
         println!("{}", allow_with_updated_input_json(updated));
@@ -1378,7 +1393,7 @@ fn declared_hook_denial(
     } else {
         block_bad_cmd_cd::session_cd_targets(
             &payload.command,
-            shell_dialect_for_tool(&payload.tool_name),
+            shell_dialect_for_payload(payload),
             &payload.cwd,
             crate::home::user_home().as_deref(),
         )
@@ -1476,7 +1491,7 @@ fn block_cd_denial(
 ) -> Option<String> {
     use crate::repo_clud_config::BlockCd;
 
-    let dialect = shell_dialect_for_tool(&payload.tool_name);
+    let dialect = shell_dialect_for_payload(payload);
     if !command_may_change_directory(&payload.command, dialect) {
         return None;
     }
@@ -1551,7 +1566,7 @@ fn capture_git_paths_without_policy(payload: &HookPayloadView) {
         return;
     }
     let repo_root = locate_repo_root_from(&payload.cwd);
-    let dialect = shell_dialect_for_tool(&payload.tool_name);
+    let dialect = shell_dialect_for_payload(payload);
     let script = parse_command(&payload.command, dialect, Some(&payload.cwd));
     for invocation in &script.invocations {
         if let Some(Ok(capture)) = detect_git_path(invocation, Some(&payload.cwd)) {
@@ -1706,13 +1721,23 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
         .unwrap_or("?")
         .to_string();
     let command = extract_command(value);
-    let cwd = object
+    let mut cwd = object
         .get("cwd")
         .or_else(|| object.get("cwdPath"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| process_cwd.to_path_buf());
+    // Execution tools declare workdir; arbitrary extra fields on Bash do not.
+    if matches!(block_bad_cmd_gate::tool_basename(&tool_name).as_str(),
+        "exec_command" | "shell_command" | "shell")
+    {
+        if let Some(workdir) = object.get("tool_input").or_else(|| object.get("toolInput"))
+            .and_then(|input| input.get("workdir")).and_then(Value::as_str)
+        {
+            cwd = cwd.join(workdir);
+        }
+    }
     Some(HookPayloadView {
         tool_name,
         command,
@@ -2168,7 +2193,7 @@ fn blocking_pr_wait_reason(script: &crate::shell_ast::Script, shim_active: bool)
                 .any(|word| word == "--watch" || word.starts_with("--watch="));
         if native_gh_waiter(words) && !canonical_shimmed_watch {
             return Some(format!(
-                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. Fallback: `{PR_WATCH_REPLACEMENT}`. {WAIT_REPLACEMENT}"
+                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. {WAIT_REPLACEMENT} {PR_WATCH_USAGE}"
             ));
         }
     }
@@ -2199,7 +2224,7 @@ fn blocking_pr_wait_reason(script: &crate::shell_ast::Script, shim_active: bool)
         });
     if (unbounded || sleeps) && commands.iter().any(|words| gh_poll_target(words)) {
         return Some(format!(
-            "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
+            "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. {WAIT_REPLACEMENT} {PR_WATCH_USAGE}"
         ));
     }
     None
@@ -3590,6 +3615,22 @@ fn rewrite_only_covers_removals(command_text: &str, dialect: ShellDialect) -> bo
     true
 }
 
+fn shell_command_keys(tool_name: &str) -> &'static [&'static str] {
+    if block_bad_cmd_gate::tool_basename(tool_name) == "exec_command" {
+        &["cmd"]
+    } else {
+        SHELL_COMMAND_KEYS
+    }
+}
+
+fn command_text_mut<'a>(
+    input: &'a mut serde_json::Map<String, Value>, tool_name: &str,
+) -> Option<&'a mut Value> {
+    let key = shell_command_keys(tool_name).iter().copied()
+        .find(|key| input.get(*key).is_some_and(Value::is_string))?;
+    input.get_mut(key)
+}
+
 fn extract_command(payload: &Value) -> String {
     let Some(object) = payload.as_object() else {
         return String::new();
@@ -3597,11 +3638,17 @@ fn extract_command(payload: &Value) -> String {
     let Some(tool_input) = object.get("tool_input").or_else(|| object.get("toolInput")) else {
         return String::new();
     };
+    let tool_name = object.get("tool_name").or_else(|| object.get("toolName"))
+        .and_then(Value::as_str).unwrap_or("?");
     if let Some(map) = tool_input.as_object() {
-        for key in ["command", "script"] {
+        for &key in shell_command_keys(tool_name) {
             if let Some(command) = map.get(key).and_then(Value::as_str) {
                 return command.to_string();
             }
+        }
+        // exec_command declares only a string cmd. Extra fields cannot shadow it.
+        if block_bad_cmd_gate::tool_basename(tool_name) == "exec_command" {
+            return String::new();
         }
         // #1086: some tools carry the command as an argv array — either under
         // `argv`, or directly under `command` (`{"command":["rm","-rf",…]}`).
@@ -3669,7 +3716,7 @@ mod block_bad_cmd_loop_stop;
 
 #[path = "block_bad_cmd_wait_loop.rs"]
 mod block_bad_cmd_wait_loop;
-use block_bad_cmd_wait_loop::{hand_written_wait_reason, ScanContext, WAIT_REPLACEMENT};
+use block_bad_cmd_wait_loop::{hand_written_wait_reason, ScanContext, PR_WATCH_USAGE, WAIT_REPLACEMENT};
 
 #[path = "block_bad_cmd_wait_scan.rs"]
 mod block_bad_cmd_wait_scan;

@@ -125,9 +125,14 @@ fn gate_prefix_from(value: Option<&str>) -> String {
 /// layer's business, not the gate's.
 pub(super) fn gates_tool(tool_name: &str) -> bool {
     matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "bash" | "powershell" | "pwsh" | "cmd" | "commandprompt" | "shell" | "shell_command"
+        tool_basename(tool_name).as_str(),
+        "bash" | "powershell" | "pwsh" | "cmd" | "commandprompt" | "shell" | "shell_command" | "exec_command"
     )
+}
+
+/// Tool namespaces do not change the declared command payload contract.
+pub(super) fn tool_basename(tool_name: &str) -> String {
+    tool_name.rsplit('.').next().unwrap_or(tool_name).to_ascii_lowercase()
 }
 
 /// Emit a gate denial in the harness's PreToolUse protocol and return its

@@ -246,7 +246,8 @@ command are untouched. Code: `block_bad_cmd_stale_upstream.rs`.
 
 ### Hand-written wait guard (#1880)
 
-Never poll. To wait, run the command in the background and wait for the notification.
+Never poll. Wait on the existing process through the execution capabilities
+the runtime actually exposes; see [watch recovery](#watch-recovery-and-continuation-2004).
 
 For every shell call, from the main agent or any sub-agent (the rule reads
 `tool_input.command` and never consults `agent_id`/`agent_type`), the scan
@@ -257,9 +258,9 @@ status read; and a standalone `sleep` over 60 s or of non-literal length
 (DD-168). A `for` loop over a finite list with no `sleep`, a one-shot
 `pgrep`/`gh` snapshot and a short `sleep` stay allowed. Process-list waits
 (`while pgrep -f …`, `while ps … | grep …`) fall to the loop rule. The refusal
-names the replacement: `run_in_background` plus the completion notification,
-or a waiter with its own deadline (`clud ci`, `bosn ci run --wait`,
-`pr_merge_watch`). The only escape is the audited
+names the replacement: a persistent process session and its wait operation,
+a supported background completion notification, or a waiter with its own
+deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`). The only escape is the audited
 `CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`; the rule only tightens.
 Code: `block_bad_cmd_wait_loop.rs`; fixtures from the issue's session in
 `block_bad_cmd_wait_loop_tests.rs` (including a sub-agent payload). The PR-
@@ -274,13 +275,86 @@ payloads and heredocs fed to a shell or Python are scanned recursively;
 heredocs written to a `.sh`/`.py` file and literal script files run from the
 call's `cwd` are scanned for PR/CI waits; a `case`-arm `sleep` and a
 `python -c` `time.sleep` count as sleeps; a native watcher inside any loop is
-refused. PR/CI refusals spell out `clud tool run github/pr_merge_watch.py
-<PR> [--repo OWNER/NAME] [--timeout SECS]` under `run_in_background`. The
+refused. PR/CI refusals spell out the canonical bounded waiter and conditional
+session/background/foreground instructions, without inferring runtime tools
+from the payload's tool name. The
 helpers live in `block_bad_cmd_wait_scan.rs`; the audit's regression corpus
 is `crates/clud-bin/tests/fixtures/wait_loop/corpus.json`, run by
 `block_bad_cmd_wait_scan_tests.rs`. Codex sessions run it through the
 session-flag hook clud injects at launch and, for a bare `codex`, the global
 entry described in [Global Codex hook](#global-codex-hook-1972).
+
+### Watch recovery and continuation (#2004)
+
+A rejected native watch is recoverable when the supported replacement is
+available. Start the existing waiter once, with an explicit repository and a
+deadline below the execution tool's command cap:
+
+```sh
+clud tool run github/pr_merge_watch.py -- <PR> --repo OWNER/NAME --timeout 540
+```
+
+Classify **declared execution capabilities**, independently of the tool name
+in the hook payload. A normalized `Bash` call can originate from Codex; it
+does not establish that Claude background-task flags exist.
+
+| Available capability | Executable recovery |
+| --- | --- |
+| Persistent process session and session wait (this Codex environment) | Start with `exec_command`. If it returns a live session ID, call `write_stdin` with empty input and bounded waits on that same session until terminal exit. |
+| Declared background-task and completion mechanism (supported Claude environments) | Start with `run_in_background` and wait for the exposed completion notification. Do not invent a notification tool. |
+| Bounded foreground execution only | Run the waiter with a timeout below the verified outer command cap. Its terminal timeout remains incomplete; inspect the same CI and resume the waiter after exit. |
+| Unknown or incomplete capabilities | Inspect tool declarations first. If necessary, use a harmless local process to verify creation of a live session, waiting on that same process, and terminal completion. An inconclusive probe does not establish support. Report any missing capability. |
+
+A short local process such as `python -c "import time; time.sleep(2)"` can be
+used with a shorter declared execution yield to probe session support. This
+is a bounded capability probe, not GitHub polling. Prefer runtime declarations
+when they are available. Never fabricate tools or replace a missing wait
+operation with shell sleep/status loops.
+
+A session ID or an observation deadline is not a terminal process result.
+Keep using the same live handle; do not launch a second waiter while the
+first still exists. A durable log or a lock file alone does not prove it is
+live. The raw `exec_command` payload's `cmd`, declared `workdir` and optional
+`shell` are interpreted by the shared hook; namespace qualification does not
+change its command contract. Unsupported extra fields on `Bash` cannot change
+its execution directory or dialect.
+
+Select the requested **completion scope** too. By default the waiter uses
+branch-required checks; without accessible protection it uses all reported
+checks. `--require` overrides branch protection. Add `--require '.*'` when
+all selected CI/acceptance lanes must finish, and `--no-cancel` when their
+runs must remain intact. A green required-check result can coexist with a
+pending advisory lane. It cannot substantiate “all workflows passed.” Keep
+candidate and public-release runs distinct, even when check names overlap.
+
+Read the terminal exit reason and the pinned head in the durable JSONL log:
+
+| Result | Next action |
+| --- | --- |
+| `0`, reason `green` | Continue the already-authorized next step for the selected scope; verify the current head before merging. |
+| `0`, reason `merged`, or `3`, closed | Reconcile PR state. Already merged does not prove every selected workflow passed. |
+| `1`, failed checks | Diagnose the reported failure before changing code or retrying. |
+| `2`, review activity | Read and address the relevant review before continuing. |
+| `64`, usage | Correct the command; this is not a CI verdict. |
+| `4`, watcher timeout | Work is incomplete. Revalidate the same CI run, then resume the canonical waiter after its process has exited. Do not restart CI solely because observation expired. |
+| `124`, resumable tool watchdog | Inspect `status: in-progress` and `resume_hint`; after the wrapper has stopped the process, reuse the same arguments. Never interpret it as green. |
+| Live handle or tool observation timeout | Wait on that same process; do not claim success, permanent blockage, or a terminal CI failure. |
+
+The existing waiter retains its other explicit terminal results (approval,
+conflict, unavailable GitHub, stale/missing checks, queued deadline and killed
+process). Diagnose those results rather than collapsing them into green.
+
+**Goal state is separate.** Neither a rejected command nor successful CI
+changes a persisted goal's lifecycle. When the user removes a previous
+blocker, use the runtime's supported goal-resume mechanism if one is exposed.
+If no such tool is available, report that limitation and ask the user to
+resume the goal; do not claim automatic continuation is active. Codex runtime
+reactivation cannot be implemented by clud's hook or watcher. Already-authorized
+ordinary work can continue when tools permit it without misreporting goal state.
+
+Offline regressions use the real hook and bundled waiter with controlled
+process sessions and GitHub snapshots. They exercise the published procedure;
+they do not claim to execute a real Codex agent or reactivate its goal runtime.
 
 ### Repeated-call guard (#1674)
 

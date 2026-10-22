@@ -30,40 +30,11 @@ pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<Str
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if super::block_bad_cmd_gate::gates_tool(&tool) || tool == "exec_command" {
-        let command = payload
-            .tool_input
-            .as_ref()
-            .and_then(|input| input.get("cmd"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(&payload.command);
-        let cwd = payload
-            .tool_input
-            .as_ref()
-            .and_then(|input| input.get("workdir"))
-            .and_then(serde_json::Value::as_str)
-            .map(|path| payload.cwd.join(path));
-        let dialect = payload
-            .tool_input
-            .as_ref()
-            .and_then(|input| input.get("shell"))
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(
-                || {
-                    super::shell_dialect_for_tool(if tool == "exec_command" {
-                        "shell"
-                    } else {
-                        &tool
-                    })
-                },
-                |shell| {
-                    super::shell_dialect_for_tool(&super::block_bad_cmd_shell::program_name(shell))
-                },
-            );
+    if super::block_bad_cmd_gate::gates_tool(&tool) {
         return reason_in(
-            command,
-            dialect,
-            Some(cwd.as_deref().unwrap_or(&payload.cwd)),
+            &payload.command,
+            super::shell_dialect_for_payload(payload),
+            Some(&payload.cwd),
             home.as_deref(),
         );
     }
