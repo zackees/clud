@@ -198,7 +198,7 @@ def _goal_roles(
     if parallel:
         add = (
             f"git -C {repo} fetch -q origin && "
-            f"git -C {repo} worktree add -q {checkout} -b {branch} origin/{FEATURE}"
+            f"git -C {repo} worktree add --no-track -q {checkout} -b {branch} origin/{FEATURE}"
         )
         planner = [_bash(add), _after(OK, _structured(plan))]
     write = {"file_path": f"{checkout}/{goal}.txt", "content": f"{goal}\n"}
