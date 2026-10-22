@@ -598,6 +598,7 @@ def test_first_run_offer_defaults_to_not_now_and_cancels_without_writes(
     home = tmp_path / "untouched-home"
     env = isolated_env(home)
     env["PATH"] = ""
+    before = browser_user_path_snapshot()
     process = PseudoTerminalProcess([str(clud_binary())], env=env, capture=True)
     try:
         process.expect("[x] Not now", timeout=30)
@@ -605,6 +606,7 @@ def test_first_run_offer_defaults_to_not_now_and_cancels_without_writes(
         process.write(cancel)
         assert process.wait(timeout=30) == 130, process.output_text
         assert not home.exists(), process.output_text
+        assert browser_user_path_snapshot() == before
     finally:
         if process.poll() is None:
             process.kill()
@@ -623,6 +625,7 @@ def test_browser_menu_uses_canonical_url_without_installing(
         log = tmp_path / "missing-parent" / "opened-url"
     env = isolated_env(home)
     env["CLUD_INSTALLER_CI_BROWSER_LOG"] = str(log)
+    before = browser_user_path_snapshot()
     process = PseudoTerminalProcess(
         [str(clud_binary()), "--installer"], env=env, capture=True,
     )
@@ -638,7 +641,21 @@ def test_browser_menu_uses_canonical_url_without_installing(
         else:
             assert log.read_text(encoding="utf-8") == page
         assert not home.exists(), process.output_text
+        assert browser_user_path_snapshot() == before
     finally:
         if process.poll() is None:
             process.kill()
         process.close()
+
+
+def browser_user_path_snapshot():
+    """Windows HOME overrides do not isolate the real per-user registry."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            return winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return None
