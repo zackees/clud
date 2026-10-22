@@ -12,6 +12,7 @@ def observe(event: dict, config: Path) -> dict:
     session = event.get("session_id")
     row = {
         "agent_id": agent, "session_id": session, "agent_type": event.get("agent_type"),
+        "transcript_path": event.get("transcript_path"), "cwd": event.get("cwd"),
         "command": event.get("tool_input", {}).get("command"), "metadata": [],
     }
     if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
