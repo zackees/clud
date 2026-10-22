@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import select
 import sys
 import time
@@ -150,8 +151,9 @@ def test_unattended_activation_failure_never_repairs(tmp_path: Path, structured:
 
 
 def terminal_report(terminal: InstallerTerminal) -> dict:
+    transcript = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", terminal.output)
     reports = [
-        json.loads(line) for line in terminal.output.splitlines() if line.startswith(b'{"schema"')
+        json.loads(line) for line in transcript.splitlines() if line.startswith(b'{"schema"')
     ]
     assert len(reports) == 1, terminal.output.decode(errors="replace")
     assert reports[0]["schema"] == "clud-installer-result/v1"
