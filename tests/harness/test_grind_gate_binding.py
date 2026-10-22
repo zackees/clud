@@ -107,3 +107,6 @@ def test_native_gate_cannot_report_ready_without_executing_check(harness: Harnes
     reports = [row for row in result.hooks if row.get("agent_type") == "grind-gate"
                and row.get("tool_name") == "StructuredOutput"]
     assert len(reports) == 1, reports
+    assert any(row.get("role") == "gate"
+               and row.get("step", {}).get("text") == "UNPROVED_READY_REJECTED"
+               for row in result.requests), result.requests
