@@ -1113,12 +1113,11 @@ DEFERRED_GOALS.forEach(d => {
 const remaining = summary.filter(s => ORCHESTRATION && s.status === 'deferred' &&
   s.gate && s.gate.when !== 'merged' && nonempty(s.gate.check)).map(s => String(s.goal))
 const nextEpochs = { ...GATE_EPOCHS }
-for (const id of remaining) {
-  if (gateEpoch(id) >= MAX_GATE_EPOCH) throw new Error(`gate epoch exhausted for ${id}`)
-  nextEpochs[id] = gateEpoch(id) + 1
-}
+const exhausted = remaining.some(id => gateEpoch(id) >= MAX_GATE_EPOCH)
+for (const id of remaining) nextEpochs[id] = Math.min(MAX_GATE_EPOCH, gateEpoch(id) + 1)
 const resume = remaining.length ? {
   schema: 'grind-publication-resume/v1', remaining_goals: remaining, gateEpochs: nextEpochs,
+  ...(exhausted ? { exhausted: true, reason: 'native replay history limit reached; retain deferred work' } : {}),
 } : null
 const resumeResult = resume ? { resume } : {}
 if (PLAN_URL) log(`plan: ${PLAN_URL}`)

@@ -76,3 +76,8 @@ as publication waiting. When no resume manifest remains, end this loop, remove
 If native `/loop` or native Workflow resumption is unavailable, report that
 specific missing capability and retain the manifest for explicit resumption;
 do not invent a notification mechanism or external relaunch loop.
+
+If a publication-resume manifest has `exhausted: true`, stop the native loop,
+retain `orchestration_resume`, its launch references and the manifest, and
+report the replay-history limit. Do not call Finish, advance its epochs or
+restart completed work. The deferred goals remain unfinished.

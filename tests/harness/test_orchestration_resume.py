@@ -251,9 +251,10 @@ def test_native_resume_preserves_completed_work_across_three_generations(
     assert "resume" not in outputs[2]
     assert _merged(h) == [f"grind/{goal}" for goal in ("a", "b", "c", "d")]
     for goal in ("a", "b", "c", "d"):
-        for role in ("planner", "worker", "reviewer", "integrator"):
+        for role in ("planner", "worker", "reviewer", "integrator", "lander"):
             turns = [row for row in result.requests
-                     if row["role"] == f"{role}:{goal}" and row.get("turn") == 0]
+                     if row["role"] == (f"lander:{goal}:0" if role == "lander" else f"{role}:{goal}")
+                     and row.get("turn") == 0]
             assert len(turns) == 1, (goal, role, turns)
     for gate in ("gate:b:0", "gate:b:1", "gate:c:1", "gate:c:2"):
         assert len([row for row in result.requests

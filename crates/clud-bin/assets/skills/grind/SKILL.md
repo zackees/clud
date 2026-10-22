@@ -673,3 +673,8 @@ two), whether or not every goal merged:
 
 Tools are capped by each agent type's `tools:` list; shell commands by
 clud's PreToolUse hook, keyed on the agent type.
+
+If a publication-resume manifest has `exhausted: true`, stop the native loop,
+retain `orchestration_resume`, its launch references and the manifest, and
+report the replay-history limit. Do not call Finish, advance its epochs or
+restart completed work. The deferred goals remain unfinished.
