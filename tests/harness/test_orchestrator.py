@@ -12,7 +12,14 @@ from typing import Any
 import pytest
 
 from tests.harness.harness import Harness
-from tests.harness.test_grind_plan_only import _classify, _plan_phase, _script, _seed, _structured, _told
+from tests.harness.test_grind_plan_only import (
+    _classify,
+    _plan_phase,
+    _script,
+    _seed,
+    _structured,
+    _told,
+)
 
 
 def run_plan() -> dict[str, Any]:
