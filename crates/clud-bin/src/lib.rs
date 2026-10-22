@@ -106,6 +106,7 @@ pub mod route_health;
 pub mod route_plan;
 pub mod runner;
 pub mod runtime_cache;
+pub mod secret_prompt;
 pub mod secret_redaction;
 pub mod selector;
 pub mod self_install;

@@ -4,6 +4,36 @@
 
 use super::*;
 
+#[test]
+fn meta_do_requires_grind_capabilities_but_single_do_does_not() {
+    let mut args = parse(&["clud", "do", "https://github.com/o/r/issues/9"]);
+    let codex = ResolvedLaunchTarget {
+        requested_harness: HarnessSelection::Codex,
+        effective_harness: Backend::Codex,
+        ..bridge_target()
+    };
+    for target in [codex, deepseek_harness_target()] {
+        assert!(grind_launch_error(&args, target).is_none());
+        args.do_meta = true;
+        assert!(grind_launch_error(&args, target)
+            .unwrap()
+            .contains("requires the Claude harness"));
+        args.do_meta = false;
+    }
+    args.do_meta = true;
+    assert!(grind_launch_error(&args, bridge_target()).is_none());
+    args.subprocess = true;
+    assert!(grind_launch_error(&args, bridge_target())
+        .unwrap()
+        .contains("foreground interactive PTY"));
+    args.subprocess = false;
+    for detached in [false, true] {
+        args.detach = detached;
+        args.detachable = !detached;
+        assert!(grind_launch_error(&args, bridge_target()).is_some());
+    }
+}
+
 /// #1803: `grind reconcile` never launches a session -- it reads GitHub state
 /// through `gh` and exits with its own status -- so the interactive harness
 /// gate cannot apply to it. It parses as `Command::Grind`, so the gate used

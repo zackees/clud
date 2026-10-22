@@ -1,8 +1,8 @@
-//! Classify a `clud do` target so the launch seeds the right skill.
+//! Classify a `clud do` target so the launch renders the right procedure.
 //!
-//! - A single issue, a PR, or a free-form goal seeds `/goal /do <target>`.
+//! - A single issue, a PR, or a free-form goal gets the rendered /do contract.
 //! - A GitHub issue with at least one open native sub-issue is a meta issue,
-//!   and seeds `/goal /grind <url>`.
+//!   and gets a grind router handoff, with its harness capability checks.
 //!
 //! Deciding needs a GitHub query. When clud cannot answer it (no `gh`, not
 //! authenticated, offline, an issue URL on a forge clud cannot query), the

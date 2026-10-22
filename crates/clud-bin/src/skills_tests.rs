@@ -90,6 +90,16 @@ fn do_and_grind_skills_install_with_explicit_only_invocation() {
 }
 
 #[test]
+fn credential_prompt_skill_remains_automatically_discoverable_after_install() {
+    let dir = tempdir().unwrap();
+    install_to(dir.path(), BUNDLED_SKILLS).unwrap();
+    install_explicit_invocation_policies(dir.path()).unwrap();
+    let body = std::fs::read_to_string(dir.path().join("clud-secret/SKILL.md")).unwrap();
+    assert!(!body.contains("disable-model-invocation: true"));
+    assert!(!dir.path().join("clud-secret/agents/openai.yaml").exists());
+}
+
+#[test]
 fn installs_when_missing() {
     let dir = tempdir().unwrap();
     let report = install_to(dir.path(), &fake_skills()).unwrap();

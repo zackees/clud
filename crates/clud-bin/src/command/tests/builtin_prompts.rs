@@ -113,48 +113,54 @@ fn test_fix_with_non_github_url() {
 fn test_do_command_resolves_goal_prompt() {
     let p = plan(&["clud", "do", "https://github.com/zackees/clud/issues/866"]);
     // `do` seeds an interactive session, so the prompt is the trailing
-    // positional (no `-p`), same shape as codex. The contract lives in the
-    // bundled `/do` skill; `/goal` keeps the session going until it is met.
-    assert_eq!(
-        last_arg(&p),
-        "/goal /do https://github.com/zackees/clud/issues/866"
-    );
+    // positional (no `-p`), same shape as codex. The live contract itself is
+    // the goal text: /goal cannot expand a nested explicit-only skill.
+    let seed = last_arg(&p);
+    assert!(seed.starts_with("/goal # /do: rendered"));
+    assert!(seed.contains("Verdict: `default`"));
+    assert!(seed.contains("https://github.com/zackees/clud/issues/866"));
+    assert!(seed.contains("Read the issue and implement it"));
 }
 
 #[test]
 fn test_do_command_on_a_meta_issue_seeds_grind() {
     let mut args = parse(&["clud", "do", "https://github.com/zackees/clud/issues/900"]);
     args.do_meta = true;
+    args.do_rendered_prompt = Some(crate::command::do_prompt::render(
+        "https://github.com/zackees/clud/issues/900",
+        &Ok(crate::command::do_kind::DoKind::Meta),
+        &Ok(crate::command::do_prompt::BranchFacts {
+            branch: Some("main".into()),
+            default_branch: "main".into(),
+            ..Default::default()
+        }),
+    ));
     let backend = crate::backend::resolve_backend(args.claude, args.codex);
     let p = build_launch_plan(&args, backend, backend.executable_name());
+    let seed = last_arg(&p);
+    assert!(seed.starts_with("/goal # /do: rendered"));
+    assert!(seed.contains("This is a meta issue"));
+    assert!(seed.contains("Workflow tool"));
+    assert!(seed.contains("use Read to read the complete grind router"));
+    assert!(!seed.contains("Read the issue and implement it"));
+}
+
+#[test]
+fn test_build_do_prompt_preserves_the_whole_rendered_contract() {
+    let procedure = "Verdict: stale_merged\nrepair \"quotes\"; $(touch sentinel) &\nFinish";
     assert_eq!(
-        last_arg(&p),
-        "/goal /grind https://github.com/zackees/clud/issues/900"
+        build_do_prompt(Some(procedure)),
+        format!("/goal {procedure}")
     );
 }
 
 #[test]
-fn test_build_do_prompt_expands_to_goal_do() {
-    assert_eq!(
-        build_do_prompt("https://example.com/thing", false),
-        "/goal /do https://example.com/thing"
-    );
-    assert_eq!(
-        build_do_prompt("github.com/zackees/clud/issues/1036", false),
-        "/goal /do github.com/zackees/clud/issues/1036"
-    );
-    assert_eq!(
-        build_do_prompt("  refactor the launch mode classifier ", false),
-        "/goal /do refactor the launch mode classifier"
-    );
-}
-
-#[test]
-fn test_build_do_prompt_routes_meta_issues_to_grind() {
-    assert_eq!(
-        build_do_prompt("https://github.com/o/r/issues/1", true),
-        "/goal /grind https://github.com/o/r/issues/1"
-    );
+fn test_do_plan_without_a_prepared_contract_fails_closed() {
+    for rendered in [None, Some(""), Some("  ")] {
+        let seed = build_do_prompt(rendered);
+        assert!(seed.starts_with("/goal Stop:"));
+        assert!(seed.contains("do not start work"));
+    }
 }
 
 #[test]

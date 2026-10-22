@@ -213,10 +213,15 @@ pub struct Args {
     pub dry_run: bool,
 
     /// Set by `main` for `clud do`: the target is a meta issue (it has open
-    /// native sub-issues), so the prompt seeds `/grind` instead of `/do`.
+    /// native sub-issues), so the launch requires grind's harness capabilities.
     /// Never a CLI flag; see `command::do_kind`.
     #[arg(skip)]
     pub do_meta: bool,
+
+    /// Live `/do` procedure prepared before launch setup. Never a CLI flag:
+    /// the builder wraps this text in `/goal`, without nested skill expansion.
+    #[arg(skip)]
+    pub do_rendered_prompt: Option<String>,
 
     #[arg(long = "detach", conflicts_with = "dry_run")]
     pub detach: bool,
@@ -555,6 +560,8 @@ impl Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Acquire a credential in a masked window and deliver it directly to a sink.
+    Secret(crate::secret_prompt::Options),
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
     /// Query clud's cached OpenRouter model and pricing catalog.
@@ -1461,6 +1468,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "settings",
     "test",
     "auth",
+    "secret",
     "models",
     "codex-update",
     "dsh-update",
@@ -1773,7 +1781,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     // subcommand missing from this list does not fail loudly: clud silently
     // swallows everything after `--` as backend passthrough, and the subcommand
     // sees an empty command vector.
-    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "safe-rm"];
+    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "safe-rm", "secret"];
 
     // Which subcommand we are inside, once one has been seen. `None` means the
     // tokens still belong to clud's own top-level flags.

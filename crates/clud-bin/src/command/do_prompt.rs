@@ -10,8 +10,8 @@
 //! - the **target**: a meta issue routes to `/grind`, a single issue or a
 //!   free-form goal gets its contract, and "can't tell" stops the session.
 //!
-//! `clud do` shares the same classifier (`do_kind`), so the two entry points
-//! cannot drift.
+//! `clud do` shares the classifier and [`render_current`] with `do-prompt`;
+//! its `/goal` seed contains the rendered procedure, not a nested skill call.
 
 use std::path::Path;
 
@@ -147,8 +147,8 @@ Read the issue and implement it. Every code change keeps a RED -> GREEN \
 focused regression: first show the failure or reproduction, then make that \
 signal pass before the broader repository gates.
 
-If the issue turns out to have several independent children after all, use \
-`/grind` to delegate them. Each child needs its own branch and one or more \
+If the issue turns out to have several independent children after all, follow \
+the grind handoff above. Each child needs its own branch and one or more \
 PRs; never combine children in one PR. Only a child's final PR closes it, \
 and child PRs must not close the parent. Record child -> PR links, then \
 close the parent after all children are resolved.
@@ -176,8 +176,25 @@ checkout only when `/grind` and the repository's guidance allow it; work can \
 only land here. When you are done, run `git status` and make sure it's \
 clean, and make sure the local repo is rebased to the starting branch.
 
-If the goal contains several independent deliverables, invoke `/grind` to \
-delegate them; otherwise keep the normal `/goal` workflow.";
+If the goal contains several independent deliverables, follow the grind \
+handoff above; otherwise keep the normal `/goal` workflow.";
+
+const GRIND_HANDOFF: &str = "\
+## Grind handoff (only when needed)
+
+Use this handoff only for a meta issue or independent children discovered \
+while doing the target below. Otherwise continue with What to do.
+
+Grind requires Claude Code's Workflow tool and the bundled grind-* agent \
+types. If either is missing, stop and say: \"/grind requires the Claude \
+harness; relaunch with `--harness claude`.\" Do not emulate the workflow.
+
+Once the starting point is settled, use Read to read the complete grind router \
+at the absolute path listed above (or `../grind/SKILL.md` relative to /do's \
+skill base directory). Follow it with the target below as the user's argument. \
+Use the router's parent directory as its base for relative leaf-skill paths. \
+If it cannot be read, stop and report that failure; do not invent a procedure. \
+Do not call the Skill tool: /do, /grind and the leaves remain explicit-only.\n";
 
 /// The mandatory last step, shared with `/grind`'s router. `default` is the
 /// repository's default branch.
@@ -237,11 +254,15 @@ pub fn render(
             "Verdict: `blocked`.\n\nStop: this checkout could not be inspected ({error}). Tell the user and do not start work."
         )),
     }
+    if kind.is_ok() {
+        out.push_str("\n\n");
+        out.push_str(GRIND_HANDOFF);
+    }
     out.push_str("\n\n## What to do\n\n");
     match kind {
-        Ok(DoKind::Meta) => out.push_str(&format!(
-            "This is a meta issue: it has open sub-issues. Do not implement it as one change. Once the starting point above is settled, invoke `/grind {target}` and follow it.\n"
-        )),
+        Ok(DoKind::Meta) => out.push_str(
+            "This is a meta issue: it has open sub-issues. Do not implement it as one change. Follow the grind handoff above.\n"
+        ),
         Ok(DoKind::Single) if issue.is_some() || target.contains("://") => {
             out.push_str(ISSUE_CONTRACT);
             out.push_str("\n\n");
@@ -271,6 +292,27 @@ pub fn verdict_name(v: Verdict) -> &'static str {
         Verdict::Blocked => "blocked",
         Verdict::Unknown => "unknown",
     }
+}
+
+/// Inspect the checkout once and give both explicit entry points the same
+/// procedure and installed-router context. Target text never enters a shell.
+pub fn render_current(target: &str, kind: &Result<DoKind, String>) -> String {
+    let facts = std::env::current_dir()
+        .map_err(|error| format!("could not resolve the current directory: {error}"))
+        .and_then(|cwd| gather(&cwd));
+    let skills = crate::home::user_home().and_then(|home| {
+        crate::skills::backend_for(crate::backend::Backend::Claude)
+            .map(|backend| backend.skills_dir(&home))
+    });
+    let context = match skills {
+        Some(skills) => format!(
+            "Skill base directory for /do: {}\nGrind router path: {}\n\n",
+            serde_json::json!(skills.join("do").to_string_lossy()),
+            serde_json::json!(skills.join("grind").join("SKILL.md").to_string_lossy()),
+        ),
+        None => "Stop: the skill directory could not be resolved. Tell the user and do not start work.\n\n".to_string(),
+    };
+    format!("{context}{}", render(target, kind, &facts))
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -402,8 +444,6 @@ fn pr_for_branch(branch: &str) -> Result<Option<(u64, String, String)>, String> 
 /// the harness shows the model the text (a refusal is part of the text).
 pub fn run(words: &[String]) -> i32 {
     let target = words.join(" ");
-    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let facts = gather(&cwd);
     let kind = if target.trim().is_empty() {
         Ok(DoKind::Single)
     } else {
@@ -413,7 +453,7 @@ pub fn run(words: &[String]) -> i32 {
             do_kind::query_sub_issues,
         )
     };
-    print!("{}", render(&target, &kind, &facts));
+    print!("{}", render_current(&target, &kind));
     0
 }
 
@@ -542,7 +582,10 @@ mod tests {
             &Ok(DoKind::Meta),
             &Ok(facts("main")),
         );
-        assert!(out.contains("invoke `/grind https://github.com/o/r/issues/9`"));
+        assert!(out.contains("Follow the grind handoff above"));
+        assert!(out.contains("use Read to read the complete grind router"));
+        assert!(out.contains("Workflow tool"));
+        assert!(out.contains("Do not call the Skill tool"));
         assert!(!out.contains("Read the issue and implement it"));
     }
 

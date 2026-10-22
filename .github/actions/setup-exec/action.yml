@@ -17,6 +17,18 @@ inputs:
 runs:
   using: composite
   steps:
+    # Native credential windows need a real graphics stack even when their
+    # test display is Xvfb. In particular, winit panics without the X11 XKB
+    # runtime instead of returning a graphics-initialization error (#1708).
+    - name: Install Linux native window runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          xvfb xauth xfonts-base weston libgl1-mesa-dri libegl1 libgles2 \
+          libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1
+
     - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
@@ -55,6 +67,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        echo 'CLUD_TEST_REQUIRE_SECRET_GUI=1' >> "$GITHUB_ENV"
         if [ -x .venv/Scripts/python.exe ]; then
           echo "VENV_PY=$(pwd)/.venv/Scripts/python.exe" >> "$GITHUB_ENV"
         elif [ -x .venv/bin/python ]; then

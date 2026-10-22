@@ -13,6 +13,8 @@ arboard = "3"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+# #1708: masked native credential window; no persistence or browser surface.
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "clipboard", "wayland", "x11"] }
 # Native crash handler for SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT
 # on Unix and structured exceptions on Windows. By default it does NOT
 # attach a SIGINT / CTRL_C_EVENT handler, so the existing `ctrlc`-based
@@ -178,6 +180,7 @@ cpal = "0.16"
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
 
 [target.'cfg(unix)'.dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["glow"] }
 libc = "0.2"
 signal-hook = "0.3"
 
@@ -194,6 +197,7 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 keyring = { version = "=3.6.3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["wgpu"] }
 # #933: materialize the standard machine + user login environment from the
 # registry rather than preserving the shell that happened to start the daemon.
 winreg = "0.10"

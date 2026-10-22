@@ -239,6 +239,7 @@ fn backend_prompt_launch_plan(
         coauthor: args.coauthor.clone(),
         dry_run: false,
         do_meta: false,
+        do_rendered_prompt: None,
         detach: false,
         detachable: false,
         session_name: None,

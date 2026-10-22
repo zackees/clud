@@ -8,6 +8,7 @@ re-explaining.
 
 | Document | Lines | What it covers |
 |---|---|---|
+| [architecture/secret-prompt.md](architecture/secret-prompt.md) | ~60 | Masked native credential input, direct sinks, caller-checked askpass, output secrecy and cancellation |
 | [architecture/loop-subsystem.md](architecture/loop-subsystem.md) | ~250 | `clud loop`: task resolution, plan synthesis, iteration run, DONE/BLOCKED marker contract, artifact rollover, repeat scheduling |
 | [architecture/testing-tiers.md](architecture/testing-tiers.md) | ~110 | The three test tiers; tier 3 runs the real Claude Code on `mock-agent serve` (scripted model), with the `tests/harness/` fixture and its pitfalls |
 | [architecture/grind.md](architecture/grind.md) | ~550 | `clud grind` and the `/grind` skill DAG: meta-issue routing, the plan-only pass and regroup threshold, meta of metas, preflight and the single question round, prework's plan comment, bug and feature stages, feature-branch mode, problem reporting, reconcile, capped `grind-*` agent roles, one-at-a-time integration |

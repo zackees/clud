@@ -107,7 +107,12 @@ def test_h6_meta_issue_routes_to_grind(harness: Harness) -> None:
     _gh(harness)
     text = _do(harness, META)
     _rendered(text)
-    assert f"invoke `/grind {META}`" in text
+    assert META in text
+    assert "This is a meta issue" in text
+    assert "use Read to read the complete grind router" in text
+    assert str(harness.config / "skills" / "grind" / "SKILL.md") in text
+    assert "/grind requires the Claude harness" in text
+    assert f"invoke `/grind {META}`" not in text
     assert "Read the issue and implement it" not in text
 
 
@@ -214,3 +219,87 @@ def test_h13_goal_seed_does_not_bypass_explicit_only_do_policy(harness: Harness)
     after_skill = json.dumps([r.get("messages") for r in result.requests if r.get("turn") == 1])
     assert "cannot be used with Skill tool due to disable-model-invocation" in after_skill
     assert "rendered for this checkout by `clud do-prompt`" not in after_skill
+
+
+def _cli_seed(harness: Harness, target: str) -> str:
+    launch = process.run(
+        [str(harness.clud), "--dry-run", "--claude", "do", target],
+        cwd=str(harness.repo),
+        capture_output=True,
+        text=True,
+        env=harness.env(),
+        timeout=60,
+    )
+    assert launch.returncode == 0, launch.stderr
+    return json.loads(launch.stdout)["command"][-1]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        ISSUE,
+        "refactor the launcher",
+        'repair "quoted words"; $(touch cli-target-executed) `touch cli-backtick-executed` &',
+    ],
+)
+def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, target: str) -> None:
+    _branch(harness, "feat/x", commit=True)
+    _gh(harness, prs=[{"number": 812, "head": "feat/x", "state": "MERGED"}])
+    seed = _cli_seed(harness, target)
+    assert seed.startswith("/goal ")
+    direct = process.run(
+        [str(harness.clud), "do-prompt", target],
+        cwd=str(harness.repo),
+        capture_output=True,
+        text=True,
+        env=harness.env(),
+        timeout=60,
+    )
+    assert direct.returncode == 0, direct.stderr
+    # Feed the actual CLI seed through the real harness, with no recovery
+    # Skill call. The first model request must already have the live verdict.
+    result = harness.run(seed, ACK)
+    assert result.returncode == 0, result.stdout[-2000:]
+    text = result.prompt_text("main")
+    _rendered(text)
+    assert "Verdict: `stale_merged`" in text
+    assert "A session-scoped Stop hook is now active" in text
+    assert "812" in text
+    assert "RED" in text
+    assert "GREEN" in text
+    for line in direct.stdout.splitlines():
+        if line.strip():
+            assert json.dumps(line)[1:-1] in text, line
+    assert not (harness.repo / "cli-target-executed").exists()
+    assert not (harness.repo / "cli-backtick-executed").exists()
+
+
+def test_h15_explicit_cli_meta_handoff_reads_the_router(harness: Harness) -> None:
+    _gh(harness)
+    router = harness.config / "skills" / "grind" / "SKILL.md"
+    seed = _cli_seed(harness, META)
+    assert seed.startswith("/goal ")
+    script = {
+        "default_text": "ACK",
+        "roles": [
+            {
+                "name": "main",
+                "steps": [
+                    {"tool_use": {"name": "Read", "input": {"file_path": str(router)}}},
+                    {"text": "ACK"},
+                ],
+            }
+        ],
+    }
+    result = harness.run(seed, script)
+    assert result.returncode == 0, result.stdout[-2000:]
+    text = result.prompt_text("main")
+    _rendered(text)
+    assert "Verdict: `default`" in text
+    assert META in text
+    assert "A session-scoped Stop hook is now active" in text
+    assert str(router) in text
+    assert "Workflow" in text
+    after_read = json.dumps([r.get("messages") for r in result.requests if r.get("turn") == 1])
+    assert "/grind requires the Claude harness" in after_read
+    assert "cannot be used with Skill tool" not in after_read
