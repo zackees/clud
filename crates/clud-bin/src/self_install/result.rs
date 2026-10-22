@@ -46,7 +46,11 @@ impl Outcome {
     }
 
     pub(super) fn activation_required() -> Self {
-        Self::new(Status::ActivationRequired, 0, Some("path_modification_disabled"))
+        Self::new(
+            Status::ActivationRequired,
+            0,
+            Some("path_modification_disabled"),
+        )
     }
 
     pub(super) fn refused(code: i32, reason: &'static str) -> Self {

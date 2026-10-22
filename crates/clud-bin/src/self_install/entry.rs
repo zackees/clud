@@ -237,7 +237,9 @@ fn confirm_installation(plan: &transaction::InstallPlan, yes: bool) -> Option<Ou
         Ok(ConfirmChoice::Proceed) => return None,
         Ok(ConfirmChoice::NotNow) => Outcome::refused(0, "declined"),
         Ok(ConfirmChoice::Cancelled) => Outcome::refused(130, "cancelled"),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
         Err(error) => {
             eprintln!("clud installer: {error}");
             Outcome::failed(1, "confirmation_failed")
@@ -258,7 +260,11 @@ fn print_terminal_commands(destination: &std::path::Path) {
     }
 }
 
-fn finish_activation(activation: Option<ActivationPlan>, version: &str, ask_repair: bool) -> Outcome {
+fn finish_activation(
+    activation: Option<ActivationPlan>,
+    version: &str,
+    ask_repair: bool,
+) -> Outcome {
     let Some(activation) = activation else {
         eprintln!(
             "clud installer: installed clud {version}; activation required (--no-modify-path)"
@@ -304,7 +310,9 @@ fn execute_approved_repair(
         Ok(ConfirmChoice::Proceed) => activation_result(apply(), version),
         Ok(ConfirmChoice::NotNow) => Outcome::refused(1, "repair_declined"),
         Ok(ConfirmChoice::Cancelled) => Outcome::refused(130, "cancelled"),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
         Err(error) => {
             eprintln!("clud installer: repair confirmation failed: {error}");
             Outcome::failed(1, "confirmation_failed")
@@ -332,7 +340,8 @@ fn run_menu_choice(choice: MenuChoice, options: InstallOptions) -> Outcome {
         MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, options),
         MenuChoice::Releases => run_releases(options),
         MenuChoice::Browser => {
-            let code = open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()));
+            let code =
+                open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()));
             if code == 0 {
                 Outcome::browser_opened()
             } else {
@@ -369,7 +378,9 @@ fn run_releases(options: InstallOptions) -> Outcome {
             run_selected(InstallIntent::Published(selected.asset), options)
         }
         Ok(ReleaseChoice::Cancelled) => Outcome::refused(130, "cancelled"),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Outcome::refused(130, "cancelled"),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Outcome::refused(130, "cancelled")
+        }
         Err(error) => {
             eprintln!("clud installer: {error}");
             Outcome::failed(1, "release_picker_failed")
@@ -637,7 +648,12 @@ mod tests {
     #[test]
     fn structured_output_is_scoped_and_never_leaks_to_the_backend() {
         use clap::Parser;
-        let current = parse(&["clud", "--installer", "--install-current", "--installer-json"]);
+        let current = parse(&[
+            "clud",
+            "--installer",
+            "--install-current",
+            "--installer-json",
+        ]);
         assert!(current.installer_json);
         assert!(current.passthrough.is_empty());
         assert_eq!(explicit_request(&current).unwrap(), Some(Request::Current));
