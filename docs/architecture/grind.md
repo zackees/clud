@@ -163,9 +163,19 @@ The read-only `grind-orchestrator` role is the router-callable exception to
 the internal-role delegation rule. It inspects all repositories and proposes
 the run graph; it cannot write, fetch, build or create checkouts, even in
 parallel mode. Its shell cap rejects output redirections and command-local
-environment overrides in addition to mutating commands. Wiring the approved
-graph into scheduling and separately rooted repo sessions is tracked in #1338
-and #1422; availability of this role does not establish that execution path.
+environment overrides in addition to mutating commands. The router calls it
+once after intake and presents the graph for approval before classification.
+The approved graph travels as `orchestration`, separately from classification
+stages. Its selected goals run in topological order, and approved merge
+dependencies settle before downstream planning, even when a per-goal planner
+omits them. Failed upstream goals block their dependents; independent goals
+can continue.
+
+Publication checks, cross-stage resumption and separately rooted repository
+sessions remain under development in #1338 and #1422. The current graph path
+returns an explicit blocked result for missing-stage dependencies, external
+publication evidence or a sister repository needing its own session; it must
+not treat those conditions as successful merges or execute in the wrong root.
 
 ### Grind skills require explicit invocation
 
@@ -757,8 +767,9 @@ subagent's `agent_type` in the payload, and
 decompose (command substitution, subshells) are refused for capped roles, as
 are `find -exec`/`-delete`, `tail -f`, and git global options other than
 `-C`. The integrator's bans also look inside wrappers such as `bash -c`.
-A goal may depend only on goals listed before it, so dependency waits cannot
-cycle. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
+A legacy planner dependency may name only goals listed before it. An approved
+run graph is validated for cycles and ordered before scheduling; the planner
+cannot drop its merge dependencies. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
 included.
 Other agents and the primary session are unaffected. The tests next to it
 own the exact allowlists. On top of the table, every `grind-*` role is
