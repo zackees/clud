@@ -92,3 +92,22 @@ def test_invalid_orchestration_stops_before_planning(harness: Harness, case: str
     assert reason in _told(result).replace('\\"', '"'), _told(result)[-4000:]
     assert harness.git("status", "--porcelain") == before
     assert harness.read_gh_state()["issues"]["101"]["state"] == "open"
+
+
+def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
+    """A valid graph must still reach classification; rejection is selective."""
+    _seed(harness, [101])
+    _plan_phase(harness)
+    script = _script(harness, [101], [_structured(_classify({101: ("bug", None)}, {}))])
+    args = script["roles"][-1]["steps"][0]["tool_use"]["input"]["args"]
+    args["orchestration"] = {
+        "session_repo": "o/r",
+        "goals": [{"id": "101", "repo": "o/r", "main": "main", "blockers": []}],
+        "proposed_goals": [], "risks": [],
+    }
+    before = harness.git("status", "--porcelain")
+    result = harness.run("Validate the graph and classify without doing implementation.", script)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    assert {row["role"] for row in result.requests} == {"main", "planner"}
+    assert '"planOnly"' in _told(result).replace('\\"', '"')
+    assert harness.git("status", "--porcelain") == before
