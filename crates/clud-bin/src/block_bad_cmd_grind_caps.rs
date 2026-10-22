@@ -40,6 +40,7 @@ pub(super) const INTEGRATOR: &str = "grind-integrator";
 pub(super) const LANDER: &str = "grind-lander";
 pub(super) const PREWORK: &str = "grind-prework";
 pub(super) const ORCHESTRATOR: &str = "grind-orchestrator";
+pub(super) const GATE: &str = "grind-gate";
 
 /// Read-only inspection commands every shell-holding role may run, subject
 /// to [`inspect_ok`].
@@ -318,12 +319,15 @@ pub(super) fn agent_spawn_reason(
 pub(super) fn is_grind_role(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK | ORCHESTRATOR
+        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK | ORCHESTRATOR | GATE
     )
 }
 
 /// The denial reason for a shell `command` from `role`, or `None` to allow.
 pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<String> {
+    if role == GATE {
+        return Some(format!("{GATE} requires one approved check bound to its native agent identity"));
+    }
     if role == ORCHESTRATOR {
         return orchestrator_shell_reason(command);
     }
@@ -556,6 +560,12 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
 /// front, in one round before prework. The planner never writes files, in
 /// either phase, and neither does the prework agent.
 pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option<String> {
+    if role == GATE
+        && !super::block_bad_cmd_gate::gates_tool(tool_name)
+        && tool_name != "StructuredOutput"
+    {
+        return Some(format!("{GATE} may only execute its bound check and report the result"));
+    }
     // Codex reports its file edits as `apply_patch` even where a matcher
     // reaches them through the `Edit`/`Write` aliases (#1954).
     const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"];
