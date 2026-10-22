@@ -352,7 +352,7 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
 /// Unlike a planner, the run orchestrator never fetches or creates a worktree.
 /// Keep redirections and command-local environment overrides visible: the
 /// shared statement view deliberately omits those for other roles.
-fn orchestrator_shell_reason(command: &str) -> Option<String> {
+pub(super) fn orchestrator_shell_reason(command: &str) -> Option<String> {
     use crate::shell_ast::{parse, BaseEnv, Dialect};
     let script = parse(command, Dialect::Posix, &BaseEnv::default());
     let invalid = script.has_error

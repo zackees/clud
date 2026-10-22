@@ -180,6 +180,18 @@ returns an explicit blocked result for missing-stage dependencies, external
 publication evidence or a sister repository needing its own session; it must
 not treat those conditions as successful merges or execute in the wrong root.
 
+The reserved `grind-gate` role denies shell execution by default. Its hook can
+bind an exact read-only check from run facts' approved `orchestration` graph to
+a native workflow task labeled `gate:<downstream-id>:<blocker-index>`. Lookup
+uses the hook's parent-session transcript path and agent ID, searches at most
+64 session-local workflow directories, and rejects ambiguous metadata,
+symlinks, oversized metadata, wrong roots/roles/repositories and plan-only
+facts. The label cannot select a command outside that approved blocker.
+This relies on harness-owned metadata and router-owned run facts; it is not a
+sandbox against arbitrary processes that can modify those control files.
+The workflow does not yet start this role or interpret model reports as proof
+of readiness. Actual check execution, evidence and resumption remain open.
+
 ### Grind skills require explicit invocation
 
 The leaves and roles exist for the workflow, and for a person testing one by

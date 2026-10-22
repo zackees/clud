@@ -3762,6 +3762,9 @@ mod block_bad_cmd_cwd_changed;
 #[path = "block_bad_cmd_grind_caps.rs"]
 mod block_bad_cmd_grind_caps;
 
+#[path = "block_bad_cmd_grind_gate.rs"]
+mod block_bad_cmd_grind_gate;
+
 #[path = "block_bad_cmd_stale_upstream.rs"]
 mod block_bad_cmd_stale_upstream;
 
@@ -3814,6 +3817,10 @@ mod block_bad_cmd_claude_worktrees_tests;
 /// or the feature-branch-mode router caps for any other caller while
 /// the session's run facts record a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
+    if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE) {
+        return block_bad_cmd_grind_gate::reason(payload)
+            .map(|reason| format!("Blocked by the /grind role caps: {reason}."));
+    }
     let Some(role) = payload
         .agent_type
         .as_deref()
