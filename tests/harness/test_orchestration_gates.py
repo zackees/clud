@@ -1,6 +1,8 @@
 """Bounded native Workflow gate attempts must observe publication, then defer."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.harness.harness import Harness
@@ -16,6 +18,7 @@ from tests.harness.test_grind import (
     _structured,
 )
 from tests.harness.test_grind_gate_binding import install_outcome_guard
+from tests.harness.test_grind_meta_of_metas import _told
 
 
 @pytest.mark.parametrize("opens_after", [2, None])
@@ -73,6 +76,11 @@ def test_native_publication_gate_uses_fresh_bounded_attempts_with_backoff(
     if opens_after is None:
         assert "planner:b" not in ran
         assert _merged(h) == ["grind/a", "grind/c"]
+        told = _told(result).replace("\\", "")
+        assert "grind-publication-resume/v1" in told, told[-4000:]
+        assert re.search(r'"remaining_goals"\s*:\s*\[\s*"b"\s*\]', told), told[-4000:]
+        assert re.search(r'"gateEpochs"\s*:\s*\{\s*"b"\s*:\s*1\s*\}', told), told[-4000:]
     else:
         assert max(ran["gate:3"]) < min(ran["planner:b"])
         assert _merged(h) == ["grind/a", "grind/b", "grind/c"]
+        assert "grind-publication-resume/v1" not in _told(result)

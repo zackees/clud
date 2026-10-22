@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from tests.harness.test_grind import (
     _structured,
 )
 from tests.harness.test_grind_gate_binding import install_outcome_guard
+from tests.harness.test_grind_meta_of_metas import _told
 
 
 def capture_resume_input(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -95,6 +97,9 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
                    script, timeout=300)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
+    told = _told(result).replace("\\", "")
+    assert "grind-publication-resume/v1" in told, told[-4000:]
+    assert re.search(r'"remaining_goals"\s*:\s*\[\s*"b"\s*,\s*"c"\s*\]', told), told[-4000:]
     reference = json.loads(captured.read_text())
     assert reference["resumeFromRunId"].startswith("wf_")
     resumed = [row["n"] for row in result.requests

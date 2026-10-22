@@ -207,9 +207,16 @@ before downstream planning. A successful native check releases that blocker;
 an unavailable or unsuccessful observation defers the dependent and its
 transitive dependents, preserving the original gate and immediate blocker.
 Independent work continues; an upstream implementation failure remains a
-failure rather than a deferred publication branch. Bounded
-backoff, transitive `/loop` handoff and cross-repository execution remain
-under development.
+failure rather than a deferred publication branch. Each observation uses a
+fresh native agent, with bounded native timer backoff between observations;
+independent goals continue while a gate waits. The result includes a small
+`grind-publication-resume/v1` manifest for precisely the deferred goals.
+Per-goal observation epochs preserve completed branches' native cache keys
+while allowing new observations on deferred branches. The router retains the
+original approved arguments and actual native launch references in run facts
+for same-session `/loop` resumption. Native resumption and scheduled handoff
+are undergoing harness verification; cross-repository execution remains under
+development.
 
 ### Grind skills require explicit invocation
 
