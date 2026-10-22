@@ -152,12 +152,20 @@ The sections below follow that order: [routing](#input-routing), the
 | Asset | Source | Installed to |
 |---|---|---|
 | Skills `grind`, `grind-intake`, `grind-prework`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
-| Agents `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
+| Agents `grind-orchestrator`, `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
 | Workflow `grind-run` | `crates/clud-bin/assets/workflows/grind-run.js` (`claude_files.rs`) | `~/.claude/workflows/` |
 
 Each workflow agent runs as its `grind-<role>` type and is told to invoke
 its leaf skill, so the procedure lives once, in the skill, and each leaf is
 also usable directly (for example `/grind-land` on an existing PR).
+
+The read-only `grind-orchestrator` role is the router-callable exception to
+the internal-role delegation rule. It inspects all repositories and proposes
+the run graph; it cannot write, fetch, build or create checkouts, even in
+parallel mode. Its shell cap rejects output redirections and command-local
+environment overrides in addition to mutating commands. Wiring the approved
+graph into scheduling and separately rooted repo sessions is tracked in #1338
+and #1422; availability of this role does not establish that execution path.
 
 ### Grind skills require explicit invocation
 

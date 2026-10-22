@@ -60,6 +60,11 @@ fn skill_body(skill_md: &str) -> &str {
 /// Every bundled agent definition and workflow script.
 pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
     BundledClaudeFile {
+        rel_path: "agents/grind-orchestrator.md",
+        body: include_str!("../assets/agents/grind-orchestrator.md"),
+        procedure: None,
+    },
+    BundledClaudeFile {
         rel_path: "agents/grind-planner.md",
         body: include_str!("../assets/agents/grind-planner.md"),
         procedure: Some("grind-plan"),
@@ -193,6 +198,7 @@ mod tests {
     fn bundled_includes_the_grind_roles_and_workflow() {
         let paths: Vec<_> = BUNDLED_CLAUDE_FILES.iter().map(|f| f.rel_path).collect();
         for role in [
+            "orchestrator",
             "planner",
             "prework",
             "worker",
@@ -239,6 +245,7 @@ mod tests {
                 .body
         };
         for role in [
+            "orchestrator",
             "planner",
             "prework",
             "worker",
