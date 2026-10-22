@@ -201,6 +201,7 @@ def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
     args = script["roles"][-1]["steps"][0]["tool_use"]["input"]["args"]
     args["orchestration"] = {
         "session_repo": "o/r",
+        "session_root": str(harness.repo),
         "goals": [{"id": "101", "repo": "o/r", "main": "main", "blockers": []}],
         "proposed_goals": [], "risks": [],
     }
@@ -211,3 +212,58 @@ def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
     _no_notes(result)
     assert _path(result) == "simple", _told(result)[-3000:]
     assert harness.git("status", "--porcelain") == before
+
+
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+@pytest.mark.parametrize("case", ["root", "main", "classification"])
+def test_approved_context_mismatch_stops_before_agents(harness: Harness, mode: str, case: str):
+    _seed(harness, [101])
+    _plan_phase(harness)
+    script = _script(harness, [101], [])
+    args = script["roles"][-1]["steps"][0]["tool_use"]["input"]["args"]
+    args["mode"] = mode
+    graph = {"session_repo": "o/r", "session_root": str(harness.repo), "goals": [
+        {"id": "101", "repo": "o/r", "main": "main", "blockers": []},
+        {"id": "102", "repo": "o/r", "main": "main",
+         "blockers": [{"goal": "101", "when": "merged"}]},
+    ]}
+    if case == "root":
+        graph["session_root"] = str(harness.root / "another-checkout")
+        reason = "execution root differs"
+    elif case == "main":
+        graph["goals"][0]["main"] = "master"
+        reason = "execution main differs"
+    else:
+        args["plan"] = {"stages": [
+            {"stage": "feature", "depends_on_bugs": {"101": ["102"]}},
+        ]}
+        reason = "classification dependency 102 → 101 is absent"
+    args["orchestration"] = graph
+    before = harness.git("status", "--porcelain")
+    result = harness.run("Reject inconsistent approval before starting agents.", script)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    assert {row["role"] for row in result.requests} == {"main"}
+    assert reason in _told(result), _told(result)[-3000:]
+    assert harness.git("status", "--porcelain") == before
+
+
+def test_orchestrator_cannot_execute_configured_git_filters(harness: Harness) -> None:
+    h = harness
+    canary = h.root / "filter-was-executed"
+    (h.repo / "filter-input").write_text("plain blob\n")
+    (h.repo / ".gitattributes").write_text("filter-input filter=advisor-canary\n")
+    h.git("add", "filter-input", ".gitattributes")
+    h.git("commit", "-qm", "filter fixture")
+    h.git("config", "filter.advisor-canary.smudge", f"touch {shlex.quote(str(canary))}")
+    command = f"git -C {shlex.quote(str(h.repo))} cat-file --filters HEAD:filter-input"
+    steps = [_bash(command), _after(
+        {"is_error": True, "content_contains": "grind-orchestrator"}, {"text": "FILTER_REFUSED"},
+    )]
+    before = h.git("status", "--porcelain")
+    result = h.run("Inspect the filtered blob without executing configured commands.",
+                   orchestrator_script(steps))
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    assert "FILTER_REFUSED" in str(result.requests)
+    assert not canary.exists()
+    assert h.git("status", "--porcelain") == before

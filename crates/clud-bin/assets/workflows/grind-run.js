@@ -116,7 +116,27 @@ const validateRunPlan = (plan) => {
 }
 const ORCHESTRATION = args.orchestration === undefined ? null : validateRunPlan(args.orchestration)
 const RUN_GOALS = new Map((ORCHESTRATION ? ORCHESTRATION.goals : []).map(g => [g.id, g]))
+const validateApprovedContext = () => {
+  if (ORCHESTRATION.session_root !== args.repo) throw new Error('run plan: execution root differs from approved session_root')
+  for (const g of RUN_GOALS.values()) {
+    if (g.repo === ORCHESTRATION.session_repo && g.main !== (args.main || 'main')) {
+      throw new Error(`run plan: execution main differs from approved main for ${g.id}`)
+    }
+  }
+  for (const stage of ((args.plan && args.plan.stages) || [])) {
+    for (const [id, deps] of Object.entries(stage.depends_on_bugs || {})) {
+      const goal = RUN_GOALS.get(String(id).replace(/^#/, ''))
+      if (!goal || !Array.isArray(deps)) throw new Error('run plan: invalid classification dependencies')
+      for (const dep of deps) {
+        if (!goal.blockers.some(b => b.goal === String(dep).replace(/^#/, ''))) {
+          throw new Error(`run plan: classification dependency ${dep} → ${id} is absent from the approved graph`)
+        }
+      }
+    }
+  }
+}
 if (ORCHESTRATION) {
+  validateApprovedContext()
   const selected = new Map(args.goals.map(g => [String(g.id), g]))
   for (const id of selected.keys()) {
     if (!RUN_GOALS.has(id)) throw new Error(`run plan: selected goal ${id} was not approved`)
