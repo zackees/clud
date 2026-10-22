@@ -277,3 +277,15 @@ def test_unsafe_claude_launch_still_delivers_settings_authority(tmp_path: Path) 
     )
     assert "safe-rm" not in json.dumps(command)
     assert settings.read_bytes() == original
+
+
+def test_settings_authority_preserves_owner_command_recovery(tmp_path: Path) -> None:
+    world = _world(tmp_path)
+    original = world[3].read_bytes()
+    # Scan only: neither invocation executes this command.
+    refused = _scan(world, "sleep 61")
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    world[1]["CLUD_ALLOW_ALL_CMDS"] = "1"
+    allowed = _scan(world, "sleep 61")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert world[3].read_bytes() == original
