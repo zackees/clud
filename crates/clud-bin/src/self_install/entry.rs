@@ -409,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn install_only_is_claimed_for_current_exact_and_menu_requests() {
+        use clap::Parser;
+
+        for (flags, expected) in [
+            (vec!["--installer", "--no-modify-path"], Request::Menu),
+            (
+                vec!["--installer", "--install-current", "--no-modify-path", "--yes"],
+                Request::Current,
+            ),
+            (
+                vec!["--installer", "--install-version", "2.8.14", "--no-modify-path"],
+                Request::Exact("2.8.14".into()),
+            ),
+        ] {
+            let mut argv = vec!["clud"];
+            argv.extend(flags);
+            let parsed = Args::try_parse_from(argv).expect("install-only flags must parse");
+            assert_eq!(explicit_request(&parsed).unwrap(), Some(expected));
+        }
+        assert!(Args::try_parse_from(["clud", "--no-modify-path"]).is_err());
+    }
+
+    #[test]
     fn invalid_installer_combinations_fail_in_clap() {
         use clap::Parser;
         assert!(Args::try_parse_from(["clud", "--install-current"]).is_err());
