@@ -90,3 +90,10 @@ installed executable's digest and reported version against the independently
 fetched public catalog. The picker transcript is retained beside its evidence.
 Candidate mode retains exact-version selection because the stable channel
 must continue to point at the previous public release.
+Released-mode hosts also download the fixed older native installer 2.8.30,
+verify its public catalog size/digest and reported source version, then drive
+its release picker to install the independently expected newer stable version.
+This checks discovery through the older installer's own catalog fetch and
+picker. Evidence includes both source and installed digests
+and a separate older-installer terminal transcript. The selected stable must
+be newer than the fixed source version.

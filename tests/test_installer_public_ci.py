@@ -15,7 +15,7 @@ from running_process import PseudoTerminalProcess
 
 from ci.installer_candidate import TARGETS
 from ci.installer_public_evidence import require_evidence, require_guest_evidence
-from installer.catalog import ONLINE_URL, verify_direct_executable
+from installer.catalog import ONLINE_URL, verify_direct_executable, version_key
 from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
@@ -105,6 +105,53 @@ def assert_public_latest_install(
     )
     assert installed.returncode == 0, installed.stderr.decode(errors="replace")
     assert installed.stdout.strip() == f"clud {version}".encode()
+
+
+def assert_older_installer_discovery(
+    catalog: dict,
+    os_name: str,
+    arch: str,
+    env: dict[str, str],
+    destination: Path,
+    version: str,
+    digest: str,
+    directory: Path,
+) -> dict:
+    """A fixed older public executable must discover and install today's stable."""
+    prior_version = "2.8.30"
+    assert version_key(prior_version) < version_key(version)
+    release = next(row for row in catalog["releases"] if row["version"] == prior_version)
+    matches = [
+        row for row in release["platforms"]
+        if row["platform"]["os"] == os_name
+        and row["platform"]["arch"] == arch
+        and row["asset"]["media_type"] == "application/octet-stream"
+        and (os_name != "linux" or row["variant"] == {"flavor": "static-musl"})
+    ]
+    assert len(matches) == 1, matches
+    asset = matches[0]["asset"]
+    payload = public_bytes(asset["urls"][0])
+    assert len(payload) == asset["size_bytes"]
+    assert hashlib.sha256(payload).hexdigest() == asset["sha256"]
+    verify_direct_executable(payload, os_name, arch, public_executable_flavor(matches[0]))
+    binary = directory / asset["filename"]
+    binary.write_bytes(payload)
+    binary.chmod(0o755)
+    source = run_process(
+        [str(binary), "--version"], env=env, capture_output=True, timeout=15, check=False
+    )
+    assert source.returncode == 0, source.stderr.decode(errors="replace")
+    assert source.stdout.strip() == f"clud {prior_version}".encode()
+    transcript = Path(os.environ["CLUD_PUBLIC_EVIDENCE"]).with_suffix(".older.terminal.log")
+    assert_public_latest_install(binary, env, destination, version, digest, transcript)
+    return {
+        "source_version": prior_version,
+        "source_sha256": asset["sha256"],
+        "source_url": asset["urls"][0],
+        "selected_version": version,
+        "installed_sha256": digest,
+        "transcript": transcript.name,
+    }
 
 
 def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
@@ -267,10 +314,14 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
+    older_installer = {}
     if mode == "released":
         assert_public_latest_install(
             binary, env, destination, version, digest,
             Path(os.environ["CLUD_PUBLIC_EVIDENCE"]).with_suffix(".latest.terminal.log"),
+        )
+        older_installer = assert_older_installer_discovery(
+            catalog, os_name, arch, env, destination, version, digest, tmp_path
         )
 
     if os_name == "windows":
@@ -300,6 +351,7 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
         "size_bytes": len(payload),
         "asset_url": asset["urls"][0],
         "resolved_path": lines[0],
+        "older_installer": older_installer,
     }
     if os_name == "windows":
         evidence["shell_lookup"] = shell_evidence
