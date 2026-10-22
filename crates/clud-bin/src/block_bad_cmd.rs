@@ -4525,7 +4525,7 @@ mod tests {
             });
             let reason = reason.unwrap_or_else(|| panic!("{command} should be denied"));
             assert!(
-                reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
+                reason.contains("clud tool run github/pr_merge_watch.py -- <PR>"),
                 "{reason}"
             );
         }
