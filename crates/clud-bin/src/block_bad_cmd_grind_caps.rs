@@ -1822,7 +1822,7 @@ mod tests {
         assert!(is_grind_role(role));
         let input = serde_json::json!({"subagent_type": role});
         assert!(agent_spawn_reason("Agent", Some(&input), None).is_none());
-        for internal in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+        for internal in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK, GATE] {
             let input = serde_json::json!({"subagent_type": internal});
             assert!(agent_spawn_reason("Agent", Some(&input), None).is_some());
         }

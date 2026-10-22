@@ -65,6 +65,11 @@ pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
         procedure: None,
     },
     BundledClaudeFile {
+        rel_path: "agents/grind-gate.md",
+        body: include_str!("../assets/agents/grind-gate.md"),
+        procedure: None,
+    },
+    BundledClaudeFile {
         rel_path: "agents/grind-planner.md",
         body: include_str!("../assets/agents/grind-planner.md"),
         procedure: Some("grind-plan"),
@@ -199,6 +204,7 @@ mod tests {
         let paths: Vec<_> = BUNDLED_CLAUDE_FILES.iter().map(|f| f.rel_path).collect();
         for role in [
             "orchestrator",
+            "gate",
             "planner",
             "prework",
             "worker",
@@ -246,6 +252,7 @@ mod tests {
         };
         for role in [
             "orchestrator",
+            "gate",
             "planner",
             "prework",
             "worker",
@@ -269,6 +276,25 @@ mod tests {
         assert!(!body("lander").contains("Edit"));
         assert!(!body("planner").contains("Edit"));
         assert_eq!(tools("prework"), "tools: Bash, Read, Grep, Glob");
+    }
+
+    #[test]
+    fn gate_agent_is_small_shell_only_and_requires_execution_evidence() {
+        let file = BUNDLED_CLAUDE_FILES
+            .iter()
+            .find(|file| file.rel_path == "agents/grind-gate.md")
+            .unwrap();
+        assert!(file.procedure.is_none());
+        assert!(file.body.contains("\ntools: Bash\n"));
+        assert!(file.body.contains("\nmodel: haiku\n"));
+        for instruction in [
+            "Copy it verbatim",
+            "actually completed successfully",
+            "Do not retry, sleep or poll",
+            "execution evidence remains authoritative",
+        ] {
+            assert!(file.body.contains(instruction), "missing {instruction}");
+        }
     }
 
     #[test]
