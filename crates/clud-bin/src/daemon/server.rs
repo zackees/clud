@@ -1083,7 +1083,12 @@ fn daemon_create_session(
     worker
         .start()
         .map_err(|err| io::Error::other(err.to_string()))?;
-    log_create_phase(state_dir, "create_worker_started", Some(&session_id), admission_started);
+    log_create_phase(
+        state_dir,
+        "create_worker_started",
+        Some(&session_id),
+        admission_started,
+    );
 
     // Issue #305: each startup phase gets its own budget, measured from its
     // own start.
@@ -1118,7 +1123,12 @@ fn daemon_create_session(
         }
     };
 
-    log_create_phase(state_dir, "create_snapshot_seen", Some(&session_id), admission_started);
+    log_create_phase(
+        state_dir,
+        "create_snapshot_seen",
+        Some(&session_id),
+        admission_started,
+    );
 
     // Verify the worker's TCP listener is actually accepting connections
     // before reporting the session as ready. If the backend exits immediately,
@@ -1157,7 +1167,12 @@ fn daemon_create_session(
         }
     }
 
-    log_create_phase(state_dir, "create_ready", Some(&session_id), admission_started);
+    log_create_phase(
+        state_dir,
+        "create_ready",
+        Some(&session_id),
+        admission_started,
+    );
     workers
         .lock()
         .expect("workers mutex poisoned")

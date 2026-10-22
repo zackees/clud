@@ -437,7 +437,10 @@ fn send_admission_over_tcp(
     budget: Duration,
 ) -> io::Result<DaemonResponse> {
     send_daemon_request_over_tcp(state_dir, request, Some(budget)).map_err(|err| {
-        if matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
+        if matches!(
+            err.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
             io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
