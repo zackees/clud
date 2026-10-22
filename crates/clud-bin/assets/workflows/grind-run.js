@@ -884,9 +884,7 @@ const observeGate = async (g, blocker, index) => {
 // Enforce approved dependencies before a planner or worker touches this goal.
 // A missing stage or external publication needs a resumable gate, not guessed
 // success. Cross-repository execution needs a separately rooted session first.
-const approvedBlock = async (g) => {
-  const approved = RUN_GOALS.get(String(g.id))
-  if (!approved) return null
+const approvedDependencies = async (g, approved) => {
   const blocked = (note, gate) => ({ merged: false, blocked: true, note, ...(gate ? { gate } : {}) })
   if (approved.repo !== ORCHESTRATION.session_repo) {
     return blocked(`blocked: ${approved.repo} requires a separately rooted repository session`)
@@ -914,11 +912,16 @@ const approvedBlock = async (g) => {
     return { ...blocked(depNote(blocker.goal), upstream.gate || blocker), status: 'deferred',
       waiting_on: blocker.goal, gate_evidence: upstream.gate_evidence || 'upstream gate unavailable' }
   }
+  return null
+}
+
+const approvedChecks = async (g, approved) => {
   for (const [index, b] of approved.blockers.entries()) {
     if (b.when !== 'merged') {
       const observed = await observeGate(g, b, index)
       if (!observed.ready) {
-        return { ...blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b),
+        return { merged: false, blocked: true, gate: b,
+          note: `blocked: dependency ${b.goal} still requires ${b.when} evidence`,
           status: 'deferred', gate_evidence: observed.evidence,
           gate_attempts: observed.attempts }
       }
@@ -927,33 +930,63 @@ const approvedBlock = async (g) => {
   return null
 }
 
+// Restore the native branch before each phase, including after dependency
+// promises resolve in another goal's context. Keep terminal results outside
+// pipeline's null-means-stop convention, and preserve thrown errors for parking.
+const inNativeStages = async (stages) => {
+  let stopped = null
+  let failure = null
+  const results = await pipeline([true], ...stages.map(stage => async () => {
+    if (stopped || failure) return true
+    try { stopped = await stage() }
+    catch (cause) { failure = { cause } }
+    return true
+  }))
+  if (failure) throw failure.cause
+  if (!results[0]) throw new Error('native goal stage did not complete')
+  return stopped
+}
+
+const approvedBlock = (g) => {
+  const approved = RUN_GOALS.get(String(g.id))
+  return approved ? inNativeStages([
+    () => approvedDependencies(g, approved),
+    () => approvedChecks(g, approved),
+  ]) : null
+}
+
 const attemptGoal = async (g, state) => {
-  if (!PARALLEL && DIRTY_AFTER !== null) return { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` }
-  const approved = await approvedBlock(g)
-  if (approved) return approved
-  // Stuck-bug rule: a failed bug blocks only the feature children that list
-  // it, whether it ran in this call or in the earlier bug-stage call.
-  if (STUCK_BUG_BLOCKS) {
-    for (const bug of bugDepsOf(g)) {
-      const dep = goalIdOf[bug]
-      const stuck = dep === undefined ? STUCK_BUGS.has(bug) : !(await landed[dep])
-      if (stuck) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
-    }
-  }
-  const planned = await plan(g)
-  if (!planned) return { merged: false, note: 'planner died' }
-  const p = routeCheckTasks(earlierDeps(planned, g))
-  if (!p.tasks.length) return { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' }
-  // A dependency that already settled unmerged blocks this goal before any
-  // worker writes on top of it (#1424).
-  const early = settledBlock(p)
-  if (early) return early
-  state.p = p
-  const worked = await work(p, g)
-  state.results = worked.results
-  const reviewed = await review(worked, g)
-  state.review = reviewed.review
-  return integrateAndLand(reviewed, g)
+  let worked
+  let reviewed
+  return inNativeStages([
+    () => !PARALLEL && DIRTY_AFTER !== null
+      ? { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` } : null,
+    () => approvedBlock(g),
+    async () => {
+      // Failed bugs block only the feature children that list them (#1409).
+      if (STUCK_BUG_BLOCKS) {
+        for (const bug of bugDepsOf(g)) {
+          const dep = goalIdOf[bug]
+          const stuck = dep === undefined ? STUCK_BUGS.has(bug) : !(await landed[dep])
+          if (stuck) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
+        }
+      }
+      return null
+    },
+    async () => {
+      const planned = await plan(g)
+      if (!planned) return { merged: false, note: 'planner died' }
+      const p = routeCheckTasks(earlierDeps(planned, g))
+      if (!p.tasks.length) return { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' }
+      const early = settledBlock(p)
+      if (early) return early
+      state.p = p
+      return null
+    },
+    async () => { worked = await work(state.p, g); state.results = worked.results },
+    async () => { reviewed = await review(worked, g); state.review = reviewed.review },
+    () => integrateAndLand(reviewed, g),
+  ])
 }
 
 // Did anything write to the checkout? A rejected or blocked goal whose
