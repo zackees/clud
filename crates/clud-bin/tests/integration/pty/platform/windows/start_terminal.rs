@@ -60,7 +60,10 @@ fn wait_for_terminal(process: &NativePtyProcess) -> ProcessIdentity {
 fn check_started_terminal(request: &str) {
     let temp = tempfile::tempdir().unwrap();
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(key, _)| !key.eq_ignore_ascii_case(running_process::DAEMON_MARKER_ENV_VAR))
+        .filter(|(key, _)| {
+            !key.eq_ignore_ascii_case(running_process::DAEMON_MARKER_ENV_VAR)
+                && !key.eq_ignore_ascii_case("MSYS2_ARG_CONV_EXCL")
+        })
         .collect();
     let overrides = clud::shell::nounset::env_overrides_at(temp.path(), false, None);
     let originator = format!("CLUD:{}", std::process::id());
@@ -72,7 +75,6 @@ fn check_started_terminal(request: &str) {
                 .to_string(),
         ),
         (running_process::ORIGINATOR_ENV_VAR.to_string(), originator),
-        ("MSYS2_ARG_CONV_EXCL".to_string(), "*".to_string()),
     ]) {
         env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
         env.push((key, value));
