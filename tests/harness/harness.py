@@ -426,6 +426,7 @@ class Harness:
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
         answers: dict[str, Any] | None = None,
+        cwd: Path | None = None,
     ) -> RunResult:
         if self._session_used:
             raise RuntimeError(
@@ -455,7 +456,7 @@ class Harness:
             argv += list(extra_args or [])
             argv.append(prompt)
             env = self.env({"ANTHROPIC_BASE_URL": base_url, **(extra_env or {})})
-            cwd = self.repo if self.repo.is_dir() else self.root
+            cwd = cwd if cwd is not None else self.repo if self.repo.is_dir() else self.root
             result = process.run(
                 argv, cwd=str(cwd), capture_output=True, text=True, env=env, timeout=timeout
             )
