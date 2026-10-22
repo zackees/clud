@@ -373,24 +373,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 0;
     }
 
-    // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
-    // command check below is skipped. It exists because a stale rm shim
+    // Owner command-policy kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`.
+    // It exists because a stale rm shim
     // (e.g. after rebuilding `target/debug/clud`) makes the identity
     // check deny *every* shell call, which leaves the session unable to run
     // the one command that would repair it.
-    if allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref()) {
-        append_log(&format!(
-            "{ALLOW_ALL_CMDS_ENV}=1: all command checks bypassed"
-        ));
-        return 0;
-    }
+    // Settings authority is checked after payload decoding, before this
+    // switch can bypass command policy. It never authorizes a settings write.
+    let owner_bypass = allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref());
 
     // Resolved before anything else can fail, because the gate's entire value
     // is that a hook which cannot read or parse its input still *denies*. Each
     // early `return 0` below is an allow-by-default that the gate must
     // override — see `block_bad_cmd_gate`'s module docs for why this module's
     // usual fail-open posture is inverted here.
-    let gate_enforced = !crate::runner::unsafe_mode_enabled()
+    let gate_enforced = !owner_bypass
+        && !crate::runner::unsafe_mode_enabled()
         && event == PRE_TOOL_USE_EVENT
         && block_bad_cmd_gate::gate_mode() == block_bad_cmd_gate::GateMode::Enforce;
 
@@ -469,6 +467,13 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             eprintln!("[clud safe-rm] {reason}");
             return 2;
         }
+    }
+
+    if owner_bypass {
+        append_log(&format!(
+            "{ALLOW_ALL_CMDS_ENV}=1: command policy bypassed, settings authority retained"
+        ));
+        return 0;
     }
 
     if crate::runner::unsafe_mode_enabled() {
