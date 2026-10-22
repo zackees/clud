@@ -88,7 +88,8 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
         )
     except AssertionError:
         requests = h.logs / "requests.jsonl"
-        rows = [json.loads(line) for line in requests.read_text().splitlines()] if requests.exists() else []
+        lines = requests.read_text().splitlines() if requests.exists() else []
+        rows = [json.loads(line) for line in lines]
         for row in [row for row in rows if row.get("role") == "main"][-8:]:
             print("NATIVE_RESUME_WAKEUP_REQUEST", json.dumps({
                 "n": row.get("n"), "turn": row.get("turn"), "note": row.get("note"),
