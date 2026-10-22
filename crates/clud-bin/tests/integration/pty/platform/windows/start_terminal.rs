@@ -115,7 +115,10 @@ fn check_started_terminal(request: &str) {
         "opened Command Prompt did not inherit explicit persistence"
     );
     fixture.process.close_impl().unwrap();
-    assert!(terminal.is_live(), "opened Command Prompt died with PTY close");
+    assert!(
+        terminal.is_live(),
+        "opened Command Prompt died with PTY close"
+    );
     drop(fixture.tracker.take());
     assert!(
         terminal.is_live(),
