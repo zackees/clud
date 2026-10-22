@@ -7069,3 +7069,17 @@ aggregate detector counts, never the mapping.
 launches. Direct native Codex requests needing redaction fail the launch
 check. Provider privacy routing remains a separate control. See
 [secret-redaction.md](architecture/secret-redaction.md).
+
+## DD-179: Credential prompts deliver to sinks without exposing values to agents
+
+The native credential prompt (#1708) is part of the existing multicall binary,
+using masked single and multiline egui fields with persistence disabled. The
+agent selects the host/purpose and sink; the user enters the value in the
+window. File, vault and command sinks expose only outcome status. Child output
+is discarded even on failure because credential tools can echo stdin.
+
+Askpass needs a separate stdout protocol for git/ssh/sudo, so its multicall
+alias checks the requesting process chain and refuses ordinary agent callers.
+This protects against accidental capture, not hostile local process spoofing.
+No GUI fails clearly rather than requesting secrets through chat. The detailed
+contract lives in [secret-prompt.md](architecture/secret-prompt.md).

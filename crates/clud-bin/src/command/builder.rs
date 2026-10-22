@@ -803,7 +803,8 @@ fn build_launch_plan_for_target_at(
                 push_prompt_interactive(&mut cmd, crate::video::seed_prompt(&checkout));
             }
         }
-        Some(Command::Auth { .. })
+        Some(Command::Secret(_))
+        | Some(Command::Auth { .. })
         | Some(Command::Models { .. })
         | Some(Command::CodexUpdate)
         | Some(Command::DshUpdate)

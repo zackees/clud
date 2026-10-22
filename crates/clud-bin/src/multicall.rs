@@ -40,6 +40,8 @@ pub const LINK_ALIASES_SUBCOMMAND: &str = "__link-aliases";
 pub enum Personality {
     CmdScan,
     Shim,
+    Secret,
+    Askpass,
 }
 
 /// Every name `clud` answers to besides its own, in materialization order.
@@ -48,6 +50,8 @@ pub fn alias_names() -> Vec<String> {
         CMD_SCAN.to_string(),
         LEGACY_CMD_SCAN.to_string(),
         SHIM.to_string(),
+        "clud-secret".to_string(),
+        "clud-askpass".to_string(),
     ];
     for spec in shim_registry::SHIMS {
         if !names.iter().any(|name| name == spec.name) {
@@ -65,7 +69,11 @@ pub fn personality_for(argv0: &OsStr) -> Option<Personality> {
 }
 
 fn personality_for_name(name: &str) -> Option<Personality> {
-    if name == CMD_SCAN || name == LEGACY_CMD_SCAN {
+    if name == "clud-secret" {
+        Some(Personality::Secret)
+    } else if name == "clud-askpass" {
+        Some(Personality::Askpass)
+    } else if name == CMD_SCAN || name == LEGACY_CMD_SCAN {
         Some(Personality::CmdScan)
     } else if name == SHIM || shim_registry::SHIMS.iter().any(|spec| spec.name == name) {
         Some(Personality::Shim)
@@ -101,6 +109,8 @@ pub fn maybe_run(argv: &[OsString]) -> Option<i32> {
 fn run_personality(personality: Personality, argv: &[OsString]) -> i32 {
     match personality {
         Personality::CmdScan => run_cmd_scan(argv),
+        Personality::Secret => crate::secret_prompt::run_alias(argv),
+        Personality::Askpass => crate::secret_prompt::run_askpass(argv),
         Personality::Shim => crate::shim_main::run(argv),
     }
 }
@@ -169,6 +179,10 @@ mod tests {
         for name in alias_names() {
             let expected = if name == CMD_SCAN || name == LEGACY_CMD_SCAN {
                 Personality::CmdScan
+            } else if name == "clud-secret" {
+                Personality::Secret
+            } else if name == "clud-askpass" {
+                Personality::Askpass
             } else {
                 Personality::Shim
             };
