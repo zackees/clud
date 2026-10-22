@@ -133,7 +133,10 @@ def test_successful_native_publication_check_opens_dependent_goal(
     harness: Harness, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     h = harness
-    command = "echo APPROVED_PUBLICATION_OBSERVED"
+    command = "gh release view v0.9.0 --repo o/r"
+    state = h.read_gh_state()
+    state["releases"] = {"v0.9.0": {"publishedAt": "2026-10-22T00:00:00Z"}}
+    h.write_gh_state(state)
     graph = {
         "session_repo": "o/r", "session_root": str(h.repo),
         "goals": [
@@ -150,7 +153,7 @@ def test_successful_native_publication_check_opens_dependent_goal(
         "name": "gate:b", "match": "You are the /grind gate checker", "steps": [
             _bash(command),
             _after({"is_error": False}, _structured({
-                "ready": True, "evidence": "APPROVED_PUBLICATION_OBSERVED",
+                "ready": True, "evidence": "published release v0.9.0 exists",
             })),
         ],
     }]
