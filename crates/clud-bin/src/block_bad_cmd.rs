@@ -477,7 +477,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // the per-call opt-out below, which the agent types itself and so must
     // not be a way to widen its own deletion roots.
     if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
-        if let Some(reason) = block_bad_cmd_rm_override::reason(&payload.command) {
+        if let Some(reason) = block_bad_cmd_rm_override::reason_for_payload(&payload) {
             append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
             println!("{}", deny_json(&reason));
             eprintln!("[clud safe-rm] {reason}");

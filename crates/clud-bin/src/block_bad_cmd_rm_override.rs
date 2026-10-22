@@ -1,15 +1,10 @@
-//! Agents cannot set the safe-rm root override (#1668, DD-137).
-//!
-//! `safe_rm.extra_roots` widens where `safe-rm` may delete, so only the user
-//! may write it, by hand, in `~/.clud/settings.json`. This check refuses any
-//! shell command that names that settings file (or the `extra_roots` key)
-//! unless every statement in it is a plain read with no output redirection.
-//! It is the same text-scan mechanism that refuses a deletion command
-//! assigning `CLUD_RM_ROOTS`, `TMPDIR`, `TEMP` or `TMP`
-//! (`block_bad_cmd_rm_redirect::changes_deletion_environment`), extended to
-//! the setting's file: there is no environment-variable form of the
-//! override to assign. It fails closed: an unrecognized program touching the
-//! file is refused, not allowed.
+//! Protect user settings while distinguishing executable writes from data.
+//! A protected name in an issue search or scratch heredoc is not a write.
+//! Unknown operations that mention the protected setting still fail closed.
+
+use std::path::Path;
+
+use crate::shell_ast::{Invocation, Value};
 
 /// Programs that only read their operands when run without a redirection.
 const READ_ONLY: &[&str] = &[
@@ -22,8 +17,22 @@ pub(super) const REFUSAL: &str = "agents may not write ~/.clud/settings.json or 
      by editing the file by hand. Ask the user to add the path and a reason, or leave the path \
      and report it";
 
-/// The refusal for `command`, or `None` when it cannot write the override.
-pub(super) fn reason(command: &str) -> Option<String> {
+pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<String> {
+    let home = crate::home::user_home();
+    reason_in(
+        &payload.command,
+        super::shell_dialect_for_tool(&payload.tool_name),
+        Some(&payload.cwd),
+        home.as_deref(),
+    )
+}
+
+fn reason_in(
+    command: &str,
+    dialect: super::ShellDialect,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<String> {
     let normalized: String = command
         .to_ascii_lowercase()
         .chars()
@@ -36,35 +45,95 @@ pub(super) fn reason(command: &str) -> Option<String> {
         .any(|marker| normalized.contains(marker));
     let names_override = normalized.contains("extra_roots")
         || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
-    if !names_override || only_reads(command) {
+    if !names_override || does_not_write_settings(command, dialect, cwd, home) {
         return None;
     }
     Some(REFUSAL.to_string())
 }
 
-/// Whether every command in `command`, at any depth, is a [`READ_ONLY`]
-/// program and nothing is written anywhere but `/dev/null` (duplicating a
-/// descriptor, as in `2>&1`, writes nothing). Text the shell cannot parse
-/// fails closed.
-fn only_reads(command: &str) -> bool {
-    let script =
-        super::block_bad_cmd_shell::parse_command(command, super::ShellDialect::Posix, None);
+fn does_not_write_settings(
+    command: &str,
+    dialect: super::ShellDialect,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, Some(home));
     !script.has_error
         && script.invocations.iter().all(|invocation| {
             let writes = invocation.redirects.iter().any(|redirect| {
-                redirect.writes_file() && redirect.target.as_literal() != Some("/dev/null")
+                redirect.writes_file() && !safe_destination(&redirect.target, invocation, home)
             });
-            let Some(program) = invocation.words.first() else {
-                return true;
-            };
-            let name = super::block_bad_cmd_shell::program_name(program.text());
-            !writes && (READ_ONLY.contains(&name.as_str()) || program.text() == "[")
+            !writes && read_only_invocation(invocation)
+        })
+}
+
+fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> bool {
+    let Some(target) = target.as_literal() else {
+        return false;
+    };
+    if target == "/dev/null" {
+        return true;
+    }
+    let Some(cwd) = invocation.cwd.as_literal() else {
+        return false;
+    };
+    let destination = crate::shell_ast::join_path(cwd, target);
+    let settings = crate::clud_settings::settings_path_at(home);
+    let canonical = |path: &Path| {
+        crate::path_norm::canonicalize_plain(path).unwrap_or_else(|_| path.to_path_buf())
+    };
+    canonical(Path::new(&destination)) != canonical(&settings)
+}
+
+fn read_only_invocation(invocation: &Invocation) -> bool {
+    let words = invocation.effective_argv();
+    let Some(program) = words.first() else {
+        return true;
+    };
+    let Some(program) = program.as_literal() else {
+        return false;
+    };
+    let name = super::block_bad_cmd_shell::program_name(program);
+    READ_ONLY.contains(&name.as_str())
+        || program == "["
+        || forge_read(&name, words)
+        || numeric_sed_read(&name, words)
+}
+
+fn forge_read(program: &str, words: &[Value]) -> bool {
+    program == "gh"
+        && words.get(1).and_then(Value::as_literal) == Some("issue")
+        && matches!(words.get(2).and_then(Value::as_literal), Some("list" | "view"))
+}
+
+fn numeric_sed_read(program: &str, words: &[Value]) -> bool {
+    program == "sed"
+        && words.get(1).and_then(Value::as_literal) == Some("-n")
+        && words
+            .get(2)
+            .and_then(Value::as_literal)
+            .and_then(|script| script.strip_suffix('p'))
+            .is_some_and(|range| range.chars().all(|c| c.is_ascii_digit() || matches!(c, ',' | '$')))
+        && words.iter().skip(3).all(|word| {
+            word.as_literal().is_some_and(|operand| !operand.starts_with('-'))
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reason(command: &str) -> Option<String> {
+        reason_in(
+            command,
+            crate::block_bad_cmd::ShellDialect::Posix,
+            None,
+            Some(Path::new("/home/u")),
+        )
+    }
 
     #[test]
     fn commands_that_write_the_settings_file_are_refused() {
@@ -102,6 +171,9 @@ mod tests {
             "echo settings.json > notes.txt",
             "cargo test",
             "cat ./settings.json",
+            "gh issue list --repo zackees/clud --search 'safe_rm.extra_roots ~/.clud/settings.json'",
+            "cat > issue-draft.md <<'EOF'\nDocument ~/.clud/settings.json and safe_rm.extra_roots.\nEOF",
+            "sed -n '1,175p' crates/clud-bin/src/rm_tool_extra_roots.rs",
             // The repo layer is never read for the override.
             "jq '.bash.block_cd=false' .clud/settings.json > t && mv t .clud/settings.json",
         ] {
