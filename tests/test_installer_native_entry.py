@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from running_process import PseudoTerminalProcess
 
 from tests.process import run as run_process
 
@@ -588,3 +589,56 @@ def test_explicit_menu_escape_through_conpty(tmp_path: Path) -> None:
         assert not home.exists()
     finally:
         process.close(force=True)
+
+
+@pytest.mark.parametrize("cancel", ["\x1b", "\x03"])
+def test_first_run_offer_defaults_to_not_now_and_cancels_without_writes(
+    tmp_path: Path, cancel: str,
+) -> None:
+    home = tmp_path / "untouched-home"
+    env = isolated_env(home)
+    env["PATH"] = ""
+    process = PseudoTerminalProcess([str(clud_binary())], env=env, capture=True)
+    try:
+        process.expect("[x] Not now", timeout=30)
+        assert "[ ] Install this version" in process.output_text
+        process.write(cancel)
+        assert process.wait(timeout=30) == 130, process.output_text
+        assert not home.exists(), process.output_text
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+@pytest.mark.parametrize("opener_fails", [False, True])
+def test_browser_menu_uses_canonical_url_without_installing(
+    tmp_path: Path, opener_fails: bool,
+) -> None:
+    if not os.environ.get("CLUD_INSTALLER_CI_FIXTURE_DIR"):
+        pytest.skip("requires the candidate's compile-time browser fixture")
+    home = tmp_path / "untouched-home"
+    log = tmp_path / "opened-url"
+    if opener_fails:
+        log = tmp_path / "missing-parent" / "opened-url"
+    env = isolated_env(home)
+    env["CLUD_INSTALLER_CI_BROWSER_LOG"] = str(log)
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer"], env=env, capture=True,
+    )
+    page = "https://zackees.github.io/clud/install/index.html"
+    try:
+        process.expect("Install clud", timeout=30)
+        process.write("\x1b[B\x1b[B\r")
+        assert process.wait(timeout=30) == int(opener_fails), process.output_text
+        assert page in process.output_text
+        if opener_fails:
+            assert "could not open browser" in process.output_text
+            assert not log.exists()
+        else:
+            assert log.read_text(encoding="utf-8") == page
+        assert not home.exists(), process.output_text
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
