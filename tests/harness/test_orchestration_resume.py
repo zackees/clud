@@ -1,6 +1,7 @@
 """Resume the real native Workflow cache without redoing completed branches."""
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import shlex
@@ -96,6 +97,17 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
     result = h.run("Resume only deferred publication work using the native Workflow cache.",
                    script, timeout=300)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    if any(row.get("note") for row in result.requests):
+        print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
+        for role in ("planner:a", "worker:a", "reviewer:a", "integrator:a"):
+            requests = [row for row in result.requests if row["role"] == role]
+            if len(requests) > 1:
+                first = json.dumps(requests[0]["messages"], indent=1).splitlines()
+                last = json.dumps(requests[-1]["messages"], indent=1).splitlines()
+                print("NATIVE_RESUME_PROMPT_DIFF", role,
+                      "\n".join(list(difflib.unified_diff(first, last))[:80]))
+        for journal in list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))[:4]:
+            print("NATIVE_RESUME_JOURNAL", journal.name, journal.read_text()[:20000])
     _no_notes(result)
     told = _told(result).replace("\\", "")
     assert "grind-publication-resume/v1" in told, told[-4000:]
