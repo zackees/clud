@@ -96,11 +96,21 @@ def test_workflow_repo_context(harness: Harness, selection: str) -> None:
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     errors = [block for row in result.requests for block in row.get("tool_results", [])
               if block["is_error"]]
+    if selection == "workflow":
+        # Capability classification, not cross-repo acceptance: the pinned
+        # runtime rejects this input before spawning any workflow child.
+        assert any("unexpected parameter `cwd`" in row["content"] for row in errors), errors
+        assert not observed.exists()
+        assert not any(row["role"] == "probe" for row in result.requests)
+        assert [h.git("status", "--porcelain", cwd=root) for root in (h.repo, sister)] == before
+        return
     assert observed.is_file(), errors
     identity = json.loads(observed.read_text())
-    expected = h.repo if selection == "default" else sister
+    # The unknown agent option is silently ignored. Pin that limitation so
+    # orchestration cannot mistake successful execution for repo isolation.
+    expected = sister if selection == "session" else h.repo
     assert identity["cwd"] == str(expected), {"selection": selection, "observed": identity}
-    name = "primary" if selection == "default" else "sister"
+    name = "sister" if selection == "session" else "primary"
     assert identity["project"] == name, identity
     requests = [row for row in result.requests if row["role"] == "probe"]
     assert f"REPO_CONTEXT_INSTRUCTIONS_{name.upper()}" in json.dumps(requests)
