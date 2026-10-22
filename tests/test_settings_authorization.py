@@ -234,3 +234,17 @@ def test_native_first_creation_through_parent_alias_is_refused(tmp_path: Path) -
     })
     assert result.returncode == 2, result.stdout + result.stderr
     assert not target.exists()
+
+
+@pytest.mark.parametrize("tool", ["exec_command", "functions.exec_command", "shell_command"])
+def test_execution_workdir_cannot_hide_relative_settings_target(tmp_path: Path, tool: str) -> None:
+    world = _world(tmp_path)
+    home = world[3].parent.parent
+    (home / "staged.json").write_text("{}", encoding="utf-8")
+    original = world[3].read_bytes()
+    key = "command" if tool == "shell_command" else "cmd"
+    result = _tool(world, tool, {
+        key: "cp staged.json .clud/settings.json", "workdir": str(home),
+    })
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert world[3].read_bytes() == original
