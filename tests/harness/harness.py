@@ -306,8 +306,9 @@ class Harness:
     ) -> Path:
         """A `--settings` file: the recorder, then clud's real command guard.
 
-        Project `.claude/settings.json` hooks do not fire under an isolated
-        CLAUDE_CONFIG_DIR, so hooks are passed this way (#1323, pitfall 2).
+        The recorder and command guard are injected consistently. Project
+        settings hooks may also load under the isolated CLAUDE_CONFIG_DIR;
+        source-loading probes must establish their own positive control.
         With `answers`, an `AskUserQuestion` hook (``answer_hook.py``) picks
         each question's option from that table and logs it with its time to
         ``logs/questions.jsonl`` (#1402); see :meth:`answer_args`.
