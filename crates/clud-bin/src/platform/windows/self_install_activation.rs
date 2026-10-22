@@ -27,9 +27,7 @@ pub fn terminal_commands(destination: &Path) -> Result<Vec<(&'static str, String
     // A child cannot modify its parent cmd environment. Open a nested cmd with
     // the activated environment; encoding keeps cmd's %/! expansion away from
     // the literal directory, including when delayed expansion is enabled.
-    let script = format!(
-        "{powershell}; & \"$env:SystemRoot\\System32\\cmd.exe\" /D /V:OFF"
-    );
+    let script = format!("{powershell}; & \"$env:SystemRoot\\System32\\cmd.exe\" /D /V:OFF");
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = STANDARD.encode(bytes);
     let quoted = shell_words::quote(value);

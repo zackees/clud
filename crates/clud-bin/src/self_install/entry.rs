@@ -209,7 +209,8 @@ fn run_selected(intent: InstallIntent, options: InstallOptions) -> i32 {
     let destination = plan.destination.clone();
     match transaction::execute(plan) {
         Ok(()) => {
-            let status = finish_activation(activation, &version, !options.yes && terminal_available());
+            let status =
+                finish_activation(activation, &version, !options.yes && terminal_available());
             print_terminal_commands(&destination);
             status
         }
