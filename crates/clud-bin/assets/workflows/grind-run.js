@@ -222,18 +222,16 @@ const opts = (role, label, phase, schema) => {
 const semaphore = (n) => {
   let free = n
   const queue = []
-  // Queue permits, not work: the waiting caller invokes its own agent after
-  // acquiring a slot, preserving the native parallel branch's async context.
-  return async (fn) => {
-    if (free > 0) free--
-    else await new Promise(resolve => queue.push(resolve))
-    try {
-      return await fn()
-    } finally {
-      if (queue.length) queue.shift()()
-      else free++
+  return (fn) => new Promise((resolve, reject) => {
+    const run = () => {
+      free--
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+        free++
+        if (queue.length) queue.shift()()
+      })
     }
-  }
+    free > 0 ? run() : queue.push(run)
+  })
 }
 const light = semaphore(MAX_AGENTS)
 const exclusive = semaphore(1)
