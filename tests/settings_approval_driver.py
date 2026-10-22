@@ -33,7 +33,7 @@ def main() -> None:
             replacement.mkdir()
             (replacement / settings.name).write_bytes(original)
             settings.parent.symlink_to(replacement, target_is_directory=True)
-        keys = ["Escape"] if action == "cancel" else ["Tab", "Return"]
+        keys = {"cancel": ["Escape"], "enter": ["Return"]}.get(action, ["Tab", "Return"])
         process.run(
             ["xdotool", "key", "--clearmodifiers", "--delay", "150", *keys],
             timeout=10, check=True,
