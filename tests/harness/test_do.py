@@ -107,7 +107,12 @@ def test_h6_meta_issue_routes_to_grind(harness: Harness) -> None:
     _gh(harness)
     text = _do(harness, META)
     _rendered(text)
-    assert f"invoke `/grind {META}`" in text
+    assert META in text
+    assert "This is a meta issue" in text
+    assert "use Read to read the complete grind router" in text
+    assert str(harness.config / "skills" / "grind" / "SKILL.md") in text
+    assert "/grind requires the Claude harness" in text
+    assert f"invoke `/grind {META}`" not in text
     assert "Read the issue and implement it" not in text
 
 
