@@ -57,24 +57,27 @@ fn draw(ui: &mut egui::Ui, preview: &Preview, first_frame: &mut bool) -> Option<
             "This changes where safe-rm can delete. Review every path and reason.",
         );
     }
-    let decision = ui.horizontal(|ui| {
-        let cancel = ui.button("Cancel");
-        if *first_frame {
-            cancel.request_focus();
-            *first_frame = false;
-        }
-        let accept = ui.button(if preview.roots {
-            "Approve deletion roots"
-        } else {
-            "Approve change"
-        });
-        let cancelled = cancel.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape));
-        if cancelled || accept.clicked() {
-            Some(accept.clicked() && !cancelled)
-        } else {
-            None
-        }
-    }).inner;
+    let decision = ui
+        .horizontal(|ui| {
+            let cancel = ui.button("Cancel");
+            if *first_frame {
+                cancel.request_focus();
+                *first_frame = false;
+            }
+            let accept = ui.button(if preview.roots {
+                "Approve deletion roots"
+            } else {
+                "Approve change"
+            });
+            let cancelled =
+                cancel.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if cancelled || accept.clicked() {
+                Some(accept.clicked() && !cancelled)
+            } else {
+                None
+            }
+        })
+        .inner;
     ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| draw_changes(ui, preview));
     decision
