@@ -97,14 +97,15 @@ fn free_model_redaction_routes_exactly_and_restores_nonstream_tool_input() {
         "raw free ID reached Anthropic"
     );
     bridge.shutdown().unwrap();
-    let log = std::fs::read_to_string(log).unwrap();
-    assert!(!log.contains(SECRET));
-    assert!(!log.contains(&token));
+    assert!(!log.exists(), "successful turns must not create forensic logs");
 }
 
 fn response_json(response: &str) -> serde_json::Value {
     let head = response.split_once("\r\n\r\n").unwrap().0;
-    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let body = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         decode_chunked_body(response)
     } else {
         captured_body(response).to_string()
@@ -292,17 +293,25 @@ fn paid_to_free_failover_enables_redaction_unless_explicitly_disabled() {
         let echoed = if disabled { SECRET } else { &token };
         let reply = message(serde_json::json!([{"type":"text","text":echoed}]));
         let free = FakeResponses::start_with_response(Some(raw_response(200, "OK", &reply)));
-        let paid = FakeResponses::start_with_response(Some(raw_response(200, "OK",
-            r#"{"error":{"message":"fixture provider fault"}}"#)));
+        let paid = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"error":{"message":"fixture provider fault"}}"#,
+        )));
         // The scheduler receives resolved rungs, independently of catalog discovery.
         let ladder = FailoverLadder::from_test_rungs(vec![crate::failover::FailoverRung {
-            spec: FREE_MODEL.into(), wire_id: FREE_MODEL.into(),
-            provider: ModelProvider::OpenRouter, route: ConversationRoute::OpenRouter,
+            spec: FREE_MODEL.into(),
+            wire_id: FREE_MODEL.into(),
+            provider: ModelProvider::OpenRouter,
+            route: ConversationRoute::OpenRouter,
             cost: crate::failover::CostOwner::Metered,
         }]);
-        let config = gateway.with_openrouter_upstream(free.base_url.clone())
-            .with_upstreams(paid.base_url.clone(), String::new()).with_failover(ladder);
-        let bridge = BridgeHandle::start(BridgeConfig::default().with_unified_gateway(config)).unwrap();
+        let config = gateway
+            .with_openrouter_upstream(free.base_url.clone())
+            .with_upstreams(paid.base_url.clone(), String::new())
+            .with_failover(ladder);
+        let bridge =
+            BridgeHandle::start(BridgeConfig::default().with_unified_gateway(config)).unwrap();
         let mut payload: serde_json::Value = serde_json::from_str(&body(false)).unwrap();
         payload["model"] = serde_json::json!("claude-opus-4-1");
         let response = unified_request(&bridge, &payload.to_string(), "paid-to-free", None);

@@ -112,7 +112,10 @@ pub struct FailoverLadder {
 impl FailoverLadder {
     #[cfg(test)]
     pub(crate) fn from_test_rungs(rungs: Vec<FailoverRung>) -> Self {
-        Self { rungs, allow_metered: true }
+        Self {
+            rungs,
+            allow_metered: true,
+        }
     }
 
     /// Parse a comma-separated ladder such as `claude-opus-4-1,codex-terra`.

@@ -26,9 +26,9 @@ impl Drop for Report {
             return;
         };
         let counts = session.lock().ok().map(|session| session.counts());
-        if let Some(counts) = counts.filter(|counts| {
-            !counts.kinds.is_empty() || counts.unknown_tokens != 0
-        }) {
+        if let Some(counts) =
+            counts.filter(|counts| !counts.kinds.is_empty() || counts.unknown_tokens != 0)
+        {
             writer.publish_redaction(counts);
         }
     }

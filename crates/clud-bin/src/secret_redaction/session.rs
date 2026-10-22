@@ -250,7 +250,10 @@ fn rewrite_object(
     skip_binary: bool,
     transform: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<bool, serde_json::Error> {
-    let kind = object.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let kind = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     if skip_binary && matches!(kind, "image" | "input_image" | "output_image" | "image_url") {
         return Ok(false);
     }
@@ -258,10 +261,16 @@ fn rewrite_object(
     let document = kind == "document";
     let mut changed = false;
     for (key, mut value) in std::mem::take(object) {
-        let binary_source = skip_binary && document && key == "source"
+        let binary_source = skip_binary
+            && document
+            && key == "source"
             && value.get("type").and_then(serde_json::Value::as_str) == Some("base64");
         if !binary_source {
-            changed |= rewrite_value(&mut value, skip_binary && !(tool_input && key == "input"), transform)?;
+            changed |= rewrite_value(
+                &mut value,
+                skip_binary && !(tool_input && key == "input"),
+                transform,
+            )?;
         }
         let rewritten = transform(&key);
         changed |= rewritten.is_some();
@@ -289,7 +298,10 @@ mod key_tests {
         let redacted = session.redact_body(&bytes).unwrap().into_owned();
         assert!(!String::from_utf8_lossy(&redacted).contains(secret));
         let restored = session.restore_body(&redacted).unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&restored).unwrap(), body);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&restored).unwrap(),
+            body
+        );
     }
 
     #[test]

@@ -1854,8 +1854,6 @@ fn serve_unified_messages(
     }
     let original_model = model.to_string();
     let mut attempt = UnifiedAttempt::for_launch(unified, &resolved, model);
-    let redaction =
-        unified.redactor_for(attempt.provider, attempt.model.as_deref().or(Some(model)));
     let _redaction_report = crate::secret_redaction::status::Report::new(
         unified.redaction.as_ref(),
         config
@@ -1875,7 +1873,7 @@ fn serve_unified_messages(
         headers,
         log,
         cache_health,
-        redaction,
+        redaction: None,
     };
 
     // Descend the ladder. Probing is enabled only while a further rung exists,
@@ -2115,7 +2113,8 @@ struct UnifiedTurn<'a> {
 impl UnifiedTurn<'_> {
     fn retain_redaction(&mut self, attempt: &UnifiedAttempt) {
         self.redaction = self.redaction.or_else(|| {
-            self.unified.redactor_for(attempt.provider, attempt.model.as_deref())
+            self.unified
+                .redactor_for(attempt.provider, attempt.model.as_deref())
         });
     }
 }
