@@ -1,6 +1,36 @@
 use super::*;
 use tempfile::tempdir;
 
+/// #1999: readers of the previous file must never observe an in-place rewrite.
+#[test]
+fn settings_patch_replaces_the_file_without_truncating_an_existing_reader() {
+    let home = tempdir().unwrap();
+    let path = settings_path_at(home.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = br#"{"unrelated":"preserved","safe_rm":{"extra_roots":[]}}"#;
+    fs::write(&path, original).unwrap();
+    let previous = home.path().join("previous-settings.json");
+    fs::hard_link(&path, &previous).unwrap();
+
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            web_term: Some(false),
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&previous).unwrap(),
+        original,
+        "saving must replace the file instead of truncating the previous inode"
+    );
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["web_term"]["enabled"], json!(false));
+    assert_eq!(saved["unrelated"], json!("preserved"));
+}
+
 #[test]
 fn missing_settings_file_has_no_launch_setup_scope() {
     let home = tempdir().unwrap();
