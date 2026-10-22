@@ -326,7 +326,9 @@ pub(super) fn is_grind_role(agent_type: &str) -> bool {
 /// The denial reason for a shell `command` from `role`, or `None` to allow.
 pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<String> {
     if role == GATE {
-        return Some(format!("{GATE} requires one approved check bound to its native agent identity"));
+        return Some(format!(
+            "{GATE} requires one approved check bound to its native agent identity"
+        ));
     }
     if role == ORCHESTRATOR {
         return orchestrator_shell_reason(command);
@@ -564,7 +566,9 @@ pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option
         && !super::block_bad_cmd_gate::gates_tool(tool_name)
         && tool_name != "StructuredOutput"
     {
-        return Some(format!("{GATE} may only execute its bound check and report the result"));
+        return Some(format!(
+            "{GATE} may only execute its bound check and report the result"
+        ));
     }
     // Codex reports its file edits as `apply_patch` even where a matcher
     // reaches them through the `Edit`/`Write` aliases (#1954).
