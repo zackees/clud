@@ -1,6 +1,7 @@
 """Classify multi-agent native cache replay independently of grind's roles."""
 from __future__ import annotations
 
+import json
 from collections import Counter
 
 import pytest
@@ -71,6 +72,9 @@ def test_native_cache_replays_every_stage_of_two_chains(
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
     outputs = workflow_results(result)
+    contexts = {tuple(row.get("payload_keys", [])) for row in result.hooks
+                if row.get("event") == "PreToolUse" and row.get("agent_id")}
+    print("NATIVE_WORKFLOW_HOOK_KEYS", json.dumps(sorted(contexts)))
     assert len(outputs) == 2, outputs
     wanted = [[{"observed": f"{goal}{stage}"} for stage in range(4)] for goal in ("a", "d")]
     assert outputs == [wanted, wanted], outputs
