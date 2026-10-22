@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 from tests.process import run as run_process
-from tests.test_installer_native_entry import clud_binary, installer_json, isolated_env, required_shell
+from tests.test_installer_native_entry import (
+    clud_binary,
+    installer_json,
+    isolated_env,
+    required_shell,
+)
 
 if sys.platform != "win32":
     import pty
@@ -145,7 +150,9 @@ def test_unattended_activation_failure_never_repairs(tmp_path: Path, structured:
 
 
 def terminal_report(terminal: InstallerTerminal) -> dict:
-    reports = [json.loads(line) for line in terminal.output.splitlines() if line.startswith(b'{"schema"')]
+    reports = [
+        json.loads(line) for line in terminal.output.splitlines() if line.startswith(b'{"schema"')
+    ]
     assert len(reports) == 1, terminal.output.decode(errors="replace")
     assert reports[0]["schema"] == "clud-installer-result/v1"
     return reports[0]
