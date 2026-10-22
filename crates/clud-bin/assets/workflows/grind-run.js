@@ -803,7 +803,6 @@ const inspectGate = (g, blocker, index, attempt) => light(() => agent(
 // its semaphore slot is released before the native timer wait. Distinct prompts
 // prevent a prior not-ready agent result being replayed as the next observation.
 const observeGate = async (g, blocker, index) => {
-  const started = Date.now()
   let observed = null
   let attempts = 0
   for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt++) {
@@ -834,7 +833,7 @@ const observeGate = async (g, blocker, index) => {
   }
   return { ready: !!(observed && observed.ready === true),
     evidence: observed && observed.evidence || 'check unavailable',
-    attempts, elapsed_ms: Date.now() - started }
+    attempts }
 }
 
 // Enforce approved dependencies before a planner or worker touches this goal.
@@ -876,7 +875,7 @@ const approvedBlock = async (g) => {
       if (!observed.ready) {
         return { ...blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b),
           status: 'deferred', gate_evidence: observed.evidence,
-          gate_attempts: observed.attempts, gate_elapsed_ms: observed.elapsed_ms }
+          gate_attempts: observed.attempts }
       }
     }
   }

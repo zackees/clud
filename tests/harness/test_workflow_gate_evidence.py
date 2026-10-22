@@ -101,11 +101,11 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
         "export const meta = {name: 'wait-capability-probe', description: 'Wait capabilities'}\n"
         "const capabilities = {setTimeout: typeof setTimeout, sleep: typeof sleep, "
         "wait: typeof wait, Promise: typeof Promise};\n"
+        "await agent('WAIT_TIMER_PROBE_START', {agentType: 'wait-capability-probe', "
+        "label: 'wait-timer-start'});\n"
         "if (typeof setTimeout === 'function') {\n"
         "  try {\n"
-        "    const started = Date.now();\n"
         "    await new Promise(resolve => setTimeout(resolve, 20));\n"
-        "    capabilities.timerElapsedMs = Date.now() - started;\n"
         "    capabilities.timer = 'supported';\n"
         "  } catch (error) {\n"
         "    capabilities.timer = 'unusable';\n"
@@ -117,6 +117,10 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
         "{agentType: 'wait-capability-probe', label: 'wait-capabilities'});\n"
     )
     result = h.run("Observe native workflow wait capabilities without waiting.", {"roles": [
+        {"name": "wait-start", "match": "WAIT_CAPABILITY_OBSERVER_ROLE",
+         "match_prompt": "WAIT_TIMER_PROBE_START", "steps": [
+             {"text": "WAIT_TIMER_PROBE_STARTED"},
+         ]},
         {"name": "wait-probe", "match": "WAIT_CAPABILITY_OBSERVER_ROLE", "steps": [
             {"text": "WAIT_CAPABILITIES_OBSERVED"},
         ]},
@@ -143,7 +147,9 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     assert capabilities["setTimeout"] in ("function", "undefined"), capabilities
     assert capabilities["timer"] in ("supported", "unusable", "missing"), capabilities
     if capabilities["timer"] == "supported":
-        assert capabilities["timerElapsedMs"] >= 10, capabilities
+        started = max(row["t_end"] for row in result.requests if row["role"] == "wait-start")
+        finished = min(row["t_start"] for row in result.requests if row["role"] == "wait-probe")
+        assert finished - started >= 20, capabilities
     elif capabilities["timer"] == "unusable":
         assert capabilities["timerError"], capabilities
     print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", json.dumps(capabilities, sort_keys=True))
