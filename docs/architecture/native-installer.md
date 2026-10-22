@@ -67,6 +67,15 @@ after a fresh shell or OS-built Windows user environment resolves `clud` by
 name to the approved destination and returns the selected version. Shadows or
 startup files that undo the edit produce a repair error, not success.
 
+If activation fails after an interactive install, the installer recomputes a
+read-only activation plan and displays it for separate approval. **Not now**
+is the default. Approval permits one additional activation attempt; refusal,
+an unsafe plan, or a second failure leaves the binary installed but returns
+failure. Cancellation returns 130. Automated `--yes` and noninteractive
+invocations do not offer this extra prompt or authorize additional writes.
+Repair retains prior-content checks and rollback and never removes another
+package manager's executable.
+
 The native candidate-host acceptance lane provisions Bash, fish and zsh on
 Linux/macOS and sets `CLUD_TEST_REQUIRE_INSTALLER_SHELLS=1`. A missing supported
 shell fails that lane instead of skipping it. Ordinary developer acceptance

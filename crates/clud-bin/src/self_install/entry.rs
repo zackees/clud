@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::args::Args;
 
+use super::activation::{self, ActivationPlan};
 use super::catalog::{Arch, Catalog, GnuEligibility, Host, Os, ResolvedAsset, VersionChoice};
 use super::picker::{self, ConfirmChoice, MenuChoice, ReleaseChoice};
 use super::transaction;
@@ -206,24 +207,71 @@ fn run_selected(intent: InstallIntent, options: InstallOptions) -> i32 {
     let activation = plan.activation.clone();
     let version = plan.version.clone();
     match transaction::execute(plan) {
-        Ok(()) => {
-            let Some(activation) = activation else {
-                eprintln!("clud installer: installed clud {version}; activation required (--no-modify-path)");
-                return 0;
-            };
-            match activation.apply_and_verify(&version) {
-                Ok(()) => {
-                    eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("clud installer: binary committed, but activation failed: {error}");
-                    1
-                }
-            }
-        }
+        Ok(()) => finish_activation(activation, &version, !options.yes && terminal_available()),
         Err(error) => {
             eprintln!("clud installer: {error}");
+            1
+        }
+    }
+}
+
+fn finish_activation(activation: Option<ActivationPlan>, version: &str, ask_repair: bool) -> i32 {
+    let Some(activation) = activation else {
+        eprintln!("clud installer: installed clud {version}; activation required (--no-modify-path)");
+        return 0;
+    };
+    if let Err(error) = activation.apply_and_verify(version) {
+        eprintln!("clud installer: binary committed, but activation failed: {error}");
+        return if ask_repair {
+            offer_activation_repair(&activation, version)
+        } else {
+            1
+        };
+    }
+    activation_result(Ok(()), version)
+}
+
+fn offer_activation_repair(previous: &ActivationPlan, version: &str) -> i32 {
+    let repair = match activation::plan(&previous.destination) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("clud installer: cannot safely plan activation repair: {error}");
+            return 1;
+        }
+    };
+    eprintln!("Additional activation repair plan:\n{}", repair.description());
+    execute_approved_repair(
+        version,
+        || picker::prompt_repair("Approve this additional activation repair?".into()),
+        || repair.apply_and_verify(version),
+    )
+}
+
+fn execute_approved_repair(
+    version: &str,
+    prompt: impl FnOnce() -> io::Result<ConfirmChoice>,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> i32 {
+    match prompt() {
+        Ok(ConfirmChoice::Proceed) => activation_result(apply(), version),
+        Ok(ConfirmChoice::NotNow) => 1,
+        Ok(ConfirmChoice::Cancelled) => 130,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => 130,
+        Err(error) => {
+            eprintln!("clud installer: repair confirmation failed: {error}");
+            1
+        }
+    }
+}
+
+fn activation_result(result: Result<(), String>, version: &str) -> i32 {
+    match result {
+        Ok(()) => {
+            eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
+            0
+        }
+        Err(error) => {
+            eprintln!("clud installer: binary committed, but activation repair failed: {error}");
             1
         }
     }
@@ -475,6 +523,43 @@ mod tests {
         assert!(split.passthrough.is_empty());
         assert_eq!(explicit_request(&split).unwrap(), Some(Request::Current));
         assert!(Args::try_parse_from(["clud", "--no-modify-path"]).is_err());
+    }
+
+    #[test]
+    fn repair_refusal_and_cancellation_never_apply_changes() {
+        for (choice, status) in [(ConfirmChoice::NotNow, 1), (ConfirmChoice::Cancelled, 130)] {
+            assert_eq!(
+                execute_approved_repair("2.8.14", || Ok(choice), || panic!("unapproved write")),
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn approved_repair_has_exactly_one_attempt_even_when_it_fails() {
+        let attempts = std::cell::Cell::new(0);
+        let status = execute_approved_repair(
+            "2.8.14",
+            || Ok(ConfirmChoice::Proceed),
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("profile changed again".into())
+            },
+        );
+        assert_eq!(status, 1);
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn failed_repair_confirmation_never_applies_changes() {
+        assert_eq!(
+            execute_approved_repair(
+                "2.8.14",
+                || Err(io::Error::from(io::ErrorKind::Interrupted)),
+                || panic!("unapproved write")
+            ),
+            130
+        );
     }
 
     #[test]

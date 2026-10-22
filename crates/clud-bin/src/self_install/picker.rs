@@ -175,12 +175,21 @@ pub enum ConfirmChoice {
 
 pub struct Confirm {
     label: String,
+    action: &'static str,
     selected: usize,
 }
 
 impl Confirm {
     pub fn new(label: String) -> Self {
-        Self { label, selected: 1 }
+        Self::with_action(label, "Install")
+    }
+
+    fn with_action(label: String, action: &'static str) -> Self {
+        Self {
+            label,
+            action,
+            selected: 1,
+        }
     }
 }
 
@@ -192,7 +201,7 @@ impl Selector for Confirm {
             title: self.label.clone(),
             hints: vec!["Up/Down choose, Enter confirm, Esc cancel".into()],
             gap: true,
-            rows: ["Install", "Not now"]
+            rows: [self.action, "Not now"]
                 .iter()
                 .enumerate()
                 .map(|(index, label)| Row {
@@ -229,6 +238,10 @@ impl Selector for Confirm {
 
 pub fn prompt_confirm(label: String) -> std::io::Result<ConfirmChoice> {
     selector::run(&mut std::io::stderr(), &mut Confirm::new(label))
+}
+
+pub fn prompt_repair(label: String) -> std::io::Result<ConfirmChoice> {
+    selector::run(&mut std::io::stderr(), &mut Confirm::with_action(label, "Repair"))
 }
 
 #[cfg(test)]
