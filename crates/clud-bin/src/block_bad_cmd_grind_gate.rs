@@ -521,6 +521,17 @@ mod tests {
     }
 
     #[test]
+    fn gate_identity_survives_more_than_sixty_four_prior_workflows() {
+        let fixture = Fixture::new();
+        for index in 0..128 {
+            fixture.metadata(&format!("wf-prior-{index}"), "unrelated", "unused");
+        }
+        assert!(fixture.allowed());
+        fixture.metadata("wf-duplicate", "left-agent", "gate:downstream:0");
+        assert!(!fixture.allowed());
+    }
+
+    #[test]
     fn duplicate_approved_labels_and_excess_workflows_are_denied() {
         let mut fixture = Fixture::new();
         let goal = fixture.facts["orchestration"]["goals"][0].clone();
