@@ -215,9 +215,10 @@ fresh native agent, with bounded native timer backoff between observations;
 independent goals continue while a gate waits. The result includes a small
 `grind-publication-resume/v1` manifest for precisely the deferred goals.
 Per-goal observation epochs change gate prompts only on deferred branches.
-Single-agent harness controls confirm native cache reuse, but full-graph
-resumption currently replays some completed reviewer and integrator calls;
-avoiding repeated completed work remains unverified. The router retains the
+The workflow replays whole earlier observation rounds unchanged before starting
+the next round for deferred goals: native cache lookup stops globally after
+the first new agent call, including calls on other parallel branches. This
+ordering applies in sequential mode too. Full-graph verification is ongoing. The router retains the
 original approved arguments and actual native launch references in run facts
 for same-session `/loop` resumption. Native resumption and scheduled handoff
 are undergoing harness verification; cross-repository execution remains under

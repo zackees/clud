@@ -197,7 +197,9 @@ for (const [id, epoch] of Object.entries(GATE_EPOCHS)) {
     throw new Error(`invalid gate epoch for approved goal ${id}`)
   }
 }
-const gateEpoch = (id) => GATE_EPOCHS[String(id)] ?? GATE_EPOCH
+let replayEpoch = null
+const requestedEpoch = (id) => GATE_EPOCHS[String(id)] ?? GATE_EPOCH
+const gateEpoch = (id) => replayEpoch ?? requestedEpoch(id)
 
 // The repo's ./lint and ./test, chosen once by the /grind router (#1336).
 const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
@@ -1034,6 +1036,28 @@ const runBatch = async (goals) => {
   return rs
 }
 
+// Native resume stops using ALL cached agents at its first cache miss, even
+// across parallel branches. Replay complete prior rounds before changing any
+// gate prompt. Each round has the same goal list, branch slots and observations
+// as that round had in the previous run; completed goals never enter later
+// rounds. This also preserves sequential cache chains across independent goals.
+const runApprovedRounds = async () => {
+  const lastEpoch = Math.max(GATE_EPOCH, ...args.goals.map(g => requestedEpoch(g.id)))
+  const byId = {}
+  for (let epoch = GATE_EPOCH; epoch <= lastEpoch; epoch++) {
+    replayEpoch = epoch
+    const goals = args.goals.filter(g => requestedEpoch(g.id) >= epoch)
+    for (const g of goals) {
+      delete outcome[String(g.id)]
+      landed[g.id] = new Promise(resolve => { settle[g.id] = resolve })
+    }
+    const round = await runBatch(goals)
+    goals.forEach((g, i) => { byId[String(g.id)] = round[i] })
+  }
+  replayEpoch = null
+  return args.goals.map(g => byId[String(g.id)])
+}
+
 let results
 phase('Plan')
 const featureStages = STAGES.filter(s => !isBugStage(s))
@@ -1056,7 +1080,7 @@ if (!ORCHESTRATION && STAGES.some(isBugStage) && featureStages.length) {
   }
   results = args.goals.map(g => byId[idKey(g.id)])
 } else {
-  results = await runBatch(args.goals)
+  results = ORCHESTRATION ? await runApprovedRounds() : await runBatch(args.goals)
 }
 
 const summary = args.goals.map((g, i) => ({ goal: g.id, ...(results[i] || { merged: false, note: 'dropped' }), problems: problemsOf(g.id) }))
