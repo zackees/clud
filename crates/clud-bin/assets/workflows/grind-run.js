@@ -839,7 +839,13 @@ const observeGate = async (g, blocker, index) => {
         break
       }
       const delay = Math.min(30000, GATE_BACKOFF_MS * 2 ** (attempt - 1))
-      await new Promise(resolve => setTimeout(resolve, delay))
+      try {
+        await new Promise(resolve => setTimeout(resolve, delay))
+      } catch (error) {
+        if (error && error.name === 'AbortError') throw error
+        log(`goal ${g.id}: native timer failed; deferring: ${error && error.message ? error.message : error}`)
+        break
+      }
     }
   }
   return { ready: !!(observed && observed.ready === true),
