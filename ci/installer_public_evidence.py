@@ -19,6 +19,11 @@ REQUIRED_DISTRO_HOSTS = {
     ("fedora", "x86_64"),
     ("fedora", "aarch64"),
 }
+REQUIRED_NIXOS_HOSTS = {
+    (arch, state)
+    for arch in ("x86_64", "aarch64")
+    for state in ("disabled", "enabled")
+}
 
 
 def require_evidence(rows: list[dict], expected: dict[str, dict], mode: str, tag: str) -> None:
@@ -57,7 +62,8 @@ def require_guest_evidence(
     mode: str,
     tag: str,
 ) -> None:
-    if len(nixos) != 2 or {row.get("host_arch") for row in nixos} != {"x86_64", "aarch64"}:
+    nixos_hosts = {(row.get("host_arch"), row.get("nix_ld")) for row in nixos}
+    if len(nixos) != len(REQUIRED_NIXOS_HOSTS) or nixos_hosts != REQUIRED_NIXOS_HOSTS:
         raise ValueError("missing public NixOS guest evidence")
     for row in nixos:
         target = f"{row['host_arch']}-unknown-linux-musl"

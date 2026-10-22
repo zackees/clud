@@ -135,10 +135,12 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     nixos = [
         {
             "mode": "candidate", "tag": tag, "version": tag, "host_arch": arch,
+            "nix_ld": state,
             "sha256": expected[f"{arch}-unknown-linux-musl"]["sha256"],
             "resolved_path": "/home/alice/.local/bin/clud",
         }
         for arch in ("x86_64", "aarch64")
+        for state in ("disabled", "enabled")
     ]
     distros = [
         {
@@ -155,6 +157,13 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
         )
     ]
     require_guest_evidence(nixos, distros, expected, "candidate", tag)
+    for index in range(len(nixos)):
+        with pytest.raises(ValueError, match="missing"):
+            require_guest_evidence(
+                nixos[:index] + nixos[index + 1:], distros, expected, "candidate", tag
+            )
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence([*nixos[:-1], nixos[0]], distros, expected, "candidate", tag)
     for index in range(len(distros)):
         with pytest.raises(ValueError, match="missing"):
             require_guest_evidence(

@@ -203,7 +203,7 @@ jobs:
           if-no-files-found: warn
 
   candidate-nixos:
-    name: Real NixOS VM ${{ matrix.target }}
+    name: Real NixOS VM ${{ matrix.target }} nix-ld=${{ matrix.nix_ld }}
     needs: candidate-catalog
     if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     timeout-minutes: 30
@@ -213,8 +213,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            nix_ld: disabled
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            nix_ld: disabled
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nix_ld: enabled
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nix_ld: enabled
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -258,6 +266,7 @@ jobs:
           nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
           nix-build ci/nixos/candidate-test.nix --no-out-link \
             --argstr nixpkgs "$nixpkgs" \
+            --arg nixLd "${{ matrix.nix_ld == 'enabled' && 'true' || 'false' }}" \
             --argstr candidate "$PWD/candidate/$CANDIDATE_FILENAME" \
             --argstr fixture "$PWD/candidate-fixture" \
             --argstr version "$CANDIDATE_VERSION" \
@@ -506,7 +515,7 @@ jobs:
           if-no-files-found: error
 
   public-nixos:
-    name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }}
+    name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }} nix-ld=${{ matrix.nix_ld }}
     if: inputs.release_tag != ''
     timeout-minutes: 30
     strategy:
@@ -515,8 +524,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            nix_ld: disabled
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            nix_ld: disabled
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nix_ld: enabled
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nix_ld: enabled
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -550,6 +567,7 @@ jobs:
           nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
           driver=$(nix-build ci/nixos/public-test.nix -A config.driver --no-out-link \
             --argstr nixpkgs "$nixpkgs" \
+            --arg nixLd "${{ matrix.nix_ld == 'enabled' && 'true' || 'false' }}" \
             --argstr tag "$RELEASE_TAG" \
             --argstr version "$PUBLIC_VERSION" \
             --argstr digest "$PUBLIC_SHA256" \
@@ -561,7 +579,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}
+          name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}-${{ matrix.nix_ld }}
           path: public-nixos-evidence.txt
           if-no-files-found: warn
 

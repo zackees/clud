@@ -1,11 +1,11 @@
-{ nixpkgs, tag, version, digest, mode }:
+{ nixpkgs, tag, version, digest, mode, nixLd ? false }:
 let
   pkgs = import (builtins.storePath nixpkgs) { system = builtins.currentSystem; };
   arch = if builtins.currentSystem == "aarch64-linux" then "aarch64" else "x86_64";
 in
 assert mode == "candidate" || mode == "released";
 pkgs.testers.runNixOSTest {
-  name = "clud-public-installer-${mode}-${builtins.currentSystem}";
+  name = "clud-public-installer-${mode}-${builtins.currentSystem}-${if nixLd then "nix-ld" else "no-nix-ld"}";
   nodes.machine = { pkgs, ... }: {
     virtualisation.memorySize = 2048;
     virtualisation.vlans = [];
@@ -15,7 +15,7 @@ pkgs.testers.runNixOSTest {
     ];
     networking.useDHCP = true;
     environment.stub-ld.enable = false;
-    programs.nix-ld.enable = false;
+    programs.nix-ld.enable = nixLd;
     users.users.alice = {
       isNormalUser = true;
       createHome = true;
@@ -28,7 +28,7 @@ pkgs.testers.runNixOSTest {
   };
   testScript = ''
     machine.wait_for_unit("multi-user.target")
-    output = machine.succeed("bash /etc/clud-public-guest ${mode} ${tag} ${version} ${digest} ${arch}")
+    output = machine.succeed("bash /etc/clud-public-guest ${mode} ${tag} ${version} ${digest} ${arch} ${if nixLd then "enabled" else "disabled"}")
     assert "PUBLIC_NIXOS_EVIDENCE " in output, output
     print(output)
   '';

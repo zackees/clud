@@ -226,6 +226,28 @@ def test_pr_workflow_gates_on_the_managed_dsh_lane() -> None:
     assert '"$CANDIDATE_DSH"' in workflow
 
 
+@pytest.mark.parametrize("job", ["candidate-nixos", "public-nixos"])
+def test_nixos_matrix_requires_both_loader_states_on_both_architectures(job: str) -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow)
+    assert block is not None
+    rows = re.findall(
+        r"(?m)^          - runner: (\S+)\n"
+        r"            target: (\S+)\n"
+        r"            nix_ld: (\w+)",
+        block.group(1),
+    )
+    assert len(rows) == 4
+    assert set(rows) == {
+        (runner, f"{arch}-unknown-linux-musl", state)
+        for runner, arch in (("ubuntu-24.04", "x86_64"), ("ubuntu-24.04-arm", "aarch64"))
+        for state in ("disabled", "enabled")
+    }
+    assert '--arg nixLd "${{ matrix.nix_ld' in block.group(1)
+
+
 def test_native_candidate_installs_by_name_and_writes_host_evidence(
     installer_target,  # noqa: F811
 ) -> None:

@@ -6,9 +6,18 @@ tag=$2
 version=$3
 expected_sha=$4
 expected_arch=$5
+nix_ld=$6
 test "$(uname -m)" = "$expected_arch"
-test ! -e /lib64/ld-linux-x86-64.so.2
-test ! -e /lib/ld-linux-aarch64.so.1
+case "$nix_ld" in
+  disabled)
+    test ! -e /lib64/ld-linux-x86-64.so.2
+    test ! -e /lib/ld-linux-aarch64.so.1
+    ;;
+  enabled)
+    test -x /lib64/ld-linux-x86-64.so.2 || test -x /lib/ld-linux-aarch64.so.1
+    ;;
+  *) exit 2 ;;
+esac
 
 if [ "$mode" = candidate ]; then
   catalog_url="https://github.com/zackees/clud/releases/download/$tag/installer-candidate-manifest.json"
@@ -46,6 +55,6 @@ clud $version"
 test "$selected" = "$expected_output"
 test "$(sha256sum /home/alice/.local/bin/clud | cut -d ' ' -f 1)" = "$expected_sha"
 jq -nc --arg mode "$mode" --arg tag "$tag" --arg arch "$expected_arch" \
-  --arg sha "$expected_sha" --arg version "$version" \
-  '{mode:$mode,tag:$tag,host_arch:$arch,sha256:$sha,version:$version,resolved_path:"/home/alice/.local/bin/clud"}' |
+  --arg sha "$expected_sha" --arg version "$version" --arg nix_ld "$nix_ld" \
+  '{mode:$mode,tag:$tag,host_arch:$arch,nix_ld:$nix_ld,sha256:$sha,version:$version,resolved_path:"/home/alice/.local/bin/clud"}' |
   sed 's/^/PUBLIC_NIXOS_EVIDENCE /'

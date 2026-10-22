@@ -75,6 +75,10 @@ pairs: Arch and Alpine x64, plus Ubuntu, Debian and Fedora on both x64 and
 ARM64. Each container runs on a matching native host and uses a pinned image
 digest. Public aggregation rejects missing or duplicate pairs and compares
 each record against the published digest for that architecture.
+NixOS boots matching x64 and ARM64 VMs both with and without `nix-ld`.
+Each case verifies its loader state before installation and still requires
+the exact static musl executable. Public aggregation requires all four
+architecture/loader-state combinations, rejecting missing or duplicate cases.
 
 Operators can rerun the read-only public checks using the existing
 `installer-check.yml` workflow's manual dispatch, with an exact `release_tag`
