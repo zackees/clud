@@ -96,12 +96,17 @@ roots already discovered by intake. Ask what blocks what across the entire
 run. Do not start a goal planner, classification Workflow, worker or
 checkout mutation while the advisor is running.
 
-Keep its returned `{session_repo, goals, proposed_goals, risks}` as
+Keep its returned `{session_repo, session_root, goals, proposed_goals, risks}` as
 `orchestration`, separate from the later `grind-plan/v1` classification.
 Require every original goal exactly once with its repository, actual
 default branch, checkout choice and blockers. Resolve missing or ambiguous
 repository evidence before proceeding. Do not replace a sister repository's
 default branch with the session repository's branch.
+Retain the approved absolute `session_root`; every workflow call must use that
+same `repo` path and the approved session repository's default branch. If
+classification introduces an edge absent from the graph, resolve it and obtain
+approval of the revised graph before execution; do not start contradictory
+dependency waits.
 
 Show the run graph with a lane per repository, each dependency's condition
 and check, checkout risks, and any proposed goals. Ask one approval question:

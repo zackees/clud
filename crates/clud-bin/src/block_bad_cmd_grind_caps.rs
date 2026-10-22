@@ -402,6 +402,7 @@ fn orchestrator_read(words: &[String]) -> bool {
         "--output",
         "--ext-diff",
         "--textconv",
+        "--filters",
         "--upload-pack",
         "--exec",
     ];
@@ -413,7 +414,7 @@ fn orchestrator_read(words: &[String]) -> bool {
     }
     match sub.first().map(String::as_str) {
         Some("fetch") | None => false,
-        Some("ls-remote") => true,
+        Some("ls-remote") => !sub.iter().any(|word| word.starts_with("-u") || word.contains("::")),
         Some("worktree") => sub.get(1).is_some_and(|w| w == "list"),
         _ => is_git_read(&sub),
     }
@@ -1806,6 +1807,10 @@ mod tests {
                 "gh api repos/o/r/issues -X POST",
                 "gh api repos/o/r/issues -f title=changed",
                 "git log --output=changed",
+                "git cat-file --filters HEAD:path",
+                "git ls-remote -u /tmp/helper origin",
+                "git ls-remote -u/tmp/helper origin",
+                "git ls-remote ext::helper",
                 "rg --pre 'cargo build' pattern /sister",
                 "LD_PRELOAD=/sister/plugin.so git log",
                 "echo changed > file",

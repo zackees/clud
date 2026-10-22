@@ -33,6 +33,7 @@ def test_approved_merge_dependency_gates_planning(
     # depends_on. The approved graph must still control the execution order.
     graph = {
         "session_repo": "o/r",
+        "session_root": str(h.repo),
         "goals": [
             {"id": "b", "repo": "o/r", "main": "main", "checkout": "local",
              "blockers": [{"goal": "a", "when": "merged"}]},
