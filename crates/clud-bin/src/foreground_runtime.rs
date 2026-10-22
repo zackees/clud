@@ -4286,9 +4286,9 @@ pub(crate) mod tests {
             ("PostToolUseFailure", "Bash"),
         ] {
             assert!(hooks[event].as_array().unwrap().iter().any(|entry| {
-                entry["matcher"].as_str().is_some_and(|matcher| {
-                    matcher.split('|').any(|candidate| candidate == tool)
-                })
+                entry["matcher"]
+                    .as_str()
+                    .is_some_and(|matcher| matcher.split('|').any(|candidate| candidate == tool))
             }));
         }
         for entries in hooks.values() {
