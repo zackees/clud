@@ -159,6 +159,16 @@ def test_native_resume_only_reobserves_deferred_branch(
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     if any(row.get("note") for row in result.requests):
         print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
+        metadata = [row for row in result.hooks if row.get("tool_name") == "Workflow"]
+        for row in metadata[-4:]:
+            print("NATIVE_WORKFLOW_VERSION_METADATA", json.dumps(row)[-6000:])
+        outcomes = h.logs / "gate-native-outcomes.jsonl"
+        if outcomes.exists():
+            rows = [json.loads(line) for line in outcomes.read_text().splitlines()]
+            for row in [row for row in rows if row.get("tool_name") == "Workflow"][-4:]:
+                print("NATIVE_WORKFLOW_POST_METADATA", json.dumps(row)[-6000:])
+        for receipt in list(h.config.glob("projects/*/*/grind-resume-*.json"))[:6]:
+            print("NATIVE_WORKFLOW_ORIGIN_RECEIPT", str(receipt), receipt.read_text())
         for role in ("planner:a", "worker:a", "reviewer:a", "integrator:a"):
             requests = [row for row in result.requests
                         if row["role"] == role and row.get("turn") == 0]
