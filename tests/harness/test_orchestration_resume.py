@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.harness.harness import Harness
+from tests.harness.harness import Harness, RunResult
 from tests.harness.test_grind import (
     _after,
     _bash,
@@ -78,6 +78,26 @@ def native_resume_steps(captured: Path, scheduled: bool) -> list[dict[str, Any]]
     return steps
 
 
+def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
+    """Keep native wakeup failures observable after the PTY times out."""
+    try:
+        return h.run_clud_interactive(
+            "Resume the deferred graph through a native scheduled wakeup.", script,
+            model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180,
+        )
+    except AssertionError:
+        requests = h.logs / "requests.jsonl"
+        rows = [json.loads(line) for line in requests.read_text().splitlines()] if requests.exists() else []
+        for row in [row for row in rows if row.get("role") == "main"][-8:]:
+            print("NATIVE_RESUME_WAKEUP_REQUEST", json.dumps({
+                "n": row.get("n"), "turn": row.get("turn"), "note": row.get("note"),
+                "tools": row.get("tools"),
+                "latest": str(row.get("messages", [])[-1:])[-1200:],
+            }))
+        raise
+
+
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize("scheduled", [False, True])
 def test_native_resume_only_reobserves_deferred_branch(
@@ -114,11 +134,7 @@ def test_native_resume_only_reobserves_deferred_branch(
     script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
                                "steps": native_resume_steps(captured, scheduled)})
     if scheduled:
-        result = h.run_clud_interactive(
-            "Resume the deferred graph through a native scheduled wakeup.", script,
-            model="nvidia/nemotron-3-ultra-550b-a55b:free",
-            finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180,
-        )
+        result = scheduled_resume(h, script)
     else:
         result = h.run("Resume only deferred publication work using the native Workflow cache.",
                        script, timeout=180)
