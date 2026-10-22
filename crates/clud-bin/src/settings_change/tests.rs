@@ -159,9 +159,14 @@ fn concurrent_changes_and_expired_review_cannot_reuse_authority() {
     assert!(matches!(result, Err(Failure::Changed)));
     assert_eq!(fs::read(&path).unwrap(), changed);
 
-    let mut prepared = prepare(&home, &setting("/web_term/enabled", "true")).unwrap();
-    prepared.preview.created = Instant::now() - APPROVAL_LIFETIME - Duration::from_secs(1);
-    assert!(matches!(commit(prepared), Err(Failure::Changed)));
+    // Advance the clock rather than back-dating `created`: Windows `Instant`
+    // counts from boot and cannot go 601 s back on a fresh runner (#2031).
+    let prepared = prepare(&home, &setting("/web_term/enabled", "true")).unwrap();
+    let expired = prepared.preview.created + APPROVAL_LIFETIME + Duration::from_secs(1);
+    assert!(matches!(
+        commit_with_clock(prepared, || expired),
+        Err(Failure::Changed)
+    ));
     assert_eq!(fs::read(path).unwrap(), changed);
 }
 
