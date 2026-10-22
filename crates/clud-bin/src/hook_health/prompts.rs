@@ -210,6 +210,8 @@ fn backend_prompt_launch_plan(
         provider_only: Vec::new(),
         zdr: false,
         no_data_collection: false,
+        redact_secrets: false,
+        no_redact_secrets: false,
         effort: None,
         context_window: None,
         prompt: Some(prompt),

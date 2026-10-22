@@ -700,6 +700,7 @@ pub struct UpstreamClient<C: CredentialSource> {
     /// The bearer actually sent on the last attempt may differ from the
     /// source's initial bearer after a guarded 401 refresh.
     last_target: Mutex<Option<UpstreamTarget>>,
+    redaction: Option<crate::secret_redaction::stream::SharedSession>,
 }
 
 impl<C: CredentialSource> std::fmt::Debug for UpstreamClient<C> {
@@ -719,6 +720,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
             session_id: new_session_id(),
             retry_observer: None,
             last_target: Mutex::new(None),
+            redaction: None,
         }
     }
 
@@ -751,6 +753,36 @@ impl<C: CredentialSource> UpstreamClient<C> {
         self
     }
 
+    pub fn with_redaction(
+        mut self,
+        session: Option<crate::secret_redaction::stream::SharedSession>,
+    ) -> Self {
+        self.redaction = session;
+        self
+    }
+
+    fn redacted_body<'a>(
+        &self,
+        body: &'a [u8],
+        target: &UpstreamTarget,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, UpstreamError> {
+        let Some(session) = &self.redaction else {
+            return Ok(std::borrow::Cow::Borrowed(body));
+        };
+        let mut session = session
+            .lock()
+            .map_err(|_| UpstreamError::Transport("secret redaction unavailable"))?;
+        session.add_known(
+            target
+                .authorization
+                .strip_prefix("Bearer ")
+                .unwrap_or(&target.authorization),
+        );
+        session
+            .redact_body(body)
+            .map_err(|_| UpstreamError::Transport("invalid request for secret redaction"))
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -770,6 +802,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
             return Err(UpstreamError::Cancelled);
         }
         let target = self.credentials.resolve()?;
+        let body = self.redacted_body(body, &target)?;
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(self.config.connect_timeout)
             .timeout_read(self.config.read_timeout)
@@ -794,7 +827,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
         for (name, value) in &target.extra_headers {
             request = request.set(name, value);
         }
-        let response = match request.send_bytes(body) {
+        let response = match request.send_bytes(&body) {
             Ok(response) => response,
             Err(ureq::Error::Status(status, response)) => {
                 return Err(UpstreamError::Status(capture_failure(
@@ -937,6 +970,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
         sink: &mut dyn FnMut(&[u8]) -> Result<(), UpstreamError>,
         delivered: &AtomicBool,
     ) -> Result<usize, UpstreamError> {
+        let body = self.redacted_body(body, target)?;
         let attempt_deadline = self
             .config
             .first_frame_timeout
@@ -975,8 +1009,8 @@ impl<C: CredentialSource> UpstreamClient<C> {
         let response = match match attempt_deadline {
             Some(deadline) => request
                 .timeout(deadline.saturating_duration_since(Instant::now()))
-                .send_bytes(body),
-            None => request.send_bytes(body),
+                .send_bytes(&body),
+            None => request.send_bytes(&body),
         } {
             Ok(response) => response,
             // The response is *read*, not discarded. Its headers carry the
@@ -1316,6 +1350,58 @@ mod tests {
             UpstreamTarget::new(CODEX_BACKEND_BASE_URL, "Bearer x").compact_url(),
             "https://chatgpt.com/backend-api/codex/responses/compact"
         );
+    }
+
+    #[test]
+    fn redaction_at_the_send_boundary_covers_credentials_and_retries() {
+        let server = FakeUpstream::start(vec![status_response(503), sse_response("data: ok\n\n")]);
+        let shared = Arc::new(Mutex::new(
+            crate::secret_redaction::reversible::Session::new(Vec::new()).unwrap(),
+        ));
+        let client =
+            client(&server.base_url, fast_config()).with_redaction(Some(Arc::clone(&shared)));
+        client
+            .stream(
+                br#"{"model":"m","input":[{"role":"user","content":"sk-test-key"}]}"#,
+                &AtomicBool::new(false),
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        let token = shared
+            .lock()
+            .unwrap()
+            .redact_text("sk-test-key")
+            .into_owned();
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert!(request.contains("Authorization: Bearer sk-test-key"));
+            let body = request.split_once("\r\n\r\n").unwrap().1;
+            assert!(!body.contains("sk-test-key"));
+            assert!(body.contains(&token));
+        }
+    }
+
+    #[test]
+    fn compaction_redacts_the_final_translated_history_body() {
+        let reply = r#"{"output":[{"type":"compaction","encrypted_content":"summary"}]}"#;
+        let server = FakeUpstream::start(vec![body_response(200, reply, &[])]);
+        let shared = Arc::new(Mutex::new(
+            crate::secret_redaction::reversible::Session::new(Vec::new()).unwrap(),
+        ));
+        let client = client(&server.base_url, fast_config()).with_redaction(Some(shared));
+        client
+            .compact(
+                br#"{"model":"m","input":[{"role":"user","content":"sk-test-key"}]}"#,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/responses/compact "));
+        let body = requests[0].split_once("\r\n\r\n").unwrap().1;
+        assert!(!body.contains("sk-test-key"));
+        assert!(body.contains("clud_secret_"));
     }
 
     #[test]

@@ -884,6 +884,13 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
+    if args.redact_secrets && launch_target.effective_harness != backend::Backend::Claude {
+        eprintln!(
+            "[clud] error: {}",
+            clud::secret_redaction::policy::GATEWAY_REQUIRED
+        );
+        std::process::exit(2);
+    }
     validate_provider_only(args, launch_target);
     if let Some(error) = command::grind_launch_error(args, launch_target)
         .or_else(|| command::video_launch_error(args, launch_target))

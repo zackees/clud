@@ -70,6 +70,9 @@ pub struct StatusState {
     /// session state, not an alert competing for the one toast slot.
     #[serde(default)]
     pub usage: Option<StatusUsage>,
+    /// Aggregate gateway redaction counters; never contains tokens or credentials.
+    #[serde(default)]
+    pub redaction: Option<crate::secret_redaction::reversible::Counts>,
     /// Efforts of recent gateway/bridge requests (#1464), pruned to
     /// [`EFFORT_WINDOW`]. Only present when clud's gateway is in the path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -130,6 +133,7 @@ pub struct StatusStateWriter {
     provider_label: String,
     board: Mutex<ToastBoard>,
     usage: Mutex<Option<StatusUsage>>,
+    redaction: Mutex<Option<crate::secret_redaction::reversible::Counts>>,
     efforts: Mutex<Vec<EffortEvent>>,
 }
 
@@ -159,6 +163,7 @@ impl StatusStateWriter {
             provider_label: provider.to_string(),
             board: Mutex::new(ToastBoard::default()),
             usage: Mutex::new(None),
+            redaction: Mutex::new(None),
             efforts: Mutex::new(Vec::new()),
         };
         let _ = writer.write(None, Instant::now());
@@ -221,6 +226,26 @@ impl StatusStateWriter {
         let _ = self.write(visible.as_ref(), now);
     }
 
+    /// Publish only monotonic session counters, including unknown placeholders.
+    pub fn publish_redaction(&self, counts: crate::secret_redaction::reversible::Counts) {
+        {
+            let mut current = self.redaction.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = current.get_or_insert_with(Default::default);
+            for (kind, count) in counts.kinds {
+                let recorded = previous.kinds.entry(kind).or_default();
+                *recorded = (*recorded).max(count);
+            }
+            previous.unknown_tokens = previous.unknown_tokens.max(counts.unknown_tokens);
+        }
+        let now = Instant::now();
+        let visible = {
+            let mut board = self.board.lock().unwrap_or_else(|e| e.into_inner());
+            board.expire(now);
+            board.visible(now).cloned()
+        };
+        let _ = self.write(visible.as_ref(), now);
+    }
+
     /// Record one gateway request's effort (#1464) and refresh the file.
     pub fn record_effort(&self, level: &str, agent: bool) {
         let level: String = level.chars().filter(|c| !c.is_control()).take(16).collect();
@@ -264,6 +289,11 @@ impl StatusStateWriter {
                 }),
             }),
             usage: self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            redaction: self
+                .redaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             efforts: {
                 let mut efforts = self.efforts.lock().unwrap_or_else(|e| e.into_inner());
                 prune_efforts(&mut efforts, wall);
@@ -693,6 +723,23 @@ pub fn render_into_with_effort_env(
     } else if let Some(model) = claude_status_model(stdin) {
         out.extend_from_slice(format!("\x1b[38;5;75m{}\x1b[0m", safe_label(&model)).as_bytes());
         out.push(b'\n');
+    }
+    if let Some(counts) = state
+        .as_ref()
+        .filter(|state| state_owner_live(state, now_ms))
+        .and_then(|state| state.redaction.as_ref())
+    {
+        let total = counts
+            .kinds
+            .values()
+            .fold(0_u64, |sum, count| sum.saturating_add(*count));
+        out.extend_from_slice(
+            format!(
+                "secrets tokenized: {total} · unknown placeholders: {}\n",
+                counts.unknown_tokens
+            )
+            .as_bytes(),
+        );
     }
     let events = state
         .as_ref()

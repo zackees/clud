@@ -229,6 +229,8 @@ fn transcript_forces_centralized_daemon() {
         provider_only: Vec::new(),
         zdr: false,
         no_data_collection: false,
+        redact_secrets: false,
+        no_redact_secrets: false,
         mode: None,
         effort: None,
         context_window: None,

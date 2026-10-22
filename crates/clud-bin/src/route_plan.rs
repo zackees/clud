@@ -421,6 +421,8 @@ pub struct ResolvedRoute {
     pub context: ContextPolicy,
     pub effort: EffortPolicy,
     pub upstream_routing: Option<ProviderRouting>,
+    #[serde(default)]
+    pub redaction: crate::secret_redaction::policy::Policy,
     /// The effective per-request timeout, in milliseconds. `None` means this
     /// backend does not set one.
     pub timeout_ms: Option<u64>,
@@ -690,6 +692,7 @@ pub fn evaluate(
         request_path_verdict(route.backend),
         free_cost_verdict(route, catalog),
         provider_only_verdict(route),
+        redaction_verdict(route),
     ]
 }
 
@@ -720,6 +723,27 @@ fn request_path_verdict(backend: RouteBackend) -> CheckVerdict {
             verdict,
         },
         refusal: None,
+    }
+}
+
+fn redaction_verdict(route: &ResolvedRoute) -> CheckVerdict {
+    let supported = route.backend == RouteBackend::Unified;
+    let refusal = (route.redaction.enabled && !supported)
+        .then(|| crate::secret_redaction::policy::GATEWAY_REQUIRED.to_string());
+    let applicability = if let Some(reason) = &refusal {
+        Applicability::Unsupported(reason.clone())
+    } else if route.redaction.enabled {
+        Applicability::Applies
+    } else {
+        Applicability::NotApplicable(route.redaction.reason.clone())
+    };
+    CheckVerdict {
+        check: LaunchCheck {
+            name: "secret_redaction".to_string(),
+            applicability,
+            verdict: route.redaction.reason.clone(),
+        },
+        refusal,
     }
 }
 
@@ -1075,6 +1099,16 @@ pub fn resolve_with_catalog(
                 }),
         },
         upstream_routing: provider_routing(plan),
+        redaction: crate::secret_redaction::policy::Policy::resolve(
+            provider,
+            plan.model_selection
+                .as_ref()
+                .and_then(|selection| selection.wire_model.as_deref()),
+            plan.redact_secrets,
+            provider_routing(plan)
+                .as_ref()
+                .is_some_and(|routing| routing.data_collection.as_deref() == Some("allow")),
+        ),
         timeout_ms: match backend {
             RouteBackend::Direct => DIRECT_TIMEOUT_MS.parse().ok(),
             RouteBackend::Unified | RouteBackend::CodexBridge => BRIDGE_TIMEOUT_MS.parse().ok(),
