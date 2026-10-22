@@ -1,6 +1,6 @@
 //! Bind one gate shell command to native, session-local workflow metadata.
 //!
-//! This authorizes a check; it does not interpret its result as readiness.
+//! Readiness additionally requires the native tool outcome recorded by `evidence`.
 
 use std::io::Read;
 use std::path::Path;
@@ -14,6 +14,21 @@ const MAX_METADATA_BYTES: u64 = 8192;
 const MAX_GOALS: usize = 256;
 const MAX_BLOCKERS: usize = 64;
 
+#[path = "block_bad_cmd_grind_gate_evidence.rs"]
+mod evidence;
+
+pub(super) fn observe(event: &str, raw: &Value, payload: &HookPayloadView) {
+    if payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE)
+        || payload.tool_name != "Bash"
+    {
+        return;
+    }
+    let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
+    if let Some(facts) = facts.facts() {
+        let _ = evidence::observe(event, raw, payload, facts);
+    }
+}
+
 pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
     let role = block_bad_cmd_grind_caps::GATE;
     if let Some(reason) = block_bad_cmd_grind_caps::tool_reason(
@@ -23,14 +38,20 @@ pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
     ) {
         return Some(reason);
     }
-    if !block_bad_cmd_gate::gates_tool(&payload.tool_name) {
-        return None;
-    }
     let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
     let result = facts
         .facts()
         .ok_or_else(|| "missing valid run facts".to_string())
-        .and_then(|facts| authorize(payload, facts));
+        .and_then(|facts| {
+            if payload.tool_name == "StructuredOutput" {
+                evidence::report(payload, facts)
+            } else if block_bad_cmd_gate::gates_tool(&payload.tool_name) {
+                authorize(payload, facts)?;
+                evidence::claim(payload, facts)
+            } else {
+                Ok(())
+            }
+        });
     result.err().map(|error| format!("{role}: {error}"))
 }
 
@@ -270,6 +291,42 @@ mod tests {
 
         fn allowed(&self) -> bool {
             authorize(&self.payload, &self.facts).is_ok()
+        }
+    }
+
+    #[test]
+    fn readiness_requires_a_successful_native_outcome_for_this_binding() {
+        let mut fixture = Fixture::new();
+        let mut report = fixture.payload.clone();
+        report.tool_name = "StructuredOutput".into();
+        report.tool_input = Some(json!({"ready": true}));
+        assert!(evidence::report(&report, &fixture.facts).is_err());
+        evidence::claim(&fixture.payload, &fixture.facts).unwrap();
+        assert!(evidence::claim(&fixture.payload, &fixture.facts).is_err());
+        assert!(evidence::report(&report, &fixture.facts).is_err());
+        evidence::observe("PostToolUse", &json!({"tool_response": {"interrupted": false}}),
+                          &fixture.payload, &fixture.facts).unwrap();
+        assert!(evidence::report(&report, &fixture.facts).is_ok());
+        fixture.facts["orchestration"]["goals"][0]["blockers"][0]["check"] = json!("echo CHANGED");
+        assert!(evidence::report(&report, &fixture.facts).is_err());
+    }
+
+    #[test]
+    fn failed_interrupted_and_unknown_outcomes_cannot_release_a_gate() {
+        for (event, response) in [
+            ("PostToolUseFailure", json!({})),
+            ("PostToolUse", json!({"tool_response": {"interrupted": true}})),
+            ("PostToolUse", json!({})),
+        ] {
+            let fixture = Fixture::new();
+            evidence::claim(&fixture.payload, &fixture.facts).unwrap();
+            evidence::observe(event, &response, &fixture.payload, &fixture.facts).unwrap();
+            let mut report = fixture.payload.clone();
+            report.tool_name = "StructuredOutput".into();
+            report.tool_input = Some(json!({"ready": true}));
+            assert!(evidence::report(&report, &fixture.facts).is_err());
+            report.tool_input = Some(json!({"ready": false}));
+            assert!(evidence::report(&report, &fixture.facts).is_ok());
         }
     }
 
