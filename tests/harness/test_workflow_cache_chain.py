@@ -21,7 +21,8 @@ def test_native_cache_replays_every_stage_of_two_chains(
     (h.config / "agents").mkdir(exist_ok=True)
     (h.config / "workflows").mkdir(exist_ok=True)
     (h.config / "agents" / "cache-chain-probe.md").write_text(
-        "---\nname: cache-chain-probe\ndescription: Native chain cache probe\ntools: [Read, Write, Bash]\n---\n"
+        "---\nname: cache-chain-probe\ndescription: Native chain cache probe\n"
+        "tools: [Read, Write, Bash]\n---\n"
         "CACHE_CHAIN_PROBE_ROLE\n"
     )
     run = ("return await parallel([() => chain('a'), () => chain('d')]);" if parallel_mode
@@ -65,12 +66,24 @@ def test_native_cache_replays_every_stage_of_two_chains(
             {"text": "CHAIN_PROBE_STARTED"},
         ]},
     ])
-    result = h.run("Observe native cache replay across each stage of both chains.", {"roles": roles})
+    result = h.run("Observe native cache replay across each stage of both chains.",
+                   {"roles": roles})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
     outputs = workflow_results(result)
     assert len(outputs) == 2, outputs
     wanted = [[{"observed": f"{goal}{stage}"} for stage in range(4)] for goal in ("a", "d")]
     assert outputs == [wanted, wanted], outputs
-    observed = Counter((h.repo / "cache-chain.txt").read_text().rstrip(",").split(","))
-    assert observed == Counter(expected), observed
+    observed = {
+        "bash": Counter((h.repo / "cache-chain.txt").read_text().rstrip(",").split(",")),
+        "writes": Counter(row["tool_input"]["file_path"] for row in result.hooks
+                          if row.get("event") == "PreToolUse" and row.get("tool_name") == "Write"),
+        "agents": Counter(row["role"] for row in result.requests
+                          if row.get("turn") == 0 and row["role"] in expected),
+    }
+    wanted_effects = {
+        "bash": Counter(expected), "agents": Counter(expected),
+        "writes": Counter(str(h.repo / f"cache-{label}.txt") for label in expected)
+        if native_writes else Counter(),
+    }
+    assert observed == wanted_effects, observed
