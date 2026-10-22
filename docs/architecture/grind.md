@@ -176,7 +176,7 @@ goals can continue.
 
 Publication checks, cross-stage resumption and separately rooted repository
 sessions remain under development in #1338 and #1422. The current graph path
-returns an explicit blocked result for missing-stage dependencies, external
+returns an explicit blocked result for missing-stage dependencies, unavailable
 publication evidence or a sister repository needing its own session; it must
 not treat those conditions as successful merges or execute in the wrong root.
 
@@ -197,8 +197,11 @@ approved check, label and root. Missing or pending evidence cannot release
 work. A retry needs a new native gate agent. These records share the harness
 session directory's lifecycle and trust boundary; they contain the binding
 and outcome, without command stdout/stderr.
-The workflow does not yet start this role. Workflow execution, native outcome
-coverage and resumption remain under development.
+The workflow starts this role after the approved upstream goal lands and
+before downstream planning. A successful native check releases that blocker;
+an unavailable or unsuccessful observation defers the dependent. Bounded
+backoff, transitive `/loop` handoff and cross-repository execution remain
+under development.
 
 ### Grind skills require explicit invocation
 
@@ -792,7 +795,7 @@ The rationale is in
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
 | `grind-orchestrator` | Read, Grep, Glob, Bash | AST-validated read-only inspection; no fetch, edits, builds or checkouts |
-| `grind-gate` | Bash | exactly one assigned read-only Bash check, bound to native agent identity and approved run facts; not yet invoked by `grind-run` |
+| `grind-gate` | Bash | exactly one assigned read-only Bash check, bound to native agent identity and approved run facts; readiness requires its successful native outcome |
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit); `clud grind-facts task` to record each task's files |
 | `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the run facts' meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh`; `safe-rm` on literal paths inside its task's directories ([rm-tools.md](rm-tools.md#location-policy)) |
