@@ -341,3 +341,52 @@ def test_required_gui_probes_cannot_skip_after_session_scrub(tmp_path: Path, mon
     ):
         with pytest.raises(AssertionError, match=message):
             invoke(probe)
+
+
+def test_native_secret_window_authenticates_real_glab(tmp_path: Path) -> None:
+    """The actual consumer logs in and verifies its saved token on every native host."""
+    import os
+    import shutil
+    import sys
+
+    import pytest
+
+    from tests import process
+    from tests.secret_glab_fixture import HOST, TOKEN, environment, gitlab_api
+    from tests.test_hello import CLUD
+
+    required = os.environ.get("CLUD_TEST_REQUIRE_SECRET_GUI") == "1"
+    glab = os.environ.get("CLUD_TEST_GLAB_BINARY")
+    if not glab or not Path(glab).is_file():
+        assert not required, "native secret acceptance requires the pinned real GitLab CLI"
+        pytest.skip("pinned GitLab CLI is required for the native credential consumer probe")
+    source = tmp_path / "fixture-token"
+    source.write_text(TOKEN)
+    env = environment(tmp_path, source)
+    with gitlab_api() as (api_host, accepted):
+        argv = [
+            CLUD, "secret", "--title", "GitLab fixture login",
+            "--label", f"Token for {HOST}", "--to-command", glab,
+            "auth", "login", "--stdin", "--hostname", HOST,
+            "--api-host", api_host, "--api-protocol", "http", "--git-protocol", "https",
+            "--insecure-storage",
+        ]
+        if sys.platform == "linux" and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+            xvfb = shutil.which("xvfb-run")
+            if xvfb is None:
+                assert not required, "native GitLab consumer coverage requires xvfb-run"
+                pytest.skip("a desktop or xvfb-run is required for the native GitLab consumer")
+            argv = [xvfb, "-a", *argv]
+        result = process.run(argv, capture_output=True, text=True, timeout=40, env=env)
+        assert TOKEN not in result.stdout + result.stderr
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "stored"
+        login_requests = len(accepted)
+        assert login_requests >= 1, "glab login never authenticated against the fixture"
+        status = process.run(
+            [glab, "auth", "status", "--hostname", HOST],
+            capture_output=True, text=True, timeout=15, env=env, cwd=str(tmp_path),
+        )
+        assert TOKEN not in status.stdout + status.stderr
+        assert status.returncode == 0, status.stderr
+        assert len(accepted) > login_requests, "glab status did not verify the saved token"
