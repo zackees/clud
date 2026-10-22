@@ -223,6 +223,15 @@ for same-session `/loop` resumption. Native resumption and scheduled handoff
 are undergoing harness verification; cross-repository execution remains under
 development.
 
+Graph resumption requires Claude Code 2.1.306 or newer: the old 2.1.282 runtime
+used a shared rolling cache chain whose keys changed when parallel cached
+calls completed in a different order. The PreToolUse hook checks the latest
+matching session-version record in a bounded tail of the harness transcript.
+An older, missing or unrecognized version refuses graph resumption. Keep the
+deferred manifest and launch references, report the unsupported runtime, and
+do not run Finish; update the harness before explicit resumption. The check
+uses the same harness-owned transcript trust boundary as native gate identity.
+
 ### Grind skills require explicit invocation
 
 The leaves and roles exist for the workflow, and for a person testing one by

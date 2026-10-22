@@ -3838,6 +3838,9 @@ mod block_bad_cmd_claude_worktrees_tests;
 /// or the feature-branch-mode router caps for any other caller while
 /// the session's run facts record a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
+    if let Some(reason) = block_bad_cmd_grind_gate::resume_reason(payload) {
+        return Some(reason);
+    }
     if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE) {
         return block_bad_cmd_grind_gate::reason(payload)
             .map(|reason| format!("Blocked by the /grind role caps: {reason}."));

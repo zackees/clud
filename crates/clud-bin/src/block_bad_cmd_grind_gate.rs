@@ -16,6 +16,13 @@ const MAX_BLOCKERS: usize = 64;
 #[path = "block_bad_cmd_grind_gate_evidence.rs"]
 mod evidence;
 
+#[path = "block_bad_cmd_grind_resume.rs"]
+mod resume;
+
+pub(super) fn resume_reason(payload: &HookPayloadView) -> Option<String> {
+    resume::reason(payload)
+}
+
 pub(super) fn guards_report_tool(tool: &str) -> bool {
     tool == "StructuredOutput"
 }
