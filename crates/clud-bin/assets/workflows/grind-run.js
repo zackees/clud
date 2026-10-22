@@ -22,7 +22,7 @@ export const meta = {
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
 //   maxAgents?: 4, maxFixRounds?: 10, agentErrors?: 3,   // agentErrors: tool-misuse allowance, apart from fix rounds (#1331)
-//   gateAttempts?: 3, gateBackoffMs?: 1000, gateEpoch?: 0,
+//   gateAttempts?: 3, gateBackoffMs?: 1000, gateEpoch?: 0, gateEpochs?: {goalId: 0},
 //   planOnly?: true, meta?: '<meta issue number>',
 //   orchestration?: { session_repo: 'owner/repo', goals: [
 //     { id, repo, main, checkout?: 'local' | 'worktree', blockers: [{goal, when, check?}] }
@@ -186,6 +186,19 @@ const gateInteger = (name, fallback, minimum, maximum) => {
 const GATE_ATTEMPTS = gateInteger('gateAttempts', 3, 1, 5)
 const GATE_BACKOFF_MS = gateInteger('gateBackoffMs', 1000, 1, 30000)
 const GATE_EPOCH = gateInteger('gateEpoch', 0, 0, 1000000000)
+// Resume only deferred branches: completed gate prompts must retain their native
+// cache keys. Epochs select fresh observations; they never assert readiness.
+const GATE_EPOCHS = args.gateEpochs ?? {}
+if (!GATE_EPOCHS || typeof GATE_EPOCHS !== 'object' || Array.isArray(GATE_EPOCHS)) {
+  throw new Error('gateEpochs must map approved goal ids to integer epochs')
+}
+for (const [id, epoch] of Object.entries(GATE_EPOCHS)) {
+  if (!RUN_GOALS.has(id) || !Number.isInteger(epoch) || epoch < 0 || epoch > 1000000000) {
+    throw new Error(`invalid gate epoch for approved goal ${id}`)
+  }
+}
+const gateEpoch = (id) => GATE_EPOCHS[String(id)] ?? GATE_EPOCH
+
 // The repo's ./lint and ./test, chosen once by the /grind router (#1336).
 const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
 const scriptLines = () => [SCRIPTS.lint, SCRIPTS.test].filter(Boolean)
@@ -808,7 +821,7 @@ let DIRTY_AFTER = null
 
 const inspectGate = (g, blocker, index, attempt) => light(() => agent(
   `Observe this approved dependency gate once.\n${ctx(g)}\n` +
-  `Observation: ${GATE_EPOCH}/${attempt}.\n` +
+  `Observation: ${gateEpoch(g.id)}/${attempt}.\n` +
   `Upstream goal: ${blocker.goal}. Required condition: ${blocker.when}.\n` +
   `Exact approved Bash check (copy verbatim):\n${blocker.check}\n` +
   'Report ready only after successful native execution. Include the observed output as evidence. ' +
@@ -1019,6 +1032,19 @@ DEFERRED_GOALS.forEach(d => {
   log(`deferred: goal ${d.goal}: ${d.note}`)
   summary.push(d)
 })
+// The router combines this small manifest with the original approved arguments
+// and the actual native Workflow launch references. No completed-goal bypass
+// or invented run identifier is accepted from the model.
+const remaining = summary.filter(s => s.status === 'deferred').map(s => String(s.goal))
+const nextEpochs = { ...GATE_EPOCHS }
+for (const id of remaining) {
+  if (gateEpoch(id) >= 1000000000) throw new Error(`gate epoch exhausted for ${id}`)
+  nextEpochs[id] = gateEpoch(id) + 1
+}
+const resume = remaining.length ? {
+  schema: 'grind-publication-resume/v1', remaining_goals: remaining, gateEpochs: nextEpochs,
+} : null
+const resumeResult = resume ? { resume } : {}
 if (PLAN_URL) log(`plan: ${PLAN_URL}`)
 if (allProblems().length) log(`problems go to: ${PROBLEM_REPORTING} (the router files them)`)
 if (!FEATURE) {
@@ -1028,12 +1054,14 @@ if (!FEATURE) {
   const orphans = allProblems().filter(p => !goalIds.has(String(p.goal)))
   if (orphans.length) summary.push({ goal: 'run', status: 'problems', note: 'problems reported outside any goal', problems: orphans })
   // With a plan the router needs plan_url back for the feature-stage call.
-  return args.plan ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING } : summary
+  return args.plan || ORCHESTRATION ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING, ...resumeResult } : summary
 }
 
 // Feature landing (#1410): once every feature-stage goal has settled.
 const feature = { branch: FEATURE.branch, pr: FEATURE.pr || null, policy: FEATURE_MERGE, merged: false, note: '' }
-if (!FEATURE.pr) {
+if (resume) {
+  feature.note = 'waiting for deferred publication goals; feature PR stays draft'
+} else if (!FEATURE.pr) {
   feature.note = 'no feature PR'
 } else if (FEATURE_MERGE === 'auto') {
   phase('Land')
@@ -1055,4 +1083,4 @@ if (!FEATURE.pr) {
 log(`feature ${feature.branch}: PR ${feature.pr || '(none)'}, policy ${feature.policy}, ${feature.merged ? 'merged' : 'not merged'}: ${feature.note}`)
 feature.problems = problemsOf('feature')
 logProblems()
-return { goals: summary, feature, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING }
+return { goals: summary, feature, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING, ...resumeResult }

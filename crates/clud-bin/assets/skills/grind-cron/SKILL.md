@@ -48,3 +48,24 @@ no-overlap. Same rule as `/grind-intake` step 5.
 
 Each tick is a full sequential run, so each code change still goes through
 RED -> GREEN in `/grind-integrate`.
+
+## Publication resumption
+
+For an approved run with a publication-resume manifest, use one native `/loop`
+in this same session. Each tick starts with `clud grind-facts path`, reads
+`orchestration_resume`, and calls the native Workflow with its saved actual
+`scriptPath` and `resumeFromRunId: <saved runId>`. Pass the complete original
+approved arguments, changing only `gateEpochs` to the manifest's map.
+Completed native agent calls retain their cache keys; only deferred gate
+observations receive new epochs. Do not create a replacement workflow script,
+assert completed-goal results, re-run intake, or poll from a shell.
+
+Wait for the native task notification. If it returns another resume manifest,
+replace the saved manifest and native launch references with those from this
+call, retaining the original approved arguments. Report remaining goals and
+their actual evidence. A hard failure is reported as a failure, never relabelled
+as publication waiting. When no resume manifest remains, end this loop, remove
+`orchestration_resume`, and continue the original router's next stage or Finish.
+If native `/loop` or native Workflow resumption is unavailable, report that
+specific missing capability and retain the manifest for explicit resumption;
+do not invent a notification mechanism or external relaunch loop.
