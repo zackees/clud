@@ -17,6 +17,14 @@ from tests.harness.test_grind import (
 )
 
 
+def report_upstream_artifacts(roles: list[dict]) -> None:
+    upstream_lander = next(role for role in roles if role["name"] == "lander:a:0")
+    upstream_lander["steps"][-1]["tool_use"]["input"]["artifacts"] = {
+        "version": "0.9.0", "tag": "v0.9.0",
+        "release_url": "https://github.com/o/r/releases/tag/v0.9.0",
+    }
+
+
 @pytest.mark.parametrize("upstream_succeeds", [True, False])
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 @pytest.mark.parametrize("staged", [False, True])
@@ -25,11 +33,7 @@ def test_approved_merge_dependency_gates_planning(
 ) -> None:
     h = harness
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
-    upstream_lander = next(role for role in roles if role["name"] == "lander:a:0")
-    upstream_lander["steps"][-1]["tool_use"]["input"]["artifacts"] = {
-        "version": "0.9.0", "tag": "v0.9.0",
-        "release_url": "https://github.com/o/r/releases/tag/v0.9.0",
-    }
+    report_upstream_artifacts(roles)
     if not upstream_succeeds:
         planner = next(role for role in roles if role["name"] == "planner:a")
         planner["steps"] = [_structured({
@@ -78,3 +82,35 @@ def test_approved_merge_dependency_gates_planning(
         assert not any(role.endswith(":b") or role.startswith("lander:b:") for role in ran)
         assert not (h.repo / "b.txt").exists()
         assert _merged(h) == ["grind/c"]
+
+
+@pytest.mark.parametrize("condition", ["released", "tag", "published"])
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+def test_reported_release_artifacts_do_not_open_publication_gate(
+    harness: Harness, condition: str, mode: str,
+) -> None:
+    h = harness
+    roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
+    report_upstream_artifacts(roles)
+    graph = {
+        "session_repo": "o/r", "session_root": str(h.repo),
+        "goals": [
+            {"id": "a", "repo": "o/r", "main": "main", "checkout": "local", "blockers": []},
+            {"id": "b", "repo": "o/r", "main": "main", "checkout": "local", "blockers": [
+                {"goal": "a", "when": condition,
+                 "check": "gh release view v0.9.0 --repo o/r"},
+            ]},
+            {"id": "c", "repo": "o/r", "main": "main", "checkout": "local", "blockers": []},
+        ],
+        "proposed_goals": [], "risks": [],
+    }
+    result = h.run("Do not infer publication from reported artifacts.",
+                   _script(h, mode, _goals("a", "b", "c"), roles, orchestration=graph),
+                   timeout=300)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    ran = _by_role(result)
+    assert "lander:a:0" in ran
+    assert not any(role.endswith(":b") or role.startswith("lander:b:") for role in ran)
+    assert not (h.repo / "b.txt").exists()
+    assert _merged(h) == ["grind/a", "grind/c"]
