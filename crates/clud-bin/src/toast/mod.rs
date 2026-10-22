@@ -27,6 +27,7 @@ pub mod kitty;
 pub mod launch;
 pub mod mouse;
 pub mod raster;
+pub mod shadow_input;
 pub mod statusline;
 pub mod text_tier;
 pub mod tier;

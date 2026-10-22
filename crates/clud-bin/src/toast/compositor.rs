@@ -155,6 +155,8 @@ pub struct Compositor {
     usage_writer: Option<Arc<StatusStateWriter>>,
     image_id: u32,
     shadow: vt100::Parser,
+    /// Rewrites the sequences `vt100` drops before they reach `shadow` (#2028).
+    shadow_feed: super::shadow_input::ShadowFeed,
     tracker: EscapeTracker,
     input: Arc<ToastInput>,
     visible: Option<Toast>,
@@ -185,6 +187,7 @@ impl Compositor {
             usage_writer: options.usage,
             image_id: options.image_id,
             shadow: vt100::Parser::new(rows, cols, 0),
+            shadow_feed: super::shadow_input::ShadowFeed::default(),
             tracker: EscapeTracker::new(),
             input: Arc::new(ToastInput::default()),
             visible: None,
@@ -222,7 +225,7 @@ impl Compositor {
     /// Forward one child burst, compositing the toast around it.
     pub fn on_child(&mut self, bytes: &[u8], now: Instant) -> Vec<u8> {
         if self.tier == ToastTier::Off {
-            self.shadow.process(bytes);
+            self.shadow_feed.feed(&mut self.shadow, bytes);
             return bytes.to_vec();
         }
         let mut out = Vec::with_capacity(bytes.len() + 64);
@@ -245,7 +248,7 @@ impl Compositor {
 
         out.extend_from_slice(bytes);
         self.tracker.feed(bytes);
-        self.shadow.process(bytes);
+        self.shadow_feed.feed(&mut self.shadow, bytes);
 
         let flags = self.tracker.take_burst();
         if flags.any() {

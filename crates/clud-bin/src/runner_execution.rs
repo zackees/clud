@@ -181,7 +181,12 @@ pub fn run_plan_pty(
     }
     let toast_tier = if toast_cfg.enabled {
         let env = |name: &str| std::env::var(name).ok();
-        crate::toast::tier::decide(terminal_capabilities.as_ref(), &env, false)
+        crate::toast::tier::decide(
+            terminal_capabilities.as_ref(),
+            &env,
+            false,
+            crate::platform::host::WINDOWS,
+        )
     } else {
         crate::toast::tier::TierDecision {
             tier: crate::toast::tier::ToastTier::Off,
