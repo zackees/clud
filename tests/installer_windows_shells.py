@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path, PureWindowsPath
 
 from tests.process import run as run_process
-
-
-def ps_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def git_bash_executable(git: Path) -> Path:
@@ -32,6 +29,8 @@ def windows_shell_commands() -> dict[str, list[str]]:
     assert git, "Git for Windows is required for Git Bash installer acceptance"
     bash = git_bash_executable(Path(git))
     powershell_lookup = (
+        "$ErrorActionPreference='Stop'; "
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
         "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
         "Write-Output $c.Source; & $c.Source --version; exit $LASTEXITCODE"
     )
@@ -52,27 +51,43 @@ def windows_shell_commands() -> dict[str, list[str]]:
     }
 
 
+def persisted_windows_environment(env: dict[str, str]) -> dict[str, str]:
+    """Read registry PATH once, without nesting one tested shell inside another."""
+    launcher = shutil.which("pwsh.exe")
+    assert launcher, "PowerShell 7 is required for installer acceptance"
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
+        '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
+        '[Environment]::ExpandEnvironmentVariables("$m;$u") | ConvertTo-Json -Compress'
+    )
+    result = run_process(
+        [launcher, "-NoProfile", "-NonInteractive", "-Command", script],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    path = json.loads(result.stdout.decode("utf-8-sig"))
+    assert isinstance(path, str) and path, path
+    fresh = {key: value for key, value in env.items() if key.upper() != "PATH"}
+    fresh["PATH"] = path
+    return fresh
+
+
 def assert_windows_shell_activation(
     env: dict[str, str], destination: Path, version: str
 ) -> dict[str, str]:
-    """Launch shells with machine/user PATH reconstructed from persisted state."""
-    launcher = shutil.which("pwsh.exe")
-    assert launcher, "PowerShell 7 is required for installer acceptance"
+    """Launch each shell directly with independently reconstructed registry PATH."""
+    commands = windows_shell_commands()
+    fresh = persisted_windows_environment(env)
     evidence = {}
-    for shell, command in windows_shell_commands().items():
-        invocation = "& " + " ".join(ps_literal(argument) for argument in command)
-        script = (
-            "$ErrorActionPreference='Stop'; "
-            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
-            '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
-            '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
-            '$env:Path=[Environment]::ExpandEnvironmentVariables("$m;$u"); '
-            + invocation
-            + "; exit $LASTEXITCODE"
-        )
+    for shell, command in commands.items():
         result = run_process(
-            [launcher, "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env,
+            command,
+            env=fresh,
             capture_output=True,
             timeout=30,
             check=False,

@@ -41,3 +41,26 @@ def test_missing_git_bash_does_not_select_an_unrelated_ancestor(tmp_path: Path) 
     unrelated.touch()
     with pytest.raises(AssertionError, match="Git Bash is missing"):
         git_bash_executable(git)
+
+
+def test_persisted_environment_excludes_inherited_path_spellings(monkeypatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from tests import installer_windows_shells as shells
+
+    inherited = {"Path": "C:\\shadow", "PATH": "C:\\other", "SystemRoot": "C:\\Windows"}
+    original = inherited.copy()
+    persisted = "C:\\Windows;C:\\User with ünicode\\bin"
+    monkeypatch.setattr(shells.shutil, "which", lambda _name: "C:\\PowerShell\\pwsh.exe")
+
+    def read_registry(_command, **kwargs):
+        assert kwargs["env"] == original
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps(persisted).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(shells, "run_process", read_registry)
+    fresh = shells.persisted_windows_environment(inherited)
+    assert fresh == {"PATH": persisted, "SystemRoot": "C:\\Windows"}
+    assert inherited == original
