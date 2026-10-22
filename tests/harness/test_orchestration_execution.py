@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -18,6 +19,7 @@ from tests.harness.test_grind import (
     _structured,
 )
 from tests.harness.test_grind_gate_binding import install_outcome_guard
+from tests.harness.test_grind_tracks import _told
 
 
 def report_upstream_artifacts(roles: list[dict]) -> None:
@@ -168,3 +170,46 @@ def test_successful_native_publication_check_opens_dependent_goal(
     outcomes = [json.loads(line) for line in output.read_text().splitlines()]
     assert any(row.get("event") == "PostToolUse" and row.get("agent_type") == "grind-gate"
                and row.get("tool_name") == "Bash" for row in outcomes), outcomes
+
+
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+def test_unmet_publication_gate_defers_transitive_dependents_only(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    h = harness
+    graph = {
+        "session_repo": "o/r", "session_root": str(h.repo), "goals": [
+            {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
+            {"id": "b", "repo": "o/r", "main": "main", "blockers": [
+                {"goal": "a", "when": "released", "check": "test 1 = 2"},
+            ]},
+            {"id": "c", "repo": "o/r", "main": "main", "blockers": [
+                {"goal": "b", "when": "merged"},
+            ]},
+            {"id": "d", "repo": "o/r", "main": "main", "blockers": []},
+        ], "proposed_goals": [], "risks": [],
+    }
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    install_outcome_guard(h, monkeypatch)
+    roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c"),
+             *_goal_roles(h, "d"), {
+                 "name": "gate:b", "match": "You are the /grind gate checker", "steps": [
+                     _bash("test 1 = 2"),
+                     _after({"contains": "CLUD_GATE_EXIT_"}, _structured({
+                         "ready": False, "evidence": "publication unavailable",
+                     })),
+                 ],
+             }]
+    result = h.run("Defer only the transitive branch behind the unmet publication gate.",
+                   _script(h, mode, _goals("a", "b", "c", "d"), roles, orchestration=graph),
+                   timeout=300)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    ran = _by_role(result)
+    assert "gate:b" in ran
+    assert "planner:b" not in ran and "planner:c" not in ran, ran
+    assert _merged(h) == ["grind/a", "grind/d"]
+    told = _told(result)
+    for goal in ("b", "c"):
+        pattern = rf'goal\\\\*"\s*:\s*\\\\*"{goal}\\\\*".{{0,200}}?status\\\\*"\s*:\s*\\\\*"deferred'
+        assert re.search(pattern, told, re.DOTALL), told[-4000:]
