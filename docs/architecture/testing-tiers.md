@@ -46,6 +46,10 @@ test ─ Harness ─ claude -p … (real Claude Code, isolated config)
   `CLUD_TEST_DIRECT_UPSTREAM_URL` (with `CLUD_INTEGRATION_TESTS=1`) points the
   direct route at the scripted mock. `tool_results()` reads the JSONL stream's
   `tool_result` blocks. Example: `test_worktree_consent_e2e.py`.
+  With `provider="--unified"`, every gateway upstream also points at the
+  owned mock. `test_openrouter_zdr.py` invokes the real persistent setter,
+  launches fresh native clients, and checks the logged upstream `provider`
+  policy on both direct and unified requests, without paid traffic.
 - **Interactive tool surfaces:** `Harness.run_clud_interactive` launches
   the reported model in an owned PTY with disposable onboarding/trust
   preferences. The loop plan-mode test uses this path because print mode

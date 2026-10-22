@@ -229,6 +229,9 @@ Entry and orchestration:
   routing, timeout, scrub list, launch checks), the pure resolver, and every
   backend's renderer. Launch checks run from it before the backend branch. See
   [route-plan.md](../../../docs/architecture/route-plan.md) (#1852).
+- `openrouter_routing.rs` - provider pin/privacy request-body renderer and
+  the early `--set-openrouter-zdr` setter. Saved policy resolution and audit
+  provenance are described in [provider-selection.md](../../../docs/architecture/provider-selection.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before
