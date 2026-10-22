@@ -217,7 +217,9 @@ fn run_selected(intent: InstallIntent, options: InstallOptions) -> i32 {
 
 fn finish_activation(activation: Option<ActivationPlan>, version: &str, ask_repair: bool) -> i32 {
     let Some(activation) = activation else {
-        eprintln!("clud installer: installed clud {version}; activation required (--no-modify-path)");
+        eprintln!(
+            "clud installer: installed clud {version}; activation required (--no-modify-path)"
+        );
         return 0;
     };
     if let Err(error) = activation.apply_and_verify(version) {
@@ -239,7 +241,10 @@ fn offer_activation_repair(previous: &ActivationPlan, version: &str) -> i32 {
             return 1;
         }
     };
-    eprintln!("Additional activation repair plan:\n{}", repair.description());
+    eprintln!(
+        "Additional activation repair plan:\n{}",
+        repair.description()
+    );
     execute_approved_repair(
         version,
         || picker::prompt_repair("Approve this additional activation repair?".into()),
@@ -267,7 +272,9 @@ fn execute_approved_repair(
 fn activation_result(result: Result<(), String>, version: &str) -> i32 {
     match result {
         Ok(()) => {
-            eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
+            eprintln!(
+                "clud installer: installed clud {version} and verified fresh name-based lookup"
+            );
             0
         }
         Err(error) => {

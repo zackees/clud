@@ -241,7 +241,10 @@ pub fn prompt_confirm(label: String) -> std::io::Result<ConfirmChoice> {
 }
 
 pub fn prompt_repair(label: String) -> std::io::Result<ConfirmChoice> {
-    selector::run(&mut std::io::stderr(), &mut Confirm::with_action(label, "Repair"))
+    selector::run(
+        &mut std::io::stderr(),
+        &mut Confirm::with_action(label, "Repair"),
+    )
 }
 
 #[cfg(test)]
