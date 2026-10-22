@@ -96,6 +96,13 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
                 "tools": row.get("tools"),
                 "latest": str(row.get("messages", [])[-1:])[-1200:],
             }))
+        for transcript in list(h.config.glob("projects/*/*.jsonl"))[:3]:
+            rows = [json.loads(line) for line in transcript.read_text().splitlines()]
+            print("NATIVE_RESUME_TRANSCRIPT_METADATA", json.dumps({
+                "path": str(transcript), "session": h.session_id,
+                "versions": [{key: row.get(key) for key in ("type", "sessionId", "version")}
+                             for row in rows if "version" in row][-8:],
+            }))
         raise
 
 

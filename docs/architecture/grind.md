@@ -218,7 +218,9 @@ Per-goal observation epochs change gate prompts only on deferred branches.
 The workflow replays whole earlier observation rounds unchanged before starting
 the next round for deferred goals: native cache lookup stops globally after
 the first new agent call, including calls on other parallel branches. This
-ordering applies in sequential mode too. Full-graph verification is ongoing. The router retains the
+ordering applies in sequential mode too. At most 64 resume generations are
+accepted; an exhausted history stops explicitly and retains the deferred work.
+Full-graph verification is ongoing. The router retains the
 original approved arguments and actual native launch references in run facts
 for same-session `/loop` resumption. Native resumption and scheduled handoff
 are undergoing harness verification; cross-repository execution remains under
