@@ -54,8 +54,11 @@ def download(name: str) -> bytes:
 
 def zip_binary(payload: bytes, binary: str) -> bytes:
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        matches = [entry for entry in archive.infolist()
-                   if not entry.is_dir() and PurePosixPath(entry.filename.replace("\\", "/")).name == binary]
+        matches = [
+            entry for entry in archive.infolist()
+            if not entry.is_dir()
+            and PurePosixPath(entry.filename.replace("\\", "/")).name == binary
+        ]
         if len(matches) != 1:
             raise ValueError("GitLab CLI archive must contain exactly one executable")
         entry = matches[0]
