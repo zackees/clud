@@ -37,6 +37,16 @@ pub(super) fn record(payload: &HookPayloadView, raw: &Value, version: [u64; 3]) 
     if bytes.len() as u64 > MAX_RECEIPT {
         return None;
     }
+    // Native Workflow persistence creates this directory asynchronously after
+    // returning its launch references. The Post hook may win that race. Create
+    // only the session directory beneath the verified transcript parent; never
+    // create ancestors or accept an existing symlink/non-directory.
+    let directory = payload.transcript_path.as_ref()?.with_extension("");
+    match std::fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
