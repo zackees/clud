@@ -136,6 +136,10 @@ Script format:
   reply is `default_text`.
 - **Step kinds:** `tool_use {name, input}`, `structured {…}` (a
   `StructuredOutput` call), `text`, and `error {status}` (an HTTP error reply).
+- A `tool_use` may set `input_file` instead of fixed `input`: each response
+  reads a regular JSON object file, bounded to 1 MiB. Native-harness fixtures
+  use this to copy actual runtime-generated Workflow references into later
+  calls. Missing, invalid or oversized files fail the script visibly.
 - **`delay_ms`** on any step holds the reply open, so concurrent agents
   visibly overlap in the log's `t_start` / `t_end` (epoch milliseconds).
 - **`expect`** checks the `tool_result`s sent back for the previous step
