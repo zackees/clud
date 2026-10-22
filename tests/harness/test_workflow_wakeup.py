@@ -12,7 +12,8 @@ from tests.harness.harness import Harness
 def test_native_loop_scheduler_wakes_and_continues(harness: Harness) -> None:
     script = {"roles": [{"name": "main", "steps": [
         {"tool_use": {"name": "CronCreate", "input": {
-            "cron": "* * * * *", "prompt": "WAKE_PUBLICATION_PROBE", "recurring": False,
+            # The interactive harness stops active tasks on exit after the first wake.
+            "cron": "* * * * *", "prompt": "WAKE_PUBLICATION_PROBE", "recurring": True,
         }}},
         {"expect": {"is_error": False}, "text": "PUBLICATION_WAKE_ARMED"},
         {"tool_use": {"name": "Bash", "input": {
