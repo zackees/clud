@@ -84,6 +84,7 @@ def test_activation_repair_requires_separate_bounded_consent(tmp_path: Path, dec
     home, env = setup_home(tmp_path)
     profile = home / ".bashrc"
     profile.write_text("# original\n")
+    profile.chmod(0o600)
     changed = "# changed after initial plan\n"
     with installer_terminal(env) as terminal:
         terminal.expect(b"Install clud")
@@ -113,6 +114,7 @@ def test_unattended_activation_failure_never_repairs(tmp_path: Path) -> None:
     profiles = [home / ".bash_profile", home / ".bashrc"]
     for profile in profiles:
         profile.write_text(original)
+        profile.chmod(0o600)
     result = run_process(
         [str(clud_binary()), "--installer", "--install-current", "--yes"],
         env=env, capture_output=True, timeout=30, check=False,
