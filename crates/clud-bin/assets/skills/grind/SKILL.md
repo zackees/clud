@@ -428,6 +428,9 @@ instead. The hook picks the entry whose `repo` contains the calling agent's
 working directory, and applies the strictest caps when none or two match.
 
 `undo` is the section 2b change record (empty without a regroup).
+Also include `orchestration` with the complete graph the user approved in
+section 1a, preserving its session root, repository, goal IDs and blocker
+order/checks. Do not copy unapproved proposed goals into that graph.
 `waiting_on_pr` is the open feature PR that made the run bugs-only under the
 1b no-overlap rule, or `null`.
 
