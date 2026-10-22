@@ -272,6 +272,28 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_instructions_cover_dependencies_and_approval() {
+        let file = BUNDLED_CLAUDE_FILES
+            .iter()
+            .find(|f| f.rel_path == "agents/grind-orchestrator.md")
+            .unwrap();
+        assert!(file.procedure.is_none());
+        assert!(file.body.contains("\ntools: Read, Grep, Glob, Bash\n"));
+        for instruction in [
+            "ask what blocks it",
+            "`merged`, `released`, `tag` or `published`",
+            "exact read-only `check` command",
+            "PR URLs, versions and tags",
+            "dirty or active checkouts",
+            "`proposed_goals`",
+            "never silently add it to `goals`",
+            "obtains approval before execution",
+        ] {
+            assert!(file.body.contains(instruction), "missing {instruction}");
+        }
+    }
+
+    #[test]
     fn install_is_idempotent_and_respects_user_ownership() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
