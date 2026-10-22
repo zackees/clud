@@ -82,6 +82,8 @@ and never starts a model or harness process.
 - Native `parallel`/`pipeline` branches own independent resume cache chains.
   The older 2.1.282 pin shared one rolling chain across branches, so cached
   calls returning immediately could change later calls' keys during resume.
+  Plain JavaScript `Promise.all` does not create native branch cache scopes;
+  cache-reuse assertions cover the native helpers, not that unsupported route.
 - A skill's `$ARGUMENTS` and `` !`cmd` `` are rendered at invocation.
   `UserPromptSubmit` can add context but cannot rewrite a prompt.
   `disable-model-invocation` hides skills from the model, but not agent types.

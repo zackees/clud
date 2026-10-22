@@ -12,7 +12,7 @@ from tests.harness.test_orchestration_resume import capture_resume_input, native
 from tests.harness.workflow_results import workflow_results
 
 
-@pytest.mark.parametrize("scheduling", ["sequential", "parallel", "promise_all"])
+@pytest.mark.parametrize("scheduling", ["sequential", "parallel"])
 @pytest.mark.parametrize("native_writes", [False, True])
 def test_native_cache_replays_every_stage_of_two_chains(
     harness: Harness, monkeypatch, scheduling: str, native_writes: bool,
@@ -29,7 +29,6 @@ def test_native_cache_replays_every_stage_of_two_chains(
     run = {
         "sequential": "return [await chain('a'), await chain('d')];",
         "parallel": "return await parallel([() => chain('a'), () => chain('d')]);",
-        "promise_all": "return await Promise.all([chain('a'), chain('d')]);",
     }[scheduling]
     (h.config / "workflows" / "cache-chain-probe.js").write_text(
         "export const meta = {name: 'cache-chain-probe', description: 'Native chain cache', "

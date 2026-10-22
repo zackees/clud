@@ -222,16 +222,30 @@ const opts = (role, label, phase, schema) => {
 const semaphore = (n) => {
   let free = n
   const queue = []
-  // Queue permits, not work: the waiting caller invokes its own agent after
-  // acquiring a slot, preserving the native parallel branch's async context.
+  // Native pipeline stages restore their branch context after a queued permit
+  // resolves. A plain VM await can otherwise inherit the releasing branch's
+  // cache chain, even when the queue carries permits rather than callbacks.
   return async (fn) => {
-    if (free > 0) free--
-    else await new Promise(resolve => queue.push(resolve))
+    let acquired = false
+    let failure = null
     try {
-      return await fn()
+      const results = await pipeline([true], async () => {
+        if (free > 0) free--
+        else await new Promise(resolve => queue.push(resolve))
+        acquired = true
+        return true
+      }, async () => {
+        try { return { value: await fn() } }
+        catch (cause) { failure = { cause }; return {} }
+      })
+      if (failure) throw failure.cause
+      if (!results[0]) throw new Error('native semaphore stage did not complete')
+      return results[0].value
     } finally {
-      if (queue.length) queue.shift()()
-      else free++
+      if (acquired) {
+        if (queue.length) queue.shift()()
+        else free++
+      }
     }
   }
 }
