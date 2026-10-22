@@ -57,3 +57,11 @@ references, then broadcasts the environment change. An install succeeds only
 after a fresh shell or OS-built Windows user environment resolves `clud` by
 name to the approved destination and returns the selected version. Shadows or
 startup files that undo the edit produce a repair error, not success.
+
+The native candidate-host acceptance lane provisions Bash, fish and zsh on
+Linux/macOS and sets `CLUD_REQUIRE_INSTALLER_SHELLS=1`. A missing supported
+shell fails that lane instead of skipping it. Ordinary developer acceptance
+may skip unavailable shells. Fish with a custom `XDG_CONFIG_HOME` and zsh
+with a custom `ZDOTDIR` are checked in fresh login, interactive and combined
+login/interactive shells for both the exact installed path and version.
+Windows keeps its separate registry and fresh-user-environment acceptance.

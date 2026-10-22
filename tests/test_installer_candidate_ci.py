@@ -162,6 +162,10 @@ def test_pr_workflow_declares_every_native_candidate_lane() -> None:
         assert target in workflow
     assert "candidate-host:" in workflow
     assert "candidate-aggregate:" in workflow
+    host = workflow.split("  candidate-host:", 1)[1].split("\n  candidate-", 1)[0]
+    assert "CLUD_REQUIRE_INSTALLER_SHELLS: '1'" in host
+    for shell in ("bash", "fish", "zsh"):
+        assert f"command -v {shell}" in host
     assert "if: always()" in workflow
 
 

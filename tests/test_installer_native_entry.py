@@ -30,6 +30,35 @@ def clud_binary() -> Path:
     return path
 
 
+def required_shell(name: str) -> str:
+    shell = shutil.which(name)
+    if shell is not None:
+        return shell
+    if os.environ.get("CLUD_REQUIRE_INSTALLER_SHELLS") == "1":
+        pytest.fail(f"required installer acceptance shell is unavailable: {name}")
+    pytest.skip(f"{name} is unavailable")
+
+
+def assert_fresh_shell_lookup(shell: str, env: dict[str, str], installed: Path) -> None:
+    version = run_process(
+        [str(clud_binary()), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    ).stdout.strip()
+    for mode in ("-lc", "-ic", "-lic"):
+        fresh = run_process(
+            [shell, mode, "command -v clud; clud --version"],
+            env=env,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert fresh.returncode == 0, fresh.stderr.decode(errors="replace")
+        assert fresh.stdout.splitlines() == [os.fsencode(installed), version]
+
+
 def isolated_env(home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -219,9 +248,7 @@ def test_interrupted_commit_restores_backup_before_reinstall(installer_target) -
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
 def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
-    shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("bash is unavailable")
+    shell = required_shell("bash")
     home = tmp_path / "home with spaces and 'quotes' $dollars"
     home.mkdir(mode=0o700)
     env = isolated_env(home)
@@ -260,9 +287,7 @@ def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
 def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
-    shell = shutil.which("bash")
-    if shell is None:
-        pytest.skip("bash is unavailable")
+    shell = required_shell("bash")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     bin_dir = home / "bin"
@@ -289,9 +314,7 @@ def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX fish startup files")
 def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
-    shell = shutil.which("fish")
-    if shell is None:
-        pytest.skip("fish is unavailable")
+    shell = required_shell("fish")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     config = home / "custom config"
@@ -311,13 +334,12 @@ def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
     assert snippet.is_file()
     assert "fish_add_path --path --move --" in snippet.read_text()
     assert not (config / "fish" / "fish_variables").exists()
+    assert_fresh_shell_lookup(shell, env, home / ".local" / "bin" / "clud")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX zsh startup files")
 def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
-    shell = shutil.which("zsh")
-    if shell is None:
-        pytest.skip("zsh is unavailable")
+    shell = required_shell("zsh")
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     dotdir = home / "custom zsh"
@@ -335,6 +357,7 @@ def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert (dotdir / ".zprofile").is_file()
     assert (dotdir / ".zshrc").is_file()
+    assert_fresh_shell_lookup(shell, env, home / ".local" / "bin" / "clud")
 
 
 def test_exact_older_release_downloads_selected_executable(installer_target) -> None:
