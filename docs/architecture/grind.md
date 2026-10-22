@@ -184,10 +184,12 @@ execution in the wrong root.
 The internal `grind-gate` role defaults to Haiku and denies shell execution without a binding. Its hook can
 bind an exact read-only native Bash check from run facts' approved `orchestration` graph to
 a native workflow task labeled `gate:<downstream-id>:<blocker-index>`. Lookup
-uses the hook's parent-session transcript path and agent ID, searches at most
-64 session-local workflow directories, and rejects ambiguous metadata,
+uses the hook's parent-session transcript path and agent ID, streams the
+session-local workflow directories with constant memory, and rejects ambiguous metadata,
 symlinks, oversized metadata, wrong roots/roles/repositories and plan-only
 facts. The label cannot select a command outside that approved blocker.
+Lookup time grows with retained workflow directories, without a fixed limit
+on how many workflow runs a recurring session may accumulate.
 This relies on harness-owned metadata and router-owned run facts; it is not a
 sandbox against arbitrary processes that can modify those control files.
 The pre-tool hook claims one check attempt per native gate agent. It wraps the
