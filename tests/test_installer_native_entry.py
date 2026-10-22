@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import select
 import shutil
@@ -66,6 +67,17 @@ def isolated_env(home: Path) -> dict[str, str]:
         env["USERPROFILE"] = str(home)
         env.pop("LOCALAPPDATA", None)
     return env
+
+
+def installer_json(result, status: str, code: int, committed: bool) -> dict:
+    assert result.returncode == code, result.stderr.decode(errors="replace")
+    report = json.loads(result.stdout)
+    assert len(result.stdout.splitlines()) == 1, result.stdout
+    assert report["schema"] == "clud-installer-result/v1"
+    assert report["status"] == status
+    assert report["exit_code"] == code
+    assert report["binary_committed"] is committed
+    return report
 
 
 @pytest.fixture
@@ -253,6 +265,42 @@ def test_install_only_preserves_windows_user_path(installer_target) -> None:
     ).digest()
     assert b"activation required" in result.stderr.lower()
     assert b"verified fresh name-based lookup" not in result.stderr
+
+
+@pytest.mark.parametrize(("flags", "status", "verified"), [
+    ([], "complete", True),
+    (["--no-modify-path"], "activation_required", False),
+])
+def test_installer_json_reports_committed_state(installer_target, flags, status, verified) -> None:
+    env, destination = installer_target
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes", "--installer-json",
+         *flags],
+        env=env, capture_output=True, timeout=30, check=False,
+    )
+    report = installer_json(result, status, 0, True)
+    assert report["activation_verified"] is verified
+    assert Path(report["destination"]).resolve() == destination.resolve()
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    version = run_process([str(clud_binary()), "--version"], capture_output=True, check=True)
+    assert report["version"] == version.stdout.decode().strip().split()[-1]
+
+
+@pytest.mark.parametrize(("flags", "status"), [
+    (["--install-current"], "refused"),
+    (["--install-version", "not-a-version", "--yes"], "failed"),
+])
+def test_installer_json_distinguishes_refusal_and_failure(tmp_path, flags, status) -> None:
+    home = tmp_path / "home"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--installer-json", *flags],
+        env=isolated_env(home), input=b"", capture_output=True, timeout=15, check=False,
+    )
+    report = installer_json(result, status, 2, False)
+    assert report["activation_verified"] is False
+    assert not home.exists(), "structured reporting must not add pre-consent writes"
 
 
 def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:
