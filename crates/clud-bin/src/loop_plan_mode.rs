@@ -142,7 +142,7 @@ fn observed_event(event: &str, payload: &Value) -> Option<Event> {
         "UserPromptSubmit" if loop_prompt(payload["prompt"].as_str().unwrap_or("")) => {
             Some(Event::Prompt)
         }
-        POST_TOOL_USE => tool_event(&payload),
+        POST_TOOL_USE => tool_event(payload),
         "Stop" => payload
             .get("session_crons")
             .and_then(Value::as_array)
