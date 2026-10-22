@@ -613,6 +613,10 @@ class Harness:
             "hasCompletedOnboarding": True,
             "theme": "dark",
             "bypassPermissionsModeAccepted": True,
+            "customApiKeyResponses": {
+                "approved": ["fixture-api-key-canary", "fixture-api-key-canary"[-20:]],
+                "rejected": [],
+            },
             "projects": {str(self.repo): {"hasTrustDialogAccepted": True}},
         }
         for path in (self.home / ".claude.json", self.config / ".claude.json"):
@@ -622,7 +626,18 @@ class Harness:
         document["skipDangerousModePermissionPrompt"] = True
         settings.write_text(json.dumps(document), encoding="utf-8")
         with self.backend(script) as base_url:
-            env = self.clud_env(base_url, {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"})
+            # Free models enable the unified redaction gateway. Its client
+            # auth still needs a fixture Claude key, while upstream auth
+            # comes from the isolated OpenRouter vault. Every possible
+            # upstream stays on the scripted loopback backend.
+            env = self.clud_env(base_url, {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
+                "ANTHROPIC_API_KEY": "fixture-api-key-canary",
+                "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": base_url,
+                "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": base_url,
+            })
             argv = [
                 str(self.clud), "--openrouter", "--model", model, "--", prompt,
                 "--settings", str(settings), "--session-id", self.session_id,
