@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import sys
 from pathlib import Path
@@ -91,6 +90,11 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
         "export const meta = {name: 'wait-capability-probe', description: 'Wait capabilities'}\n"
         "const capabilities = {setTimeout: typeof setTimeout, sleep: typeof sleep, "
         "wait: typeof wait, Promise: typeof Promise};\n"
+        "if (typeof setTimeout === 'function') {\n"
+        "  const started = Date.now();\n"
+        "  await new Promise(resolve => setTimeout(resolve, 20));\n"
+        "  capabilities.timerElapsedMs = Date.now() - started;\n"
+        "}\n"
         "return await agent('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities), "
         "{agentType: 'wait-capability-probe', label: 'wait-capabilities'});\n"
     )
@@ -107,9 +111,18 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     ]})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
-    evidence = result.prompt_text("wait-probe")
-    assert "NATIVE_WAIT_CAPABILITIES" in evidence, evidence
-    assert '"setTimeout"' in evidence or '\\"setTimeout\\"' in evidence, evidence
-    print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", re.findall(
-        r"NATIVE_WAIT_CAPABILITIES.{0,500}", evidence,
-    )[:6])
+    messages = result.first_request("wait-probe")["messages"]
+    texts = []
+    for message in messages:
+        content = message.get("content", [])
+        if isinstance(content, str):
+            texts.append(content)
+        else:
+            texts.extend(block.get("text", "") for block in content if isinstance(block, dict))
+    marker = "NATIVE_WAIT_CAPABILITIES "
+    observed = next(text.split(marker, 1)[1] for text in texts if marker in text)
+    capabilities, _ = json.JSONDecoder().raw_decode(observed)
+    assert capabilities["setTimeout"] in ("function", "undefined"), capabilities
+    if capabilities["setTimeout"] == "function":
+        assert capabilities["timerElapsedMs"] >= 10, capabilities
+    print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", json.dumps(capabilities, sort_keys=True))
