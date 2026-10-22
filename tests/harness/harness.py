@@ -608,7 +608,7 @@ class Harness:
 
     def run_clud_interactive(
         self, prompt: str, script: dict[str, Any], *, model: str, finished: str,
-        timeout: float = 90,
+        timeout: float = 90, confirm_background_exit: bool = True,
     ) -> RunResult:
         """Run the real interactive Claude surface in an owned PTY (#1844).
 
@@ -662,8 +662,9 @@ class Harness:
                 child.write("\r")  # The default highlighted choice is session-only.
                 child.expect(finished, timeout=timeout)
                 child.write("/exit\r")
-                child.expect("Background", timeout=15)
-                child.write("\r")  # Confirm Exit and stop tasks, the default.
+                if confirm_background_exit:
+                    child.expect("Background", timeout=15)
+                    child.write("\r")  # Confirm Exit and stop tasks, the default.
                 code = child.wait(timeout=15)
                 output = child.output_text
             except Exception as error:
