@@ -261,6 +261,31 @@ def test_native_resume_preserves_completed_work_across_three_generations(
                     if row["role"] == gate and row.get("turn") == 0]) == 1, gate
 
 
+def test_graph_resume_exhaustion_returns_deferred_manifest(harness: Harness, monkeypatch) -> None:
+    h = harness
+    graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
+        {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
+        {"id": "b", "repo": "o/r", "main": "main", "blockers": [
+            {"goal": "a", "when": "released", "check": "gh release view v-pending --repo o/r"},
+        ]},
+    ], "proposed_goals": [], "risks": []}
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    install_outcome_guard(h, monkeypatch)
+    roles = [*_goal_roles(h, "a"), gate_role("gate:b", "b", "v-pending", False, 64)]
+    result = h.run("Retain publication state after the final permitted observation round.",
+                   _script(h, "sequential", _goals("a", "b"), roles,
+                           orchestration=graph, gateAttempts=1, gateEpoch=64))
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    outputs = workflow_results(result)
+    assert len(outputs) == 1, outputs
+    manifest = outputs[0]["resume"]
+    assert manifest["exhausted"] is True
+    assert manifest["remaining_goals"] == ["b"]
+    assert manifest["gateEpochs"] == {"b": 64}
+    assert _merged(h) == ["grind/a"]
+
+
 @pytest.mark.parametrize("field", ["gateEpoch", "gateEpochs"])
 def test_graph_resume_history_is_bounded_before_agents(harness: Harness, field: str) -> None:
     h = harness
