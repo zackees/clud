@@ -222,6 +222,9 @@ fn dispatch_before_startup(args: &args::Args) -> Option<i32> {
     if let Some(code) = clud::openrouter_routing::handle_setting(args) {
         return Some(code);
     }
+    if let Some(code) = clud_settings::authorized::handle(args) {
+        return Some(code);
+    }
     if let Some(code) = self_install::entry::run_explicit(args) {
         return Some(code);
     }
@@ -561,7 +564,7 @@ fn dispatch_local_tool_command(args: &args::Args) -> Option<i32> {
         },
         // `clud settings` is an interactive global-settings TUI, self-contained;
         // never launches a backend.
-        args::Command::Settings { list } => settings_tui::run(*list),
+        args::Command::Settings { list, .. } => settings_tui::run(*list),
         // `clud optimize` is machine/repo setup and never launches a backend.
         args::Command::Optimize {
             target,
