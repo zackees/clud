@@ -157,10 +157,13 @@ def test_native_gate_readiness_matches_executed_outcome(
         ]}],
     }})
     output = install_outcome_guard(h, monkeypatch)
+    background = _bash(command)
+    background["tool_use"]["input"]["run_in_background"] = True
     result = h.run("Check native gate readiness against execution.", {"roles": [
         {"name": "gate", "match": ROLE, "steps": [
-            _bash(command),
-            _after({"is_error": not succeeds}, _structured({"ready": True})),
+            background,
+            _after({"is_error": True}, _bash(command)),
+            _after({"contains": "CLUD_GATE_EXIT_"}, _structured({"ready": True})),
             _after({"is_error": True}, _structured({"ready": False})),
         ]},
         {"name": "main", "steps": [
@@ -171,8 +174,9 @@ def test_native_gate_readiness_matches_executed_outcome(
         ]},
     ]})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
-    _no_notes(result)
     outcomes = [json.loads(line) for line in output.read_text().splitlines()]
+    print("NATIVE_GATE_EXECUTED_OUTCOMES", json.dumps(outcomes, sort_keys=True))
+    _no_notes(result)
     reports = [row for row in outcomes if row.get("agent_type") == "grind-gate"
                and row.get("tool_name") == "StructuredOutput"
                and row.get("event") == "PostToolUse"]

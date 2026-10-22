@@ -99,7 +99,9 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     ]})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
-    evidence = json.dumps(result.requests)
+    journals = list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))
+    assert journals, result.stdout[-5000:]
+    evidence = "\n".join(path.read_text() for path in journals)
     assert "NATIVE_WAIT_CAPABILITIES" in evidence, evidence
     assert '"setTimeout"' in evidence or '\\"setTimeout\\"' in evidence, evidence
     print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", re.findall(
