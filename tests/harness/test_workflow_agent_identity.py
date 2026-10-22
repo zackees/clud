@@ -45,6 +45,8 @@ def test_workflow_identity_metadata_precedes_first_tool(
         target = h.root / "sister repo"
         target.mkdir()
         h.git("init", "-q", "-b", "master", cwd=target)
+    (h.config / "agents").mkdir(exist_ok=True)
+    (h.config / "workflows").mkdir(exist_ok=True)
     (h.config / "agents" / f"{AGENT}.md").write_text(
         f"---\nname: {AGENT}\ndescription: Fixture identity probe\ntools: Bash\n---\n{ROLE}\n"
     )
