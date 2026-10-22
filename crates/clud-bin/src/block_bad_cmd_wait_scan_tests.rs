@@ -307,3 +307,20 @@ fn shimmed_canonical_watch_is_still_allowed_outside_a_loop() {
     });
     assert!(reason.is_some_and(|r| r.contains("retried in a loop")));
 }
+
+#[test]
+fn codex_watch_payload_keeps_command_and_recovery_capabilities() {
+    for tool in ["exec_command", "functions.exec_command"] {
+        let payload = serde_json::json!({
+            "tool_name": tool,
+            "tool_input": {"cmd": "gh run watch 123 --exit-status"}
+        });
+        let view = parse_payload_value(&payload, Path::new(".")).expect("payload");
+        assert_eq!(view.command, "gh run watch 123 --exit-status");
+        assert!(block_bad_cmd_gate::gates_tool(tool));
+    }
+    let reason = evaluate_command("gh run watch 123 --exit-status", None, false, &[])
+        .reason.expect("native watch refused");
+    assert!(reason.contains("write_stdin"), "{reason}");
+    assert!(reason.contains("run_in_background"), "{reason}");
+}
