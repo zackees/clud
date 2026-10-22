@@ -764,11 +764,9 @@ fn build_launch_plan_for_target_at(
             // Stop-hook loop. Headless execution hides progress and prevents
             // follow-up input, so both Claude and Codex seed an interactive
             // session. `main` resolves the optional target before plan building.
-            if seed_interactive_builtin {
-                if target.is_some() {
-                    let prompt = build_do_prompt(args.do_rendered_prompt.as_deref());
-                    push_prompt_interactive(&mut cmd, prompt);
-                }
+            if seed_interactive_builtin && target.is_some() {
+                let prompt = build_do_prompt(args.do_rendered_prompt.as_deref());
+                push_prompt_interactive(&mut cmd, prompt);
             }
         }
         Some(Command::Wasm { .. }) => {
