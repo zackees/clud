@@ -206,12 +206,29 @@ fn run_selected(intent: InstallIntent, options: InstallOptions) -> i32 {
     }
     let activation = plan.activation.clone();
     let version = plan.version.clone();
+    let destination = plan.destination.clone();
     match transaction::execute(plan) {
-        Ok(()) => finish_activation(activation, &version, !options.yes && terminal_available()),
+        Ok(()) => {
+            let status = finish_activation(activation, &version, !options.yes && terminal_available());
+            print_terminal_commands(&destination);
+            status
+        }
         Err(error) => {
             eprintln!("clud installer: {error}");
             1
         }
+    }
+}
+
+fn print_terminal_commands(destination: &std::path::Path) {
+    match activation::terminal_commands(destination) {
+        Ok(commands) => {
+            eprintln!("Activate a terminal by running the command for your shell:");
+            for (shell, command) in commands {
+                eprintln!("{shell}: {command}");
+            }
+        }
+        Err(error) => eprintln!("clud installer: manual activation guidance unavailable: {error}"),
     }
 }
 

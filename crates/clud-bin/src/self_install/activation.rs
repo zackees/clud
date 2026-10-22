@@ -22,6 +22,11 @@ pub fn plan(destination: &Path) -> Result<ActivationPlan, String> {
     })
 }
 
+/// Commands are labeled because the account login shell need not be the caller.
+pub fn terminal_commands(destination: &Path) -> Result<Vec<(&'static str, String)>, String> {
+    host_activation::terminal_commands(destination)
+}
+
 impl ActivationPlan {
     pub fn description(&self) -> String {
         host_activation::description(&self.destination, &self.host)

@@ -17,6 +17,16 @@ for this mode. The result explicitly reports **activation required** and does
 not claim verified fresh name-based lookup. Exit 0 means the requested binary
 installation completed; it does not mean the invoking terminal was activated.
 
+After a binary commit, output includes labeled commands for Bash/zsh and fish
+on POSIX, or PowerShell, Git Bash and Command Prompt on Windows. Labels avoid
+guessing the invoking shell from the account login shell. The commands update
+the chosen terminal's PATH without editing profiles or the registry. Command
+Prompt opens a nested activated shell in the same terminal; exiting that shell
+returns to the original environment. Its PowerShell bootstrap is encoded as
+UTF-16LE to preserve literal `%` and `!` in directories even when the outer
+cmd has delayed expansion enabled. The other commands use their shell's
+literal quoting. Unrepresentable PATH entries receive an explicit diagnostic.
+
 `main.rs::run` calls `self_install::entry` after argument normalization and
 before utility dispatch, daemon startup, the runtime-cache hop, Windows
 trampoline handling, and the console-title keeper. The early path keeps an

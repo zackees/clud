@@ -33,6 +33,25 @@ const START: &str = "# >>> clud installer PATH >>>";
 const END: &str = "# <<< clud installer PATH <<<";
 const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 
+pub fn terminal_commands(destination: &Path) -> Result<Vec<(&'static str, String)>, String> {
+    let bin = destination.parent().ok_or("missing install directory")?;
+    let value = bin.to_str().ok_or("install directory is not UTF-8")?;
+    if value.contains([':', '\0', '\n', '\r']) {
+        return Err("install directory cannot be represented in a shell PATH".into());
+    }
+    let quoted = shell_words::quote(value);
+    Ok(vec![
+        (
+            "Bash/zsh",
+            format!("case \"$PATH\" in {quoted}:*) ;; *) export PATH={quoted}:\"$PATH\" ;; esac; hash -r"),
+        ),
+        (
+            "fish",
+            format!("fish_add_path --path --move -- {}", fish_quote(bin)?),
+        ),
+    ])
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -504,7 +523,15 @@ fn parse_shell_probe(output: &[u8]) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_shell_probe;
+    use super::{parse_shell_probe, terminal_commands};
+    use std::path::Path;
+
+    #[test]
+    fn terminal_commands_refuse_unrepresentable_path_entries() {
+        for destination in ["/tmp/colon:home/bin/clud", "/tmp/line\nhome/bin/clud"] {
+            assert!(terminal_commands(Path::new(destination)).is_err());
+        }
+    }
 
     #[test]
     fn fresh_shell_probe_ignores_interactive_warnings() {
