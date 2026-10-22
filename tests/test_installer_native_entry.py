@@ -137,6 +137,7 @@ def assert_crlf(output: bytes) -> None:
     [
         (["--installer"], 2),
         (["--installer", "--install-current"], 2),
+        (["--installer", "--install-current", "--no-modify-path"], 2),
         (["--installer", "--install-version", "2.8.14"], 2),
     ],
 )

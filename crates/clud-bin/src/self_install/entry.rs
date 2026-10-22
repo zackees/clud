@@ -21,6 +21,21 @@ pub enum Request {
     Exact(String),
 }
 
+#[derive(Clone, Copy)]
+struct InstallOptions {
+    yes: bool,
+    modify_path: bool,
+}
+
+impl Default for InstallOptions {
+    fn default() -> Self {
+        Self {
+            yes: false,
+            modify_path: true,
+        }
+    }
+}
+
 pub fn explicit_request(args: &Args) -> Result<Option<Request>, String> {
     if !args.installer {
         return Ok(None);
@@ -30,7 +45,7 @@ pub fn explicit_request(args: &Args) -> Result<Option<Request>, String> {
     let mut words = args.raw_argv.iter().skip(1);
     while let Some(word) = words.next() {
         match word.as_str() {
-            "--installer" | "--install-current" | "--yes" | "-y" => {}
+            "--installer" | "--install-current" | "--no-modify-path" | "--yes" | "-y" => {}
             "--install-version" => {
                 words.next().ok_or("--install-version requires a version")?;
             }
@@ -68,7 +83,14 @@ pub fn should_offer(args: &Args, stdin_tty: bool, stderr_tty: bool, path_has_clu
 pub fn run_explicit(args: &Args) -> Option<i32> {
     match explicit_request(args) {
         Ok(None) => None,
-        Ok(Some(request)) => Some(run_request(request, args.yes, false)),
+        Ok(Some(request)) => Some(run_request(
+            request,
+            InstallOptions {
+                yes: args.yes,
+                modify_path: !args.no_modify_path,
+            },
+            false,
+        )),
         Err(error) => {
             eprintln!("clud installer: {error}");
             Some(2)
@@ -93,7 +115,7 @@ pub fn run_auto_offer(args: &Args) -> Option<i32> {
     }
     match picker::prompt_menu(true) {
         Ok(MenuChoice::NotNow) => None,
-        Ok(choice) => Some(run_menu_choice(choice)),
+        Ok(choice) => Some(run_menu_choice(choice, InstallOptions::default())),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Some(130),
         Err(error) => {
             eprintln!("clud installer: {error}");
@@ -102,7 +124,7 @@ pub fn run_auto_offer(args: &Args) -> Option<i32> {
     }
 }
 
-fn run_request(request: Request, yes: bool, automatic: bool) -> i32 {
+fn run_request(request: Request, options: InstallOptions, automatic: bool) -> i32 {
     match request {
         Request::Menu => {
             if !terminal_available() {
@@ -110,7 +132,7 @@ fn run_request(request: Request, yes: bool, automatic: bool) -> i32 {
                 return 2;
             }
             match picker::prompt_menu(automatic) {
-                Ok(choice) => run_menu_choice(choice),
+                Ok(choice) => run_menu_choice(choice, options),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => 130,
                 Err(error) => {
                     eprintln!("clud installer: {error}");
@@ -118,9 +140,9 @@ fn run_request(request: Request, yes: bool, automatic: bool) -> i32 {
                 }
             }
         }
-        Request::Current => run_selected(InstallIntent::CurrentExecutable, yes),
+        Request::Current => run_selected(InstallIntent::CurrentExecutable, options),
         Request::Exact(version) => {
-            if !yes && !terminal_available() {
+            if !options.yes && !terminal_available() {
                 eprintln!("clud installer: a terminal or --yes is required before installation");
                 return 2;
             }
@@ -139,7 +161,7 @@ fn run_request(request: Request, yes: bool, automatic: bool) -> i32 {
                 }
             };
             match catalog.resolve(VersionChoice::Exact(version), host) {
-                Ok(asset) => run_selected(InstallIntent::Published(asset), yes),
+                Ok(asset) => run_selected(InstallIntent::Published(asset), options),
                 Err(error) => {
                     eprintln!("clud installer: {error}");
                     1
@@ -155,12 +177,12 @@ pub enum InstallIntent {
     Published(ResolvedAsset),
 }
 
-fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
-    if !yes && !terminal_available() {
+fn run_selected(intent: InstallIntent, options: InstallOptions) -> i32 {
+    if !options.yes && !terminal_available() {
         eprintln!("clud installer: a terminal or --yes is required before installation");
         return 2;
     }
-    let plan = match transaction::plan(intent) {
+    let plan = match transaction::plan(intent, options.modify_path) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("clud installer: {error}");
@@ -168,7 +190,7 @@ fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
         }
     };
     eprintln!("{}", plan.description());
-    if !yes {
+    if !options.yes {
         let label = format!("Install clud {} at this destination?", plan.version);
         match picker::prompt_confirm(label) {
             Ok(ConfirmChoice::NotNow) => return 0,
@@ -185,6 +207,10 @@ fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
     let version = plan.version.clone();
     match transaction::execute(plan) {
         Ok(()) => {
+            let Some(activation) = activation else {
+                eprintln!("clud installer: installed clud {version}; activation required (--no-modify-path)");
+                return 0;
+            };
             match activation.apply_and_verify(&version) {
                 Ok(()) => {
                     eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
@@ -203,10 +229,10 @@ fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
     }
 }
 
-fn run_menu_choice(choice: MenuChoice) -> i32 {
+fn run_menu_choice(choice: MenuChoice, options: InstallOptions) -> i32 {
     match choice {
-        MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, false),
-        MenuChoice::Releases => run_releases(),
+        MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, options),
+        MenuChoice::Releases => run_releases(options),
         MenuChoice::Browser => {
             open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()))
         }
@@ -215,7 +241,7 @@ fn run_menu_choice(choice: MenuChoice) -> i32 {
     }
 }
 
-fn run_releases() -> i32 {
+fn run_releases(options: InstallOptions) -> i32 {
     let catalog = match fetch_catalog() {
         Ok(catalog) => catalog,
         Err(error) => {
@@ -237,7 +263,7 @@ fn run_releases() -> i32 {
     }
     match picker::prompt_releases(releases, catalog.latest_stable_version()) {
         Ok(ReleaseChoice::Selected(selected)) => {
-            run_selected(InstallIntent::Published(selected.asset), false)
+            run_selected(InstallIntent::Published(selected.asset), options)
         }
         Ok(ReleaseChoice::Cancelled) => 130,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => 130,
@@ -426,8 +452,13 @@ mod tests {
             let mut argv = vec!["clud"];
             argv.extend(flags);
             let parsed = Args::try_parse_from(argv).expect("install-only flags must parse");
+            assert!(parsed.no_modify_path);
             assert_eq!(explicit_request(&parsed).unwrap(), Some(expected));
         }
+        let split = parse(&["clud", "--installer", "--install-current", "--no-modify-path"]);
+        assert!(split.no_modify_path);
+        assert!(split.passthrough.is_empty());
+        assert_eq!(explicit_request(&split).unwrap(), Some(Request::Current));
         assert!(Args::try_parse_from(["clud", "--no-modify-path"]).is_err());
     }
 

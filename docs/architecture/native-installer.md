@@ -8,6 +8,15 @@ interactive consent only when one of those choices is explicit. Existing
 by both clap and the known/unknown argument splitter, so they cannot leak to
 a backend agent.
 
+`--installer --no-modify-path` requests binary-only installation. It composes
+with the menu, current executable and exact published version choices; it
+does not waive installation consent. The transaction still verifies the
+binary's format, digest and exact version, but does not plan or apply profile
+or User Path changes. Existing startup files need not be readable or writable
+for this mode. The result explicitly reports **activation required** and does
+not claim verified fresh name-based lookup. Exit 0 means the requested binary
+installation completed; it does not mean the invoking terminal was activated.
+
 `main.rs::run` calls `self_install::entry` after argument normalization and
 before utility dispatch, daemon startup, the runtime-cache hop, Windows
 trampoline handling, and the console-title keeper. The early path keeps an
@@ -53,7 +62,7 @@ User Path proposal before consent. On POSIX, activation uses owned stanzas in
 the active Bash login and interactive files, zsh login and interactive files,
 or a fish `conf.d` snippet with non-universal `fish_add_path`. Windows updates
 only HKCU `Environment\\Path`, preserving its registry type and raw variable
-references, then broadcasts the environment change. An install succeeds only
+references, then broadcasts the environment change. An ordinary install succeeds only
 after a fresh shell or OS-built Windows user environment resolves `clud` by
 name to the approved destination and returns the selected version. Shadows or
 startup files that undo the edit produce a repair error, not success.

@@ -26,7 +26,7 @@ pub struct InstallPlan {
     pub source_sha256: String,
     pub replacement: Option<String>,
     pub path_proposal: String,
-    pub activation: ActivationPlan,
+    pub activation: Option<ActivationPlan>,
     source: Source,
 }
 
@@ -57,7 +57,7 @@ impl Fingerprint {
     }
 }
 
-pub fn plan(intent: InstallIntent) -> Result<InstallPlan, String> {
+pub fn plan(intent: InstallIntent, modify_path: bool) -> Result<InstallPlan, String> {
     let destination = approved_destination()?;
     inspect_destination(&destination, false)?;
     let backup = destination.with_extension("clud-backup");
@@ -75,8 +75,13 @@ pub fn plan(intent: InstallIntent) -> Result<InstallPlan, String> {
     } else {
         None
     };
-    let activation = activation::plan(&destination)?;
-    let path_proposal = activation.description();
+    let activation = modify_path
+        .then(|| activation::plan(&destination))
+        .transpose()?;
+    let path_proposal = activation.as_ref().map_or_else(
+        || "none; --no-modify-path preserves profiles and User PATH".to_owned(),
+        ActivationPlan::description,
+    );
     match intent {
         InstallIntent::CurrentExecutable => {
             let path = std::env::current_exe().map_err(|error| error.to_string())?;

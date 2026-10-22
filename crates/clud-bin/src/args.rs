@@ -300,6 +300,10 @@ pub struct Args {
     )]
     pub install_version: Option<String>,
 
+    /// Install the executable without changing shell profiles or User PATH.
+    #[arg(long = "no-modify-path", requires = "installer")]
+    pub no_modify_path: bool,
+
     /// Issue #83: allow `--clean-worktrees` to remove dirty / unpushed
     /// worktrees. Locked worktrees are still preserved.
     #[arg(long = "force")]
@@ -1721,6 +1725,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--no-redact-secrets",
         "--installer",
         "--install-current",
+        "--no-modify-path",
         "--continue",
         "--claude",
         "--codex",

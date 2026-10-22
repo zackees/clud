@@ -18,7 +18,9 @@ startup-file edits and fresh-shell proof, and
 change broadcast, and OS-built user-environment proof on Windows.
 `platform/{unix,windows}/self_install.rs` hold the owner, mode, and
 reparse-point checks `transaction.rs` applies. A binary commit alone does not
-count as installer success.
+count as installer success. Explicit `--no-modify-path` instead skips the
+activation plan entirely, preserves profiles/User Path, and reports binary
+installation with activation still required.
 
 `catalog.rs` parses the bounded, duplicate-key rejecting v1 Catalog published
 at the Pages installer endpoint. `Catalog::compatible_releases` lists complete
