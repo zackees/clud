@@ -134,8 +134,8 @@ def test_non_shell_patch_payload_skips_shell_identity_analysis(tmp_path: Path) -
         {
             "tool_name": "apply_patch",
             "tool_input": (
-                "*** Begin Patch\\n*** Update File: note.txt\\n@@\\n-old\\n"
-                "+rm -rf /\\n*** End Patch"
+                "*** Begin Patch\n*** Update File: note.txt\n@@\n-old\n"
+                "+rm -rf /\n*** End Patch"
             ),
             "cwd": str(tmp_path),
         }

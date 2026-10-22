@@ -204,11 +204,13 @@ def test_hook_rewrite_refuses_deletion_environment_changes(tmp_path: Path, prefi
     "command",
     [
         'grep -n "r' + 'm |mktemp" "$S/install.sh"',
-        "cat > \"$D/x.py\" <<'PY'\nr" + "m -f\nPY",
-        'for n in a; do printf x > "$S/$n"; done',
+        "cat > \"{scratch}/x.py\" <<'PY'\nr" + "m -f\nPY",
+        'for n in a; do printf x > "{scratch}/a"; done',
     ],
 )
 def test_hook_leaves_investigation_false_positives_unchanged(tmp_path: Path, command: str) -> None:
+    # #1999 refuses unresolved write destinations; this test isolates deletion identity.
+    command = command.replace("{scratch}", tmp_path.as_posix())
     home = tmp_path / "home"
     home.mkdir()
     env = os.environ.copy()

@@ -167,6 +167,8 @@ def test_raw_settings_writes_cannot_borrow_forged_authority(
         "mv staged.json \"$HOME/.clud/settings.json\"",
         "python mutation.py \"$HOME/.clud/settings.json\"",
         "target=$(cat target.txt); printf '{}' > \"$target\"",
+        "cat > \"$D/x.py\" <<'PY'\nrm -f\nPY",
+        'for n in a; do printf x > "$S/$n"; done',
     ],
 )
 def test_shell_write_forms_and_unresolved_destinations_remain_refused(
@@ -197,6 +199,20 @@ def test_native_drafts_and_settings_reads_do_not_need_mutation_authority(tmp_pat
     ]:
         result = _tool(world, tool, tool_input)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("patch", [
+    r"*** Begin Patch\n*** Update File: note.txt\n@@\n-old\n+rm -rf /\n*** End Patch",
+    "*** Begin Patch\n@@\n+No target header\n*** End Patch",
+])
+def test_patch_without_recognizable_targets_is_refused(tmp_path: Path, patch: str) -> None:
+    """Malformed patch data cannot establish an unprotected destination (#1999)."""
+    world = _world(tmp_path)
+    original = world[3].read_bytes()
+    result = _tool(world, "apply_patch", patch)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "settings" in result.stderr.lower()
+    assert world[3].read_bytes() == original
 
 
 def test_settings_dry_run_cannot_enter_a_mutating_approval_flow(tmp_path: Path) -> None:
