@@ -30,7 +30,10 @@ def test_native_cache_replays_every_stage_of_two_chains(
            else "return [await chain('a'), await chain('d')];")
     (h.config / "workflows" / "cache-chain-probe.js").write_text(
         "export const meta = {name: 'cache-chain-probe', description: 'Native chain cache', "
-        "phases: [0,1,2,3].map(i => ({title: 'Stage ' + i}))};\n"
+        "phases: [{title: 'Stage 0', detail: 'First observation'}, "
+        "{title: 'Stage 1', detail: 'Second observation'}, "
+        "{title: 'Stage 2', detail: 'Third observation'}, "
+        "{title: 'Stage 3', detail: 'Fourth observation'}]};\n"
         "const schema = {type: 'object', required: ['observed'], "
         "properties: {observed: {type: 'string'}}};\n"
         "async function chain(id) {\n"
@@ -64,7 +67,7 @@ def test_native_cache_replays_every_stage_of_two_chains(
             {"tool_use": {"name": "Workflow", "input": {
                 "name": "cache-chain-probe", "args": {"gateEpochs": {"b": 1, "c": 1}},
             }}},
-            {"text": "CHAIN_PROBE_STARTED"},
+            _after({"is_error": False}, {"text": "CHAIN_PROBE_STARTED"}),
         ]},
     ])
     result = h.run("Observe native cache replay across each stage of both chains.",
