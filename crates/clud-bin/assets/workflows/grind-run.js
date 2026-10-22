@@ -797,18 +797,30 @@ const approvedBlock = async (g) => {
   if (approved.repo !== ORCHESTRATION.session_repo) {
     return blocked(`blocked: ${approved.repo} requires a separately rooted repository session`)
   }
-  for (const [index, b] of approved.blockers.entries()) {
-    if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
-      return blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
-    }
-    if (!(await landed[b.goal])) {
-      const upstream = outcome[b.goal]
-      if (upstream && upstream.status === 'deferred') {
-        return { ...blocked(depNote(b.goal), upstream.gate || b), status: 'deferred',
-          waiting_on: b.goal, gate_evidence: upstream.gate_evidence || 'upstream gate unavailable' }
+  let dependencies
+  try {
+    // Subscribe to every blocker together: any hard failure wins immediately,
+    // even if an earlier blocker is deferred or has not finished yet.
+    dependencies = await Promise.all(approved.blockers.map(async b => {
+      if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
+        throw blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
       }
-      return blocked(depNote(b.goal), b)
-    }
+      if (await landed[b.goal]) return null
+      const upstream = outcome[b.goal]
+      if (upstream && upstream.status === 'deferred') return { blocker: b, upstream }
+      throw blocked(depNote(b.goal), b)
+    }))
+  } catch (error) {
+    if (error && error.blocked === true) return error
+    throw error
+  }
+  const deferred = dependencies.find(Boolean)
+  if (deferred) {
+    const { blocker, upstream } = deferred
+    return { ...blocked(depNote(blocker.goal), upstream.gate || blocker), status: 'deferred',
+      waiting_on: blocker.goal, gate_evidence: upstream.gate_evidence || 'upstream gate unavailable' }
+  }
+  for (const [index, b] of approved.blockers.entries()) {
     if (b.when !== 'merged') {
       let observed = null
       try {
