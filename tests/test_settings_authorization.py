@@ -289,3 +289,23 @@ def test_settings_authority_preserves_owner_command_recovery(tmp_path: Path) -> 
     allowed = _scan(world, "sleep 61")
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     assert world[3].read_bytes() == original
+
+
+@pytest.mark.parametrize("raw", [
+    '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/test-owned',
+    '[{"command":"rm -rf /tmp/test-owned"}]',
+])
+def test_settings_authority_preserves_owner_malformed_payload_recovery(
+    tmp_path: Path, raw: str
+) -> None:
+    binary, env, repo, settings = _world(tmp_path)
+    original = settings.read_bytes()
+    for bypass, expected in [(False, 2), (True, 0)]:
+        if bypass:
+            env["CLUD_ALLOW_ALL_CMDS"] = "1"
+        result = process.run(
+            [binary, "__cmd-scan", "--event", "PreToolUse"],
+            input=raw, cwd=repo, env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == expected, result.stdout + result.stderr
+    assert settings.read_bytes() == original
