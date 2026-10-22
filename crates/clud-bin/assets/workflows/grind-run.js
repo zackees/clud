@@ -864,7 +864,7 @@ const runBatch = async (goals) => {
 let results
 phase('Plan')
 const featureStages = STAGES.filter(s => !isBugStage(s))
-if (STAGES.some(isBugStage) && featureStages.length) {
+if (!ORCHESTRATION && STAGES.some(isBugStage) && featureStages.length) {
   // Bug stage first (plus any goal in no stage), then each feature stage in order.
   // The router normally starts one call per stage, so one batch is empty.
   const featureIds = new Set()
