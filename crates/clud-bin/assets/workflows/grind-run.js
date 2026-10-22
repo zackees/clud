@@ -22,6 +22,7 @@ export const meta = {
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
 //   maxAgents?: 4, maxFixRounds?: 10, agentErrors?: 3,   // agentErrors: tool-misuse allowance, apart from fix rounds (#1331)
+//   gateAttempts?: 3, gateBackoffMs?: 1000, gateEpoch?: 0,
 //   planOnly?: true, meta?: '<meta issue number>',
 //   orchestration?: { session_repo: 'owner/repo', goals: [
 //     { id, repo, main, checkout?: 'local' | 'worktree', blockers: [{goal, when, check?}] }
@@ -175,6 +176,16 @@ const MAX_FIX = Math.max(0, Math.floor(args.maxFixRounds ?? 10))
 // per goal; past it the goal stops with `gave_up: tool misuse`.
 const MAX_AGENT_ERRORS = Math.max(0, Math.floor(args.agentErrors ?? 3))
 const MODELS = args.models || {}
+const gateInteger = (name, fallback, minimum, maximum) => {
+  const value = args[name] ?? fallback
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`)
+  }
+  return value
+}
+const GATE_ATTEMPTS = gateInteger('gateAttempts', 3, 1, 5)
+const GATE_BACKOFF_MS = gateInteger('gateBackoffMs', 1000, 1, 30000)
+const GATE_EPOCH = gateInteger('gateEpoch', 0, 0, 1000000000)
 // The repo's ./lint and ./test, chosen once by the /grind router (#1336).
 const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
 const scriptLines = () => [SCRIPTS.lint, SCRIPTS.test].filter(Boolean)
@@ -795,13 +806,46 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
 // goal is blocked rather than built on top of it (#1424).
 let DIRTY_AFTER = null
 
-const inspectGate = (g, blocker, index) => light(() => agent(
+const inspectGate = (g, blocker, index, attempt) => light(() => agent(
   `Observe this approved dependency gate once.\n${ctx(g)}\n` +
+  `Observation: ${GATE_EPOCH}/${attempt}.\n` +
   `Upstream goal: ${blocker.goal}. Required condition: ${blocker.when}.\n` +
   `Exact approved Bash check (copy verbatim):\n${blocker.check}\n` +
   'Report ready only after successful native execution. Include the observed output as evidence. ' +
   'A failed or denied check means not ready. Do not retry, sleep, edit or publish.',
   opts('gate', `gate:${g.id}:${index}`, 'Gate', GATE)))
+
+// The native Workflow owns this bounded schedule. Each checker observes once;
+// its semaphore slot is released before the native timer wait. Distinct prompts
+// prevent a prior not-ready agent result being replayed as the next observation.
+const observeGate = async (g, blocker, index) => {
+  const started = Date.now()
+  let observed = null
+  let attempts = 0
+  for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt++) {
+    attempts = attempt
+    observed = null
+    try {
+      observed = await inspectGate(g, blocker, index, attempt)
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error
+      observed = { ready: false, evidence: `check unavailable: ${error && error.message ? error.message : error}` }
+      log(`goal ${g.id}: ${observed.evidence}`)
+    }
+    if (observed && observed.ready === true) break
+    if (attempt < GATE_ATTEMPTS) {
+      if (typeof setTimeout !== 'function') {
+        log(`goal ${g.id}: native timer unavailable; deferring the gate`)
+        break
+      }
+      const delay = Math.min(30000, GATE_BACKOFF_MS * 2 ** (attempt - 1))
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+  return { ready: !!(observed && observed.ready === true),
+    evidence: observed && observed.evidence || 'check unavailable',
+    attempts, elapsed_ms: Date.now() - started }
+}
 
 // Enforce approved dependencies before a planner or worker touches this goal.
 // A missing stage or external publication needs a resumable gate, not guessed
@@ -838,15 +882,11 @@ const approvedBlock = async (g) => {
   }
   for (const [index, b] of approved.blockers.entries()) {
     if (b.when !== 'merged') {
-      let observed = null
-      try {
-        observed = await inspectGate(g, b, index)
-      } catch (error) {
-        log(`goal ${g.id}: gate observation failed: ${error && error.message ? error.message : error}`)
-      }
-      if (!observed || observed.ready !== true) {
+      const observed = await observeGate(g, b, index)
+      if (!observed.ready) {
         return { ...blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b),
-          status: 'deferred', gate_evidence: observed && observed.evidence || 'check unavailable' }
+          status: 'deferred', gate_evidence: observed.evidence,
+          gate_attempts: observed.attempts, gate_elapsed_ms: observed.elapsed_ms }
       }
     }
   }
