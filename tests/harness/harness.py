@@ -636,7 +636,9 @@ class Harness:
                 output = child.output_text
             except Exception as error:
                 output = child.output_text if child is not None else ""
-                raise AssertionError(f"interactive harness failed: {error}\n{output[-6000:]}") from error
+                raise AssertionError(
+                    f"interactive harness failed: {error}\n{output[-6000:]}"
+                ) from error
             finally:
                 if child is not None:
                     if child.poll() is None:
