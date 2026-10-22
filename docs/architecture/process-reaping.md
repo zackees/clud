@@ -33,6 +33,31 @@ the job reaper needs its own retry-at-exit list for exits it abandons
 
 ---
 
+## Explicit Command Prompt windows on Windows (#2007)
+
+The generated Bash startup file installs a Windows adapter for exactly
+`start cmd` and `start cmd.exe` (case insensitive). It invokes the hidden
+`clud __start-cmd` fast path; other argument forms use stock Git Bash `start`.
+The adapter remains present when nounset is disabled.
+
+The helper uses running-process's breakaway daemon launch with inherited
+environment and cwd to run `cmd /D /C start "" cmd.exe`. Breaking away leaves
+the inner PTY kill-on-close job. The new console inherits
+`RUNNING_PROCESS_IS_DAEMON=1`, so the existing `DeclaredDaemon` reason also
+protects it from foreground exit cleanup and later orphan sweeps. The outer
+foreground tracking job has no kernel kill-on-close limit. Its explicit exit
+sweep reads declared-daemon facts through the same identity-keyed marker cache
+as the live reaper; passing an empty marker set there would kill the console
+after a successful PTY breakaway.
+
+A reaper-only exemption cannot protect a process still inside the PTY job.
+No blanket `cmd.exe` exemption is added: `/c` wrappers, `/b`, titled launches,
+and other applications retain their existing behavior. Native ConPTY tests
+cover both bare aliases, real cleanup, marker production, and stock fallback.
+See [DD-177](../DESIGN_DECISIONS.md#dd-177-explicit-command-prompt-windows-use-the-existing-persistence-contract).
+
+---
+
 ## The `(pid, creation_time)` keyspace
 
 A bare PID is not a stable handle. Windows reissues numbers promptly, so "the

@@ -499,6 +499,7 @@ impl ForegroundJobTracker {
 fn explicitly_reap_job_members(
     job: HANDLE,
     processes: &Mutex<TrackerProcesses>,
+    collector: &Mutex<FactsCollector>,
     telemetry: &Mutex<Telemetry>,
 ) {
     // ---- enumerate job member PIDs ----
@@ -601,8 +602,18 @@ fn explicitly_reap_job_members(
     if !remaining.is_empty() {
         // A one-time cost at exit: collect OS facts for the unresolvable
         // candidates, then run the full spare-signal pipeline.
+        // #2007: breakaway consoles can remain in this outer tracking job.
+        // Preserve the same declared-daemon facts used by the live reaper.
+        let identities: Vec<(u32, u64)> = remaining
+            .iter()
+            .map(|&pid| (pid, crate::process_identity::start_time_of(pid)))
+            .collect();
+        let declared_daemons = collector
+            .lock()
+            .map(|mut collector| collector.daemon_marker.declared_daemons_among(&identities))
+            .unwrap_or_default();
         let facts =
-            crate::reaper_facts::collect_host_facts(&remaining, &HashSet::new(), spare_images);
+            crate::reaper_facts::collect_host_facts(&remaining, &declared_daemons, spare_images);
         for &pid in &remaining {
             let name = image_names.get(&pid).map(String::as_str).unwrap_or("");
             if let Some(reason) = crate::reaper_facts::spare_signal(&facts, pid, name) {
@@ -664,10 +675,9 @@ impl Drop for ForegroundJobTracker {
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
         }
-        // #894: explicitly enumerate, spare, and reap every job member
-        // before the kernel kill-on-close fires.  The kernel path becomes
-        // a crash-only safety net.
-        explicitly_reap_job_members(self.job, &self.processes, &self.telemetry);
+        // #894: enumerate, spare, and reap job members before closing the
+        // tracking job. Persistent members must keep their spare facts.
+        explicitly_reap_job_members(self.job, &self.processes, &self.collector, &self.telemetry);
         unsafe {
             let _ = CloseHandle(self.port);
             let _ = CloseHandle(self.job);

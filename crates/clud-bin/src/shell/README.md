@@ -78,3 +78,7 @@ via `include_str!` so the resolver works regardless of where the binary is
 launched from. Bumping the manifest means bumping both `sha256` and
 `upstream_commit_sha` in lockstep — see the file's own comments for the
 recompute command.
+
+The generated `nounset` startup file also includes the host's `start_terminal`
+adapter, retained in the nounset opt-out file. Its Windows persistence contract
+lives in [process-reaping.md](../../../../docs/architecture/process-reaping.md#explicit-command-prompt-windows-on-windows-2007).

@@ -950,6 +950,9 @@ pub enum Command {
         #[arg(long = "recovery-file")]
         recovery_file: Option<PathBuf>,
     },
+    /// Open the explicitly requested persistent Command Prompt.
+    #[command(name = "__start-cmd", hide = true)]
+    InternalStartCmd,
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1115,6 +1118,7 @@ impl Command {
     /// policy in `runtime_cache` next to the reason for it.
     pub fn internal_name(&self) -> Option<&'static str> {
         match self {
+            Self::InternalStartCmd => Some("__start-cmd"),
             Self::InternalDaemon { .. } => Some("__daemon"),
             Self::InternalWorker { .. } => Some("__worker"),
             _ => None,
@@ -1469,6 +1473,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "session-hook",
     "__daemon",
     "__worker",
+    "__start-cmd",
 ];
 
 impl Args {
