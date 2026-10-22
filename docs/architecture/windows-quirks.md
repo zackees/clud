@@ -174,6 +174,17 @@ the codebase stays portable.
   `tests/integration/pty/screen_fidelity.rs` (relay fidelity across a
   resize).
 
+- **Text-cell toasts (#2028)**: The deferred-wrap fix did not end the
+  garbling. On Windows Terminal the toast tier was `TextCells`, and the CPU
+  banner keeps a toast up for a whole high-CPU episode. A burst that began
+  mid-sequence then repainted the entire alternate screen from the
+  compositor's `vt100` shadow. Behind ConPTY that shadow cannot match the
+  terminal cell for cell, so the repaint wrote shifted text over Claude
+  Code's UI. Behind ConPTY the default tier is now the title/status
+  fallback (`toast::tier::decide`, `conpty_relay`); `CLUD_TOAST_TIER=text`
+  opts back in. The shadow also models the CSI sequences `vt100` drops
+  (`toast/shadow_input.rs`).
+
 - **File**: `crates/clud-bin/src/console_setup.rs:85`
   (`enable_console_vt_output`) over the testable `enable_vt_processing` at
   `:92`; `ConsoleVtGuard` at `:110`, constructed at `:140`
