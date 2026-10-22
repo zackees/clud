@@ -874,12 +874,16 @@ fn resolve_launch_target<'a>(
 /// injects it into every OpenRouter request it forwards (#1863). Nothing else
 /// can carry it.
 fn validate_provider_only(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
-    if args.provider_only.is_empty() && !args.zdr && !args.no_data_collection {
+    let zdr = clud::openrouter_routing::effective_zdr(args, launch_target.model_provider);
+    if args.provider_only.is_empty() && !zdr && !args.no_data_collection {
         return;
     }
-    if launch_target.model_provider != backend::ModelProvider::OpenRouter {
+    if launch_target.model_provider != backend::ModelProvider::OpenRouter
+        || launch_target.effective_harness != backend::Backend::Claude
+    {
         eprintln!(
-            "[clud] error: --provider-only, --zdr and --no-data-collection apply only to an OpenRouter launch \
+            "[clud] error: OpenRouter routing requirements (--provider-only, --zdr, saved ZDR, \
+             --no-data-collection) apply only to an OpenRouter launch using the Claude harness \
              (direct or --unified)"
         );
         std::process::exit(2);

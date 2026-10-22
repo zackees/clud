@@ -14,6 +14,13 @@ use serde_json::{Map, Value};
 /// The variable Claude Code merges into every request body.
 pub const EXTRA_BODY_ENV: &str = "CLAUDE_CODE_EXTRA_BODY";
 
+#[must_use]
+pub fn effective_zdr(args: &crate::args::Args, provider: crate::backend::ModelProvider) -> bool {
+    args.zdr
+        || (provider == crate::backend::ModelProvider::OpenRouter
+            && args.saved_openrouter_zdr == Some(true))
+}
+
 /// Persistent setters exit before harness setup, credentials, or network access.
 pub fn handle_setting(args: &crate::args::Args) -> Option<i32> {
     let preference = args.set_openrouter_zdr?;
