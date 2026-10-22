@@ -160,6 +160,7 @@ def test_pr_workflow_declares_every_native_candidate_lane() -> None:
     ).read_text(encoding="utf-8")
     for target in REQUIRED_TARGETS:
         assert target in workflow
+    assert "workflow_dispatch:" in workflow
     assert "candidate-host:" in workflow
     assert "candidate-aggregate:" in workflow
     host = workflow.split("  candidate-host:", 1)[1].split("\n  candidate-", 1)[0]
@@ -176,7 +177,7 @@ def test_pr_workflow_requires_real_nixos_and_linux_distributions() -> None:
     assert "candidate-nixos:" in workflow
     assert "ubuntu-24.04-arm" in workflow
     assert "candidate-distros:" in workflow
-    for distribution in ("archlinux", "fedora", "alpine"):
+    for distribution in ("archlinux", "fedora", "alpine", "debian"):
         assert distribution in workflow
     assert "CANDIDATE_NIXOS" in workflow
     assert "CANDIDATE_DISTROS" in workflow

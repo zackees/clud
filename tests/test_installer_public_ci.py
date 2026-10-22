@@ -105,9 +105,17 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
             "host_arch": "x86_64", "distro": distro, "sha256": "a" * 64,
             "resolved_path": "/home/alice/.local/bin/clud",
         }
-        for distro in ("archlinux", "fedora", "alpine")
+        for distro in ("archlinux", "fedora", "alpine", "debian")
     ]
     require_guest_evidence(nixos, distros, expected, "candidate", tag)
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence(
+            nixos,
+            [row for row in distros if row["distro"] != "debian"],
+            expected,
+            "candidate",
+            tag,
+        )
     with pytest.raises(ValueError, match="missing"):
         require_guest_evidence(nixos[:-1], distros, expected, "candidate", tag)
     with pytest.raises(ValueError, match="differs"):
