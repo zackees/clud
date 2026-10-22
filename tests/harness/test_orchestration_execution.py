@@ -16,8 +16,9 @@ from tests.harness.test_grind import (
 
 
 @pytest.mark.parametrize("upstream_succeeds", [True, False])
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
 def test_approved_merge_dependency_gates_planning(
-    harness: Harness, upstream_succeeds: bool,
+    harness: Harness, upstream_succeeds: bool, mode: str,
 ) -> None:
     h = harness
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
@@ -41,7 +42,7 @@ def test_approved_merge_dependency_gates_planning(
     }
     result = h.run(
         "Execute the approved graph; do not infer dependencies from planner output.",
-        _script(h, "sequential", _goals("b", "a", "c"), roles, orchestration=graph),
+        _script(h, mode, _goals("b", "a", "c"), roles, orchestration=graph),
         timeout=300,
     )
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
