@@ -39,7 +39,7 @@ def install_outcome_guard(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
         data = json.loads(path.read_text())
         scanner = h.clud.parent / ("clud-cmd-scan" + EXE)
         for event in ("PostToolUse", "PostToolUseFailure"):
-            data["hooks"][event].append({"matcher": "Bash", "hooks": [{
+            data["hooks"][event].append({"matcher": "Bash|Workflow", "hooks": [{
                 "type": "command", "command": f'"{scanner}" --event {event}',
             }]})
         path.write_text(json.dumps(data))

@@ -114,7 +114,7 @@ pub fn deletion_safety_fragment() -> Value {
                 }]
             }],
             "PostToolUse": [{
-                "matcher": "Bash|CronCreate|CronDelete|ScheduleWakeup",
+                "matcher": "Bash|Workflow|CronCreate|CronDelete|ScheduleWakeup",
                 "hooks": [{ "type": "command", "command": dispatcher_command("PostToolUse") }]
             }],
             "PostToolUseFailure": [{
