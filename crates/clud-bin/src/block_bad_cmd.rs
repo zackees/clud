@@ -431,6 +431,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
                 gate_enforced,
                 &stdin.text,
                 &describe_unverifiable("decode the tool-call payload", stdin.incomplete),
+                owner_bypass,
             ) {
                 return code;
             }
@@ -446,6 +447,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             gate_enforced,
             &stdin.text,
             &describe_unverifiable("recognize the tool-call payload shape", stdin.incomplete),
+            owner_bypass,
         ) {
             return code;
         }
@@ -1148,8 +1150,9 @@ fn refuse_unverifiable_payload(
     gate_enforced: bool,
     raw: &str,
     what: &str,
+    owner_bypass: bool,
 ) -> Option<i32> {
-    if crate::runner::unsafe_mode_enabled() {
+    if owner_bypass || crate::runner::unsafe_mode_enabled() {
         return None;
     }
     if event != PRE_TOOL_USE_EVENT {
