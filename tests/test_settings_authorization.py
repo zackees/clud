@@ -250,3 +250,25 @@ def test_execution_workdir_cannot_hide_relative_settings_target(tmp_path: Path, 
     })
     assert result.returncode == 2, result.stdout + result.stderr
     assert world[3].read_bytes() == original
+
+
+def test_unsafe_claude_launch_still_delivers_settings_authority(tmp_path: Path) -> None:
+    binary, env, repo, settings = _world(tmp_path)
+    original = settings.read_bytes()
+    result = process.run(
+        [binary, "--dry-run", "--claude", "--unsafe", "-p", "hello"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = json.loads(result.stdout)["command"]
+    document = json.loads(command[command.index("--settings") + 1])
+    assert document.get("permissions", {}).get("deny") == [
+        "Edit(~/.clud/settings.json)", "Write(~/.clud/settings.json)",
+    ]
+    entries = document["hooks"]["PreToolUse"]
+    assert any(
+        hook["command"] == "clud-cmd-scan"
+        for entry in entries for hook in entry["hooks"]
+    )
+    assert "safe-rm" not in json.dumps(command)
+    assert settings.read_bytes() == original
