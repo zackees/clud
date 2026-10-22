@@ -1763,6 +1763,21 @@ mod tests {
     }
 
     #[test]
+    fn gate_without_agent_binding_denies_shell_and_file_tools() {
+        let role = "grind-gate";
+        assert!(is_grind_role(role));
+        let facts = RunFacts::default();
+        for command in ["gh release view v1 --repo o/r", "gh release create v1", "true"] {
+            assert!(shell_reason(role, command, &facts).is_some(), "{command}");
+        }
+        for tool in ["Read", "Write", "Edit", "Agent", "AskUserQuestion"] {
+            assert!(tool_reason(role, tool, &facts).is_some(), "{tool}");
+        }
+        let input = serde_json::json!({"subagent_type": role});
+        assert!(agent_spawn_reason("Agent", Some(&input), None).is_some());
+    }
+
+    #[test]
     fn only_bundled_roles_are_capped() {
         assert!(is_grind_role("grind-planner"));
         assert!(is_grind_role("grind-lander"));
