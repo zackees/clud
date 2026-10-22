@@ -202,3 +202,35 @@ def test_settings_dry_run_cannot_enter_a_mutating_approval_flow(tmp_path: Path) 
     )
     assert result.returncode == 2, result.stdout + result.stderr
     assert settings.read_bytes() == original
+
+
+@pytest.mark.parametrize("command", [
+    "cp staged.json .clud/settings.json",
+    "mv staged.json .clud/settings.json",
+    "tee .clud/settings.json < staged.json",
+])
+def test_relative_settings_mutators_are_refused_from_home(tmp_path: Path, command: str) -> None:
+    binary, env, _repo, settings = _world(tmp_path)
+    home = settings.parent.parent
+    (home / "staged.json").write_text("{}", encoding="utf-8")
+    original = settings.read_bytes()
+    result = _scan((binary, env, home, settings), command)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert settings.read_bytes() == original
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX parent alias fixture")
+def test_native_first_creation_through_parent_alias_is_refused(tmp_path: Path) -> None:
+    binary, env, repo, _settings = _world(tmp_path)
+    # A separate empty home models first creation without deleting any fixture.
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    env["HOME"] = env["USERPROFILE"] = env["CLUD_HOOK_HOME"] = str(home)
+    alias = repo / "alias"
+    alias.symlink_to(home, target_is_directory=True)
+    target = alias / ".clud" / "settings.json"
+    result = _tool((binary, env, repo, target), "Write", {
+        "file_path": str(target), "content": "{}",
+    })
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert not target.exists()

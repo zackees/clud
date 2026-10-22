@@ -294,6 +294,38 @@ fn numeric_sed_read(program: &str, words: &[Value]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn relative_mutators_cannot_write_home_settings() {
+        let home = tempfile::tempdir().unwrap();
+        for command in [
+            "cp staged.json .clud/settings.json",
+            "mv staged.json .clud/settings.json",
+            "tee .clud/settings.json < staged.json",
+        ] {
+            assert!(reason_in(
+                command,
+                crate::block_bad_cmd::ShellDialect::Posix,
+                Some(home.path()),
+                Some(home.path()),
+            ).is_some(), "{command}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_settings_through_parent_alias_are_protected() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        assert!(protected_file(
+            &alias.join(".clud/settings.json").to_string_lossy(),
+            &directory.path().to_string_lossy(),
+            &home,
+        ));
+    }
+
     fn reason(command: &str) -> Option<String> {
         reason_in(
             command,
