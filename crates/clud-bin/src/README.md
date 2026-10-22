@@ -604,7 +604,7 @@ which test tier a change belongs in — lives in
   separate from the command-text probe next to it, because raw bytes may be
   truncated mid-token, write newlines as `\n`, and name the program by path.
 - `block_bad_cmd_grind_caps.rs` - per-role shell caps for the `/grind` agents, keyed on the payload's `agent_type` and the session's run facts (`grind_facts.rs`), plus the feature-mode router caps (`router_reason`) for callers without a grind role while those facts record a feature. The router-callable `grind-orchestrator` exception has an AST-backed read-only allowlist that rejects output redirections and command-local environment overrides; execution roles remain internal. See [grind.md](../../../docs/architecture/grind.md#role-caps).
-- `block_bad_cmd_grind_gate.rs` - session-relative native task metadata lookup and exact approved-check authorization for the reserved `grind-gate` role. Missing, ambiguous or mismatched identities fail closed; reported check results do not establish publication readiness.
+- `block_bad_cmd_grind_gate.rs` - session-relative native task metadata lookup and exact approved-check authorization for the internal `grind-gate` role. Missing, ambiguous or mismatched identities fail closed; reported check results do not establish publication readiness.
 - `block_bad_cmd_gate.rs` - the command gate: an **allowlist** requiring every
   statement in a shell tool call to be invoked through a wrapper (`tap` by
   default), so the wrapper sees post-expansion argv instead of the hook having
