@@ -193,7 +193,9 @@ jobs:
           mkdir -p candidate-evidence
           python -m pytest -q \
             tests/test_installer_candidate_ci.py::test_native_candidate_installs_by_name_and_writes_host_evidence \
-            tests/test_installer_native_entry.py
+            tests/test_installer_native_entry.py \
+            tests/test_installer_repair.py \
+            tests/test_installer_activation_commands.py
       - name: Retain candidate host evidence
         if: always()
         uses: actions/upload-artifact@v4
