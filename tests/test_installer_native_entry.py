@@ -196,6 +196,36 @@ def test_no_tty_refusal_preserves_windows_user_path() -> None:
         assert after == before
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX startup files")
+def test_install_only_preserves_profiles_and_reports_activation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    profiles = {
+        home / ".bash_profile": b"# preserve login configuration\n",
+        home / ".bashrc": b"# preserve non-UTF8 configuration: \xff\n",
+    }
+    for path, content in profiles.items():
+        path.write_bytes(content)
+        path.chmod(0o400)
+    env = isolated_env(home)
+    env["SHELL"] = required_shell("bash")
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes", "--no-modify-path"],
+        env=env, capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    destination = home / ".local" / "bin" / "clud"
+    assert destination.is_file()
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    for path, content in profiles.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_mode & 0o777 == 0o400
+    assert b"activation required" in result.stderr.lower()
+    assert b"verified fresh name-based lookup" not in result.stderr
+
+
 def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:
     env, destination = installer_target
     env["HTTPS_PROXY"] = "http://127.0.0.1:1"
