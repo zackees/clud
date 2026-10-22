@@ -15,6 +15,13 @@ SHELL_CASES = [
 ]
 
 
+def run_required_scenario(scenario, tmp_path: Path) -> None:
+    try:
+        scenario(tmp_path)
+    except pytest.skip.Exception as error:
+        raise AssertionError("mandatory acceptance skipped its supported shell") from error
+
+
 @pytest.mark.parametrize("scenario", SHELL_CASES, ids=lambda case: case.__name__)
 def test_required_acceptance_fails_when_a_supported_shell_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario
@@ -22,10 +29,7 @@ def test_required_acceptance_fails_when_a_supported_shell_is_missing(
     monkeypatch.setenv("CLUD_TEST_REQUIRE_INSTALLER_SHELLS", "1")
     monkeypatch.setattr(native.shutil, "which", lambda _name: None)
     with pytest.raises(pytest.fail.Exception, match="required installer acceptance shell"):
-        try:
-            scenario(tmp_path)
-        except pytest.skip.Exception as error:
-            raise AssertionError("mandatory acceptance skipped its supported shell") from error
+        run_required_scenario(scenario, tmp_path)
 
 
 @pytest.mark.parametrize("scenario", SHELL_CASES, ids=lambda case: case.__name__)

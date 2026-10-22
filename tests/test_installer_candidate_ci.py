@@ -7,6 +7,7 @@ import io
 import json
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 
@@ -181,6 +182,36 @@ def test_pr_workflow_requires_real_nixos_and_linux_distributions() -> None:
         assert distribution in workflow
     assert "CANDIDATE_NIXOS" in workflow
     assert "CANDIDATE_DISTROS" in workflow
+
+
+@pytest.mark.parametrize("job", ["candidate-distros", "public-distros"])
+def test_distribution_matrix_runs_every_required_architecture_on_matching_hosts(job: str) -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    block = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow)
+    assert block is not None
+    rows = re.findall(
+        r"(?m)^          - distro: (\w+)\n"
+        r"            arch: (\w+)\n"
+        r"            runner: (\S+)\n"
+        r"            platform: (\S+)\n"
+        r"            target: (\S+)\n"
+        r"            image: (\S+)",
+        block.group(1),
+    )
+    assert len(rows) == 8
+    assert {(distro, arch) for distro, arch, *_ in rows} == {
+        ("archlinux", "x86_64"), ("alpine", "x86_64"),
+        ("ubuntu", "x86_64"), ("ubuntu", "aarch64"),
+        ("debian", "x86_64"), ("debian", "aarch64"),
+        ("fedora", "x86_64"), ("fedora", "aarch64"),
+    }
+    for _distro, arch, runner, docker_platform, target, image in rows:
+        assert runner == ("ubuntu-24.04-arm" if arch == "aarch64" else "ubuntu-24.04")
+        assert docker_platform == ("linux/arm64" if arch == "aarch64" else "linux/amd64")
+        assert target == f"{arch}-unknown-linux-musl"
+        assert re.fullmatch(r"[\w/:.-]+@sha256:[0-9a-f]{64}", image)
 
 
 def test_pr_workflow_gates_on_the_managed_dsh_lane() -> None:

@@ -9,6 +9,17 @@ from pathlib import Path
 from ci.installer_candidate import TARGETS
 from ci.installer_public_catalog import resolve
 
+REQUIRED_DISTRO_HOSTS = {
+    ("archlinux", "x86_64"),
+    ("alpine", "x86_64"),
+    ("ubuntu", "x86_64"),
+    ("ubuntu", "aarch64"),
+    ("debian", "x86_64"),
+    ("debian", "aarch64"),
+    ("fedora", "x86_64"),
+    ("fedora", "aarch64"),
+}
+
 
 def require_evidence(rows: list[dict], expected: dict[str, dict], mode: str, tag: str) -> None:
     if len(rows) != len(TARGETS):
@@ -58,18 +69,16 @@ def require_guest_evidence(
             or row.get("resolved_path") != "/home/alice/.local/bin/clud"
         ):
             raise ValueError("public NixOS guest evidence differs from published asset")
-    if len(distros) != 3 or {row.get("distro") for row in distros} != {
-        "archlinux", "fedora", "alpine"
-    }:
+    hosts = {(row.get("distro"), row.get("host_arch")) for row in distros}
+    if len(distros) != len(REQUIRED_DISTRO_HOSTS) or hosts != REQUIRED_DISTRO_HOSTS:
         raise ValueError("missing public distribution guest evidence")
-    x64 = expected["x86_64-unknown-linux-musl"]["sha256"]
     for row in distros:
+        target = f"{row['host_arch']}-unknown-linux-musl"
         if (
             row.get("mode") != mode
             or row.get("tag") != tag
             or row.get("version") != tag.removeprefix("v")
-            or row.get("host_arch") != "x86_64"
-            or row.get("sha256") != x64
+            or row.get("sha256") != expected[target]["sha256"]
             or row.get("resolved_path") != "/home/alice/.local/bin/clud"
         ):
             raise ValueError("public distribution guest evidence differs from published asset")

@@ -74,14 +74,15 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     rows = []
     for target, (os_name, arch, _kind, _suffix) in TARGETS.items():
         url = f"https://github.com/zackees/clud/releases/download/{tag}/clud-{tag}-{target}"
-        expected[target] = {"version": tag, "sha256": "a" * 64, "size_bytes": 100, "url": url}
+        digest = "c" * 64 if target == "aarch64-unknown-linux-musl" else "a" * 64
+        expected[target] = {"version": tag, "sha256": digest, "size_bytes": 100, "url": url}
         rows.append({
             "mode": "candidate",
             "tag": tag,
             "version": tag,
             "os": os_name,
             "arch": arch,
-            "sha256": "a" * 64,
+            "sha256": digest,
             "size_bytes": 100,
             "asset_url": url,
             "resolved_path": "/user/bin/clud",
@@ -95,19 +96,42 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     nixos = [
         {
             "mode": "candidate", "tag": tag, "version": tag, "host_arch": arch,
-            "sha256": "a" * 64, "resolved_path": "/home/alice/.local/bin/clud",
+            "sha256": expected[f"{arch}-unknown-linux-musl"]["sha256"],
+            "resolved_path": "/home/alice/.local/bin/clud",
         }
         for arch in ("x86_64", "aarch64")
     ]
     distros = [
         {
             "mode": "candidate", "tag": tag, "version": tag,
-            "host_arch": "x86_64", "distro": distro, "sha256": "a" * 64,
+            "host_arch": arch, "distro": distro,
+            "sha256": expected[f"{arch}-unknown-linux-musl"]["sha256"],
             "resolved_path": "/home/alice/.local/bin/clud",
         }
-        for distro in ("archlinux", "fedora", "alpine", "debian")
+        for distro, arch in (
+            ("archlinux", "x86_64"), ("alpine", "x86_64"),
+            ("ubuntu", "x86_64"), ("ubuntu", "aarch64"),
+            ("debian", "x86_64"), ("debian", "aarch64"),
+            ("fedora", "x86_64"), ("fedora", "aarch64"),
+        )
     ]
     require_guest_evidence(nixos, distros, expected, "candidate", tag)
+    for index in range(len(distros)):
+        with pytest.raises(ValueError, match="missing"):
+            require_guest_evidence(
+                nixos, distros[:index] + distros[index + 1:], expected, "candidate", tag
+            )
+    with pytest.raises(ValueError, match="missing"):
+        require_guest_evidence(nixos, [*distros[:-1], distros[0]], expected, "candidate", tag)
+    wrong_arch = {**distros[-1], "sha256": expected["x86_64-unknown-linux-musl"]["sha256"]}
+    with pytest.raises(ValueError, match="differs"):
+        require_guest_evidence(
+            nixos,
+            [*distros[:-1], wrong_arch],
+            expected,
+            "candidate",
+            tag,
+        )
     with pytest.raises(ValueError, match="missing"):
         require_guest_evidence(
             nixos,

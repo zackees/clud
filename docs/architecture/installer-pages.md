@@ -60,7 +60,7 @@ present when this flow was introduced, so its build job has a 30-minute limit.
 `auto-release.yml` snapshots the prior public release and Pages digest, uploads
 final native bytes as a public prerelease, attaches the candidate catalog,
 and calls `installer-check.yml` in candidate mode. Every native host and the
-Arch, Fedora, Alpine, and NixOS guests fetch public HTTPS bytes and prove a
+Arch, Alpine, Ubuntu, Debian, Fedora, and NixOS guests fetch public HTTPS bytes and prove a
 fresh name-based install. Only after that gate passes does the workflow
 publish PyPI, promote the same GitHub asset IDs, and deploy the canonical
 Pages site. It calls the same installer matrix in released mode against the

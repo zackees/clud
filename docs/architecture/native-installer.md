@@ -65,3 +65,14 @@ may skip unavailable shells. Fish with a custom `XDG_CONFIG_HOME` and zsh
 with a custom `ZDOTDIR` are checked in fresh login, interactive and combined
 login/interactive shells for both the exact installed path and version.
 Windows keeps its separate registry and fresh-user-environment acceptance.
+
+Candidate and public-release acceptance also require eight distribution/host
+pairs: Arch and Alpine x64, plus Ubuntu, Debian and Fedora on both x64 and
+ARM64. Each container runs on a matching native host and uses a pinned image
+digest. Public aggregation rejects missing or duplicate pairs and compares
+each record against the published digest for that architecture.
+
+Operators can rerun the read-only public checks using the existing
+`installer-check.yml` workflow's manual dispatch, with an exact `release_tag`
+and `mode` (`candidate` or `released`). This validates downloaded assets and
+the catalog; it does not publish, promote, delete or modify a release.
