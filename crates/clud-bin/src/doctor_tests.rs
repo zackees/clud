@@ -62,13 +62,22 @@ fn an_owned_dir_reports_missing_aliases_and_lists_foreign_files() {
         }]
     );
     assert_eq!(report.unknown, vec![foreign.clone()]);
-    assert!(foreign.exists(), "doctor never deletes what it does not own");
+    assert!(
+        foreign.exists(),
+        "doctor never deletes what it does not own"
+    );
 }
 
 #[test]
 fn an_absent_owned_dir_is_not_a_missing_alias() {
     let dir = tempfile::tempdir().unwrap();
-    let report = inspect_dir(&dir.path().join("never-made"), &names(&["rm"]), &[], "x", true);
+    let report = inspect_dir(
+        &dir.path().join("never-made"),
+        &names(&["rm"]),
+        &[],
+        "x",
+        true,
+    );
     assert_eq!(report, DirReport::default());
 }
 
@@ -86,7 +95,10 @@ fn matchers_reach_tools_by_name_alias_or_catch_all() {
     assert!(matcher_reaches("*", "ScheduleWakeup"));
     assert!(matcher_reaches("", "Agent"));
     assert!(matcher_reaches("Bash|Agent", "Agent"));
-    assert!(!matcher_reaches("Bash", "BashOutput"), "matchers are anchored");
+    assert!(
+        !matcher_reaches("Bash", "BashOutput"),
+        "matchers are anchored"
+    );
     // Codex's aliases (#1954).
     assert!(matcher_reaches("Edit", "apply_patch"));
     assert!(matcher_reaches("Agent", "spawn_agent"));

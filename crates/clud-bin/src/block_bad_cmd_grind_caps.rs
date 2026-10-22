@@ -1762,7 +1762,14 @@ mod tests {
             ..run(true, false)
         };
         // `apply_patch` is how Codex writes files (#1954).
-        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "write", "apply_patch"] {
+        for tool in [
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "write",
+            "apply_patch",
+        ] {
             assert!(
                 tool_reason(PLANNER, tool, &run(true, false)).is_some(),
                 "{tool}"

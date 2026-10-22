@@ -155,8 +155,14 @@ pub fn inspect(exe: &Path, own: &str, home: Option<&Path>, path_env: &str) -> Di
     };
     if let Some(home) = home {
         let dirs = [
-            (crate::shim_registry::INTERPRETER_SUBDIR, file_names_in(ShimDir::Interpreter)),
-            (crate::shim_registry::SESSION_SUBDIR, file_names_in(ShimDir::Session)),
+            (
+                crate::shim_registry::INTERPRETER_SUBDIR,
+                file_names_in(ShimDir::Interpreter),
+            ),
+            (
+                crate::shim_registry::SESSION_SUBDIR,
+                file_names_in(ShimDir::Session),
+            ),
             (".clud/state/helper-bin", scanners.clone()),
         ];
         for (subdir, files) in dirs {
@@ -316,7 +322,10 @@ fn print_report(own: &str, exe: &Path, aliases: &DirReport, coverage: &[Coverage
         println!("hook coverage: {}: {gaps}", entry.source);
     }
     for path in &aliases.unknown {
-        println!("note: {} is not a clud alias; left in place", path.display());
+        println!(
+            "note: {} is not a clud alias; left in place",
+            path.display()
+        );
     }
     if aliases.findings.is_empty() {
         println!("aliases: all current");
