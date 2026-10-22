@@ -1019,7 +1019,8 @@ DEFERRED_GOALS.forEach(d => {
 // The router combines this small manifest with the original approved arguments
 // and the actual native Workflow launch references. No completed-goal bypass
 // or invented run identifier is accepted from the model.
-const remaining = summary.filter(s => s.status === 'deferred').map(s => String(s.goal))
+const remaining = summary.filter(s => ORCHESTRATION && s.status === 'deferred' &&
+  s.gate && s.gate.when !== 'merged' && nonempty(s.gate.check)).map(s => String(s.goal))
 const nextEpochs = { ...GATE_EPOCHS }
 for (const id of remaining) {
   if (gateEpoch(id) >= 1000000000) throw new Error(`gate epoch exhausted for ${id}`)
