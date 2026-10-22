@@ -64,7 +64,10 @@ fn authorize(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
     if payload.tool_name != "Bash" {
         return Err("approved gate checks require the native Bash tool".into());
     }
-    if payload.tool_input.as_ref().and_then(|input| input.get("run_in_background"))
+    if payload
+        .tool_input
+        .as_ref()
+        .and_then(|input| input.get("run_in_background"))
         .is_some_and(|value| value != &Value::Bool(false))
     {
         return Err("gate checks must complete in the foreground".into());
@@ -314,19 +317,14 @@ mod tests {
         evidence::claim(&fixture.payload, &fixture.facts).unwrap();
         assert!(evidence::claim(&fixture.payload, &fixture.facts).is_err());
         assert!(evidence::report(&report, &fixture.facts).is_err());
-        let state: Value = serde_json::from_slice(&std::fs::read(
-            fixture.root.path().join("session/gate-left-agent.json")
-        ).unwrap()).unwrap();
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(fixture.root.path().join("session/gate-left-agent.json")).unwrap(),
+        )
+        .unwrap();
         let nonce = state["nonce"].as_str().unwrap();
         let response = json!({"tool_response": {"interrupted": false,
             "stdout": format!("actual output\nCLUD_GATE_EXIT_{nonce}:0\n")}});
-        evidence::observe(
-            "PostToolUse",
-            &response,
-            &fixture.payload,
-            &fixture.facts,
-        )
-        .unwrap();
+        evidence::observe("PostToolUse", &response, &fixture.payload, &fixture.facts).unwrap();
         assert!(evidence::report(&report, &fixture.facts).is_ok());
         fixture.facts["orchestration"]["goals"][0]["blockers"][0]["check"] = json!("echo CHANGED");
         assert!(evidence::report(&report, &fixture.facts).is_err());
@@ -364,7 +362,8 @@ mod tests {
     #[test]
     fn nonzero_and_unfinished_receipts_cannot_report_ready() {
         for (status, extra) in [
-            (1, json!({})), (0, json!({"backgroundTaskId": "still-running"})),
+            (1, json!({})),
+            (0, json!({"backgroundTaskId": "still-running"})),
             (0, json!({"timedOutAfterMs": 1000})),
             (0, json!({"backgroundedByUser": true})),
             (0, json!({"noExitStatus": true})),
@@ -376,9 +375,17 @@ mod tests {
             let nonce = state["nonce"].as_str().unwrap();
             let mut response = json!({"interrupted": false,
                 "stdout": format!("CLUD_GATE_EXIT_{nonce}:{status}\n")});
-            response.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            evidence::observe("PostToolUse", &json!({"tool_response": response}),
-                              &fixture.payload, &fixture.facts).unwrap();
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            evidence::observe(
+                "PostToolUse",
+                &json!({"tool_response": response}),
+                &fixture.payload,
+                &fixture.facts,
+            )
+            .unwrap();
             let mut report = fixture.payload.clone();
             report.tool_name = "StructuredOutput".into();
             report.tool_input = Some(json!({"ready": true}));

@@ -80,25 +80,49 @@ pub(super) fn rewrite(payload: &HookPayloadView, facts: &Value) -> Result<String
 }
 
 fn nonce(state: &Value) -> Result<&str, String> {
-    state.get("nonce").and_then(Value::as_str)
+    state
+        .get("nonce")
+        .and_then(Value::as_str)
         .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| "invalid gate completion receipt".into())
 }
 
 fn completed_success(raw: &Value, state: &Value) -> bool {
-    let Some(response) = raw.get("tool_response") else { return false };
+    let Some(response) = raw.get("tool_response") else {
+        return false;
+    };
     if response.get("interrupted").and_then(Value::as_bool) != Some(false)
-        || ["backgroundTaskId", "backgroundOutputPath", "timedOutAfterMs"].iter()
-            .any(|key| response.get(key).is_some_and(|value| !value.is_null()))
-        || ["backgroundedByUser", "backgroundedByTurnAbort", "backgroundedToDeliverMessage", "noExitStatus"]
-            .iter().any(|key| response.get(key).is_some_and(|value| value != &Value::Bool(false)))
+        || [
+            "backgroundTaskId",
+            "backgroundOutputPath",
+            "timedOutAfterMs",
+        ]
+        .iter()
+        .any(|key| response.get(key).is_some_and(|value| !value.is_null()))
+        || [
+            "backgroundedByUser",
+            "backgroundedByTurnAbort",
+            "backgroundedToDeliverMessage",
+            "noExitStatus",
+        ]
+        .iter()
+        .any(|key| {
+            response
+                .get(key)
+                .is_some_and(|value| value != &Value::Bool(false))
+        })
     {
         return false;
     }
-    let Ok(nonce) = nonce(state) else { return false };
+    let Ok(nonce) = nonce(state) else {
+        return false;
+    };
     let expected = format!("CLUD_GATE_EXIT_{nonce}:0");
-    response.get("stdout").and_then(Value::as_str)
-        .and_then(|stdout| stdout.lines().last()) == Some(expected.as_str())
+    response
+        .get("stdout")
+        .and_then(Value::as_str)
+        .and_then(|stdout| stdout.lines().last())
+        == Some(expected.as_str())
 }
 
 fn open(payload: &HookPayloadView, write: bool) -> Result<File, String> {
@@ -152,8 +176,7 @@ pub(super) fn observe(
     if payload.command != check && payload.command != wrapped(&check, nonce(&state)?) {
         return Err("tool outcome does not identify the approved execution".into());
     }
-    let success = event == "PostToolUse"
-        && completed_success(raw, &state);
+    let success = event == "PostToolUse" && completed_success(raw, &state);
     state["outcome"] = json!(if success { "success" } else { "failure" });
     let bytes = encode(&state)?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;

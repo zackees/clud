@@ -850,7 +850,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     }
 
     if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE)
-        && event == PRE_TOOL_USE_EVENT && payload.tool_name == "Bash"
+        && event == PRE_TOOL_USE_EVENT
+        && payload.tool_name == "Bash"
     {
         if deletion_rewrite.is_some() || evaluation.rewritten_command.is_some() {
             return block_bad_cmd_gate::gate_deny("gate check conflicts with another rewrite");
