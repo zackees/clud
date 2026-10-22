@@ -77,7 +77,10 @@ pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 /// holds the `safe_rm.extra_roots` override, which only the user may write.
 /// The Bash path is refused by the command-scan hook; `Edit(...)` rules
 /// cover every built-in file-editing tool.
-pub const SETTINGS_FILE_DENIES: &[&str] = &["Edit(~/.clud/settings.json)"];
+pub const SETTINGS_FILE_DENIES: &[&str] = &[
+    "Edit(~/.clud/settings.json)",
+    "Write(~/.clud/settings.json)",
+];
 
 #[must_use]
 pub fn deletion_safety_fragment() -> Value {
@@ -132,6 +135,9 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "Edit",
     "MultiEdit",
     "NotebookEdit",
+    "exec_command",
+    "shell_command",
+    "apply_patch",
 ];
 
 /// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude

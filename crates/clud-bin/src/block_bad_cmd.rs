@@ -460,6 +460,17 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.command
     ));
 
+    // Settings authority is an exact native user decision, never a session
+    // bypass flag or agent-supplied claim. This protects file tools too.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = block_bad_cmd_rm_override::reason_for_payload(&payload) {
+            append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud safe-rm] {reason}");
+            return 2;
+        }
+    }
+
     if crate::runner::unsafe_mode_enabled() {
         if serves_declared_hooks(invocation) {
             if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
@@ -471,18 +482,6 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
         append_log("unsafe mode: clud command policy bypassed");
         return 0;
-    }
-
-    // #1668: the safe-rm root override is the user's alone. Checked before
-    // the per-call opt-out below, which the agent types itself and so must
-    // not be a way to widen its own deletion roots.
-    if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
-        if let Some(reason) = block_bad_cmd_rm_override::reason_for_payload(&payload) {
-            append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
-            println!("{}", deny_json(&reason));
-            eprintln!("[clud safe-rm] {reason}");
-            return 2;
-        }
     }
 
     // The same switch, opted into per call: a command that carries

@@ -3,6 +3,9 @@
 //! Unknown operations that mention the protected setting still fail closed.
 
 use std::path::Path;
+use std::io::Read;
+
+use sha2::{Digest, Sha256};
 
 use crate::shell_ast::{Invocation, Value};
 
@@ -12,19 +15,58 @@ const READ_ONLY: &[&str] = &[
     "stat", "file", "diff", "bat", "echo", "printf", "test", "[", "true",
 ];
 
-pub(super) const REFUSAL: &str = "agents may not write ~/.clud/settings.json or the \
-     safe_rm.extra_roots override: it widens where safe-rm may delete, so only the user sets it, \
-     by editing the file by hand. Ask the user to add the path and a reason, or leave the path \
-     and report it";
+pub(super) const REFUSAL: &str = "raw writes to user settings and safe_rm.extra_roots are refused. \
+    Use `clud settings set /key JSON --reason TEXT` for an ordinary change, or \
+    `clud settings roots JSON --reason TEXT` for a separate deletion-root change. \
+    The user must approve the exact operation in its native desktop window; \
+    environment variables, scripts, and claimed approval metadata are not authority";
 
 pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<String> {
     let home = crate::home::user_home();
-    reason_in(
-        &payload.command,
-        super::shell_dialect_for_tool(&payload.tool_name),
-        Some(&payload.cwd),
-        home.as_deref(),
-    )
+    let tool = payload.tool_name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    if super::block_bad_cmd_gate::gates_tool(&tool) || tool == "exec_command" {
+        let command = payload.tool_input.as_ref()
+            .and_then(|input| input.get("cmd"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&payload.command);
+        return reason_in(
+            command,
+            super::shell_dialect_for_tool(&tool),
+            Some(&payload.cwd),
+            home.as_deref(),
+        );
+    }
+    native_file_reason(payload, &tool, home.as_deref())
+}
+
+fn native_file_reason(payload: &super::HookPayloadView, tool: &str, home: Option<&Path>) -> Option<String> {
+    if tool == "apply_patch" {
+        let input = payload.tool_input.as_ref();
+        let patch = input.and_then(|input| input.as_str()
+            .or_else(|| input.get("patch").and_then(serde_json::Value::as_str))
+            .or_else(|| input.get("input").and_then(serde_json::Value::as_str)));
+        let Some(patch) = patch else { return Some(REFUSAL.into()); };
+        let mut targets = patch.lines().filter_map(|line| {
+            ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "]
+                .iter().find_map(|prefix| line.strip_prefix(prefix))
+        }).peekable();
+        if targets.peek().is_none() || targets.any(|path| native_target_is_protected(path, payload, home)) {
+            return Some(REFUSAL.into());
+        }
+    } else if matches!(tool, "write" | "edit" | "multiedit" | "notebookedit") {
+        let path = payload.tool_input.as_ref().and_then(|input| {
+            ["file_path", "notebook_path", "path"].iter()
+                .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+        });
+        if path.is_none_or(|path| native_target_is_protected(path, payload, home)) {
+            return Some(REFUSAL.into());
+        }
+    }
+    None
+}
+
+fn native_target_is_protected(path: &str, payload: &super::HookPayloadView, home: Option<&Path>) -> bool {
+    home.is_none_or(|home| protected_file(path, &payload.cwd.to_string_lossy(), home))
 }
 
 fn reason_in(
@@ -45,30 +87,19 @@ fn reason_in(
         .any(|marker| normalized.contains(marker));
     let names_override = normalized.contains("extra_roots")
         || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
-    if !names_override || does_not_write_settings(command, dialect, cwd, home) {
-        return None;
-    }
-    Some(REFUSAL.to_string())
-}
-
-fn does_not_write_settings(
-    command: &str,
-    dialect: super::ShellDialect,
-    cwd: Option<&Path>,
-    home: Option<&Path>,
-) -> bool {
-    let Some(home) = home else {
-        return false;
-    };
-    let script =
-        super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, Some(home));
-    !script.has_error
-        && script.invocations.iter().all(|invocation| {
-            let writes = invocation.redirects.iter().any(|redirect| {
-                redirect.writes_file() && !safe_destination(&redirect.target, invocation, home)
-            });
-            !writes && read_only_invocation(invocation)
+    let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
+    let writes_settings = script.invocations.iter().any(|invocation| {
+        invocation.redirects.iter().any(|redirect| {
+            redirect.writes_file()
+                && home.is_none_or(|home| !safe_destination(&redirect.target, invocation, home))
         })
+    });
+    if writes_settings || (names_override && (script.has_error || home.is_none()
+        || !script.invocations.iter().all(read_only_invocation))) {
+        Some(REFUSAL.to_string())
+    } else {
+        None
+    }
 }
 
 fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> bool {
@@ -81,12 +112,22 @@ fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> boo
     let Some(cwd) = invocation.cwd.as_literal() else {
         return false;
     };
-    let destination = crate::shell_ast::join_path(cwd, target);
+    !protected_file(target, cwd, home)
+}
+
+fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
+    let expanded = if let Some(relative) = target.strip_prefix("~/").or_else(|| target.strip_prefix("~\\")) {
+        home.join(relative).to_string_lossy().into_owned()
+    } else {
+        target.to_string()
+    };
+    let destination = crate::shell_ast::join_path(cwd, &expanded);
     let settings = crate::clud_settings::settings_path_at(home);
     let canonical = |path: &Path| {
         crate::path_norm::canonicalize_plain(path).unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy().replace('\\', "/").to_ascii_lowercase()
     };
-    canonical(Path::new(&destination)) != canonical(&settings)
+    canonical(Path::new(&destination)) == canonical(&settings)
 }
 
 fn read_only_invocation(invocation: &Invocation) -> bool {
@@ -102,6 +143,54 @@ fn read_only_invocation(invocation: &Invocation) -> bool {
         || program == "["
         || forge_read(&name, words)
         || numeric_sed_read(&name, words)
+        || controlled_settings_command(invocation)
+}
+
+fn controlled_settings_command(invocation: &Invocation) -> bool {
+    let words = &invocation.words;
+    if !invocation.env.is_empty()
+        || words.get(1).and_then(Value::as_literal) != Some("settings")
+        || !matches!(words.get(2).and_then(Value::as_literal), Some("set" | "roots")) {
+        return false;
+    }
+    let Some(program) = words.first().and_then(Value::as_literal) else { return false; };
+    if super::block_bad_cmd_shell::program_name(program) != "clud" { return false; }
+    let Ok(current) = std::env::current_exe() else { return false; };
+    let candidate = if program.contains(['/', '\\']) {
+        invocation.cwd.as_literal().map(|cwd| std::path::PathBuf::from(crate::shell_ast::join_path(cwd, program)))
+    } else {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).flat_map(|directory| {
+                [directory.join(program), directory.join(format!("{program}.exe"))]
+            }).find(|path| path.is_file())
+        })
+    };
+    let Some(candidate) = candidate else { return false; };
+    if matches!(
+        (crate::path_norm::canonicalize_plain(&candidate), crate::path_norm::canonicalize_plain(&current)),
+        (Ok(candidate), Ok(current)) if candidate == current
+    ) {
+        return true;
+    }
+    if std::fs::metadata(&candidate).ok().map(|metadata| metadata.len())
+        != std::fs::metadata(&current).ok().map(|metadata| metadata.len()) {
+        return false;
+    }
+    // Installed and runtime-cache copies can have different paths. Only an
+    // exact copy of this scanner's executable gets the controlled exception.
+    matches!((executable_digest(&candidate), executable_digest(&current)), (Ok(candidate), Ok(current)) if candidate == current)
+}
+
+fn executable_digest(path: &Path) -> std::io::Result<[u8; 32]> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 { break; }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest.finalize().into())
 }
 
 fn forge_read(program: &str, words: &[Value]) -> bool {

@@ -104,6 +104,10 @@ pub fn handle(args: &crate::args::Args) -> Option<i32> {
     else {
         return None;
     };
+    if args.dry_run {
+        eprintln!("[clud settings] Settings changes do not accept --dry-run; use `clud settings --list` to inspect settings");
+        return Some(2);
+    }
     Some(run(change))
 }
 
