@@ -129,7 +129,7 @@ snapshots. They do not claim a real Claude Workflow or model integration.
 
 ## The DAG
 
-`/grind` is a router over bundled skills, one bundled workflow, and five
+`/grind` is a router over bundled skills, one bundled workflow, and seven
 capped agent types:
 
 ```

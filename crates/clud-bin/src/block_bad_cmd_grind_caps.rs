@@ -375,7 +375,8 @@ fn orchestrator_read(words: &[String]) -> bool {
     let Some(program) = words.first() else {
         return false;
     };
-    if inspect_ok(program, words) {
+    let inspection = ["ls", "cat", "head", "tail", "wc", "grep", "pwd", "echo", "test", "true"];
+    if inspection.contains(&program.as_str()) && inspect_ok(program, words) {
         return true;
     }
     if program == "gh" {
@@ -1769,6 +1770,8 @@ mod tests {
                 "gh api repos/o/r/issues -X POST",
                 "gh api repos/o/r/issues -f title=changed",
                 "git log --output=changed",
+                "rg --pre 'cargo build' pattern /sister",
+                "LD_PRELOAD=/sister/plugin.so git log",
                 "echo changed > file",
                 "cat <<'EOF' > file\nchanged\nEOF",
             ] {
