@@ -59,7 +59,30 @@ def gate_role(name: str, goal: str, tag: str, ready: bool, epoch: int | None = N
     return role
 
 
-def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeypatch) -> None:
+
+def native_resume_steps(captured: Path, scheduled: bool) -> list[dict[str, Any]]:
+    steps = [{"text": "unused"}, {"text": "unused"}]
+    if scheduled:
+        steps.extend([
+            {"tool_use": {"name": "CronCreate", "input": {
+                "cron": "* * * * *", "recurring": True,
+                "prompt": 'WAKE_DEFERRED_GRAPH remaining_goals=["b","c"]',
+            }}},
+            _after({"is_error": False}, {"text": "GRAPH_RESUMPTION_ARMED"}),
+        ])
+    steps.extend([
+        {"tool_use": {"name": "Workflow", "input_file": str(captured)}},
+        _after({"is_error": False}, {"text": "NATIVE_RESUME_STARTED"}),
+        {"text": "NATIVE_GRAPH_RESUME_COMPLETE"},
+    ])
+    return steps
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_native_resume_only_reobserves_deferred_branch(
+    harness: Harness, monkeypatch, scheduled: bool,
+) -> None:
     h = harness
     graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
         {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
@@ -88,13 +111,17 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
     ])
     script = _script(h, "parallel", _goals("a", "b", "c", "d", "e"), roles,
                      orchestration=graph, gateAttempts=1)
-    resume = {"tool_use": {"name": "Workflow", "input_file": str(captured)}}
-    script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>", "steps": [
-        {"text": "unused"}, {"text": "unused"}, resume,
-        _after({"is_error": False}, {"text": "NATIVE_RESUME_STARTED"}),
-    ]})
-    result = h.run("Resume only deferred publication work using the native Workflow cache.",
-                   script, timeout=300)
+    script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
+                               "steps": native_resume_steps(captured, scheduled)})
+    if scheduled:
+        result = h.run_clud_interactive(
+            "Resume the deferred graph through a native scheduled wakeup.", script,
+            model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180,
+        )
+    else:
+        result = h.run("Resume only deferred publication work using the native Workflow cache.",
+                       script, timeout=180)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     if any(row.get("note") for row in result.requests):
         print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
@@ -119,6 +146,11 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
                if row.get("step", {}).get("tool_use", {}).get("input_file") == str(captured)]
     assert len(resumed) == 1, resumed
     boundary = resumed[0]
+    if scheduled:
+        assert any(row.get("event") == "PostToolUse" and row.get("tool_name") == "CronCreate"
+                   for row in result.hooks)
+        resumed_request = next(row for row in result.requests if row["n"] == boundary)
+        assert "WAKE_DEFERRED_GRAPH" in json.dumps(resumed_request["messages"][-1])
     assert _merged(h) == [f"grind/{goal}" for goal in ("a", "b", "c", "d", "e")]
     for row in result.requests:
         if row["role"] in ("gate:e", "planner:a", "worker:a", "integrator:a", "lander:a:0",
