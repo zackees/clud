@@ -74,10 +74,26 @@ pub const PRE_TOOL_USE: &str = "PreToolUse";
 pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 
 /// Claude file-tool denies for the user settings file (#1668, DD-137): it
-/// holds the `safe_rm.extra_roots` override, which only the user may write.
-/// The Bash path is refused by the command-scan hook; `Edit(...)` rules
-/// cover every built-in file-editing tool.
-pub const SETTINGS_FILE_DENIES: &[&str] = &["Edit(~/.clud/settings.json)"];
+/// holds the `safe_rm.extra_roots` override. Raw edits remain refused;
+/// controlled settings proposals require a separate native user decision.
+pub const SETTINGS_FILE_DENIES: &[&str] = &[
+    "Edit(~/.clud/settings.json)",
+    "Write(~/.clud/settings.json)",
+];
+
+/// Settings consent remains required when session safety policy is disabled.
+#[must_use]
+pub fn settings_authority_fragment() -> Value {
+    json!({
+        "permissions": { "deny": SETTINGS_FILE_DENIES },
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": guarded_tools_matcher(),
+                "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
+            }]
+        }
+    })
+}
 
 #[must_use]
 pub fn deletion_safety_fragment() -> Value {
@@ -132,6 +148,9 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "Edit",
     "MultiEdit",
     "NotebookEdit",
+    "exec_command",
+    "shell_command",
+    "apply_patch",
 ];
 
 /// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude

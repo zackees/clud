@@ -871,6 +871,9 @@ Quick lookup, which file owns a given subcommand:
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
 - `clud settings [--list]` -> `settings_tui.rs`.
+- `clud settings set|roots` -> `settings_change.rs`, with native approval in
+  `settings_change/gui.rs` and operation tests in `settings_change/tests.rs`.
+  Authorization contract: [rm-tools.md](../../../docs/architecture/rm-tools.md#user-approval-for-settings-changes-1999).
 - `clud extern trust <name> [--list|--revoke]` -> `extern_cli.rs` (+
   `hook_trust.rs` for the store).
 

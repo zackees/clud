@@ -953,10 +953,14 @@ pub enum Command {
     /// `~/.clud/settings.json` (created with defaults on first use, same as
     /// every other `clud_settings` consumer). Space toggles, q quits and
     /// prompts to save if anything changed.
+    #[command(args_conflicts_with_subcommands = true)]
     Settings {
         /// Print current settings and exit; no TUI, no raw terminal mode.
         #[arg(long = "list")]
         list: bool,
+        /// Propose one settings change for approval in a native desktop window.
+        #[command(subcommand)]
+        change: Option<crate::clud_settings::authorized::Mutation>,
     },
     /// Internal (#1189): print clud's toast inside Claude Code's status line.
     /// Claude Code runs this as the injected `statusLine` command.
@@ -1723,6 +1727,7 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
     "--cmd",
     "--set-web-term",
     "--set-openrouter-zdr",
+    "--reason",
     // #1189: hidden `clud statusline` arguments.
     "--session-pid",
     "--chain-b64",

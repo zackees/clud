@@ -18,6 +18,9 @@ pub const CLUD_DIR_NAME: &str = ".clud";
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const LEGACY_SETTINGS_FILE_NAME: &str = "settings.toml";
 pub const LOCK_FILE_NAME: &str = "settings.lock";
+
+#[path = "settings_change.rs"]
+pub mod authorized;
 pub const DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE: &str =
     "plugins.\"github@openai-curated\".enabled=false";
 const CODEX_CONFIG_OVERRIDES_NOTE: &str =
@@ -1642,7 +1645,7 @@ fn write_settings(path: &Path, document: &Value) -> Result<(), SettingsError> {
             error: error.to_string(),
         })?;
     body.push('\n');
-    fs::write(path, body)?;
+    crate::fs_private::write_private_atomic(path, body.as_bytes())?;
     Ok(())
 }
 

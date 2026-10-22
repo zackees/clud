@@ -218,17 +218,68 @@ To add one, edit the file by hand (agents cannot):
   `safe_rm.extra_roots override <root>: <reason>` as the path's `reason` in
   the per-call rm log, and writes the reason into the GC delete audit
   (`gc-audit.jsonl`, site `rm-tool.trash-override` or `rm-tool.purge`).
-- **Agents cannot set it.** The command-scan hook
-  (`block_bad_cmd_rm_override`) refuses any shell command that names
-  `~/.clud/settings.json` (or the `extra_roots` key) unless every statement is
-  a plain read (`cat`, `jq`, `grep`, ...) with no output redirection beyond
-  `/dev/null`: redirections, `tee`, `sed -i`, `cp`/`mv`, `python -c`,
-  `clud settings ...` and the like are refused. It runs before the per-call
-  `CLUD_ALLOW_ALL_CMDS=1` opt-out, which the agent types itself. Claude also
-  gets a generated `Edit(~/.clud/settings.json)` deny, which covers its file
-  tools. `clud settings` (the TUI) does not expose the key. Limits: a path
-  computed at run time (decoded, or assembled from pieces) is not seen by the
-  text scan, and Codex has no file-tool deny.
+- **Agents cannot authorize it.** Raw settings writes remain refused. A
+  proposal can use the controlled command below, but only a specific user
+  decision in its native window permits the immutable operation to commit.
+  Root validation and the per-use deletion audit above still apply.
+
+### User approval for settings changes (#1999)
+
+From Claude's shell or Codex's execution tool, propose an ordinary change:
+
+```sh
+clud settings set /web_term/enabled false --reason "Disable the web terminal"
+```
+
+The native desktop window shows the canonical file, reason, and changed
+values. Unchanged settings are omitted from the preview. Ordinary changes
+must preserve `safe_rm.extra_roots` exactly, including when replacing its
+parent object. Root additions and removals require a separate proposal:
+
+```sh
+clud settings roots '[{"path":"/srv/bench-out","reason":"Owned benchmark output"}]' \
+  --reason "Allow deletion inside the benchmark directory"
+clud settings roots '[]' --reason "Revoke the additional deletion roots"
+```
+
+Review every path and reason before approving. Cancel, Escape, or closing the
+window leaves settings unchanged. Approval expires after ten minutes and
+authorizes exactly one in-process operation, bound to its target and captured
+document. A changed file, changed canonical target, expired review, or changed
+root validation refuses the operation and requires a new proposal. No approval
+token is exported: another process/session, a later script invocation, forged
+hook metadata, repository settings, and environment variables cannot reuse it.
+The controlled command replaces arbitrary script or file-edit approval;
+scripts may invoke it but receive no reusable authority. `--dry-run` refuses
+mutation before opening a window.
+
+The same route serves Claude and Codex. Native Edit/Write/patch proposals
+receive guidance to use it; Claude also retains generated Edit and Write
+denies for the user settings file. Shell guards inspect parsed redirection
+destinations and settings operands, resolving relative paths and parent
+aliases. Read-only issue searches and scratch heredoc data may mention the
+protected names. Unknown operations mentioning protected settings and
+unresolved write destinations fail closed. The guard runs before `--unsafe`
+and the agent-settable `CLUD_ALLOW_ALL_CMDS` opt-out.
+
+A missing or unusable desktop fails with an actionable message (exit 1);
+cancel returns 3, and invalid proposals return 2. There is no stdin or headless
+automatic approval mode. On a remote client without a trusted local desktop,
+the user must make the change directly or run the proposal on their desktop.
+Bare `clud settings` retains its existing TUI.
+
+Approved updates preserve unrelated document values and atomically replace
+the private file under the existing settings lock. A bounded private
+`~/.clud/settings-audit.jsonl` records target, changed key names, process,
+time and outcome, without values, reasons, or unrelated secrets. This is an
+operational record, not tamper-proof authority. Values intentionally changed
+by the proposal are visible in its window and process arguments; do not use
+this interface for credential entry.
+
+Hooks are policy checks, not an operating-system sandbox: arbitrary script
+internals and paths hidden from tool payloads cannot be inferred. Installed
+hook delivery is required. Existing root validation, containment, ownership,
+and deletion auditing remain independent enforcement at each `safe-rm` use.
 
 Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
 limits integrators to their checkout and workers/reviewers to their task

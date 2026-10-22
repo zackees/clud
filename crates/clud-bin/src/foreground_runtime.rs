@@ -1626,12 +1626,14 @@ fn compose_launch_settings_document_with(
     mut settings: serde_json::Value,
     worktree_hooks: bool,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
-    if !plan.unsafe_mode {
-        let safety = crate::clud_hooks_compile::deletion_safety_fragment();
-        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
-            .map_err(BridgeError::Settings)?;
-        merge_deletion_denies(&mut settings, &safety)?;
-    }
+    let safety = if plan.unsafe_mode {
+        crate::clud_hooks_compile::settings_authority_fragment()
+    } else {
+        crate::clud_hooks_compile::deletion_safety_fragment()
+    };
+    crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
+        .map_err(BridgeError::Settings)?;
+    merge_deletion_denies(&mut settings, &safety)?;
     // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
     if worktree_hooks {
         let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();
@@ -4203,19 +4205,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unsafe_claude_settings_keep_user_hooks_without_clud_deletion_denies() {
+    fn unsafe_claude_settings_keep_user_hooks_and_settings_authority() {
         let mut launch = plan(ModelProvider::Claude, Backend::Claude);
         launch.unsafe_mode = true;
         let user_hook = serde_json::json!({
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user-check"}]}]}
         });
         let (settings, _) = compose_launch_settings_document(&launch, user_hook).unwrap();
-        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(
             settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             "user-check"
         );
-        assert!(settings.pointer("/permissions/deny").is_none());
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            crate::clud_hooks_compile::DISPATCHER_BINARY
+        );
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(crate::clud_hooks_compile::SETTINGS_FILE_DENIES)
+        );
     }
 
     #[test]

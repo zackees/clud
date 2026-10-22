@@ -5641,6 +5641,13 @@ Policy text: [rm-tools.md](architecture/rm-tools.md#creation-ledger).
 
 ## DD-137: the safe-rm root override is user-level only, and agents cannot write the settings file
 
+**Amended by #1999 / DD-183:** raw writes remain denied, while an immutable
+controlled proposal may commit after a specific native user approval. The
+current authorization and tool-delivery contract is owned by
+[rm-tools.md](architecture/rm-tools.md#user-approval-for-settings-changes-1999).
+The original decision below records why agent-settable bypasses are excluded;
+its original text-only scanner and Codex coverage limitations are historical.
+
 **Context:** DD-135 slice 3 (#1668): a human-set, reasoned extension of the
 safe-rm roots. clud reads settings from the user's `~/.clud/settings.json`
 and, for some keys, a repo's `.clud/settings.json`. The override must be
@@ -6386,6 +6393,11 @@ refuses to proceed while the daemon is down, while ordinary launches and
 commands without a mutation claim continue.
 
 ## DD-156: `--unsafe` is an explicit session policy, separate from backend permissions
+
+**Amended by #1999 / DD-183:** this switch still disables session safety
+rules, but cannot establish settings-change authority. The settings-only
+dispatcher and file-tool denies remain installed in unsafe launches. See the
+current scope in [unsafe-mode.md](architecture/unsafe-mode.md).
 
 **Context:** clud already launches agents with the backend's permission bypass
 by default, but its own command scanner, deletion rewrite, `rm` catastrophe
@@ -7137,3 +7149,25 @@ to direct and unified routing, and leaves other providers alone. Disabling
 is explicit and persistent. Invalid saved preferences refuse OpenRouter
 launches so a parse failure cannot silently weaken an intended requirement.
 The setting controls clud requests rather than OpenRouter account settings.
+
+## DD-183: Settings approval belongs to one immutable in-process operation
+
+**Context.** The settings guard also rejected harmless issue searches and
+scratch drafts, and offered no trustworthy route for a user-requested change
+(#1999). Agent-authored environment flags and reusable approval files cannot
+establish user consent.
+
+**Decision.** Use the existing native desktop window infrastructure to review
+one prepared settings mutation. The operation captures its canonical target,
+original bytes, changed values and deadline before requesting a decision,
+then consumes that decision under the settings lock with fresh validation.
+Keep ordinary updates separate from deletion-root replacement. Make the shared
+private writer atomic, and retain raw file-tool and shell-write protection.
+Classify parsed operations and destinations rather than treating protected
+names in harmless prose as writes.
+
+**Consequences.** No serialized token or environment approval mode exists.
+Clients without a usable desktop fail explicitly. The mechanism does not
+claim isolation from arbitrary malicious local processes or unseen script
+internals. Bounds, refusal behavior, auditing and supported tool routes are
+documented in [rm-tools.md](architecture/rm-tools.md#user-approval-for-settings-changes-1999).

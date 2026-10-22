@@ -298,7 +298,7 @@ pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> HookInvo
     }
 }
 
-/// Set to `1` to bypass every command-hook check for the session.
+/// Set to `1` to bypass command policy, never settings-change authority.
 pub const ALLOW_ALL_CMDS_ENV: &str = "CLUD_ALLOW_ALL_CMDS";
 
 fn allow_all_cmds(value: Option<&str>) -> bool {
@@ -373,24 +373,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 0;
     }
 
-    // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
-    // command check below is skipped. It exists because a stale rm shim
+    // Owner command-policy kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`.
+    // It exists because a stale rm shim
     // (e.g. after rebuilding `target/debug/clud`) makes the identity
     // check deny *every* shell call, which leaves the session unable to run
     // the one command that would repair it.
-    if allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref()) {
-        append_log(&format!(
-            "{ALLOW_ALL_CMDS_ENV}=1: all command checks bypassed"
-        ));
-        return 0;
-    }
+    // Settings authority is checked after payload decoding, before this
+    // switch can bypass command policy. It never authorizes a settings write.
+    let owner_bypass = allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref());
 
     // Resolved before anything else can fail, because the gate's entire value
     // is that a hook which cannot read or parse its input still *denies*. Each
     // early `return 0` below is an allow-by-default that the gate must
     // override — see `block_bad_cmd_gate`'s module docs for why this module's
     // usual fail-open posture is inverted here.
-    let gate_enforced = !crate::runner::unsafe_mode_enabled()
+    let gate_enforced = !owner_bypass
+        && !crate::runner::unsafe_mode_enabled()
         && event == PRE_TOOL_USE_EVENT
         && block_bad_cmd_gate::gate_mode() == block_bad_cmd_gate::GateMode::Enforce;
 
@@ -460,6 +458,24 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.command
     ));
 
+    // Settings authority is an exact native user decision, never a session
+    // bypass flag or agent-supplied claim. This protects file tools too.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = block_bad_cmd_rm_override::reason_for_payload(&payload) {
+            append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud safe-rm] {reason}");
+            return 2;
+        }
+    }
+
+    if owner_bypass {
+        append_log(&format!(
+            "{ALLOW_ALL_CMDS_ENV}=1: command policy bypassed, settings authority retained"
+        ));
+        return 0;
+    }
+
     if crate::runner::unsafe_mode_enabled() {
         if serves_declared_hooks(invocation) {
             if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
@@ -471,18 +487,6 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
         append_log("unsafe mode: clud command policy bypassed");
         return 0;
-    }
-
-    // #1668: the safe-rm root override is the user's alone. Checked before
-    // the per-call opt-out below, which the agent types itself and so must
-    // not be a way to widen its own deletion roots.
-    if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
-        if let Some(reason) = block_bad_cmd_rm_override::reason(&payload.command) {
-            append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
-            println!("{}", deny_json(&reason));
-            eprintln!("[clud safe-rm] {reason}");
-            return 2;
-        }
     }
 
     // The same switch, opted into per call: a command that carries
@@ -1145,7 +1149,9 @@ fn refuse_unverifiable_payload(
     raw: &str,
     what: &str,
 ) -> Option<i32> {
-    if crate::runner::unsafe_mode_enabled() {
+    if allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref())
+        || crate::runner::unsafe_mode_enabled()
+    {
         return None;
     }
     if event != PRE_TOOL_USE_EVENT {
