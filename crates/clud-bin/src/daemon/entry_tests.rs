@@ -258,6 +258,7 @@ fn transcript_forces_centralized_daemon() {
         coauthor: None,
         dry_run: false,
         do_meta: false,
+        do_rendered_prompt: None,
         detach: false,
         detachable: false,
         session_name: None,
