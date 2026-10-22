@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from ci.env import scrub_clud_session_env
 from tests import test_installer_native_entry as native
 
 SHELL_CASES = [
@@ -18,7 +19,7 @@ SHELL_CASES = [
 def test_required_acceptance_fails_when_a_supported_shell_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario
 ) -> None:
-    monkeypatch.setenv("CLUD_REQUIRE_INSTALLER_SHELLS", "1")
+    monkeypatch.setenv("CLUD_TEST_REQUIRE_INSTALLER_SHELLS", "1")
     monkeypatch.setattr(native.shutil, "which", lambda _name: None)
     with pytest.raises(pytest.fail.Exception, match="required installer acceptance shell"):
         try:
@@ -31,7 +32,13 @@ def test_required_acceptance_fails_when_a_supported_shell_is_missing(
 def test_optional_developer_acceptance_can_skip_an_unavailable_shell(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario
 ) -> None:
-    monkeypatch.delenv("CLUD_REQUIRE_INSTALLER_SHELLS", raising=False)
+    monkeypatch.delenv("CLUD_TEST_REQUIRE_INSTALLER_SHELLS", raising=False)
     monkeypatch.setattr(native.shutil, "which", lambda _name: None)
     with pytest.raises(pytest.skip.Exception, match="unavailable"):
         scenario(tmp_path)
+
+
+def test_required_shell_policy_survives_pytest_session_environment_scrubbing() -> None:
+    env = {"CLUD_TEST_REQUIRE_INSTALLER_SHELLS": "1"}
+    scrub_clud_session_env(env)
+    assert env == {"CLUD_TEST_REQUIRE_INSTALLER_SHELLS": "1"}

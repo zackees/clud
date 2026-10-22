@@ -99,7 +99,7 @@ jobs:
     env:
       CLUD_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       CLUD_CANDIDATE_TARGET: ${{ matrix.target }}
-      CLUD_REQUIRE_INSTALLER_SHELLS: '1'
+      CLUD_TEST_REQUIRE_INSTALLER_SHELLS: '1'
     steps:
       - uses: actions/checkout@v4
         with:

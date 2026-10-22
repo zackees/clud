@@ -34,7 +34,7 @@ def required_shell(name: str) -> str:
     shell = shutil.which(name)
     if shell is not None:
         return shell
-    if os.environ.get("CLUD_REQUIRE_INSTALLER_SHELLS") == "1":
+    if os.environ.get("CLUD_TEST_REQUIRE_INSTALLER_SHELLS") == "1":
         pytest.fail(f"required installer acceptance shell is unavailable: {name}")
     pytest.skip(f"{name} is unavailable")
 
