@@ -229,6 +229,22 @@ mod tests {
     }
 
     #[test]
+    fn launch_receipt_does_not_race_native_session_directory_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        std::fs::write(&path, record(json!("2.1.306"), "session")).unwrap();
+        let mut payload = payload(&path);
+        payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
+        assert!(!path.with_extension("").exists());
+        let response = json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
+        observe("PostToolUse", &response, &payload);
+        payload.tool_input = Some(json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
+            "args": {"orchestration": {}}}));
+        assert!(reason_for(&payload, None).is_none());
+        assert!(path.with_extension("").join("grind-resume-wf-new.json").is_file());
+    }
+
+    #[test]
     fn non_graph_resumes_are_unchanged_and_facts_cannot_hide_a_graph() {
         let root = tempfile::tempdir().unwrap();
         let mut payload = payload(&root.path().join("session.jsonl"));
