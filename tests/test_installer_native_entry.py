@@ -226,6 +226,34 @@ def test_install_only_preserves_profiles_and_reports_activation(tmp_path: Path) 
     assert b"verified fresh name-based lookup" not in result.stderr
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows User registry")
+def test_install_only_preserves_windows_user_path(installer_target) -> None:
+    import winreg
+
+    env, destination = installer_target
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            before = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            before = None
+        result = run_process(
+            [str(clud_binary()), "--installer", "--install-current", "--yes", "--no-modify-path"],
+            env=env, capture_output=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert destination.is_file()
+        try:
+            after = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            after = None
+        assert after == before
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    assert b"activation required" in result.stderr.lower()
+    assert b"verified fresh name-based lookup" not in result.stderr
+
+
 def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:
     env, destination = installer_target
     env["HTTPS_PROXY"] = "http://127.0.0.1:1"
