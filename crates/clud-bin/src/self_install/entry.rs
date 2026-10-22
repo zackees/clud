@@ -340,8 +340,7 @@ fn run_menu_choice(choice: MenuChoice, options: InstallOptions) -> Outcome {
         MenuChoice::Current => run_selected(InstallIntent::CurrentExecutable, options),
         MenuChoice::Releases => run_releases(options),
         MenuChoice::Browser => {
-            let code =
-                open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()));
+            let code = open_download_page();
             if code == 0 {
                 Outcome::browser_opened()
             } else {
@@ -386,6 +385,19 @@ fn run_releases(options: InstallOptions) -> Outcome {
             Outcome::failed(1, "release_picker_failed")
         }
     }
+}
+
+// Candidate-only injection exercises the real menu and URL/failure reporting
+// without opening a browser on the acceptance runner. Release binaries do not
+// recognize the variable or replace their OS browser opener.
+fn open_download_page() -> i32 {
+    #[cfg(feature = "installer-ci-fixture")]
+    if let Some(log) = std::env::var_os("CLUD_INSTALLER_CI_BROWSER_LOG") {
+        return open_page_with(|url| {
+            std::fs::write(log, url).map_err(|error| error.to_string())
+        });
+    }
+    open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()))
 }
 
 fn open_page_with(open: impl FnOnce(&str) -> Result<(), String>) -> i32 {
