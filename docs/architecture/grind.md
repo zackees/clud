@@ -174,11 +174,12 @@ outcomes, including their reported PR URL and optional release artifacts
 publication gate. Failed upstream goals block their dependents; independent
 goals can continue.
 
-Publication checks, cross-stage resumption and separately rooted repository
-sessions remain under development in #1338 and #1422. The current graph path
-returns an explicit blocked result for missing-stage dependencies, unavailable
-publication evidence or a sister repository needing its own session; it must
-not treat those conditions as successful merges or execute in the wrong root.
+Cross-stage resumption and separately rooted repository sessions remain under
+development in #1338 and #1422. The current graph path returns an explicit
+blocked result for missing-stage dependencies or a sister repository needing
+its own session. Unavailable publication evidence defers that branch, as
+described below; neither condition counts as a successful merge or authorizes
+execution in the wrong root.
 
 The internal `grind-gate` role defaults to Haiku and denies shell execution without a binding. Its hook can
 bind an exact read-only native Bash check from run facts' approved `orchestration` graph to
