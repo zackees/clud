@@ -18,6 +18,9 @@ WAITER = ("clud tool run github/pr_merge_watch.py -- 123 --repo zackees/clud "
 
 def scan(tmp_path: Path, tool: str, key: str, command: str) -> process.CompletedProcess[str]:
     binary = os.environ["CLUD_TEST_BINARY"]
+    settings = tmp_path / ".clud" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"git": {"pr_wait_fail_fast": True}}), encoding="utf-8")
     env = {name: value for name, value in os.environ.items() if not name.startswith("CLUD_")}
     env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path), CLUD_HOOK_HOME=str(tmp_path),
                CLUD_SKIP_RM_IDENTITY="1", CLUD_NO_UNLOCK="1", CLUD_SERVER_SETTINGS="0")

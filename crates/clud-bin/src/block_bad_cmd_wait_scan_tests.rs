@@ -319,7 +319,7 @@ fn codex_watch_payload_keeps_command_and_recovery_capabilities() {
         assert_eq!(view.command, "gh run watch 123 --exit-status");
         assert!(block_bad_cmd_gate::gates_tool(tool));
     }
-    let reason = evaluate_command("gh run watch 123 --exit-status", None, false, &[])
+    let reason = evaluate_command("while gh pr checks 123; do sleep 5; done", None, false, &[])
         .reason.expect("native watch refused");
     assert!(reason.contains("write_stdin"), "{reason}");
     assert!(reason.contains("run_in_background"), "{reason}");
