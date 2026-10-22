@@ -176,8 +176,9 @@ def test_successful_native_publication_check_opens_dependent_goal(
 
 
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
+@pytest.mark.parametrize("hard_failure_first", [None, False, True])
 def test_unmet_publication_gate_defers_transitive_dependents_only(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, mode: str,
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, mode: str, hard_failure_first: bool | None,
 ) -> None:
     h = harness
     graph = {
@@ -192,8 +193,6 @@ def test_unmet_publication_gate_defers_transitive_dependents_only(
             {"id": "d", "repo": "o/r", "main": "main", "blockers": []},
         ], "proposed_goals": [], "risks": [],
     }
-    h.write_run_facts({"phase": "execute", "orchestration": graph})
-    install_outcome_guard(h, monkeypatch)
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c"),
              *_goal_roles(h, "d"), {
                  "name": "gate:b", "match": "You are the /grind gate checker", "steps": [
@@ -203,8 +202,23 @@ def test_unmet_publication_gate_defers_transitive_dependents_only(
                      })),
                  ],
              }]
+    goals = _goals("a", "b", "c", "d")
+    if hard_failure_first is not None:
+        graph["goals"].append({"id": "failed", "repo": "o/r", "main": "main", "blockers": []})
+        hard = {"goal": "failed", "when": "merged"}
+        blockers = graph["goals"][2]["blockers"]
+        blockers.insert(0 if hard_failure_first else len(blockers), hard)
+        failed = _goal_roles(h, "failed")
+        failed[0]["steps"] = [_structured({
+            "checkout": str(h.repo), "branch": "grind/failed", "depends_on": [],
+            "verify": "true", "tasks": [],
+        })]
+        roles.extend(failed)
+        goals.extend(_goals("failed"))
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    install_outcome_guard(h, monkeypatch)
     result = h.run("Defer only the transitive branch behind the unmet publication gate.",
-                   _script(h, mode, _goals("a", "b", "c", "d"), roles, orchestration=graph),
+                   _script(h, mode, goals, roles, orchestration=graph),
                    timeout=300)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
@@ -215,4 +229,7 @@ def test_unmet_publication_gate_defers_transitive_dependents_only(
     told = _told(result)
     for goal in ("b", "c"):
         pattern = rf'goal\\*"\s*:\s*\\*"{goal}\\*".{{0,200}}?status\\*"\s*:\s*\\*"deferred'
-        assert re.search(pattern, told, re.DOTALL), told[-4000:]
+        expected_deferred = goal == "b" or hard_failure_first is None
+        assert bool(re.search(pattern, told, re.DOTALL)) == expected_deferred, told[-4000:]
+    if hard_failure_first is not None:
+        assert "dependency failed did not land" in told, told[-4000:]
