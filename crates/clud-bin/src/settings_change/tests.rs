@@ -209,7 +209,10 @@ fn changed_script_input_cannot_expand_or_replay_an_approved_operation() {
     let (directory, home, mut expected) = world();
     let script_input = directory.path().join("proposal.json");
     fs::write(&script_input, "false").unwrap();
-    let mutation = setting("/web_term/enabled", &fs::read_to_string(&script_input).unwrap());
+    let mutation = setting(
+        "/web_term/enabled",
+        &fs::read_to_string(&script_input).unwrap(),
+    );
     execute(&home, &mutation, |_| {
         // Script inputs can change while the user reviews; the prepared
         // operation must retain exactly the original value and key scope.
