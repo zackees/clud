@@ -422,7 +422,12 @@ jobs:
   test-linux-x64-integration:
     name: Test linux-x64 (integration)
     needs: [static, build-linux-x64]
-    if: needs.static.outputs.mode != 'minimal' && needs.static.outputs.mode != 'windows'
+    # Survive cache-maint's intentional PR skip, as the unit suite does.
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.static.result == 'success'
+          && needs.build-linux-x64.result == 'success'
+          && (needs.static.outputs.mode == 'extended' || needs.static.outputs.mode == 'full') }}
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -435,7 +440,11 @@ jobs:
   test-linux-x64-harness:
     name: Test linux-x64 (harness)
     needs: [static, build-linux-x64]
-    if: needs.static.outputs.mode == 'full'
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.static.result == 'success'
+          && needs.build-linux-x64.result == 'success'
+          && needs.static.outputs.mode == 'full' }}
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}

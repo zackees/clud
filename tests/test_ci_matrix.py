@@ -158,7 +158,7 @@ def test_harness_suite_runs_in_full_mode_and_is_gated():
     text = CI_YML.read_text(encoding="utf-8")
     after = text.split("\n  test-linux-x64-harness:\n", 1)[1]
     block = after.split("\n  build-windows-x64:\n", 1)[0]
-    assert "if: needs.static.outputs.mode == 'full'" in block
+    assert "needs.static.outputs.mode == 'full'" in block
     assert "suite: harness" in block
     gate = text.split("\n  ci-ok:\n", 1)[1]
     assert "- test-linux-x64-harness" in gate
@@ -189,7 +189,8 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     )[0]
     assert "suite: unit" in unit
     assert "suite: integration" in integration
-    assert "if: needs.static.outputs.mode != 'minimal'" in integration
+    assert "needs.static.outputs.mode == 'extended'" in integration
+    assert "needs.static.outputs.mode == 'full'" in integration
     assert "- test-linux-x64-unit" in gate
     assert "- test-linux-x64-integration" in gate
 
