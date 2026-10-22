@@ -630,6 +630,8 @@ class Harness:
             child = None
             try:
                 child = PseudoTerminalProcess(argv, cwd=self.repo, env=env, cols=160, rows=40)
+                child.expect("Launch setup scope", timeout=30)
+                child.write("\r")  # The default highlighted choice is session-only.
                 child.expect(finished, timeout=timeout)
                 child.write("/exit\r")
                 code = child.wait(timeout=15)
