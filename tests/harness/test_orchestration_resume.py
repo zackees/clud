@@ -1,0 +1,112 @@
+"""Resume the real native Workflow cache without redoing completed branches."""
+from __future__ import annotations
+
+import json
+import shlex
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.harness.harness import Harness
+from tests.harness.test_grind import (
+    _after,
+    _bash,
+    _goal_roles,
+    _goals,
+    _merged,
+    _no_notes,
+    _script,
+    _structured,
+)
+from tests.harness.test_grind_gate_binding import install_outcome_guard
+
+
+def capture_resume_input(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
+    install_outcome_guard(h, monkeypatch)
+    epochs = h.logs / "next-gate-epochs.json"
+    epochs.write_text(json.dumps({"b": 1, "c": 1}))
+    output = h.logs / "native-resume-input.json"
+    original = h.settings
+    recorder = Path(__file__).with_name("capture_workflow_resume.py")
+    command = shlex.join([sys.executable, str(recorder), str(epochs), str(output)])
+
+    def settings(**kwargs: Any) -> Path:
+        path = original(**kwargs)
+        data = json.loads(path.read_text())
+        data["hooks"]["PostToolUse"].append({"matcher": "Workflow", "hooks": [{
+            "type": "command", "command": command,
+        }]})
+        path.write_text(json.dumps(data))
+        return path
+
+    monkeypatch.setattr(h, "settings", settings)
+    return output
+
+
+def gate_role(name: str, goal: str, tag: str, ready: bool, epoch: int | None = None) -> dict:
+    role = {"name": name, "match": "You are the /grind gate checker", "match_prompt": [
+        f"Goal {goal}:",
+    ], "steps": [
+        _bash(f"gh release view {tag} --repo o/r"),
+        _after({"is_error": not ready}, _structured({"ready": ready, "evidence": tag})),
+    ]}
+    if epoch is not None:
+        role["match_prompt"].append(f"Observation: {epoch}/1.")
+    return role
+
+
+def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeypatch) -> None:
+    h = harness
+    graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
+        {"id": "a", "repo": "o/r", "main": "main", "blockers": []},
+        {"id": "b", "repo": "o/r", "main": "main", "blockers": [
+            {"goal": "a", "when": "released", "check": "gh release view v-pending --repo o/r"},
+        ]},
+        {"id": "c", "repo": "o/r", "main": "main", "blockers": [{"goal": "b", "when": "merged"}]},
+        {"id": "d", "repo": "o/r", "main": "main", "blockers": []},
+        {"id": "e", "repo": "o/r", "main": "main", "blockers": [
+            {"goal": "d", "when": "released", "check": "gh release view v-ready --repo o/r"},
+        ]},
+    ], "proposed_goals": [], "risks": []}
+    state = h.read_gh_state()
+    state["releases"] = {"v-ready": {"publishedAt": "2026-10-22T00:00:00Z"}}
+    state["release_after_views"] = {"v-pending": {
+        "after": 1, "release": {"publishedAt": "2026-10-22T00:00:00Z"},
+    }}
+    h.write_gh_state(state)
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    captured = capture_resume_input(h, monkeypatch)
+    roles = [role for goal in ("a", "b", "c", "d", "e") for role in _goal_roles(h, goal)]
+    roles.extend([
+        gate_role("gate:b:resume", "b", "v-pending", True, 1),
+        gate_role("gate:b:initial", "b", "v-pending", False),
+        gate_role("gate:e", "e", "v-ready", True),
+    ])
+    script = _script(h, "parallel", _goals("a", "b", "c", "d", "e"), roles,
+                     orchestration=graph, gateAttempts=1)
+    resume = {"tool_use": {"name": "Workflow", "input_file": str(captured)}}
+    script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>", "steps": [
+        {"text": "unused"}, {"text": "unused"}, resume,
+        _after({"is_error": False}, {"text": "NATIVE_RESUME_STARTED"}),
+    ]})
+    result = h.run("Resume only deferred publication work using the native Workflow cache.",
+                   script, timeout=300)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    reference = json.loads(captured.read_text())
+    assert reference["resumeFromRunId"].startswith("wf_")
+    resumed = [row["n"] for row in result.requests
+               if row.get("step", {}).get("tool_use", {}).get("input_file") == str(captured)]
+    assert len(resumed) == 1, resumed
+    boundary = resumed[0]
+    assert _merged(h) == [f"grind/{goal}" for goal in ("a", "b", "c", "d", "e")]
+    for row in result.requests:
+        if row["role"] in ("gate:e", "planner:a", "worker:a", "integrator:a", "lander:a:0",
+                           "planner:d", "worker:d", "integrator:d", "lander:d:0",
+                           "planner:e", "worker:e", "integrator:e", "lander:e:0"):
+            assert row["n"] < boundary, row["role"]
+    assert any(row["role"] == "gate:b:resume" and row["n"] > boundary for row in result.requests)
+    assert any(row["role"] == "planner:b" and row["n"] > boundary for row in result.requests)
+    assert any(row["role"] == "planner:c" and row["n"] > boundary for row in result.requests)
