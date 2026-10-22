@@ -561,7 +561,11 @@ impl ForegroundRuntime {
         if let Some(entry) = hook_roots_env_value(plan) {
             env.push(entry);
         }
-        set_env(&mut env, crate::loop_plan_mode::ALLOW_ENV, if plan.allow_plan_mode { "1" } else { "0" });
+        set_env(
+            &mut env,
+            crate::loop_plan_mode::ALLOW_ENV,
+            if plan.allow_plan_mode { "1" } else { "0" },
+        );
         apply_route_context(&mut env, plan);
         Ok(Self {
             env,
@@ -4215,6 +4219,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn plan_mode_opt_out_is_launch_scoped_even_with_an_inherited_override() {
+        for allowed in [false, true] {
+            let mut launch = plan(ModelProvider::Claude, Backend::Claude);
+            launch.allow_plan_mode = allowed;
+            let inherited = vec![(
+                crate::loop_plan_mode::ALLOW_ENV.to_string(),
+                if allowed { "0" } else { "1" }.to_string(),
+            )];
+            let runtime = ForegroundRuntime::start(&launch, inherited).unwrap();
+            assert_eq!(
+                lookup(runtime.env(), crate::loop_plan_mode::ALLOW_ENV),
+                Some(if allowed { "1" } else { "0" })
+            );
+        }
+    }
+
+    #[test]
     fn a_repo_that_declares_nothing_gets_deletion_guard_and_history_hooks() {
         let repo = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
@@ -4237,7 +4258,11 @@ pub(crate) mod tests {
         expected.insert("PreToolUse".to_string());
         // #1984: the user's prompt may allow worktrees for the session.
         expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
-        expected.extend(["PostToolUse".to_string(), "Stop".to_string(), "SessionEnd".to_string()]);
+        expected.extend([
+            "PostToolUse".to_string(),
+            "Stop".to_string(),
+            "SessionEnd".to_string(),
+        ]);
         assert_eq!(
             hooks
                 .keys()

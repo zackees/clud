@@ -48,10 +48,12 @@ def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> 
         script,
         model=MODEL,
         extra_env={"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"},
+        record_scheduler=True,
     )
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
     failed = [request for request in result.requests if "MOCK_EXPECT_FAILED" in str(request)]
-    assert not failed, failed
+    scheduling = [hook for hook in result.hooks if hook.get("event") == "PostToolUse"]
+    assert not failed, str(scheduling)[-4000:]
     assert any(
         block.get("is_error") and "loop-plan-mode" in tool_result_text(block)
         for block in tool_results(result)

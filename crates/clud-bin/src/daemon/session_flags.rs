@@ -150,9 +150,13 @@ pub fn session_loop_event(
     session_id: &str,
     event: crate::loop_plan_mode::Event,
 ) -> io::Result<()> {
-    match session_flag_rpc(state_dir, &SessionFlagRequest::LoopPlanMode {
-        session_id: session_id.to_string(), event,
-    })? {
+    match session_flag_rpc(
+        state_dir,
+        &SessionFlagRequest::LoopPlanMode {
+            session_id: session_id.to_string(),
+            event,
+        },
+    )? {
         SessionFlagReply::Set => Ok(()),
         SessionFlagReply::Get { .. } => Err(unexpected_reply()),
     }
@@ -206,14 +210,20 @@ mod tests {
     #[test]
     fn concurrent_cron_creates_preserve_every_job() {
         let registry = SessionFlagRegistry::default();
-        let workers: Vec<_> = (0..20).map(|index| {
-            let registry = registry.clone();
-            std::thread::spawn(move || registry.respond(SessionFlagRequest::LoopPlanMode {
-                session_id: "loop".to_string(),
-                event: crate::loop_plan_mode::Event::Created(format!("job-{index}")),
-            }))
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+        let workers: Vec<_> = (0..20)
+            .map(|index| {
+                let registry = registry.clone();
+                std::thread::spawn(move || {
+                    registry.respond(SessionFlagRequest::LoopPlanMode {
+                        session_id: "loop".to_string(),
+                        event: crate::loop_plan_mode::Event::Created(format!("job-{index}")),
+                    })
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         let state = get(&registry, "loop", crate::loop_plan_mode::FLAG_KEY).unwrap();
         assert_eq!(state["jobs"].as_array().unwrap().len(), 20);
         assert!(get(&registry, "other", crate::loop_plan_mode::FLAG_KEY).is_none());

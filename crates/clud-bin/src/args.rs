@@ -181,7 +181,8 @@ pub struct Args {
     #[arg(long = "unattended")]
     pub unattended: bool,
 
-    /// Restore the model's ability to enter plan mode on the Codex-provider /
+    /// Allow automatic plan mode during native /loop or scheduled work.
+    /// Also restore plan mode on the Codex-provider /
     /// Claude-harness bridge, where clud otherwise disallows `EnterPlanMode`
     /// unconditionally.
     ///

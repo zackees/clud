@@ -300,7 +300,10 @@ class Harness:
         env.update(extra or {})
         return env
 
-    def settings(self, *, cmd_scan: bool = True, answers: dict[str, Any] | None = None) -> Path:
+    def settings(
+        self, *, cmd_scan: bool = True, answers: dict[str, Any] | None = None,
+        record_scheduler: bool = False,
+    ) -> Path:
         """A `--settings` file: the recorder, then clud's real command guard.
 
         Project `.claude/settings.json` hooks do not fire under an isolated
@@ -333,6 +336,11 @@ class Harness:
                 "UserPromptSubmit": [{"hooks": [{"type": "command", "command": record}]}],
             }
         }
+        if record_scheduler:
+            settings["hooks"]["PostToolUse"] = [{
+                "matcher": "CronCreate|CronDelete|ScheduleWakeup",
+                "hooks": [{"type": "command", "command": record}],
+            }]
         path = self.root / "settings.json"
         path.write_text(json.dumps(settings, indent=1), encoding="utf-8")
         return path
@@ -527,6 +535,7 @@ class Harness:
         *,
         provider: str = "--openrouter",
         model: str | None = None,
+        record_scheduler: bool = False,
         extra_args: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
@@ -560,7 +569,7 @@ class Harness:
                 "stream-json",
                 "--verbose",
                 "--settings",
-                str(self.settings(cmd_scan=False)),
+                str(self.settings(cmd_scan=False, record_scheduler=record_scheduler)),
                 "--session-id",
                 self.session_id,
                 *(extra_args or []),

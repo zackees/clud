@@ -48,6 +48,40 @@ contract.
 Tier A runs first. A project guard runs last so its message is not buried under
 one clud would have produced anyway.
 
+## Loop-scoped plan mode
+
+Native `/loop` can start after launch, so `--unattended` argv cannot cover
+every scheduled session (#1844, DD-181). The compiled Claude settings route
+`EnterPlanMode` to PreToolUse and successful `CronCreate`, `CronDelete` and
+`ScheduleWakeup` calls to PostToolUse. A literal `/loop` prompt also marks
+the session before its first scheduled call. Mentioning `/loop` in prose
+does not mark it. The rule applies to every provider on the Claude harness,
+including OpenRouter; ordinary interactive sessions keep plan mode.
+
+Scheduling events update one daemon-owned session flag atomically. Each cron
+ID is tracked independently; deleting one of several jobs keeps the guard
+active. A successful dynamic-loop stop clears its marker. Native Stop
+`session_crons` inventories reconcile expired or automatically removed jobs
+when that field is supplied, and SessionEnd releases the marker. Failed
+tool calls never establish scheduling activity. State is session-scoped and
+in memory: daemon restarts forget it, as with other session flags. Older
+harnesses without inventory fields retain activity until an explicit
+delete/stop or session end.
+
+`--allow-plan-mode` disables this runtime guard and survives serialized
+daemon plans. A nested launch sets its own choice instead of inheriting the
+parent's opt-out. The existing `--unattended` launch deny remains effective.
+The hook leaves `AskUserQuestion` policy unchanged.
+
+A hook cannot force Claude out of a permission mode the user already
+selected. If `/loop` begins in manual plan mode, prompt context asks for
+`ExitPlanMode`, with Shift+Tab as the user-controlled fallback. This is
+recovery guidance, not a promise that plan approval is bypassed.
+
+The native hook contracts and scheduler lifecycle are documented in the
+[Claude hooks reference](https://code.claude.com/docs/en/hooks) and
+[scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks).
+
 ## Declaring hooks
 
 `<repo>/.clud/hooks.json`:

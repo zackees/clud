@@ -7100,3 +7100,23 @@ capability refusal. Keep skill invocation metadata unchanged.
 do contract. The router remains in its canonical skill file, keeping launch
 argv bounded. Session-only launches do not install missing assets; a missing
 router stops the handoff. Details: [skill-system.md](architecture/skill-system.md#explicit-do-launches).
+
+## DD-181: automatic plan mode is blocked while native loops are active
+
+**Context.** Native `/loop` and cron tasks can begin inside an interactive
+session. Launch-time unattended detection misses that transition, allowing
+model-initiated plan mode to park unattended work on human approval (#1844).
+
+**Decision.** Keep DD-033's provider bridge policy and add a loop-scoped
+runtime guard. Record user `/loop` invocations and successful scheduler
+events in daemon session flags; apply updates under the registry mutex.
+Guard `EnterPlanMode` through the effective native matcher. Track separate
+cron IDs, reconcile native inventories, and clear stopped/ended activity.
+Carry the explicit `--allow-plan-mode` override in the serialized launch
+plan. Do not add a provider-wide OpenRouter ban or change question policy.
+
+**Consequences.** Ordinary interactive sessions retain plan mode. Loop and
+cron sessions receive a tool denial that lets them continue implementing.
+The hook cannot force-exit manually selected plan mode; it supplies recovery
+context instead. Session flags are ephemeral across daemon restarts.
+See [hook dispatch](architecture/hook-dispatch.md#loop-scoped-plan-mode).
