@@ -39,6 +39,7 @@ pub(super) const REVIEWER: &str = "grind-reviewer";
 pub(super) const INTEGRATOR: &str = "grind-integrator";
 pub(super) const LANDER: &str = "grind-lander";
 pub(super) const PREWORK: &str = "grind-prework";
+pub(super) const ORCHESTRATOR: &str = "grind-orchestrator";
 
 /// Read-only inspection commands every shell-holding role may run, subject
 /// to [`inspect_ok`].
@@ -303,7 +304,7 @@ pub(super) fn agent_spawn_reason(
         .iter()
         .find_map(|key| tool_input?.get(*key))?
         .as_str()?;
-    is_grind_role(requested).then(|| {
+    (is_grind_role(requested) && requested != ORCHESTRATOR).then(|| {
         format!(
             "Blocked: `{requested}` is an internal /grind role, started only by the \
              `grind-run` workflow. Use /grind to run the workflow, or do the work \
@@ -317,12 +318,15 @@ pub(super) fn agent_spawn_reason(
 pub(super) fn is_grind_role(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK
+        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK | ORCHESTRATOR
     )
 }
 
 /// The denial reason for a shell `command` from `role`, or `None` to allow.
 pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<String> {
+    if role == ORCHESTRATOR {
+        return orchestrator_shell_reason(command);
+    }
     let statements = match statement_words(command) {
         Ok(statements) => statements,
         Err(construct) => return Some(format!("{role} may not use {construct}")),
@@ -337,6 +341,83 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
         .iter()
         .map(|words| strip_gh_repo_flag(words))
         .find_map(|words| statement_reason(role, &words, run))
+}
+
+/// Unlike a planner, the run orchestrator never fetches or creates a worktree.
+/// Keep redirections and command-local environment overrides visible: the
+/// shared statement view deliberately omits those for other roles.
+fn orchestrator_shell_reason(command: &str) -> Option<String> {
+    use crate::shell_ast::{BaseEnv, Dialect, parse};
+    let script = parse(command, Dialect::Posix, &BaseEnv::default());
+    let invalid = script.has_error
+        || script.depth_capped
+        || !script.constructs.is_empty()
+        || script.invocations.is_empty();
+    if invalid {
+        return Some(format!("{ORCHESTRATOR} requires simple read-only commands"));
+    }
+    for invocation in script.invocations {
+        if !invocation.env.is_empty()
+            || invocation.redirects.iter().any(|r| r.writes_file())
+            || invocation.words.iter().any(|w| w.is_unknown())
+        {
+            return Some(format!("{ORCHESTRATOR} may not write files or override command environment"));
+        }
+        let words: Vec<String> = invocation.words.iter().map(|w| w.text().to_string()).collect();
+        if !orchestrator_read(&strip_gh_repo_flag(&words)) {
+            return Some(format!("{ORCHESTRATOR} permits read-only inspection, not `{}`", words.join(" ")));
+        }
+    }
+    None
+}
+
+fn orchestrator_read(words: &[String]) -> bool {
+    let Some(program) = words.first() else {
+        return false;
+    };
+    if inspect_ok(program, words) {
+        return true;
+    }
+    if program == "gh" {
+        return orchestrator_gh_read(words);
+    }
+    if program != "git" {
+        return false;
+    }
+    let Some(sub) = git_subcommand(words) else {
+        return false;
+    };
+    let forbidden = ["--output", "--ext-diff", "--textconv", "--upload-pack", "--exec"];
+    if sub.iter().any(|w| forbidden.iter().any(|flag| w.starts_with(flag))) {
+        return false;
+    }
+    match sub.first().map(String::as_str) {
+        Some("fetch") | None => false,
+        Some("ls-remote") => true,
+        Some("worktree") => sub.get(1).is_some_and(|w| w == "list"),
+        _ => is_git_read(&sub),
+    }
+}
+
+fn orchestrator_gh_read(words: &[String]) -> bool {
+    if words.iter().any(|w| w == "--watch" || w == "--web") {
+        return false;
+    }
+    if words.get(1).is_some_and(|w| w == "api") {
+        return words[2..].iter().all(|w| {
+            !w.starts_with("-f")
+                && !w.starts_with("-F")
+                && !w.starts_with("--field")
+                && !w.starts_with("--raw-field")
+                && !w.starts_with("--input")
+                && !w.starts_with("--method")
+                && !w.starts_with("-X")
+                && w != "graphql"
+        });
+    }
+    is_gh_read(words)
+        || (words.get(1).is_some_and(|w| w == "release")
+            && words.get(2).is_some_and(|w| w == "view" || w == "list"))
 }
 
 /// Markers in a commit message, PR title or body that make GitHub skip every
@@ -457,7 +538,7 @@ pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option
              before prework; follow the rule recorded in the plan instead"
         ));
     }
-    if !matches!(role, PLANNER | PREWORK)
+    if !matches!(role, PLANNER | PREWORK | ORCHESTRATOR)
         || !WRITE_TOOLS
             .iter()
             .any(|t| t.eq_ignore_ascii_case(tool_name))
