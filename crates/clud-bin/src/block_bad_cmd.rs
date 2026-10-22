@@ -223,17 +223,20 @@ fn shell_dialect_for_tool(tool_name: &str) -> ShellDialect {
         "bash" => ShellDialect::Posix,
         "powershell" | "pwsh" => ShellDialect::PowerShell,
         "cmd" | "commandprompt" => ShellDialect::Cmd,
-        "shell" | "shell_command" | "exec_command" if crate::platform::host::WINDOWS => ShellDialect::PowerShell,
+        "shell" | "shell_command" | "exec_command" if crate::platform::host::WINDOWS => {
+            ShellDialect::PowerShell
+        }
         _ => ShellDialect::Posix,
     }
 }
-
 
 /// Only exec_command declares a shell override; an extra Bash field is not authority.
 fn shell_dialect_for_payload(payload: &HookPayloadView) -> ShellDialect {
     let tool = block_bad_cmd_gate::tool_basename(&payload.tool_name);
     if tool == "exec_command" {
-        if let Some(shell) = payload.tool_input.as_ref()
+        if let Some(shell) = payload
+            .tool_input
+            .as_ref()
             .and_then(|input| input.get("shell"))
             .and_then(Value::as_str)
         {
@@ -913,8 +916,13 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         let Some(mut updated) = payload.tool_input.clone() else {
             return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without tool_input");
         };
-        let Some(command) = updated.as_object_mut().and_then(|input| command_text_mut(input, &payload.tool_name)) else {
-            return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without a string command, script or cmd");
+        let Some(command) = updated
+            .as_object_mut()
+            .and_then(|input| command_text_mut(input, &payload.tool_name))
+        else {
+            return block_bad_cmd_gate::gate_deny(
+                "cannot rewrite a payload without a string command, script or cmd",
+            );
         };
         *command = Value::String(rewritten);
         println!("{}", allow_with_updated_input_json(updated));
@@ -1729,11 +1737,15 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
         .map(PathBuf::from)
         .unwrap_or_else(|| process_cwd.to_path_buf());
     // Execution tools declare workdir; arbitrary extra fields on Bash do not.
-    if matches!(block_bad_cmd_gate::tool_basename(&tool_name).as_str(),
-        "exec_command" | "shell_command" | "shell")
-    {
-        if let Some(workdir) = object.get("tool_input").or_else(|| object.get("toolInput"))
-            .and_then(|input| input.get("workdir")).and_then(Value::as_str)
+    if matches!(
+        block_bad_cmd_gate::tool_basename(&tool_name).as_str(),
+        "exec_command" | "shell_command" | "shell"
+    ) {
+        if let Some(workdir) = object
+            .get("tool_input")
+            .or_else(|| object.get("toolInput"))
+            .and_then(|input| input.get("workdir"))
+            .and_then(Value::as_str)
         {
             cwd = cwd.join(workdir);
         }
@@ -3624,9 +3636,12 @@ fn shell_command_keys(tool_name: &str) -> &'static [&'static str] {
 }
 
 fn command_text_mut<'a>(
-    input: &'a mut serde_json::Map<String, Value>, tool_name: &str,
+    input: &'a mut serde_json::Map<String, Value>,
+    tool_name: &str,
 ) -> Option<&'a mut Value> {
-    let key = shell_command_keys(tool_name).iter().copied()
+    let key = shell_command_keys(tool_name)
+        .iter()
+        .copied()
         .find(|key| input.get(*key).is_some_and(Value::is_string))?;
     input.get_mut(key)
 }
@@ -3638,8 +3653,11 @@ fn extract_command(payload: &Value) -> String {
     let Some(tool_input) = object.get("tool_input").or_else(|| object.get("toolInput")) else {
         return String::new();
     };
-    let tool_name = object.get("tool_name").or_else(|| object.get("toolName"))
-        .and_then(Value::as_str).unwrap_or("?");
+    let tool_name = object
+        .get("tool_name")
+        .or_else(|| object.get("toolName"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
     if let Some(map) = tool_input.as_object() {
         for &key in shell_command_keys(tool_name) {
             if let Some(command) = map.get(key).and_then(Value::as_str) {
@@ -3716,7 +3734,9 @@ mod block_bad_cmd_loop_stop;
 
 #[path = "block_bad_cmd_wait_loop.rs"]
 mod block_bad_cmd_wait_loop;
-use block_bad_cmd_wait_loop::{hand_written_wait_reason, ScanContext, PR_WATCH_USAGE, WAIT_REPLACEMENT};
+use block_bad_cmd_wait_loop::{
+    hand_written_wait_reason, ScanContext, PR_WATCH_USAGE, WAIT_REPLACEMENT,
+};
 
 #[path = "block_bad_cmd_wait_scan.rs"]
 mod block_bad_cmd_wait_scan;
