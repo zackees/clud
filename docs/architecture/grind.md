@@ -100,9 +100,12 @@ landing commands carry the same `--repo` explicitly.
 
 Planner/lander reads use the supported `gh issue view --repo OWNER/REPO N
 --comments` or `--json comments` forms. This does not grant general `gh api`
-access to capped roles. The existing task separator (`grind-facts task
---checkout ABS -- FILE...`), scoped gh reads and prework's quoted parentheses
-are covered through the real CLI/hook as well as Rust role-cap tests.
+access to capped roles. The task parser already understood the separator,
+but the top-level splitter still diverted its file list into backend
+passthrough; `grind-facts` now owns its raw `--` arguments end to end.
+The task separator (`grind-facts task --checkout ABS -- FILE...`), scoped gh
+reads and prework's quoted parentheses are covered through the real CLI/hook
+and Rust parser/role-cap tests.
 Prework still comments only on the recorded meta issue; other roles retain
 their existing mutation limits.
 
