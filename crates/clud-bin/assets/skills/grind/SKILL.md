@@ -26,7 +26,7 @@ Router for the grind DAG. It gathers every answer up front, then hands the
 deterministic part to the bundled `grind-run` workflow.
 
 ```
-/grind ─ intake ─ classify + plan (plan-only) ─ preflight ─ ONE question round ─ prework ─┬─ parallel   ─┐
+/grind ─ intake ─ orchestrator + graph approval ─ classify (plan-only) ─ preflight ─ configuration ─ prework ─┬─ parallel   ─┐
                                                                                           ├─ sequential ─┼─ workflow grind-run: plan → work → review → integrate → land ─ finish
                                                                                           └─ cron ─ /grind-cron ─ /loop: sequential run, one issue per tick
 ```
@@ -86,6 +86,38 @@ Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
 do", or a `gh` error; then stop there: skip every later section (Finish
 included), write no run facts, and create nothing.
 
+## 1a. Run orchestration before goal planning
+
+After intake resolves the goals, call the native Agent tool exactly once
+with `subagent_type: "grind-orchestrator"`. Supply the original user request,
+every approved goal (including its full issue URL and brief), the session
+repository identity and absolute checkout root, and the involved repository
+roots already discovered by intake. Ask what blocks what across the entire
+run. Do not start a goal planner, classification Workflow, worker or
+checkout mutation while the advisor is running.
+
+Keep its returned `{session_repo, goals, proposed_goals, risks}` as
+`orchestration`, separate from the later `grind-plan/v1` classification.
+Require every original goal exactly once with its repository, actual
+default branch, checkout choice and blockers. Resolve missing or ambiguous
+repository evidence before proceeding. Do not replace a sister repository's
+default branch with the session repository's branch.
+
+Show the run graph with a lane per repository, each dependency's condition
+and check, checkout risks, and any proposed goals. Ask one approval question:
+**Run it / Run it with the proposed goals / Cancel**. Omit the second option
+when there are no proposals. Cancellation ends the run before classification
+or writes. Approval of the existing goals does not approve proposed work,
+worktree creation, dirty-checkout changes or additional permissions.
+
+Only explicit approval of proposals adds those goals; retain their rationale
+and blockers and include them in the approved graph. Keep upstream PR URLs,
+tags and versions as evidence to be forwarded when they exist; never guess
+them. Do not invoke the advisor again for each goal or stage. Subsequent
+configuration questions use this graph to ask about CI, scripts and checkout
+consent for each repository. The per-goal planner still splits one goal into
+tasks; it cannot remove the approved run dependencies.
+
 ## 1b. Plan before asking (classification)
 
 **The run facts.** clud's command hook reads this run's facts from one file
@@ -103,7 +135,7 @@ After intake resolves the meta issue `T`, write `<facts>` as:
 
 clud's command hook then denies the planner Write/Edit, `git worktree add`
 and `git push`. Start the Workflow named `grind-run` with args
-`{repo, github_repo, main, meta, goals, planOnly: true}` and relay its output. The
+`{repo, github_repo, main, meta, goals, orchestration, planOnly: true}` and relay its output. The
 Workflow tool returns at once and its result arrives later as a task
 notification: end your turn and do nothing else until it arrives.
 
@@ -405,7 +437,7 @@ agent gets that comment's URL. Nobody edits the plan comment.
 - Parallel or sequential: start the Workflow named `grind-run` once per
   stage, because the feature branch is cut only after the bug stage ends.
   1. **Bug stage** (always, even when it has no children): args
-     `{repo, github_repo, main, mode, goals, ci, scripts, plan, meta, base: <main>,
+     `{repo, github_repo, main, mode, goals, orchestration, ci, scripts, plan, meta, base: <main>,
      problem_reporting, models: {planner, worker, reviewer, integrator}}`,
      where `plan` is the 3b object and `goals` are the bug-stage children
      only (`[]` for an all-feature plan: the call then only posts the plan).
