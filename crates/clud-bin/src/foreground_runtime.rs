@@ -4269,6 +4269,7 @@ pub(crate) mod tests {
         expected.insert(crate::worktree_consent::USER_PROMPT_SUBMIT_EVENT.to_string());
         expected.extend([
             "PostToolUse".to_string(),
+            "PostToolUseFailure".to_string(),
             "Stop".to_string(),
             "SessionEnd".to_string(),
         ]);
@@ -4279,6 +4280,17 @@ pub(crate) mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             expected
         );
+        for (event, tool) in [
+            ("PreToolUse", "StructuredOutput"),
+            ("PostToolUse", "Bash"),
+            ("PostToolUseFailure", "Bash"),
+        ] {
+            assert!(hooks[event].as_array().unwrap().iter().any(|entry| {
+                entry["matcher"]
+                    .as_str()
+                    .is_some_and(|matcher| matcher.split('|').any(|candidate| candidate == tool))
+            }));
+        }
         for entries in hooks.values() {
             let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
             assert!(

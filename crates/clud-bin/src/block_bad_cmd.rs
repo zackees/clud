@@ -457,6 +457,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let raw_payload = &payload;
     let Some(payload) = parse_payload_value(&payload, &cwd) else {
         append_log("unsupported_payload_shape");
         if let Some(code) = refuse_unverifiable_payload(
@@ -469,6 +470,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
         return 0;
     };
+    block_bad_cmd_grind_gate::observe(event, raw_payload, &payload);
     append_log(&format!(
         "tool_name={:?} cwd={:?} command={:?}",
         payload.tool_name,
@@ -845,6 +847,25 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         println!("{}", deny_json(&reason));
         eprintln!("{msg}");
         return 2;
+    }
+
+    if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE)
+        && event == PRE_TOOL_USE_EVENT
+        && payload.tool_name == "Bash"
+    {
+        if deletion_rewrite.is_some() || evaluation.rewritten_command.is_some() {
+            return block_bad_cmd_gate::gate_deny("gate check conflicts with another rewrite");
+        }
+        let command = match block_bad_cmd_grind_gate::rewrite(&payload) {
+            Ok(command) => command,
+            Err(error) => return block_bad_cmd_gate::gate_deny(&error),
+        };
+        let Some(mut updated) = payload.tool_input.clone().filter(Value::is_object) else {
+            return block_bad_cmd_gate::gate_deny("gate check requires object-shaped tool_input");
+        };
+        updated["command"] = Value::String(command);
+        println!("{}", allow_with_updated_input_json(updated));
+        return 0;
     }
 
     if deletion_rewrite.is_some() && evaluation.rewritten_command.is_some() {
@@ -3730,6 +3751,9 @@ mod block_bad_cmd_cwd_changed;
 #[path = "block_bad_cmd_grind_caps.rs"]
 mod block_bad_cmd_grind_caps;
 
+#[path = "block_bad_cmd_grind_gate.rs"]
+mod block_bad_cmd_grind_gate;
+
 #[path = "block_bad_cmd_stale_upstream.rs"]
 mod block_bad_cmd_stale_upstream;
 
@@ -3771,6 +3795,13 @@ mod block_bad_cmd_claude_worktrees_tests;
 /// or the feature-branch-mode router caps for any other caller while
 /// the session's run facts record a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
+    if let Some(reason) = block_bad_cmd_grind_gate::resume_reason(payload) {
+        return Some(reason);
+    }
+    if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE) {
+        return block_bad_cmd_grind_gate::reason(payload)
+            .map(|reason| format!("Blocked by the /grind role caps: {reason}."));
+    }
     let Some(role) = payload
         .agent_type
         .as_deref()
@@ -3867,6 +3898,7 @@ mod tests {
             "Agent",
             "EnterWorktree",
             "Workflow",
+            "StructuredOutput",
             "AskUserQuestion",
             "Write",
             "Edit",
@@ -3890,6 +3922,7 @@ mod tests {
                 // The wait-loop refusal scans `tool_input.command`, which
                 // Monitor carries as well as Bash.
                 || tool == "Monitor"
+                || block_bad_cmd_grind_gate::guards_report_tool(tool)
                 || crate::worktree_consent::tool_creates_worktree(tool, None)
                 || block_bad_cmd_grind_caps::tool_reason(
                     block_bad_cmd_grind_caps::PLANNER,

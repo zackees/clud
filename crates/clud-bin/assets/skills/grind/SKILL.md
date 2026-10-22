@@ -26,7 +26,7 @@ Router for the grind DAG. It gathers every answer up front, then hands the
 deterministic part to the bundled `grind-run` workflow.
 
 ```
-/grind ─ intake ─ classify + plan (plan-only) ─ preflight ─ ONE question round ─ prework ─┬─ parallel   ─┐
+/grind ─ intake ─ orchestrator + graph approval ─ classify (plan-only) ─ preflight ─ configuration ─ prework ─┬─ parallel   ─┐
                                                                                           ├─ sequential ─┼─ workflow grind-run: plan → work → review → integrate → land ─ finish
                                                                                           └─ cron ─ /grind-cron ─ /loop: sequential run, one issue per tick
 ```
@@ -86,6 +86,43 @@ Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
 do", or a `gh` error; then stop there: skip every later section (Finish
 included), write no run facts, and create nothing.
 
+## 1a. Run orchestration before goal planning
+
+After intake resolves the goals, call the native Agent tool exactly once
+with `subagent_type: "grind-orchestrator"`. Supply the original user request,
+every approved goal (including its full issue URL and brief), the session
+repository identity and absolute checkout root, and the involved repository
+roots already discovered by intake. Ask what blocks what across the entire
+run. Do not start a goal planner, classification Workflow, worker or
+checkout mutation while the advisor is running.
+
+Keep its returned `{session_repo, session_root, goals, proposed_goals, risks}` as
+`orchestration`, separate from the later `grind-plan/v1` classification.
+Require every original goal exactly once with its repository, actual
+default branch, checkout choice and blockers. Resolve missing or ambiguous
+repository evidence before proceeding. Do not replace a sister repository's
+default branch with the session repository's branch.
+Retain the approved absolute `session_root`; every workflow call must use that
+same `repo` path and the approved session repository's default branch. If
+classification introduces an edge absent from the graph, resolve it and obtain
+approval of the revised graph before execution; do not start contradictory
+dependency waits.
+
+Show the run graph with a lane per repository, each dependency's condition
+and check, checkout risks, and any proposed goals. Ask one approval question:
+**Run it / Run it with the proposed goals / Cancel**. Omit the second option
+when there are no proposals. Cancellation ends the run before classification
+or writes. Approval of the existing goals does not approve proposed work,
+worktree creation, dirty-checkout changes or additional permissions.
+
+Only explicit approval of proposals adds those goals; retain their rationale
+and blockers and include them in the approved graph. Keep upstream PR URLs,
+tags and versions as evidence to be forwarded when they exist; never guess
+them. Do not invoke the advisor again for each goal or stage. Subsequent
+configuration questions use this graph to ask about CI, scripts and checkout
+consent for each repository. The per-goal planner still splits one goal into
+tasks; it cannot remove the approved run dependencies.
+
 ## 1b. Plan before asking (classification)
 
 **The run facts.** clud's command hook reads this run's facts from one file
@@ -103,7 +140,7 @@ After intake resolves the meta issue `T`, write `<facts>` as:
 
 clud's command hook then denies the planner Write/Edit, `git worktree add`
 and `git push`. Start the Workflow named `grind-run` with args
-`{repo, github_repo, main, meta, goals, planOnly: true}` and relay its output. The
+`{repo, github_repo, main, meta, goals, orchestration, planOnly: true}` and relay its output. The
 Workflow tool returns at once and its result arrives later as a task
 notification: end your turn and do nothing else until it arrives.
 
@@ -351,6 +388,9 @@ Write `<facts>` (the path `clud grind-facts path` printed):
 ```
 
 `undo` is the section 2b change record (empty without a regroup).
+Also include `orchestration` with the complete graph the user approved in
+section 1a, preserving its session root, repository, goal IDs and blocker
+order/checks. Do not copy unapproved proposed goals into that graph.
 `waiting_on_pr` is the open feature PR that made the run bugs-only under the
 1b no-overlap rule, or `null`.
 
@@ -405,7 +445,7 @@ agent gets that comment's URL. Nobody edits the plan comment.
 - Parallel or sequential: start the Workflow named `grind-run` once per
   stage, because the feature branch is cut only after the bug stage ends.
   1. **Bug stage** (always, even when it has no children): args
-     `{repo, github_repo, main, mode, goals, ci, scripts, plan, meta, base: <main>,
+     `{repo, github_repo, main, mode, goals, orchestration, ci, scripts, plan, meta, base: <main>,
      problem_reporting, models: {planner, worker, reviewer, integrator}}`,
      where `plan` is the 3b object and `goals` are the bug-stage children
      only (`[]` for an all-feature plan: the call then only posts the plan).
@@ -480,6 +520,18 @@ the feature branch. While `<facts>` records the feature,
 clud's hook refuses the router a second `git worktree add`, any
 `gh issue close --repo <github-repo>` (or `gh api … -f state=closed`), merging the feature PR,
 and deleting a `grind/*` branch.
+
+### Publication resumption
+
+When a result contains `resume.schema: "grind-publication-resume/v1"`, the
+run is waiting for publication. Retain the complete original approved
+Workflow arguments and the actual `runId` and `scriptPath` returned by that
+launch in `<facts>.orchestration_resume`, together with the returned manifest.
+Never invent references or remove completed goals from the arguments.
+Report the deferred goals and their gate evidence, then follow the publication
+resumption section of `../grind-cron/SKILL.md`. Keep the facts, claims and
+preflight record until resumption settles. Do not start the next stage, land
+the feature PR, or run Finish cleanup while this manifest remains.
 
 ## 5. Finish (always, as the very last step)
 
@@ -582,3 +634,8 @@ two), whether or not every goal merged:
 
 Tools are capped by each agent type's `tools:` list; shell commands by
 clud's PreToolUse hook, keyed on the agent type.
+
+If a publication-resume manifest has `exhausted: true`, stop the native loop,
+retain `orchestration_resume`, its launch references and the manifest, and
+report the replay-history limit. Do not call Finish, advance its epochs or
+restart completed work. The deferred goals remain unfinished.

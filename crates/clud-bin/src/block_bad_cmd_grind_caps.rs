@@ -39,6 +39,8 @@ pub(super) const REVIEWER: &str = "grind-reviewer";
 pub(super) const INTEGRATOR: &str = "grind-integrator";
 pub(super) const LANDER: &str = "grind-lander";
 pub(super) const PREWORK: &str = "grind-prework";
+pub(super) const ORCHESTRATOR: &str = "grind-orchestrator";
+pub(super) const GATE: &str = "grind-gate";
 
 /// Read-only inspection commands every shell-holding role may run, subject
 /// to [`inspect_ok`].
@@ -302,7 +304,7 @@ pub(super) fn agent_spawn_reason(
         .iter()
         .find_map(|key| tool_input?.get(*key))?
         .as_str()?;
-    is_grind_role(requested).then(|| {
+    (is_grind_role(requested) && requested != ORCHESTRATOR).then(|| {
         format!(
             "Blocked: `{requested}` is an internal /grind role, started only by the \
              `grind-run` workflow. Use /grind to run the workflow, or do the work \
@@ -316,12 +318,20 @@ pub(super) fn agent_spawn_reason(
 pub(super) fn is_grind_role(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK
+        PLANNER | WORKER | REVIEWER | INTEGRATOR | LANDER | PREWORK | ORCHESTRATOR | GATE
     )
 }
 
 /// The denial reason for a shell `command` from `role`, or `None` to allow.
 pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<String> {
+    if role == GATE {
+        return Some(format!(
+            "{GATE} requires one approved check bound to its native agent identity"
+        ));
+    }
+    if role == ORCHESTRATOR {
+        return orchestrator_shell_reason(command);
+    }
     let statements = match statement_words(command) {
         Ok(statements) => statements,
         Err(construct) => return Some(format!("{role} may not use {construct}")),
@@ -336,6 +346,110 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
         .iter()
         .map(|words| strip_gh_repo_flag(words))
         .find_map(|words| statement_reason(role, &words, run))
+}
+
+/// Unlike a planner, the run orchestrator never fetches or creates a worktree.
+/// Keep redirections and command-local environment overrides visible: the
+/// shared statement view deliberately omits those for other roles.
+pub(super) fn orchestrator_shell_reason(command: &str) -> Option<String> {
+    use crate::shell_ast::{parse, BaseEnv, Dialect};
+    let script = parse(command, Dialect::Posix, &BaseEnv::default());
+    let invalid = script.has_error
+        || script.depth_capped
+        || !script.constructs.is_empty()
+        || script.invocations.is_empty();
+    if invalid {
+        return Some(format!("{ORCHESTRATOR} requires simple read-only commands"));
+    }
+    for invocation in script.invocations {
+        if !invocation.env.is_empty()
+            || invocation.redirects.iter().any(|r| r.writes_file())
+            || invocation.words.iter().any(|w| w.is_unknown())
+        {
+            return Some(format!(
+                "{ORCHESTRATOR} may not write files or override command environment"
+            ));
+        }
+        let words: Vec<String> = invocation
+            .words
+            .iter()
+            .map(|w| w.text().to_string())
+            .collect();
+        if !orchestrator_read(&strip_gh_repo_flag(&words)) {
+            return Some(format!(
+                "{ORCHESTRATOR} permits read-only inspection, not `{}`",
+                words.join(" ")
+            ));
+        }
+    }
+    None
+}
+
+fn orchestrator_read(words: &[String]) -> bool {
+    let Some(program) = words.first() else {
+        return false;
+    };
+    let inspection = [
+        "ls", "cat", "head", "tail", "wc", "grep", "pwd", "echo", "test", "true",
+    ];
+    if inspection.contains(&program.as_str()) && inspect_ok(program, words) {
+        return true;
+    }
+    if program == "gh" {
+        return orchestrator_gh_read(words);
+    }
+    if program != "git" {
+        return false;
+    }
+    let Some(sub) = git_subcommand(words) else {
+        return false;
+    };
+    let forbidden = [
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--filters",
+        "--upload-pack",
+        "--exec",
+    ];
+    if sub.iter().any(|w| {
+        let option = w.split('=').next().unwrap_or(w);
+        option.len() > 2
+            && forbidden
+                .iter()
+                .any(|flag| option.starts_with(flag) || flag.starts_with(option))
+    }) {
+        return false;
+    }
+    match sub.first().map(String::as_str) {
+        Some("fetch") | None => false,
+        Some("ls-remote") => !sub
+            .iter()
+            .any(|word| word.starts_with("-u") || word.contains("::")),
+        Some("worktree") => sub.get(1).is_some_and(|w| w == "list"),
+        _ => is_git_read(&sub),
+    }
+}
+
+fn orchestrator_gh_read(words: &[String]) -> bool {
+    if words.iter().any(|w| w == "--watch" || w == "--web") {
+        return false;
+    }
+    if words.get(1).is_some_and(|w| w == "api") {
+        return words[2..].iter().all(|w| {
+            !w.starts_with("-f")
+                && !w.starts_with("-F")
+                && !w.starts_with("--field")
+                && !w.starts_with("--raw-field")
+                && !w.starts_with("--input")
+                && !w.starts_with("--method")
+                && !w.starts_with("-X")
+                && w != "graphql"
+        });
+    }
+    is_gh_read(words)
+        || (words.get(1).is_some_and(|w| w == "release")
+            && words.get(2).is_some_and(|w| w == "view" || w == "list"))
 }
 
 /// Markers in a commit message, PR title or body that make GitHub skip every
@@ -447,6 +561,11 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
 /// front, in one round before prework. The planner never writes files, in
 /// either phase, and neither does the prework agent.
 pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option<String> {
+    if role == GATE && !matches!(tool_name, "Bash" | "StructuredOutput") {
+        return Some(format!(
+            "{GATE} may only execute its bound check and report the result"
+        ));
+    }
     // Codex reports its file edits as `apply_patch` even where a matcher
     // reaches them through the `Edit`/`Write` aliases (#1954).
     const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"];
@@ -456,7 +575,7 @@ pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option
              before prework; follow the rule recorded in the plan instead"
         ));
     }
-    if !matches!(role, PLANNER | PREWORK)
+    if !matches!(role, PLANNER | PREWORK | ORCHESTRATOR)
         || !WRITE_TOOLS
             .iter()
             .any(|t| t.eq_ignore_ascii_case(tool_name))
@@ -1671,11 +1790,98 @@ mod tests {
     }
 
     #[test]
+    fn gate_without_agent_binding_denies_shell_and_file_tools() {
+        let role = "grind-gate";
+        assert!(is_grind_role(role));
+        let facts = RunFacts::default();
+        for command in [
+            "gh release view v1 --repo o/r",
+            "gh release create v1",
+            "true",
+        ] {
+            assert!(shell_reason(role, command, &facts).is_some(), "{command}");
+        }
+        for tool in ["Read", "Write", "Edit", "Agent", "AskUserQuestion"] {
+            assert!(tool_reason(role, tool, &facts).is_some(), "{tool}");
+        }
+        let input = serde_json::json!({"subagent_type": role});
+        assert!(agent_spawn_reason("Agent", Some(&input), None).is_some());
+    }
+
+    #[test]
     fn only_bundled_roles_are_capped() {
         assert!(is_grind_role("grind-planner"));
         assert!(is_grind_role("grind-lander"));
         assert!(!is_grind_role("general-purpose"));
         assert!(!is_grind_role("grind-other"));
+    }
+
+    #[test]
+    fn orchestrator_is_the_capped_router_exception() {
+        let role = "grind-orchestrator";
+        assert!(is_grind_role(role));
+        let input = serde_json::json!({"subagent_type": role});
+        assert!(agent_spawn_reason("Agent", Some(&input), None).is_none());
+        for internal in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK, GATE] {
+            let input = serde_json::json!({"subagent_type": internal});
+            assert!(agent_spawn_reason("Agent", Some(&input), None).is_some());
+        }
+    }
+
+    #[test]
+    fn orchestrator_never_writes_or_builds_in_any_run_mode() {
+        let role = "grind-orchestrator";
+        for parallel in [false, true] {
+            let facts = run(parallel, true);
+            for command in [
+                "git -C /sister switch -c x",
+                "git -C /sister fetch origin",
+                "git worktree add /new -b x",
+                "cargo build",
+                "gh issue comment 12 --body changed",
+                "gh api repos/o/r/issues -X POST",
+                "gh api repos/o/r/issues -f title=changed",
+                "git log --output=changed",
+                "git cat-file --filters HEAD:path",
+                "git cat-file --filte HEAD:path",
+                "git cat-file --textc HEAD:path",
+                "git ls-remote -u /tmp/helper origin",
+                "git ls-remote -u/tmp/helper origin",
+                "git ls-remote ext::helper",
+                "rg --pre 'cargo build' pattern /sister",
+                "LD_PRELOAD=/sister/plugin.so git log",
+                "echo changed > file",
+                "cat <<'EOF' > file\nchanged\nEOF",
+            ] {
+                assert!(!allowed(role, command, &facts), "{command}");
+            }
+            for tool in [
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+                "AskUserQuestion",
+            ] {
+                assert!(tool_reason(role, tool, &facts).is_some(), "{tool}");
+            }
+        }
+    }
+
+    #[test]
+    fn orchestrator_inspects_multiple_repositories() {
+        let facts = run(false, false);
+        for command in [
+            "git -C /primary log --oneline -5",
+            "git -C /sister ls-remote origin HEAD",
+            "git -C /sister worktree list --porcelain",
+            "gh issue view 12 --repo o/primary",
+            "gh issue view 13 --repo o/sister",
+            "gh api repos/o/sister/releases/latest",
+            "gh release view v1 --repo o/sister",
+            "cat /sister/CLAUDE.md",
+        ] {
+            assert!(allowed("grind-orchestrator", command, &facts), "{command}");
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ export const meta = {
   phases: [
     { title: 'Classify', detail: 'grind-planner plan-only: classify children, feature groups, threshold' },
     { title: 'Prework', detail: 'grind-prework: post the plan JSON comment on the meta issue' },
+    { title: 'Gate', detail: 'grind-gate: observe one approved publication check' },
     { title: 'Plan', detail: 'grind-planner: split each goal into disjoint file tasks' },
     { title: 'Work', detail: 'grind-worker: read/write files only' },
     { title: 'Review', detail: 'grind-reviewer: read/edit only' },
@@ -21,7 +22,11 @@ export const meta = {
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
 //   maxAgents?: 4, maxFixRounds?: 10, agentErrors?: 3,   // agentErrors: tool-misuse allowance, apart from fix rounds (#1331)
+//   gateAttempts?: 3, gateBackoffMs?: 1000, gateEpoch?: 0, gateEpochs?: {goalId: 0},
 //   planOnly?: true, meta?: '<meta issue number>',
+//   orchestration?: { session_repo: 'owner/repo', goals: [
+//     { id, repo, main, checkout?: 'local' | 'worktree', blockers: [{goal, when, check?}] }
+//   ], proposed_goals: [], risks: [] }, // run graph, separate from grind-plan/v1 stages
 //   base?: 'main',   // default base branch for goals in no plan stage; omitted = main
 //                    // a plan stage's `base` wins for its children (#1409)
 //   // Stages (#1409): the router starts grind-run once per stage. The bug-stage
@@ -61,6 +66,86 @@ if (!args || !args.repo || !Array.isArray(args.goals) || (!args.goals.length && 
 if (!args.planOnly && args.mode !== 'parallel' && args.mode !== 'sequential') {
   throw new Error(`grind mode must be "parallel" or "sequential" (got ${JSON.stringify(args.mode)}); cron mode is driven by /grind-cron`)
 }
+
+// Validate the entire graph before classification, prework, or any goal agent.
+// This is structural validation. A local checkout still requires a clean-tree
+// check, and worktree creation still requires the session's explicit consent.
+const nonempty = (s) => typeof s === 'string' && s.trim().length > 0
+const graphGoal = (g, sessionRepo) => {
+  if (!g || !nonempty(g.id)) throw new Error('run plan: every goal needs an id')
+  if (!nonempty(g.repo) || !nonempty(g.main)) throw new Error(`goal ${g.id}: repo and main are required`)
+  if (!/^[^\s/]+\/[^\s/]+$/.test(g.repo)) throw new Error(`goal ${g.id}: repo must be owner/name`)
+  const checkout = g.checkout || (g.repo === sessionRepo ? 'local' : 'worktree')
+  if (checkout !== 'local' && checkout !== 'worktree') throw new Error(`goal ${g.id}: unknown checkout ${JSON.stringify(checkout)}`)
+  if (checkout === 'local' && g.repo !== sessionRepo) throw new Error(`goal ${g.id}: a sister repo must use a worktree`)
+  if (!Array.isArray(g.blockers)) throw new Error(`goal ${g.id}: blockers must be an array`)
+  return { ...g, checkout }
+}
+const graphBlocker = (blocker, goal, ids) => {
+  if (!blocker || !ids.has(blocker.goal)) throw new Error(`unknown goal ${JSON.stringify(blocker && blocker.goal)} in blockers of ${goal.id}`)
+  if (!['merged', 'released', 'tag', 'published'].includes(blocker.when)) throw new Error(`unknown condition ${JSON.stringify(blocker.when)}`)
+  if (blocker.when !== 'merged' && !nonempty(blocker.check)) throw new Error(`blocker ${blocker.goal} → ${goal.id} (${blocker.when}) has no check`)
+}
+const graphOrder = (goals, ids) => {
+  const done = new Set()
+  const active = []
+  const ordered = []
+  const visit = (id) => {
+    if (done.has(id)) return
+    const cycle = active.indexOf(id)
+    if (cycle >= 0) throw new Error(`dependency cycle: ${[...active.slice(cycle), id].join(' → ')}`)
+    active.push(id)
+    const goal = ids.get(id)
+    goal.blockers.forEach(b => visit(b.goal))
+    active.pop()
+    done.add(id)
+    ordered.push(goal)
+  }
+  goals.forEach(g => visit(g.id))
+  return ordered
+}
+const validateRunPlan = (plan) => {
+  if (!plan || !nonempty(plan.session_repo)) throw new Error('run plan: session_repo is required')
+  if (!Array.isArray(plan.goals) || !plan.goals.length) throw new Error('run plan: goals must be a nonempty array')
+  const goals = plan.goals.map(g => graphGoal(g, plan.session_repo))
+  const ids = new Map()
+  goals.forEach(g => {
+    if (ids.has(g.id)) throw new Error(`duplicate goal ${JSON.stringify(g.id)}`)
+    ids.set(g.id, g)
+  })
+  goals.forEach(g => g.blockers.forEach(b => graphBlocker(b, g, ids)))
+  return { ...plan, goals: graphOrder(goals, ids) }
+}
+const ORCHESTRATION = args.orchestration === undefined ? null : validateRunPlan(args.orchestration)
+const RUN_GOALS = new Map((ORCHESTRATION ? ORCHESTRATION.goals : []).map(g => [g.id, g]))
+const validateApprovedContext = () => {
+  if (ORCHESTRATION.session_root !== args.repo) throw new Error('run plan: execution root differs from approved session_root')
+  for (const g of RUN_GOALS.values()) {
+    if (g.repo === ORCHESTRATION.session_repo && g.main !== (args.main || 'main')) {
+      throw new Error(`run plan: execution main differs from approved main for ${g.id}`)
+    }
+  }
+  for (const stage of ((args.plan && args.plan.stages) || [])) {
+    for (const [id, deps] of Object.entries(stage.depends_on_bugs || {})) {
+      const goal = RUN_GOALS.get(String(id).replace(/^#/, ''))
+      if (!goal || !Array.isArray(deps)) throw new Error('run plan: invalid classification dependencies')
+      for (const dep of deps) {
+        if (!goal.blockers.some(b => b.goal === String(dep).replace(/^#/, ''))) {
+          throw new Error(`run plan: classification dependency ${dep} → ${id} is absent from the approved graph`)
+        }
+      }
+    }
+  }
+}
+if (ORCHESTRATION) {
+  validateApprovedContext()
+  const selected = new Map(args.goals.map(g => [String(g.id), g]))
+  for (const id of selected.keys()) {
+    if (!RUN_GOALS.has(id)) throw new Error(`run plan: selected goal ${id} was not approved`)
+  }
+  args.goals = ORCHESTRATION.goals.filter(g => selected.has(g.id)).map(g => selected.get(g.id))
+}
+
 const REPO = args.repo
 const MAIN = args.main || 'main'
 // The checkout path and the forge identity serve different purposes (#1897).
@@ -91,6 +176,33 @@ const MAX_FIX = Math.max(0, Math.floor(args.maxFixRounds ?? 10))
 // per goal; past it the goal stops with `gave_up: tool misuse`.
 const MAX_AGENT_ERRORS = Math.max(0, Math.floor(args.agentErrors ?? 3))
 const MODELS = args.models || {}
+const gateInteger = (name, fallback, minimum, maximum) => {
+  const value = args[name] ?? fallback
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`)
+  }
+  return value
+}
+const GATE_ATTEMPTS = gateInteger('gateAttempts', 3, 1, 5)
+const GATE_BACKOFF_MS = gateInteger('gateBackoffMs', 1000, 1, 30000)
+// Each resume replays its history; cap that history before launching any agent.
+const MAX_GATE_EPOCH = 64
+const GATE_EPOCH = gateInteger('gateEpoch', 0, 0, MAX_GATE_EPOCH)
+// Resume only deferred branches: completed gate prompts must retain their native
+// cache keys. Epochs select fresh observations; they never assert readiness.
+const GATE_EPOCHS = args.gateEpochs ?? {}
+if (!GATE_EPOCHS || typeof GATE_EPOCHS !== 'object' || Array.isArray(GATE_EPOCHS)) {
+  throw new Error('gateEpochs must map approved goal ids to integer epochs')
+}
+for (const [id, epoch] of Object.entries(GATE_EPOCHS)) {
+  if (!RUN_GOALS.has(id) || !Number.isInteger(epoch) || epoch < 0 || epoch > MAX_GATE_EPOCH) {
+    throw new Error(`invalid gate epoch for approved goal ${id}`)
+  }
+}
+let replayEpoch = null
+const requestedEpoch = (id) => GATE_EPOCHS[String(id)] ?? GATE_EPOCH
+const gateEpoch = (id) => replayEpoch ?? requestedEpoch(id)
+
 // The repo's ./lint and ./test, chosen once by the /grind router (#1336).
 const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
 const scriptLines = () => [SCRIPTS.lint, SCRIPTS.test].filter(Boolean)
@@ -114,16 +226,32 @@ const opts = (role, label, phase, schema) => {
 const semaphore = (n) => {
   let free = n
   const queue = []
-  return (fn) => new Promise((resolve, reject) => {
-    const run = () => {
-      free--
-      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
-        free++
-        if (queue.length) queue.shift()()
+  // Native pipeline stages restore their branch context after a queued permit
+  // resolves. A plain VM await can otherwise inherit the releasing branch's
+  // cache chain, even when the queue carries permits rather than callbacks.
+  return async (fn) => {
+    let acquired = false
+    let failure = null
+    try {
+      const results = await pipeline([true], async () => {
+        if (free > 0) free--
+        else await new Promise(resolve => queue.push(resolve))
+        acquired = true
+        return true
+      }, async () => {
+        try { return { value: await fn() } }
+        catch (cause) { failure = { cause }; return {} }
       })
+      if (failure) throw failure.cause
+      if (!results[0]) throw new Error('native semaphore stage did not complete')
+      return results[0].value
+    } finally {
+      if (acquired) {
+        if (queue.length) queue.shift()()
+        else free++
+      }
     }
-    free > 0 ? run() : queue.push(run)
-  })
+  }
 }
 const light = semaphore(MAX_AGENTS)
 const exclusive = semaphore(1)
@@ -165,11 +293,20 @@ const REVIEW = { type: 'object', required: ['approved', 'summary'], properties: 
   approved: { type: 'boolean' }, summary: { type: 'string' }, fixes_applied: { type: 'array', items: { type: 'string' } },
   must_verify: { type: 'array', items: { type: 'string' }, description: 'checks the integrator must run before pushing (focused test, reproduction, script); an unrun check goes here, never into a rejection' },
   problems: PROBLEMS } }
+// Reported artifacts are downstream context, never proof that a publication
+// gate is ready. That still requires the approved check to succeed.
+const ARTIFACTS = { type: 'object', properties: {
+  version: { type: 'string' }, tag: { type: 'string' }, release_url: { type: 'string' },
+} }
+const GATE = { type: 'object', required: ['ready', 'evidence'], properties: {
+  ready: { type: 'boolean' }, evidence: { type: 'string' },
+} }
 const INTEG = { type: 'object', required: ['pushed', 'summary'], properties: {
-  pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
+  pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' },
+  artifacts: ARTIFACTS, problems: PROBLEMS } }
 const LAND = { type: 'object', required: ['status', 'summary'], properties: {
   status: { type: 'string', enum: ['merged', 'needs_fix', 'gave_up', 'tool_misuse'] }, summary: { type: 'string' }, failure_log: { type: 'string' },
-  command: { type: 'string', description: 'tool_misuse only: the command that failed' }, problems: PROBLEMS } }
+  command: { type: 'string', description: 'tool_misuse only: the command that failed' }, artifacts: ARTIFACTS, problems: PROBLEMS } }
 const PARK = { type: 'object', required: ['parked', 'clean', 'summary'], properties: {
   parked: { type: 'boolean', description: "true when the goal's changes were committed to the park branch" },
   branch: { type: 'string' }, files: { type: 'array', items: { type: 'string' } },
@@ -505,9 +642,22 @@ const bugDepsOf = (g) => {
 const goalIdOf = {}
 args.goals.forEach(g => { goalIdOf[idKey(g.id)] = g.id })
 
+// Only approved dependencies belong in a goal's context. Their outcomes are
+// recorded before the landed promise settles, so even parallel planners see
+// the final upstream PR and result rather than a guessed branch or URL.
+const upstreamContext = (g) => {
+  const approved = RUN_GOALS.get(String(g.id))
+  if (!approved || !approved.blockers.length) return ''
+  const results = approved.blockers.map(b => ({
+    goal: b.goal, repo: RUN_GOALS.get(b.goal).repo, condition: b.when,
+    result: outcome[b.goal] || null,
+  }))
+  return `\nUpstream results (approved blockers):\n${JSON.stringify(results, null, 1)}`
+}
+
 const ctx = (g) => `${REPO_HEADER} Mode: ${args.mode}. Local CI (act): ${CI ? `on, lane ${args.lane || '(pick from ci.yml)'}` : 'off'}.\nGoal ${g.id}: ${g.title}\n${g.brief}` +
   (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
-  featureCheckout(g)
+  featureCheckout(g) + upstreamContext(g)
 const others = (g) => args.goals.filter(o => o.id !== g.id).map(o => `${o.id}: ${o.title}`).join('\n') || '(none)'
 
 const plan = (g) => light(() => agent(
@@ -531,11 +681,11 @@ const review = ({ p, results }, g) => light(() => agent(
 const integrate = (p, g, note) => exclusive(() => agent(
   `Follow your built-in /grind-integrate procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nBranch: ${p.branch}\n` +
   `Base: origin/${baseOf(g)}${p.depends_on.length ? ` (it already contains ${p.depends_on.join(', ')}, which landed first)` : ''}\n` +
-  `${verifyBlock(p)}\n\n${note}${featureIntegrateNote(g)}`,
+  `${verifyBlock(p)}\n\n${note}${featureIntegrateNote(g)}\nReturn any release version, tag and release URL produced by this goal in artifacts; omit unknown values.`,
   opts('integrator', `integrate:${g.id}`, 'Integrate', INTEG)).then(r => collect(r, 'integrator', g.id)))
 
 const land = (p, g, pr, round) => agent(
-  `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.${featureLandNote(g)}`,
+  `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.${featureLandNote(g)}\nReturn any observed release version, tag and release URL in artifacts; omit unknown values.`,
   opts('lander', `land:${g.id}#${round}`, 'Land', LAND)).then(r => collect(r, 'lander', g.id))
 
 // Parking (#1424): in sequential mode every goal shares one checkout, so a
@@ -574,7 +724,9 @@ args.goals.forEach((g, i) => {
   landed[g.id] = new Promise(r => { settle[g.id] = r })
 })
 const earlierDeps = (p, g) => {
-  const deps = (p.depends_on || []).map(d => { const id = goalIdOf[idKey(d)]; return id === undefined ? String(d) : String(id) })
+  const approved = RUN_GOALS.get(String(g.id))
+  const merged = approved ? approved.blockers.filter(b => b.when === 'merged').map(b => b.goal) : []
+  const deps = [...new Set([...(p.depends_on || []), ...merged])].map(d => { const id = goalIdOf[idKey(d)]; return id === undefined ? String(d) : String(id) })
   const kept = deps.filter(d => d in order && order[d] < order[g.id])
   const dropped = deps.filter(d => !kept.includes(d))
   if (dropped.length) log(`goal ${g.id}: ignoring depends_on ${dropped.join(', ')} (unknown, itself, or not listed earlier)`)
@@ -657,7 +809,10 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
       log(`goal ${g.id}: lander tool misuse ${agentErrors} of ${MAX_AGENT_ERRORS} (${l.command || l.summary}); landing again, no fix round`)
       l = await land(p, g, integ.pr_url, fixes)
     }
-    if (l && l.status === 'merged') return { merged: true, pushed: true, pr: integ.pr_url, note: l.summary }
+    if (l && l.status === 'merged') return {
+      merged: true, pushed: true, pr: integ.pr_url, note: l.summary,
+      artifacts: { ...(integ.artifacts || {}), ...(l.artifacts || {}) },
+    }
     if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pushed: true, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
     log(`goal ${g.id}: PR not green, fix round ${fixes + 1} of ${MAX_FIX}`)
     integ = await integrate(p, g, `FIX ROUND ${fixes + 1} of ${MAX_FIX}: the PR ${integ.pr_url} failed. Fix, re-verify${SCRIPTS ? ` (focused test, then ${scriptLines().join(', then ')})` : ''}, push to the same branch.\n${l.failure_log || l.summary}`)
@@ -668,31 +823,158 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
 // goal is blocked rather than built on top of it (#1424).
 let DIRTY_AFTER = null
 
-const attemptGoal = async (g, state) => {
-  if (!PARALLEL && DIRTY_AFTER !== null) return { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` }
-  // Stuck-bug rule: a failed bug blocks only the feature children that list
-  // it, whether it ran in this call or in the earlier bug-stage call.
-  if (STUCK_BUG_BLOCKS) {
-    for (const bug of bugDepsOf(g)) {
-      const dep = goalIdOf[bug]
-      const stuck = dep === undefined ? STUCK_BUGS.has(bug) : !(await landed[dep])
-      if (stuck) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
+const inspectGate = (g, blocker, index, attempt) => light(() => agent(
+  `Observe this approved dependency gate once.\n${ctx(g)}\n` +
+  `Observation: ${gateEpoch(g.id)}/${attempt}.\n` +
+  `Upstream goal: ${blocker.goal}. Required condition: ${blocker.when}.\n` +
+  `Exact approved Bash check (copy verbatim):\n${blocker.check}\n` +
+  'Report ready only after successful native execution. Include the observed output as evidence. ' +
+  'A failed or denied check means not ready. Do not retry, sleep, edit or publish.',
+  opts('gate', `gate:${g.id}:${index}`, 'Gate', GATE)))
+
+// The native Workflow owns this bounded schedule. Each checker observes once;
+// its semaphore slot is released before the native timer wait. Distinct prompts
+// prevent a prior not-ready agent result being replayed as the next observation.
+const observeGate = async (g, blocker, index) => {
+  let observed = null
+  let attempts = 0
+  for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt++) {
+    attempts = attempt
+    observed = null
+    try {
+      observed = await inspectGate(g, blocker, index, attempt)
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error
+      observed = { ready: false, evidence: `check unavailable: ${error && error.message ? error.message : error}` }
+      log(`goal ${g.id}: ${observed.evidence}`)
+    }
+    if (observed && observed.ready === true) break
+    if (attempt < GATE_ATTEMPTS) {
+      if (typeof setTimeout !== 'function') {
+        log(`goal ${g.id}: native timer unavailable; deferring the gate`)
+        break
+      }
+      const delay = Math.min(30000, GATE_BACKOFF_MS * 2 ** (attempt - 1))
+      try {
+        await new Promise(resolve => setTimeout(resolve, delay))
+      } catch (error) {
+        if (error && error.name === 'AbortError') throw error
+        log(`goal ${g.id}: native timer failed; deferring: ${error && error.message ? error.message : error}`)
+        break
+      }
     }
   }
-  const planned = await plan(g)
-  if (!planned) return { merged: false, note: 'planner died' }
-  const p = routeCheckTasks(earlierDeps(planned, g))
-  if (!p.tasks.length) return { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' }
-  // A dependency that already settled unmerged blocks this goal before any
-  // worker writes on top of it (#1424).
-  const early = settledBlock(p)
-  if (early) return early
-  state.p = p
-  const worked = await work(p, g)
-  state.results = worked.results
-  const reviewed = await review(worked, g)
-  state.review = reviewed.review
-  return integrateAndLand(reviewed, g)
+  return { ready: !!(observed && observed.ready === true),
+    evidence: observed && observed.evidence || 'check unavailable',
+    attempts }
+}
+
+// Enforce approved dependencies before a planner or worker touches this goal.
+// A missing stage or external publication needs a resumable gate, not guessed
+// success. Cross-repository execution needs a separately rooted session first.
+const approvedDependencies = async (g, approved) => {
+  const blocked = (note, gate) => ({ merged: false, blocked: true, note, ...(gate ? { gate } : {}) })
+  if (approved.repo !== ORCHESTRATION.session_repo) {
+    return blocked(`blocked: ${approved.repo} requires a separately rooted repository session`)
+  }
+  let dependencies
+  try {
+    // Subscribe to every blocker together: any hard failure wins immediately,
+    // even if an earlier blocker is deferred or has not finished yet.
+    dependencies = await Promise.all(approved.blockers.map(async b => {
+      if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
+        throw blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
+      }
+      if (await landed[b.goal]) return null
+      const upstream = outcome[b.goal]
+      if (upstream && upstream.status === 'deferred') return { blocker: b, upstream }
+      throw blocked(depNote(b.goal), b)
+    }))
+  } catch (error) {
+    if (error && error.blocked === true) return error
+    throw error
+  }
+  const deferred = dependencies.find(Boolean)
+  if (deferred) {
+    const { blocker, upstream } = deferred
+    return { ...blocked(depNote(blocker.goal), upstream.gate || blocker), status: 'deferred',
+      waiting_on: blocker.goal, gate_evidence: upstream.gate_evidence || 'upstream gate unavailable' }
+  }
+  return null
+}
+
+const approvedChecks = async (g, approved) => {
+  for (const [index, b] of approved.blockers.entries()) {
+    if (b.when !== 'merged') {
+      const observed = await observeGate(g, b, index)
+      if (!observed.ready) {
+        return { merged: false, blocked: true, gate: b,
+          note: `blocked: dependency ${b.goal} still requires ${b.when} evidence`,
+          status: 'deferred', gate_evidence: observed.evidence,
+          gate_attempts: observed.attempts }
+      }
+    }
+  }
+  return null
+}
+
+// Restore the native branch before each phase, including after dependency
+// promises resolve in another goal's context. Keep terminal results outside
+// pipeline's null-means-stop convention, and preserve thrown errors for parking.
+const inNativeStages = async (stages) => {
+  let stopped = null
+  let failure = null
+  const results = await pipeline([true], ...stages.map(stage => async () => {
+    if (stopped || failure) return true
+    try { stopped = await stage() }
+    catch (cause) { failure = { cause } }
+    return true
+  }))
+  if (failure) throw failure.cause
+  if (!results[0]) throw new Error('native goal stage did not complete')
+  return stopped
+}
+
+const approvedBlock = (g) => {
+  const approved = RUN_GOALS.get(String(g.id))
+  return approved ? inNativeStages([
+    () => approvedDependencies(g, approved),
+    () => approvedChecks(g, approved),
+  ]) : null
+}
+
+const attemptGoal = async (g, state) => {
+  let worked
+  let reviewed
+  return inNativeStages([
+    () => !PARALLEL && DIRTY_AFTER !== null
+      ? { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` } : null,
+    () => approvedBlock(g),
+    async () => {
+      // Failed bugs block only the feature children that list them (#1409).
+      if (STUCK_BUG_BLOCKS) {
+        for (const bug of bugDepsOf(g)) {
+          const dep = goalIdOf[bug]
+          const stuck = dep === undefined ? STUCK_BUGS.has(bug) : !(await landed[dep])
+          if (stuck) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
+        }
+      }
+      return null
+    },
+    async () => {
+      const planned = await plan(g)
+      if (!planned) return { merged: false, note: 'planner died' }
+      const p = routeCheckTasks(earlierDeps(planned, g))
+      if (!p.tasks.length) return { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' }
+      const early = settledBlock(p)
+      if (early) return early
+      state.p = p
+      return null
+    },
+    async () => { worked = await work(state.p, g); state.results = worked.results },
+    async () => { reviewed = await review(worked, g); state.review = reviewed.review },
+    () => integrateAndLand(reviewed, g),
+  ])
 }
 
 // Did anything write to the checkout? A rejected or blocked goal whose
@@ -756,10 +1038,32 @@ const runBatch = async (goals) => {
   return rs
 }
 
+// Native resume stops using ALL cached agents at its first cache miss, even
+// across parallel branches. Replay complete prior rounds before changing any
+// gate prompt. Each round has the same goal list, branch slots and observations
+// as that round had in the previous run; completed goals never enter later
+// rounds. This also preserves sequential cache chains across independent goals.
+const runApprovedRounds = async () => {
+  const lastEpoch = Math.max(GATE_EPOCH, ...args.goals.map(g => requestedEpoch(g.id)))
+  const byId = {}
+  for (let epoch = GATE_EPOCH; epoch <= lastEpoch; epoch++) {
+    replayEpoch = epoch
+    const goals = args.goals.filter(g => requestedEpoch(g.id) >= epoch)
+    for (const g of goals) {
+      delete outcome[String(g.id)]
+      landed[g.id] = new Promise(resolve => { settle[g.id] = resolve })
+    }
+    const round = await runBatch(goals)
+    goals.forEach((g, i) => { byId[String(g.id)] = round[i] })
+  }
+  replayEpoch = null
+  return args.goals.map(g => byId[String(g.id)])
+}
+
 let results
 phase('Plan')
 const featureStages = STAGES.filter(s => !isBugStage(s))
-if (STAGES.some(isBugStage) && featureStages.length) {
+if (!ORCHESTRATION && STAGES.some(isBugStage) && featureStages.length) {
   // Bug stage first (plus any goal in no stage), then each feature stage in order.
   // The router normally starts one call per stage, so one batch is empty.
   const featureIds = new Set()
@@ -778,7 +1082,7 @@ if (STAGES.some(isBugStage) && featureStages.length) {
   }
   results = args.goals.map(g => byId[idKey(g.id)])
 } else {
-  results = await runBatch(args.goals)
+  results = ORCHESTRATION ? await runApprovedRounds() : await runBatch(args.goals)
 }
 
 const summary = args.goals.map((g, i) => ({ goal: g.id, ...(results[i] || { merged: false, note: 'dropped' }), problems: problemsOf(g.id) }))
@@ -787,6 +1091,19 @@ DEFERRED_GOALS.forEach(d => {
   log(`deferred: goal ${d.goal}: ${d.note}`)
   summary.push(d)
 })
+// The router combines this small manifest with the original approved arguments
+// and the actual native Workflow launch references. No completed-goal bypass
+// or invented run identifier is accepted from the model.
+const remaining = summary.filter(s => ORCHESTRATION && s.status === 'deferred' &&
+  s.gate && s.gate.when !== 'merged' && nonempty(s.gate.check)).map(s => String(s.goal))
+const nextEpochs = { ...GATE_EPOCHS }
+const exhausted = remaining.some(id => gateEpoch(id) >= MAX_GATE_EPOCH)
+for (const id of remaining) nextEpochs[id] = Math.min(MAX_GATE_EPOCH, gateEpoch(id) + 1)
+const resume = remaining.length ? {
+  schema: 'grind-publication-resume/v1', remaining_goals: remaining, gateEpochs: nextEpochs,
+  ...(exhausted ? { exhausted: true, reason: 'native replay history limit reached; retain deferred work' } : {}),
+} : null
+const resumeResult = resume ? { resume } : {}
 if (PLAN_URL) log(`plan: ${PLAN_URL}`)
 if (allProblems().length) log(`problems go to: ${PROBLEM_REPORTING} (the router files them)`)
 if (!FEATURE) {
@@ -796,12 +1113,14 @@ if (!FEATURE) {
   const orphans = allProblems().filter(p => !goalIds.has(String(p.goal)))
   if (orphans.length) summary.push({ goal: 'run', status: 'problems', note: 'problems reported outside any goal', problems: orphans })
   // With a plan the router needs plan_url back for the feature-stage call.
-  return args.plan ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING } : summary
+  return args.plan || ORCHESTRATION ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING, ...resumeResult } : summary
 }
 
 // Feature landing (#1410): once every feature-stage goal has settled.
 const feature = { branch: FEATURE.branch, pr: FEATURE.pr || null, policy: FEATURE_MERGE, merged: false, note: '' }
-if (!FEATURE.pr) {
+if (resume) {
+  feature.note = 'waiting for deferred publication goals; feature PR stays draft'
+} else if (!FEATURE.pr) {
   feature.note = 'no feature PR'
 } else if (FEATURE_MERGE === 'auto') {
   phase('Land')
@@ -823,4 +1142,4 @@ if (!FEATURE.pr) {
 log(`feature ${feature.branch}: PR ${feature.pr || '(none)'}, policy ${feature.policy}, ${feature.merged ? 'merged' : 'not merged'}: ${feature.note}`)
 feature.problems = problemsOf('feature')
 logProblems()
-return { goals: summary, feature, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING }
+return { goals: summary, feature, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING, ...resumeResult }

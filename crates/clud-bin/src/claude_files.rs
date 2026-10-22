@@ -60,6 +60,16 @@ fn skill_body(skill_md: &str) -> &str {
 /// Every bundled agent definition and workflow script.
 pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
     BundledClaudeFile {
+        rel_path: "agents/grind-orchestrator.md",
+        body: include_str!("../assets/agents/grind-orchestrator.md"),
+        procedure: None,
+    },
+    BundledClaudeFile {
+        rel_path: "agents/grind-gate.md",
+        body: include_str!("../assets/agents/grind-gate.md"),
+        procedure: None,
+    },
+    BundledClaudeFile {
         rel_path: "agents/grind-planner.md",
         body: include_str!("../assets/agents/grind-planner.md"),
         procedure: Some("grind-plan"),
@@ -193,6 +203,8 @@ mod tests {
     fn bundled_includes_the_grind_roles_and_workflow() {
         let paths: Vec<_> = BUNDLED_CLAUDE_FILES.iter().map(|f| f.rel_path).collect();
         for role in [
+            "orchestrator",
+            "gate",
             "planner",
             "prework",
             "worker",
@@ -239,6 +251,8 @@ mod tests {
                 .body
         };
         for role in [
+            "orchestrator",
+            "gate",
             "planner",
             "prework",
             "worker",
@@ -262,6 +276,47 @@ mod tests {
         assert!(!body("lander").contains("Edit"));
         assert!(!body("planner").contains("Edit"));
         assert_eq!(tools("prework"), "tools: Bash, Read, Grep, Glob");
+    }
+
+    #[test]
+    fn gate_agent_is_small_shell_only_and_requires_execution_evidence() {
+        let file = BUNDLED_CLAUDE_FILES
+            .iter()
+            .find(|file| file.rel_path == "agents/grind-gate.md")
+            .unwrap();
+        assert!(file.procedure.is_none());
+        assert!(file.body.contains("\ntools: Bash\n"));
+        assert!(file.body.contains("\nmodel: haiku\n"));
+        for instruction in [
+            "Copy it verbatim",
+            "actually completed successfully",
+            "Do not retry, sleep or poll",
+            "execution evidence remains authoritative",
+        ] {
+            assert!(file.body.contains(instruction), "missing {instruction}");
+        }
+    }
+
+    #[test]
+    fn orchestrator_instructions_cover_dependencies_and_approval() {
+        let file = BUNDLED_CLAUDE_FILES
+            .iter()
+            .find(|f| f.rel_path == "agents/grind-orchestrator.md")
+            .unwrap();
+        assert!(file.procedure.is_none());
+        assert!(file.body.contains("\ntools: Read, Grep, Glob, Bash\n"));
+        for instruction in [
+            "ask what blocks it",
+            "`merged`, `released`, `tag` or `published`",
+            "exact read-only `check` command",
+            "PR URLs, versions and tags",
+            "dirty or active checkouts",
+            "`proposed_goals`",
+            "never silently add it to `goals`",
+            "obtains approval before execution",
+        ] {
+            assert!(file.body.contains(instruction), "missing {instruction}");
+        }
     }
 
     #[test]

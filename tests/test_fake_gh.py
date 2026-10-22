@@ -601,3 +601,135 @@ def test_body_file_from_stdin_and_path(world, capsys, monkeypatch, tmp_path):
     assert state["issues"]["1"]["comments"][0]["body"] == plan
     number = out.strip().rsplit("/", 1)[-1]
     assert state["issues"][number]["body"] == "evidence\nRefs #1\n"
+
+
+def _two_repositories() -> dict:
+    return {
+        "repo": "o/primary",
+        "repositories": {
+            name: {"repo": name, "default_branch": branch, "prs": [], "issues": {
+                "7": {"title": name, "body": marker, "state": "open", "comments": []},
+            }}
+            for name, branch, marker in [
+                ("o/primary", "master", "PRIMARY_REPO_ISSUE"),
+                ("o/sister", "main", "SISTER_REPO_ISSUE"),
+            ]
+        },
+    }
+
+
+@pytest.mark.parametrize("selection", [
+    ["issue", "view", "7", "--repo", "o/sister"],
+    ["issue", "view", "7", "--repo=o/sister"],
+    ["-R", "o/sister", "issue", "view", "7"],
+    ["-Ro/sister", "issue", "view", "7"],
+    ["issue", "view", "https://github.com/o/sister/issues/7"],
+])
+def test_repo_selection_does_not_conflate_issue_numbers(world, capsys, selection):
+    world(_two_repositories())
+    code, out, _ = _run(capsys, *selection, "--json", "title,body,url")
+    assert code == 0
+    value = json.loads(out)
+    assert value["body"] == "SISTER_REPO_ISSUE"
+    assert value["url"] == "https://github.com/o/sister/issues/7"
+
+
+def test_repository_mutations_preserve_other_repositories(world, capsys):
+    world(_two_repositories())
+    argv = ["issue", "comment", "7", "--repo", "o/sister", "--body", "sister only"]
+    code, out, _ = _run(capsys, *argv)
+    assert code == 0
+    assert out.startswith("https://github.com/o/sister/issues/7#")
+    state = _state(world)
+    assert state["repositories"]["o/primary"]["issues"]["7"]["comments"] == []
+    comments = state["repositories"]["o/sister"]["issues"]["7"]["comments"]
+    assert comments[0]["body"] == "sister only"
+    assert state["calls"] == [argv]
+
+
+def test_rest_endpoints_select_their_repository(world, capsys):
+    world(_two_repositories())
+    code, out, _ = _run(capsys, "api", "repos/o/sister/issues/7", "--jq", ".body")
+    assert code == 0
+    assert out.strip() == "SISTER_REPO_ISSUE"
+    code, out, _ = _run(capsys, "repo", "view", "o/primary", "--json", "defaultBranchRef")
+    assert code == 0
+    assert json.loads(out)["defaultBranchRef"]["name"] == "master"
+
+
+def test_unknown_repository_does_not_fall_back_to_primary(world, capsys):
+    world(_two_repositories())
+    code, _, error = _run(capsys, "issue", "view", "7", "--repo", "o/unknown")
+    assert code != 0
+    assert "unknown fixture repository o/unknown" in error
+    state = _state(world)
+    assert len(state["calls"]) == 1
+    assert state["repositories"] == _two_repositories()["repositories"]
+
+
+def test_missing_release_is_a_failed_check(world, capsys):
+    world()
+    code, _, error = _run(capsys, "release", "view", "v0.9.0", "--repo", "o/r")
+    assert code == 1
+    assert "release not found" in error
+    assert _state(world).get("releases", {}) == {}
+
+
+def test_release_creation_and_lookup_are_repository_scoped(world, capsys):
+    world(_two_repositories())
+    code, url, _ = _run(capsys, "release", "create", "v0.9.0", "--repo", "o/sister")
+    assert code == 0
+    assert url.strip() == "https://github.com/o/sister/releases/tag/v0.9.0"
+    code, out, _ = _run(
+        capsys, "release", "view", "v0.9.0", "--repo", "o/sister", "--json", "tagName,publishedAt",
+    )
+    release = json.loads(out)
+    assert code == 0
+    assert release["tagName"] == "v0.9.0"
+    assert release["publishedAt"]
+    assert _run(capsys, "release", "view", "v0.9.0", "--repo", "o/primary")[0] == 1
+    assert not _state(world)["repositories"]["o/primary"].get("releases")
+    code, out, _ = _run(capsys, "api", "repos/o/sister/releases/tags/v0.9.0")
+    assert code == 0
+    assert json.loads(out)["tag_name"] == "v0.9.0"
+    code, out, _ = _run(capsys, "api", "repos/o/primary/releases")
+    assert code == 0
+    assert json.loads(out) == []
+
+
+def test_draft_release_lookup_does_not_claim_publication(world, capsys):
+    world()
+    assert _run(capsys, "release", "create", "v-next", "--draft")[0] == 0
+    code, out, _ = _run(capsys, "release", "view", "v-next", "--json", "isDraft,publishedAt")
+    release = json.loads(out)
+    assert code == 0
+    assert release["isDraft"] is True
+    assert release["publishedAt"] is None
+
+
+def test_release_can_appear_after_controlled_missing_observations(world, capsys):
+    world({"repo": "o/r", "release_after_views": {"v-next": {
+        "after": 2, "release": {"publishedAt": "2026-10-22T00:00:00Z"},
+    }}})
+    for _ in range(2):
+        assert _run(capsys, "release", "view", "v-next")[0] == 1
+    assert _run(capsys, "repo", "view", "--json", "nameWithOwner")[0] == 0
+    code, out, _ = _run(capsys, "release", "view", "v-next")
+    assert code == 0
+    assert json.loads(out)["publishedAt"] == "2026-10-22T00:00:00Z"
+
+
+@pytest.mark.parametrize("args", [
+    ["release", "view", "v-next", "--repo", "o/sister"],
+    ["release", "view", "--repo", "o/sister", "v-next"],
+    ["release", "view", "-Ro/sister", "v-next"],
+    ["--repo", "o/sister", "release", "view", "v-next"],
+])
+def test_release_lookup_accepts_repository_flag_positions(world, capsys, args):
+    state = _two_repositories()
+    state["repositories"]["o/sister"]["releases"] = {"v-next": {"publishedAt": "published"}}
+    world(state)
+    code, out, _ = _run(capsys, *args)
+    assert code == 0
+    assert json.loads(out)["tagName"] == "v-next"
+    assert json.loads(out)["url"] == "https://github.com/o/sister/releases/tag/v-next"

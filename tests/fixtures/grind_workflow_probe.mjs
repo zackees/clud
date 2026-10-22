@@ -11,7 +11,7 @@ if (source.split(metadataExport).length !== 2) {
 // top-level return. Remove only the metadata export keyword.
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const execute = new AsyncFunction(
-  'args', 'agent', 'log', 'phase', 'parallel',
+  'args', 'agent', 'log', 'phase', 'parallel', 'pipeline',
   source.replace(metadataExport, 'const meta ='),
 );
 const prompts = [];
@@ -49,6 +49,16 @@ try {
   const result = await execute(
     config.args, agent, () => {}, () => {},
     tasks => Promise.all(tasks.map(task => task())),
+    // Native pipeline: items run concurrently, each item's stages run in
+    // order on the previous result, and a null result stops that item.
+    (items, ...stages) => Promise.all(items.map(async item => {
+      let value = item;
+      for (const stage of stages) {
+        value = await stage(value);
+        if (value === null || value === undefined) return null;
+      }
+      return value;
+    })),
   );
   console.log(JSON.stringify({ result, prompts }));
 } catch (error) {

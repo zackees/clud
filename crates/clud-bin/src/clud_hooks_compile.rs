@@ -114,8 +114,12 @@ pub fn deletion_safety_fragment() -> Value {
                 }]
             }],
             "PostToolUse": [{
-                "matcher": "CronCreate|CronDelete|ScheduleWakeup",
+                "matcher": "Bash|Workflow|CronCreate|CronDelete|ScheduleWakeup",
                 "hooks": [{ "type": "command", "command": dispatcher_command("PostToolUse") }]
+            }],
+            "PostToolUseFailure": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": dispatcher_command("PostToolUseFailure") }]
             }],
             "Stop": [{
                 "hooks": [{ "type": "command", "command": dispatcher_command("Stop") }]
@@ -143,6 +147,7 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "Agent",
     "EnterWorktree",
     "Workflow",
+    "StructuredOutput",
     "AskUserQuestion",
     "Write",
     "Edit",
