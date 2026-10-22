@@ -27,7 +27,6 @@ from tests.harness.test_grind_meta_of_metas import _told
 from tests.harness.test_workflow_gate_evidence import _message_texts
 
 
-
 def workflow_notices(result: RunResult) -> dict[str, str]:
     notices = {}
     for row in result.requests:
@@ -235,6 +234,7 @@ def test_native_resume_replays_one_unchanged_agent(
     assert len(notices) == 2, notices
     for notice in notices.values():
         assert "<status>completed</status>" in notice, notice
-        assert "<result>" in notice and "CACHE_OBSERVATION_COMPLETE" in notice, notice
+        assert "<result>" in notice, notice
+        assert "CACHE_OBSERVATION_COMPLETE" in notice, notice
     assert len(calls) == 1, {"calls": calls, "reference": captured.read_text()}
     assert (h.repo / "cache-probe.txt").read_text() == "observed"
