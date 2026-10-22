@@ -610,7 +610,7 @@ def identity_snapshot(pid: int, start_time: int) -> str:
     def read(name: str, probe: Callable[[], object]) -> None:
         try:
             fields.append(f"{name}={probe()!r}")
-        except Exception as error:  # noqa: BLE001 - every failure is a reading
+        except Exception as error:  # every failure is a reading
             fields.append(f"{name}=<{type(error).__name__}: {error}>")
 
     def kill_zero() -> str:
