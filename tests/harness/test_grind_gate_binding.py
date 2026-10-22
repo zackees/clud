@@ -29,6 +29,26 @@ def install_probe(h: Harness) -> None:
     )
 
 
+def install_outcome_guard(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
+    output = h.logs / "gate-native-outcomes.jsonl"
+    record_outcomes(h, monkeypatch, output)
+    original = h.settings
+
+    def settings(**kwargs: Any) -> Path:
+        path = original(**kwargs)
+        data = json.loads(path.read_text())
+        scanner = h.clud.parent / ("clud-cmd-scan" + EXE)
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            data["hooks"][event].append({"matcher": "Bash", "hooks": [{
+                "type": "command", "command": f'"{scanner}" --event {event}',
+            }]})
+        path.write_text(json.dumps(data))
+        return path
+
+    monkeypatch.setattr(h, "settings", settings)
+    return output
+
+
 @pytest.mark.parametrize("selection", ["primary", "sister"])
 @pytest.mark.parametrize("facts_state", ["approved", "missing", "plan"])
 def test_native_gate_can_only_execute_its_bound_check(
@@ -136,22 +156,7 @@ def test_native_gate_readiness_matches_executed_outcome(
             {"goal": "upstream", "when": "released", "check": command},
         ]}],
     }})
-    output = h.logs / "gate-native-outcomes.jsonl"
-    record_outcomes(h, monkeypatch, output)
-    original = h.settings
-
-    def settings(**kwargs: Any) -> Path:
-        path = original(**kwargs)
-        data = json.loads(path.read_text())
-        scanner = h.clud.parent / ("clud-cmd-scan" + EXE)
-        for event in ("PostToolUse", "PostToolUseFailure"):
-            data["hooks"][event].append({"matcher": "Bash", "hooks": [{
-                "type": "command", "command": f'"{scanner}" --event {event}',
-            }]})
-        path.write_text(json.dumps(data))
-        return path
-
-    monkeypatch.setattr(h, "settings", settings)
+    output = install_outcome_guard(h, monkeypatch)
     result = h.run("Check native gate readiness against execution.", {"roles": [
         {"name": "gate", "match": ROLE, "steps": [
             _bash(command),
