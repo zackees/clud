@@ -613,7 +613,11 @@ pub enum Command {
     /// Report hook and alias health: stale or retired aliases in clud's own
     /// alias dirs, a foreign `clud-cmd-scan` first on PATH, and the hook
     /// matcher's tool coverage (#1954). Exits 1 when anything is wrong.
-    Doctor,
+    Doctor {
+        /// Print the report as one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a CI job locally under bosn and show only the verdict and the
     /// failing steps' diagnostics (#1839).
     Ci {

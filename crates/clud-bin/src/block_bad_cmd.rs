@@ -1651,9 +1651,16 @@ pub const RECURSIVE_AGENT_RULE_ID: &str = "clud_agent_depth_exceeded";
 /// not, and this cannot see them (#812 is explicit that Workflow-internal
 /// fan-out remains uncontrolled, and the upstream gap is anthropics/claude-code#79953).
 fn creates_agents(tool_name: &str) -> bool {
+    creates_subagent(tool_name) || tool_name.eq_ignore_ascii_case("workflow")
+}
+
+/// Tools that start one subagent: Claude Code's `Agent` and Codex's
+/// `spawn_agent`, which Codex reports by its own name although a matcher
+/// may reach it through the `Agent` alias (#1954).
+fn creates_subagent(tool_name: &str) -> bool {
     matches!(
         tool_name.to_ascii_lowercase().as_str(),
-        "agent" | "workflow"
+        "agent" | "spawn_agent"
     )
 }
 
@@ -3865,6 +3872,8 @@ mod tests {
             "Edit",
             "MultiEdit",
             "NotebookEdit",
+            "apply_patch",
+            "spawn_agent",
             "Read",
             "Grep",
             "Glob",
@@ -6719,6 +6728,19 @@ mod tests {
             }
             Decision::Allow => panic!("a subagent creating an agent must be denied"),
         }
+    }
+
+    /// #1954: Codex delegates through `spawn_agent`, reported by that name.
+    #[test]
+    fn a_codex_subagent_may_not_spawn_another_agent() {
+        assert!(matches!(
+            recursive_agent_decision("spawn_agent", Some("agent-7"), true),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            recursive_agent_decision("spawn_agent", None, true),
+            Decision::Allow
+        );
     }
 
     /// The primary session keeps delegating. The harness omits `agent_id` for

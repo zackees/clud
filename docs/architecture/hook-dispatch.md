@@ -403,15 +403,22 @@ An already-installed line should register with `matcher: "*"`, not `"Bash"`. A
 `Bash`-scoped matcher only ever fires on the Bash tool, so a catastrophic
 command (`rm -rf $VAR/`) issued through Claude Code's PowerShell tool, an MCP
 shell server (`mcp__*`), or a Codex session would bypass the guard entirely
-(zackees/clud#1084). This is why this repo's own committed `.claude/settings.json`
-and `.codex/hooks.json` register `clud-cmd-scan` with `matcher: "*"`. The scan
-self-selects the shell dialect internally, so a non-shell tool call is a cheap
-no-op. (clud's own compiled dispatch already uses `*` — see below — so this only
-matters for the bare lines a user or repo installs by hand.) Codex sessions
-get the same coverage: the session-flag `hooks.PreToolUse` override clud passes
-to Codex uses `matcher="*"` (`CODEX_HOOK_MATCHER` in `command/builder.rs`,
-#1954). Rules keyed on Claude tool names (`Write`, `Agent`, …) still see only
-Claude's names; Codex's own names for those tools are not mapped yet.
+(zackees/clud#1084). The scan self-selects the shell dialect internally, so a
+non-shell tool call is a cheap no-op. clud's own launches do not depend on such
+a line: Claude Code gets the compiled `GUARDED_TOOLS` matcher, and Codex
+sessions get the session-flag `hooks.PreToolUse` override with `matcher="*"`
+(`CODEX_HOOK_MATCHER` in `command/builder.rs`, #1954).
+
+This repo dogfoods that: its committed `.claude/settings.json` and
+`.codex/hooks.json` carry no scanner line of their own (#1954). A catch-all
+line here once made every rule work for clud developers while users' launches
+delivered `Bash` alone. `tests/test_hook_matcher_delivery_1954.py` checks
+delivery through the compiled matcher alone, in a repo with no hook config.
+
+Codex reports its own tool names even where a matcher reaches them through a
+Claude alias: `apply_patch` (matched by `Edit`/`Write`) and `spawn_agent`
+(matched by `Agent`). The rules name both, so the grind write cap, the grind
+role-spawn cap and the recursive-agent guard hold on Codex too (#1954).
 
 Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
 user installed, and the `--event PreToolUse` line clud compiles — and a declared
@@ -492,6 +499,26 @@ repo's existing `.claude/settings.json` hooks and fix repos with no migration
 at all. Deliberately not done yet: excluding a source drops everything it
 contributes, so a bug there costs the user `permissions`, not just hooks. See
 #977.
+
+### Hook health: `clud doctor`
+
+`clud doctor` (`doctor.rs`, #1954) reports what a launch cannot see:
+
+- alias freshness in clud's interpreter, session and helper alias dirs, and
+  beside the running `clud`: stale (another build), missing (absent from a
+  dir clud has populated) and retired names;
+- files in those owned dirs that are not clud aliases. They are listed and
+  never deleted, since clud does not own them; an installer's dot-prefixed
+  staging copy may be another process's install in flight and is skipped;
+- a foreign `clud-cmd-scan` first on PATH;
+- scanner coverage per source: the fragment a clud launch passes, and every
+  `.claude/settings.json` / `.codex/hooks.json` under the home and the
+  current repo that registers the scanner, with the `GUARDED_TOOLS` each one
+  misses (Codex aliases counted). Coverage is computed from the configs on
+  disk; it describes what a harness would deliver, not proof that one ran.
+
+`--json` prints the same report as one document. Exit 1 means an alias
+finding; unknown files and coverage gaps are informational.
 
 ## Which repo's hooks fire
 

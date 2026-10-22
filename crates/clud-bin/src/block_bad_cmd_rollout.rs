@@ -1062,7 +1062,10 @@ mod tests {
 
     #[test]
     fn committed_repo_hook_configs_use_the_portable_bare_helper() {
-        // #1333 and #1428 both committed a machine-local helper path.
+        // #1333 and #1428 both committed a machine-local helper path. Since
+        // #1954 the repo carries no scanner line at all, so it sees the
+        // coverage a user's launch delivers; any line that returns must
+        // still be the bare helper.
         for (name, body) in [
             (".claude/settings.json", COMMITTED_CLAUDE_SETTINGS),
             (".codex/hooks.json", COMMITTED_CODEX_HOOKS),
@@ -1074,7 +1077,10 @@ mod tests {
                 .iter()
                 .filter(|command| command.contains("clud-cmd-scan"))
                 .collect();
-            assert!(!scans.is_empty(), "{name} lost its clud-cmd-scan hook");
+            assert!(
+                scans.is_empty(),
+                "{name}: a repo scanner line hides matcher gaps from clud developers (#1954)"
+            );
             for command in scans {
                 assert_eq!(command, NEW_COMMAND, "{name} must not pin clud-cmd-scan");
             }

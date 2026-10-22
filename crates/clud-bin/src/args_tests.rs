@@ -378,7 +378,13 @@ fn deepseek_harness_accepts_model_only_when_clud_routes_the_model() {
 #[test]
 fn doctor_is_a_dispatched_subcommand() {
     let args = parse(&["clud", "doctor"]);
-    assert!(matches!(args.command, Some(Command::Doctor)));
+    assert!(matches!(
+        args.command,
+        Some(Command::Doctor { json: false })
+    ));
+    assert!(args.passthrough.is_empty());
+    let args = parse(&["clud", "doctor", "--json"]);
+    assert!(matches!(args.command, Some(Command::Doctor { json: true })));
     assert!(args.passthrough.is_empty());
 }
 

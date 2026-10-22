@@ -294,12 +294,13 @@ pub(super) fn agent_spawn_reason(
     tool_input: Option<&Value>,
     allow_env: Option<&str>,
 ) -> Option<String> {
-    if !tool_name.eq_ignore_ascii_case("agent") || allow_env == Some("1") {
+    if !super::creates_subagent(tool_name) || allow_env == Some("1") {
         return None;
     }
-    let requested = tool_input?
-        .get("subagent_type")
-        .or_else(|| tool_input?.get("subagentType"))?
+    // Codex's `spawn_agent` names the role `agent_type` (#1954).
+    let requested = ["subagent_type", "subagentType", "agent_type"]
+        .iter()
+        .find_map(|key| tool_input?.get(*key))?
         .as_str()?;
     is_grind_role(requested).then(|| {
         format!(
@@ -446,7 +447,9 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
 /// front, in one round before prework. The planner never writes files, in
 /// either phase, and neither does the prework agent.
 pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option<String> {
-    const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
+    // Codex reports its file edits as `apply_patch` even where a matcher
+    // reaches them through the `Edit`/`Write` aliases (#1954).
+    const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"];
     if tool_name.eq_ignore_ascii_case("AskUserQuestion") {
         return Some(format!(
             "{role} may not ask the user: /grind asks every question up front, in one round \
@@ -1758,7 +1761,15 @@ mod tests {
             plan_only: true,
             ..run(true, false)
         };
-        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "write"] {
+        // `apply_patch` is how Codex writes files (#1954).
+        for tool in [
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "write",
+            "apply_patch",
+        ] {
             assert!(
                 tool_reason(PLANNER, tool, &run(true, false)).is_some(),
                 "{tool}"
@@ -2037,6 +2048,16 @@ mod tests {
         assert!(agent_spawn_reason("Bash", Some(&worker), None).is_none());
         let reason = agent_spawn_reason("Agent", Some(&call("grind-lander")), None).unwrap();
         assert!(reason.contains("grind-run") && reason.contains(ALLOW_GRIND_AGENTS_ENV));
+    }
+
+    #[test]
+    fn codex_spawn_agent_calls_for_grind_roles_are_refused() {
+        // #1954: Codex reports `spawn_agent` and names the role `agent_type`.
+        let worker = serde_json::json!({"agent_type": "grind-worker", "message": "x"});
+        assert!(agent_spawn_reason("spawn_agent", Some(&worker), None).is_some());
+        assert!(agent_spawn_reason("spawn_agent", Some(&worker), Some("1")).is_none());
+        let explorer = serde_json::json!({"agent_type": "explorer", "message": "x"});
+        assert!(agent_spawn_reason("spawn_agent", Some(&explorer), None).is_none());
     }
 
     #[test]

@@ -151,6 +151,7 @@ pub const GUARDED_TOOLS: &[&str] = &[
     "exec_command",
     "shell_command",
     "apply_patch",
+    "spawn_agent",
 ];
 
 /// clud's `WorktreeCreate` / `WorktreeRemove` lines (#1962, #1971): Claude

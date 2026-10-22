@@ -325,12 +325,12 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             json: *json,
         }),
         args::Command::Secret(options) => clud::secret_prompt::run(options),
-        args::Command::Doctor => {
+        args::Command::Doctor { json } => {
             if !args.passthrough.is_empty() {
                 eprintln!("doctor accepts no passthrough arguments");
                 return Some(2);
             }
-            clud::doctor::run()
+            clud::doctor::run(*json)
         }
         args::Command::DshUpdate => {
             if !args.passthrough.is_empty() {

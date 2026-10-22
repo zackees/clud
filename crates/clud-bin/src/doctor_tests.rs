@@ -4,6 +4,10 @@ fn write(path: &Path, len: usize) {
     std::fs::write(path, vec![b'x'; len]).unwrap();
 }
 
+fn names(list: &[&str]) -> Vec<String> {
+    file_names(list)
+}
+
 #[test]
 fn current_aliases_are_clean_and_stale_or_retired_ones_are_reported() {
     let dir = tempfile::tempdir().unwrap();
@@ -18,10 +22,16 @@ fn current_aliases_are_clean_and_stale_or_retired_ones_are_reported() {
         .path()
         .join(crate::shim_registry::file_name("old-alias"));
     write(&retired, 10);
-    let names = ["fresh", "stale", "absent"].map(String::from).to_vec();
-    let findings = inspect_dir(dir.path(), &names, &["old-alias", "older-alias"], &own);
+    let files = names(&["fresh", "stale", "absent"]);
+    let report = inspect_dir(
+        dir.path(),
+        &files,
+        &names(&["old-alias", "older-alias"]),
+        &own,
+        false,
+    );
     assert_eq!(
-        findings,
+        report.findings,
         vec![
             Finding::Stale {
                 path: stale,
@@ -30,6 +40,45 @@ fn current_aliases_are_clean_and_stale_or_retired_ones_are_reported() {
             Finding::Retired { path: retired },
         ]
     );
+    assert!(report.unknown.is_empty(), "a shared dir lists no unknowns");
+}
+
+#[test]
+fn an_owned_dir_reports_missing_aliases_and_lists_foreign_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join(".ref");
+    write(&reference, 4);
+    let own = fingerprint(&reference).unwrap();
+    write(&dir.path().join(crate::shim_registry::file_name("rm")), 4);
+    let foreign = dir.path().join("leftover-tool");
+    write(&foreign, 99);
+    // Another installer's staging copy is in flight, not an orphan.
+    write(&dir.path().join(".gh.123.0.tmp"), 4);
+    let report = inspect_dir(dir.path(), &names(&["rm", "gh"]), &[], &own, true);
+    assert_eq!(
+        report.findings,
+        vec![Finding::Missing {
+            path: dir.path().join(crate::shim_registry::file_name("gh")),
+        }]
+    );
+    assert_eq!(report.unknown, vec![foreign.clone()]);
+    assert!(
+        foreign.exists(),
+        "doctor never deletes what it does not own"
+    );
+}
+
+#[test]
+fn an_absent_owned_dir_is_not_a_missing_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = inspect_dir(
+        &dir.path().join("never-made"),
+        &names(&["rm"]),
+        &[],
+        "x",
+        true,
+    );
+    assert_eq!(report, DirReport::default());
 }
 
 #[test]
@@ -39,4 +88,48 @@ fn findings_read_as_one_line_each() {
     }
     .to_string();
     assert_eq!(line, "retired alias /h/.clud/state/shims/old-alias remains");
+}
+
+#[test]
+fn matchers_reach_tools_by_name_alias_or_catch_all() {
+    assert!(matcher_reaches("*", "ScheduleWakeup"));
+    assert!(matcher_reaches("", "Agent"));
+    assert!(matcher_reaches("Bash|Agent", "Agent"));
+    assert!(
+        !matcher_reaches("Bash", "BashOutput"),
+        "matchers are anchored"
+    );
+    // Codex's aliases (#1954).
+    assert!(matcher_reaches("Edit", "apply_patch"));
+    assert!(matcher_reaches("Agent", "spawn_agent"));
+    assert!(matcher_reaches("Bash", "exec_command"));
+    assert!(!matcher_reaches("Bash", "apply_patch"));
+}
+
+#[test]
+fn the_launch_fragment_covers_every_guarded_tool() {
+    let report = coverage_report(None, None);
+    assert_eq!(report.len(), 1);
+    assert!(report[0].uncovered.is_empty(), "{:?}", report[0].uncovered);
+}
+
+#[test]
+fn a_bash_only_config_reports_what_it_misses() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+    std::fs::write(
+        root.path().join(".codex/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[
+            {"matcher":"Bash","hooks":[{"type":"command","command":"clud-cmd-scan"}]},
+            {"matcher":"*","hooks":[{"type":"command","command":"python other.py"}]}
+        ]}}"#,
+    )
+    .unwrap();
+    let report = coverage_report(None, Some(root.path()));
+    assert_eq!(report.len(), 2);
+    let codex = &report[1];
+    assert_eq!(codex.matchers, vec!["Bash".to_string()]);
+    assert!(codex.uncovered.contains(&"apply_patch"));
+    assert!(codex.uncovered.contains(&"spawn_agent"));
+    assert!(!codex.uncovered.contains(&"exec_command"));
 }
