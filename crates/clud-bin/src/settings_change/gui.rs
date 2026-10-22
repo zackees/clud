@@ -29,7 +29,7 @@ pub(super) fn approve(preview: &Preview) -> Result<(), Failure> {
         egui::CentralPanel::default().show(context, |ui| {
             if let Some(accepted) = draw(ui, &preview, &mut first_frame) {
                 *returned.borrow_mut() = accepted;
-                context.send_viewport_cmd(egui::ViewportCommand::Close);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
         context.request_repaint_after(Duration::from_secs(1));
