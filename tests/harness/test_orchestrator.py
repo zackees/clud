@@ -247,7 +247,8 @@ def test_approved_context_mismatch_stops_before_agents(harness: Harness, mode: s
     assert harness.git("status", "--porcelain") == before
 
 
-def test_orchestrator_cannot_execute_configured_git_filters(harness: Harness) -> None:
+@pytest.mark.parametrize("flag", ["--filters", "--filte"])
+def test_orchestrator_cannot_execute_configured_git_filters(harness: Harness, flag: str) -> None:
     h = harness
     canary = h.root / "filter-was-executed"
     (h.repo / "filter-input").write_text("plain blob\n")
@@ -255,7 +256,7 @@ def test_orchestrator_cannot_execute_configured_git_filters(harness: Harness) ->
     h.git("add", "filter-input", ".gitattributes")
     h.git("commit", "-qm", "filter fixture")
     h.git("config", "filter.advisor-canary.smudge", f"touch {shlex.quote(str(canary))}")
-    command = f"git -C {shlex.quote(str(h.repo))} cat-file --filters HEAD:filter-input"
+    command = f"git -C {shlex.quote(str(h.repo))} cat-file {flag} HEAD:filter-input"
     steps = [_bash(command), _after(
         {"is_error": True, "content_contains": "grind-orchestrator"}, {"text": "FILTER_REFUSED"},
     )]

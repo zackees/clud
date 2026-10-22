@@ -409,7 +409,13 @@ fn orchestrator_read(words: &[String]) -> bool {
     ];
     if sub
         .iter()
-        .any(|w| forbidden.iter().any(|flag| w.starts_with(flag)))
+        .any(|w| {
+            let option = w.split('=').next().unwrap_or(w);
+            option.len() > 2
+                && forbidden
+                    .iter()
+                    .any(|flag| option.starts_with(flag) || flag.starts_with(option))
+        })
     {
         return false;
     }
@@ -1792,6 +1798,8 @@ mod tests {
                 "gh api repos/o/r/issues -f title=changed",
                 "git log --output=changed",
                 "git cat-file --filters HEAD:path",
+                "git cat-file --filte HEAD:path",
+                "git cat-file --textc HEAD:path",
                 "git ls-remote -u /tmp/helper origin",
                 "git ls-remote -u/tmp/helper origin",
                 "git ls-remote ext::helper",
