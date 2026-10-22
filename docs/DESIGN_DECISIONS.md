@@ -7120,3 +7120,20 @@ cron sessions receive a tool denial that lets them continue implementing.
 The hook cannot force-exit manually selected plan mode; it supplies recovery
 context instead. Session flags are ephemeral across daemon restarts.
 See [hook dispatch](architecture/hook-dispatch.md#loop-scoped-plan-mode).
+
+## DD-182: Persistent OpenRouter ZDR uses an explicit setter
+
+**Context.** Remembering `--zdr` for every launch is error-prone, but silently
+saving a session flag would change the existing privacy-control contract (#1998).
+
+**Decision.** Add `--set-openrouter-zdr [on|off]`, which patches only the
+user-level OpenRouter preference and exits before launch machinery. Resolve
+the saved default into the existing request routing policy; explicit `--zdr`
+wins for one session. Keep policy provenance on the dry-run audit surface,
+outside upstream request JSON.
+
+**Consequences.** The preference follows users between repositories, applies
+to direct and unified routing, and leaves other providers alone. Disabling
+is explicit and persistent. Invalid saved preferences refuse OpenRouter
+launches so a parse failure cannot silently weaken an intended requirement.
+The setting controls clud requests rather than OpenRouter account settings.

@@ -447,6 +447,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            openrouter_zdr: None,
             block_cd: None,
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Claude),

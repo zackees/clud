@@ -558,6 +558,17 @@ class Harness:
         self._install_cmd_scan_alias()
         with self.backend(script) as base_url:
             env = self.clud_env(base_url, extra_env)
+            if provider == "--unified":
+                # Every upstream and the gateway's native client credential
+                # belong to this disposable test world.
+                env.update({
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
+                    "ANTHROPIC_API_KEY": "fixture-api-key-canary",
+                    "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": base_url,
+                    "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": base_url,
+                    "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": base_url,
+                    "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": base_url,
+                })
             argv = [
                 str(self.clud),
                 provider,

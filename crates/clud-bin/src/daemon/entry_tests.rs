@@ -228,6 +228,8 @@ fn transcript_forces_centralized_daemon() {
         allow_model: Vec::new(),
         provider_only: Vec::new(),
         zdr: false,
+        set_openrouter_zdr: None,
+        saved_openrouter_zdr: None,
         no_data_collection: false,
         redact_secrets: false,
         no_redact_secrets: false,

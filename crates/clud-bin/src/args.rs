@@ -143,6 +143,21 @@ pub struct Args {
     #[arg(long)]
     pub zdr: bool,
 
+    /// Save OpenRouter zero-data-retention routing for future launches and exit.
+    /// With no value enables it; pass off to disable the saved requirement.
+    #[arg(
+        long = "set-openrouter-zdr",
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "on",
+        conflicts_with_all = ["dry_run", "zdr"]
+    )]
+    pub set_openrouter_zdr: Option<OpenRouterZdrPreference>,
+
+    /// Resolved user preference; never accepted from backend arguments.
+    #[arg(skip)]
+    pub saved_openrouter_zdr: Option<bool>,
+
     /// OpenRouter only: exclude endpoints that collect request data.
     #[arg(long)]
     pub no_data_collection: bool,
@@ -409,6 +424,19 @@ pub enum WebTermPreference {
 }
 
 impl WebTermPreference {
+    pub const fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum OpenRouterZdrPreference {
+    On,
+    Off,
+}
+
+impl OpenRouterZdrPreference {
     pub const fn enabled(self) -> bool {
         matches!(self, Self::On)
     }
@@ -1694,6 +1722,7 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
     // Issue #469: `clud log --cmd "..."` arg.
     "--cmd",
     "--set-web-term",
+    "--set-openrouter-zdr",
     // #1189: hidden `clud statusline` arguments.
     "--session-pid",
     "--chain-b64",

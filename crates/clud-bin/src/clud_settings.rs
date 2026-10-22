@@ -64,6 +64,7 @@ impl CodexCliLoginImport {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlobalSettingsPatch {
+    pub openrouter_zdr: Option<bool>,
     pub model_provider: Option<ModelProvider>,
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
@@ -138,6 +139,7 @@ pub fn save_openrouter_model(model: String) -> Result<(), SettingsError> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchPreferencesSnapshot {
+    pub openrouter_zdr: Option<bool>,
     pub global: GlobalLaunchPreferences,
     pub provider_profiles: Vec<ProviderProfile>,
 }
@@ -511,6 +513,16 @@ fn launch_preferences_from_document(
         }
     }
     Ok(LaunchPreferencesSnapshot {
+        openrouter_zdr: match document.pointer("/providers/openrouter/zdr") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(enabled)) => Some(*enabled),
+            Some(_) => {
+                return Err(invalid_provider_profile(
+                    ModelProvider::OpenRouter,
+                    "zdr must be a boolean",
+                ))
+            }
+        },
         global: global_launch_preferences_from_document(document),
         provider_profiles,
     })
@@ -763,6 +775,17 @@ fn save_settings_transaction_at(
     }
     if let Some(enabled) = patch.web_term {
         object_entry(&mut document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
+    }
+    if let Some(enabled) = patch.openrouter_zdr {
+        let profile = object_entry(&mut document, "providers")
+            .entry("openrouter")
+            .or_insert_with(|| json!({}));
+        profile
+            .as_object_mut()
+            .ok_or_else(|| {
+                invalid_provider_profile(ModelProvider::OpenRouter, "expected an object")
+            })?
+            .insert("zdr".to_string(), Value::Bool(enabled));
     }
     if let Some(enabled) = patch.gc_delete_remote_branches {
         object_entry(&mut document, "gc")
