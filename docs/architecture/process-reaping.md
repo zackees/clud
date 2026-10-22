@@ -45,7 +45,10 @@ environment and cwd to run `cmd /D /C start "" cmd.exe`. Breaking away leaves
 the inner PTY kill-on-close job. The new console inherits
 `RUNNING_PROCESS_IS_DAEMON=1`, so the existing `DeclaredDaemon` reason also
 protects it from foreground exit cleanup and later orphan sweeps. The outer
-foreground tracking job has no kernel kill-on-close limit.
+foreground tracking job has no kernel kill-on-close limit. Its explicit exit
+sweep reads declared-daemon facts through the same identity-keyed marker cache
+as the live reaper; passing an empty marker set there would kill the console
+after a successful PTY breakaway.
 
 A reaper-only exemption cannot protect a process still inside the PTY job.
 No blanket `cmd.exe` exemption is added: `/c` wrappers, `/b`, titled launches,

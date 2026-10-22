@@ -109,6 +109,7 @@ fn check_started_terminal(request: &str) {
     let terminal = wait_for_terminal(&fixture.process);
     fixture.terminal = Some(terminal);
     fixture.process.close_impl().unwrap();
+    assert!(terminal.is_live(), "opened Command Prompt died with PTY close");
     drop(fixture.tracker.take());
     assert!(
         terminal.is_live(),
