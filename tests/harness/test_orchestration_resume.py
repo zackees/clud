@@ -114,6 +114,30 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
         raise
 
 
+def print_resume_diagnostics(h: Harness, result: RunResult, captured: Path) -> None:
+    print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
+    metadata = [row for row in result.hooks if row.get("tool_name") == "Workflow"]
+    for row in metadata[-4:]:
+        print("NATIVE_WORKFLOW_VERSION_METADATA", json.dumps(row)[-6000:])
+    outcomes = h.logs / "gate-native-outcomes.jsonl"
+    if outcomes.exists():
+        rows = [json.loads(line) for line in outcomes.read_text().splitlines()]
+        for row in [row for row in rows if row.get("tool_name") == "Workflow"][-4:]:
+            print("NATIVE_WORKFLOW_POST_METADATA", json.dumps(row)[-6000:])
+    for receipt in list(h.config.glob("projects/*/*/grind-resume-*.json"))[:6]:
+        print("NATIVE_WORKFLOW_ORIGIN_RECEIPT", str(receipt), receipt.read_text())
+    for role in ("planner:a", "worker:a", "reviewer:a", "integrator:a"):
+        requests = [row for row in result.requests
+                    if row["role"] == role and row.get("turn") == 0]
+        if len(requests) > 1:
+            first = json.dumps(requests[0]["messages"], indent=1).splitlines()
+            last = json.dumps(requests[-1]["messages"], indent=1).splitlines()
+            print("NATIVE_RESUME_PROMPT_DIFF", role,
+                  "\n".join(list(difflib.unified_diff(first, last))[:80]))
+    for journal in list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))[:4]:
+        print("NATIVE_RESUME_JOURNAL", journal.name, journal.read_text()[:20000])
+
+
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize(("mode", "scheduled"), [
     ("parallel", False), ("sequential", False), ("parallel", True),
@@ -158,27 +182,7 @@ def test_native_resume_only_reobserves_deferred_branch(
                        script, timeout=180)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     if any(row.get("note") for row in result.requests):
-        print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
-        metadata = [row for row in result.hooks if row.get("tool_name") == "Workflow"]
-        for row in metadata[-4:]:
-            print("NATIVE_WORKFLOW_VERSION_METADATA", json.dumps(row)[-6000:])
-        outcomes = h.logs / "gate-native-outcomes.jsonl"
-        if outcomes.exists():
-            rows = [json.loads(line) for line in outcomes.read_text().splitlines()]
-            for row in [row for row in rows if row.get("tool_name") == "Workflow"][-4:]:
-                print("NATIVE_WORKFLOW_POST_METADATA", json.dumps(row)[-6000:])
-        for receipt in list(h.config.glob("projects/*/*/grind-resume-*.json"))[:6]:
-            print("NATIVE_WORKFLOW_ORIGIN_RECEIPT", str(receipt), receipt.read_text())
-        for role in ("planner:a", "worker:a", "reviewer:a", "integrator:a"):
-            requests = [row for row in result.requests
-                        if row["role"] == role and row.get("turn") == 0]
-            if len(requests) > 1:
-                first = json.dumps(requests[0]["messages"], indent=1).splitlines()
-                last = json.dumps(requests[-1]["messages"], indent=1).splitlines()
-                print("NATIVE_RESUME_PROMPT_DIFF", role,
-                      "\n".join(list(difflib.unified_diff(first, last))[:80]))
-        for journal in list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))[:4]:
-            print("NATIVE_RESUME_JOURNAL", journal.name, journal.read_text()[:20000])
+        print_resume_diagnostics(h, result, captured)
     _no_notes(result)
     outputs = workflow_results(result)
     assert len(outputs) == 2, outputs
