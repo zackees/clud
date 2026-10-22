@@ -74,9 +74,8 @@ pub const PRE_TOOL_USE: &str = "PreToolUse";
 pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 
 /// Claude file-tool denies for the user settings file (#1668, DD-137): it
-/// holds the `safe_rm.extra_roots` override, which only the user may write.
-/// The Bash path is refused by the command-scan hook; `Edit(...)` rules
-/// cover every built-in file-editing tool.
+/// holds the `safe_rm.extra_roots` override. Raw edits remain refused;
+/// controlled settings proposals require a separate native user decision.
 pub const SETTINGS_FILE_DENIES: &[&str] = &[
     "Edit(~/.clud/settings.json)",
     "Write(~/.clud/settings.json)",
