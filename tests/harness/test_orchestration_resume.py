@@ -64,8 +64,9 @@ def native_resume_steps(captured: Path, scheduled: bool) -> list[dict[str, Any]]
     steps = [{"text": "unused"}, {"text": "unused"}]
     if scheduled:
         steps.extend([
-            {"tool_use": {"name": "CronCreate", "input": {
-                "cron": "* * * * *", "recurring": True,
+            {"tool_use": {"name": "ScheduleWakeup", "input": {
+                "delaySeconds": 60, "noop": False,
+                "reason": "Resume the deferred publication branch after its native wakeup.",
                 "prompt": 'WAKE_DEFERRED_GRAPH remaining_goals=["b","c"]',
             }}},
             _after({"is_error": False}, {"text": "GRAPH_RESUMPTION_ARMED"}),
@@ -82,7 +83,7 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
     """Keep native wakeup failures observable after the PTY times out."""
     try:
         return h.run_clud_interactive(
-            "Resume the deferred graph through a native scheduled wakeup.", script,
+            '/loop WAKE_DEFERRED_GRAPH remaining_goals=["b","c"]', script,
             model="nvidia/nemotron-3-ultra-550b-a55b:free",
             finished="NATIVE_GRAPH_RESUME_COMPLETE", timeout=180,
         )
@@ -176,6 +177,9 @@ def test_native_resume_only_reobserves_deferred_branch(
     script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
                                "steps": native_resume_steps(captured, scheduled)})
     if scheduled:
+        script["roles"].insert(0, {"name": "title", "match_prompt":
+            "Write the title in the predominant language", "steps": [{"text": "Graph resume"}]})
+    if scheduled:
         result = scheduled_resume(h, script)
     else:
         result = h.run("Resume only deferred publication work using the native Workflow cache.",
@@ -195,7 +199,7 @@ def test_native_resume_only_reobserves_deferred_branch(
     assert len(resumed) == 1, resumed
     boundary = resumed[0]
     if scheduled:
-        assert any(row.get("event") == "PostToolUse" and row.get("tool_name") == "CronCreate"
+        assert any(row.get("event") == "PostToolUse" and row.get("tool_name") == "ScheduleWakeup"
                    for row in result.hooks)
         resumed_request = next(row for row in result.requests if row["n"] == boundary)
         assert "WAKE_DEFERRED_GRAPH" in json.dumps(resumed_request["messages"][-1])
