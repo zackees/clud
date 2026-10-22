@@ -177,8 +177,9 @@ def test_stage_deferral_never_creates_publication_resume(
 
 
 @pytest.mark.parametrize("change_args", [False, True])
+@pytest.mark.parametrize("structured", [False, True])
 def test_native_resume_replays_one_unchanged_agent(
-    harness: Harness, monkeypatch, change_args: bool,
+    harness: Harness, monkeypatch, change_args: bool, structured: bool,
 ) -> None:
     """Separate agent-cache behavior from parallelism and argument changes."""
     h = harness
@@ -189,16 +190,24 @@ def test_native_resume_replays_one_unchanged_agent(
         "---\nname: resume-cache-probe\ndescription: Native cache probe\ntools: [Bash]\n---\n"
         "NATIVE_CACHE_PROBE_ROLE\n"
     )
+    options = {"agentType": "resume-cache-probe", "label": "cache-probe"}
+    if structured:
+        options["schema"] = {"type": "object", "required": ["observed"], "properties": {
+            "observed": {"type": "string"},
+        }}
+    answer = "observed.observed" if structured else "observed"
     (h.config / "workflows" / "resume-cache-probe.js").write_text(
         "export const meta = {name: 'resume-cache-probe', description: 'Native cache probe'};\n"
-        "return await agent('Write the cache probe once.', "
-        "{agentType: 'resume-cache-probe', label: 'cache-probe'});\n"
+        "const observed = await agent('Write the cache probe once.', "
+        + json.dumps(options) + ");\nreturn " + answer + ";\n"
     )
+    report = (_structured({"observed": "CACHE_OBSERVATION_COMPLETE"}) if structured
+              else {"text": "CACHE_OBSERVATION_COMPLETE"})
     resume = {"tool_use": {"name": "Workflow", "input_file": str(captured)}}
     script = {"roles": [
         {"name": "cache-probe", "match": "NATIVE_CACHE_PROBE_ROLE", "steps": [
             _bash("printf observed >> cache-probe.txt"),
-            _after({"is_error": False}, {"text": "CACHE_OBSERVATION_COMPLETE"}),
+            _after({"is_error": False}, report),
         ]},
         {"name": "main", "match_prompt": "</task-notification>", "steps": [
             {"text": "unused"}, {"text": "unused"}, resume,
