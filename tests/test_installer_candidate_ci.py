@@ -21,8 +21,10 @@ from ci.installer_candidate import (
     require_evidence,
     verify_artifact,
 )
+from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
+from tests.test_installer_public_ci import assert_public_latest_install
 from tests.test_installer_verify_native_assets import native_payload
 
 SOURCE_SHA = "a" * 40
@@ -305,21 +307,13 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
     finally:
         fixture_asset.write_bytes(original_asset)
 
+    assert_public_latest_install(
+        binary, env, destination, version, metadata["sha256"],
+        Path(os.environ["CLUD_CANDIDATE_EVIDENCE"]).with_suffix(".latest.terminal.log"),
+    )
     if actual_os == "windows":
-        script = (
-            '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
-            '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
-            '$env:Path="$u;$m"; '
-            "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
-            "Write-Output $c.Source; Write-Output (& $c.Source --version)"
-        )
-        lookup = run_process(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env,
-            capture_output=True,
-            timeout=25,
-            check=False,
-        )
+        shell_evidence = assert_windows_shell_activation(env, destination, version)
+        lines = [shell_evidence["powershell-7"], f"clud {version}"]
     else:
         shell = "/bin/zsh" if actual_os == "darwin" else "/bin/bash"
         fresh_env = {**env, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
@@ -331,8 +325,8 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
             timeout=25,
             check=False,
         )
-    assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
-    lines = lookup.stdout.decode(errors="replace").strip().splitlines()
+        assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
+        lines = lookup.stdout.decode(errors="replace").strip().splitlines()
     assert len(lines) == 2, lines
     assert Path(lines[0]) == destination
     assert lines[1] == f"clud {version}"
@@ -347,6 +341,8 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
         "version_output": lines[1],
         "result": "success",
     }
+    if actual_os == "windows":
+        evidence["shell_lookup"] = shell_evidence
     Path(os.environ["CLUD_CANDIDATE_EVIDENCE"]).write_text(
         json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )

@@ -502,7 +502,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-evidence-${{ inputs.mode }}-${{ matrix.target }}
-          path: public-evidence/*.json
+          path: public-evidence/
           if-no-files-found: error
 
   public-nixos:

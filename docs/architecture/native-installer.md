@@ -64,7 +64,11 @@ shell fails that lane instead of skipping it. Ordinary developer acceptance
 may skip unavailable shells. Fish with a custom `XDG_CONFIG_HOME` and zsh
 with a custom `ZDOTDIR` are checked in fresh login, interactive and combined
 login/interactive shells for both the exact installed path and version.
-Windows keeps its separate registry and fresh-user-environment acceptance.
+Windows candidate and public checks independently launch PowerShell 5.1,
+PowerShell 7, cmd and Git Bash using the persisted machine/user registry PATH.
+Every shell must resolve the installed path by name and report the selected
+version; the evidence records the resolved path for each shell. These hosted
+checks do not establish clean consumer-machine or download-prompt behavior.
 
 Candidate and public-release acceptance also require eight distribution/host
 pairs: Arch and Alpine x64, plus Ubuntu, Debian and Fedora on both x64 and
@@ -77,7 +81,8 @@ Operators can rerun the read-only public checks using the existing
 and `mode` (`candidate` or `released`). This validates downloaded assets and
 the catalog; it does not publish, promote, delete or modify a release.
 Released-mode host acceptance executes both an exact-version installation
-and `--install-version latest`, checking the selected installed executable's
-digest and reported version against the independently fetched public catalog.
+and the interactive release picker's latest default, checking the selected
+installed executable's digest and reported version against the independently
+fetched public catalog. The picker transcript is retained beside its evidence.
 Candidate mode retains exact-version selection because the stable channel
 must continue to point at the previous public release.

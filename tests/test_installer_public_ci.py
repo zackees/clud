@@ -11,10 +11,12 @@ from pathlib import Path, PureWindowsPath
 from urllib.request import Request, urlopen
 
 import pytest
+from running_process import PseudoTerminalProcess
 
 from ci.installer_candidate import TARGETS
 from ci.installer_public_evidence import require_evidence, require_guest_evidence
 from installer.catalog import ONLINE_URL, verify_direct_executable
+from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
 
@@ -69,17 +71,30 @@ def public_bytes(url: str, limit: int = 200 * 1024 * 1024) -> bytes:
 
 
 def assert_public_latest_install(
-    binary: Path, env: dict[str, str], destination: Path, version: str, digest: str
+    binary: Path,
+    env: dict[str, str],
+    destination: Path,
+    version: str,
+    digest: str,
+    transcript: Path,
 ) -> None:
-    """Exercise channel selection and independently verify its installed bytes."""
-    result = run_process(
-        [str(binary), "--installer", "--install-version", "latest", "--yes"],
-        env=env,
-        capture_output=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    """Choose the latest-default release in the shipped interactive picker."""
+    process = PseudoTerminalProcess([str(binary), "--installer"], env=env, capture=True)
+    try:
+        process.expect("Install clud", timeout=30)
+        process.write("\x1b[B\r")
+        process.expect("Choose a clud release", timeout=120)
+        process.write("\r")
+        process.expect(f"Install clud {version} at this destination?", timeout=30)
+        process.write("\x1b[A\r")
+        assert process.wait(timeout=120) == 0, process.output_text
+        assert "verified fresh name-based lookup" in process.output_text
+    finally:
+        if process.poll() is None:
+            process.kill()
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(process.output_text, encoding="utf-8")
+        process.close()
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
     installed = run_process(
         [str(destination), "--version"],
@@ -244,23 +259,14 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == digest
     if mode == "released":
-        assert_public_latest_install(binary, env, destination, version, digest)
+        assert_public_latest_install(
+            binary, env, destination, version, digest,
+            Path(os.environ["CLUD_PUBLIC_EVIDENCE"]).with_suffix(".latest.terminal.log"),
+        )
 
     if os_name == "windows":
-        script = (
-            '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
-            '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
-            '$env:Path="$u;$m"; '
-            '$c=Get-Command clud -CommandType Application -ErrorAction Stop; '
-            'Write-Output $c.Source; Write-Output (& $c.Source --version)'
-        )
-        lookup = run_process(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
-            env=env,
-            capture_output=True,
-            timeout=25,
-            check=False,
-        )
+        shell_evidence = assert_windows_shell_activation(env, destination, version)
+        lines = [shell_evidence["powershell-7"], f"clud {version}"]
     else:
         shell = "/bin/zsh" if os_name == "darwin" else "/bin/bash"
         fresh_env = {**env, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
@@ -272,8 +278,8 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
             timeout=25,
             check=False,
         )
-    assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
-    lines = lookup.stdout.decode(errors="replace").strip().splitlines()
+        assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
+        lines = lookup.stdout.decode(errors="replace").strip().splitlines()
     assert_public_lookup(lines, destination, version, os_name)
     evidence = {
         "mode": mode,
@@ -286,6 +292,8 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
         "asset_url": asset["urls"][0],
         "resolved_path": lines[0],
     }
+    if os_name == "windows":
+        evidence["shell_lookup"] = shell_evidence
     output = Path(os.environ["CLUD_PUBLIC_EVIDENCE"])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
