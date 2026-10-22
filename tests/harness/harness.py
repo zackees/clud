@@ -649,6 +649,8 @@ class Harness:
                 child.write("\r")  # The default highlighted choice is session-only.
                 child.expect(finished, timeout=timeout)
                 child.write("/exit\r")
+                child.expect("Background", timeout=15)
+                child.write("\r")  # Confirm Exit and stop tasks, the default.
                 code = child.wait(timeout=15)
                 output = child.output_text
             except Exception as error:
