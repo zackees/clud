@@ -8,12 +8,15 @@ Filesystem checkout safety and repository hook context need separate probes.
 from __future__ import annotations
 
 import copy
+import shlex
 from typing import Any
 
 import pytest
 
 from tests.harness.harness import Harness
 from tests.harness.test_grind_plan_only import (
+    _after,
+    _bash,
     _classify,
     _no_notes,
     _path,
@@ -94,6 +97,61 @@ def test_invalid_orchestration_stops_before_planning(harness: Harness, case: str
     assert reason in _told(result).replace('\\"', '"'), _told(result)[-4000:]
     assert harness.git("status", "--porcelain") == before
     assert harness.read_gh_state()["issues"]["101"]["state"] == "open"
+
+
+def orchestrator_script(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"default_text": "DONE", "roles": [
+        {"name": "orchestrator", "match": "You are the /grind orchestrator.", "steps": steps},
+        {"name": "main", "steps": [
+            {"tool_use": {"name": "Agent", "input": {
+                "subagent_type": "grind-orchestrator", "description": "Inspect the run graph",
+                "prompt": "Inspect the supplied goals without changing files.",
+                "run_in_background": False,
+            }}},
+            {"text": "INSPECTED"},
+        ]},
+    ]}
+
+
+def test_orchestrator_router_call_is_readonly(harness: Harness) -> None:
+    """T1/T3: native Agent may start the advisor, which cannot mutate files."""
+    h = harness
+    target = h.repo / "orchestrator-must-not-write"
+    commands = [
+        f"git -C {shlex.quote(str(h.repo))} switch -c forbidden-orchestrator",
+        "cargo build",
+        f"echo changed > {shlex.quote(str(target))}",
+    ]
+    denied = {"is_error": True, "content_contains": "grind-orchestrator"}
+    steps = [_bash(commands[0])]
+    steps.extend(_after(denied, _bash(command)) for command in commands[1:])
+    steps.append(_after(denied, _bash("git status --porcelain")))
+    steps.append(_after({"is_error": False}, {"text": "READONLY_CONFIRMED"}))
+    before = h.git("status", "--porcelain")
+    branch = h.git("branch", "--show-current")
+    result = h.run("Call the read-only run orchestrator once.", orchestrator_script(steps))
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    request = result.first_request("orchestrator")
+    assert not {"Write", "Edit", "MultiEdit", "NotebookEdit", "Agent"} & set(request["tools"])
+    _no_notes(result)
+    assert not target.exists()
+    assert h.git("status", "--porcelain") == before
+    assert h.git("branch", "--show-current") == branch
+    assert h.git("branch", "--list", "forbidden-orchestrator") == ""
+
+
+def test_orchestrator_exception_keeps_workers_internal(harness: Harness) -> None:
+    """T2: adding the router advisor must not open direct worker delegation."""
+    script = orchestrator_script([])
+    call = script["roles"][-1]["steps"][0]["tool_use"]["input"]
+    call["subagent_type"] = "grind-worker"
+    script["roles"][-1]["steps"][1] = _after(
+        {"is_error": True, "content_contains": "internal /grind role"}, {"text": "REFUSED"},
+    )
+    result = harness.run("Try the internal role only to verify its denial.", script)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    assert {row["role"] for row in result.requests} == {"main"}
 
 
 def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
