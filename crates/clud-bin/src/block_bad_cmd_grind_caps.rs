@@ -562,8 +562,7 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
 /// either phase, and neither does the prework agent.
 pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option<String> {
     if role == GATE
-        && !super::block_bad_cmd_gate::gates_tool(tool_name)
-        && tool_name != "StructuredOutput"
+        && !matches!(tool_name, "Bash" | "StructuredOutput")
     {
         return Some(format!(
             "{GATE} may only execute its bound check and report the result"
@@ -1797,7 +1796,11 @@ mod tests {
         let role = "grind-gate";
         assert!(is_grind_role(role));
         let facts = RunFacts::default();
-        for command in ["gh release view v1 --repo o/r", "gh release create v1", "true"] {
+        for command in [
+            "gh release view v1 --repo o/r",
+            "gh release create v1",
+            "true",
+        ] {
             assert!(shell_reason(role, command, &facts).is_some(), "{command}");
         }
         for tool in ["Read", "Write", "Edit", "Agent", "AskUserQuestion"] {

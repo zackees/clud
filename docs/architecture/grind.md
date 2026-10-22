@@ -181,7 +181,7 @@ publication evidence or a sister repository needing its own session; it must
 not treat those conditions as successful merges or execute in the wrong root.
 
 The reserved `grind-gate` role denies shell execution by default. Its hook can
-bind an exact read-only check from run facts' approved `orchestration` graph to
+bind an exact read-only native Bash check from run facts' approved `orchestration` graph to
 a native workflow task labeled `gate:<downstream-id>:<blocker-index>`. Lookup
 uses the hook's parent-session transcript path and agent ID, searches at most
 64 session-local workflow directories, and rejects ambiguous metadata,

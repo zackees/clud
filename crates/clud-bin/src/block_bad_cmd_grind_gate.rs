@@ -35,6 +35,9 @@ pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
 }
 
 fn authorize(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
+    if payload.tool_name != "Bash" {
+        return Err("approved gate checks require the native Bash tool".into());
+    }
     let check = bound_check(payload, facts)?;
     if check != payload.command {
         return Err("command differs from this agent's approved check".into());
@@ -239,6 +242,20 @@ mod tests {
         assert!(fixture.allowed());
         fixture.payload.command = "echo CHECK_LEFT".into();
         assert!(!fixture.allowed());
+    }
+
+    #[test]
+    fn approved_posix_text_is_not_authorized_in_other_shells() {
+        let mut fixture = Fixture::new();
+        fixture.payload.command = "echo %CANARY%".into();
+        fixture.facts["orchestration"]["goals"][0]["blockers"][0]["check"] =
+            json!(fixture.payload.command);
+        assert!(fixture.allowed());
+        for tool in ["cmd", "PowerShell", "powershell", "pwsh", "shell", "exec_command", "bash"] {
+            fixture.payload.tool_name = tool.into();
+            assert!(!fixture.allowed(), "{tool}");
+            assert!(reason(&fixture.payload).is_some(), "{tool}");
+        }
     }
 
     #[test]
