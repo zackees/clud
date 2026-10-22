@@ -9,15 +9,6 @@
             "command": "python .codex/hooks/check-soldr.py"
           }
         ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "clud-cmd-scan"
-          }
-        ]
       }
     ]
   }
