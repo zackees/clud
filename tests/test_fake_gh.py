@@ -705,3 +705,15 @@ def test_draft_release_lookup_does_not_claim_publication(world, capsys):
     assert code == 0
     assert release["isDraft"] is True
     assert release["publishedAt"] is None
+
+
+def test_release_can_appear_after_controlled_missing_observations(world, capsys):
+    world({"repo": "o/r", "release_after_views": {"v-next": {
+        "after": 2, "release": {"publishedAt": "2026-10-22T00:00:00Z"},
+    }}})
+    for _ in range(2):
+        assert _run(capsys, "release", "view", "v-next")[0] == 1
+    assert _run(capsys, "repo", "view", "--json", "nameWithOwner")[0] == 0
+    code, out, _ = _run(capsys, "release", "view", "v-next")
+    assert code == 0
+    assert json.loads(out)["publishedAt"] == "2026-10-22T00:00:00Z"
