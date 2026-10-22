@@ -13,6 +13,17 @@ from tests.harness.harness import Harness
 from tests.harness.test_grind import _after, _bash, _no_notes, _structured
 
 
+def _message_texts(messages: list[dict[str, Any]]) -> list[str]:
+    texts = []
+    for message in messages:
+        content = message.get("content", [])
+        if isinstance(content, str):
+            texts.append(content)
+        else:
+            texts.extend(block.get("text", "") for block in content if isinstance(block, dict))
+    return texts
+
+
 def record_outcomes(h: Harness, monkeypatch: pytest.MonkeyPatch, output: Path) -> None:
     original = h.settings
     recorder = Path(__file__).with_name("record_hook.py")
@@ -91,9 +102,16 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
         "const capabilities = {setTimeout: typeof setTimeout, sleep: typeof sleep, "
         "wait: typeof wait, Promise: typeof Promise};\n"
         "if (typeof setTimeout === 'function') {\n"
-        "  const started = Date.now();\n"
-        "  await new Promise(resolve => setTimeout(resolve, 20));\n"
-        "  capabilities.timerElapsedMs = Date.now() - started;\n"
+        "  try {\n"
+        "    const started = Date.now();\n"
+        "    await new Promise(resolve => setTimeout(resolve, 20));\n"
+        "    capabilities.timerElapsedMs = Date.now() - started;\n"
+        "    capabilities.timer = 'supported';\n"
+        "  } catch (error) {\n"
+        "    capabilities.timer = 'unusable';\n"
+        "    capabilities.timerError = String(error);\n"
+        "  }\n"
+        "} else { capabilities.timer = 'missing'; }\n"
         "}\n"
         "return await agent('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities), "
         "{agentType: 'wait-capability-probe', label: 'wait-capabilities'});\n"
@@ -111,18 +129,21 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     ]})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
+    notices = dict.fromkeys(text for row in result.requests if row.get("role") == "main"
+                            for text in _message_texts(row.get("messages", []))
+                            if "<task-notification>" in text)
+    print("NATIVE_WORKFLOW_WAIT_NOTIFICATIONS", json.dumps(
+        [text[-6000:] for text in list(notices)[-2:]],
+    ))
     messages = result.first_request("wait-probe")["messages"]
-    texts = []
-    for message in messages:
-        content = message.get("content", [])
-        if isinstance(content, str):
-            texts.append(content)
-        else:
-            texts.extend(block.get("text", "") for block in content if isinstance(block, dict))
+    texts = _message_texts(messages)
     marker = "NATIVE_WAIT_CAPABILITIES "
     observed = next(text.split(marker, 1)[1] for text in texts if marker in text)
     capabilities, _ = json.JSONDecoder().raw_decode(observed)
     assert capabilities["setTimeout"] in ("function", "undefined"), capabilities
-    if capabilities["setTimeout"] == "function":
+    assert capabilities["timer"] in ("supported", "unusable", "missing"), capabilities
+    if capabilities["timer"] == "supported":
         assert capabilities["timerElapsedMs"] >= 10, capabilities
+    elif capabilities["timer"] == "unusable":
+        assert capabilities["timerError"], capabilities
     print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", json.dumps(capabilities, sort_keys=True))
