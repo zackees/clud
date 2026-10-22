@@ -14,6 +14,54 @@ use serde_json::{Map, Value};
 /// The variable Claude Code merges into every request body.
 pub const EXTRA_BODY_ENV: &str = "CLAUDE_CODE_EXTRA_BODY";
 
+/// Persistent setters exit before harness setup, credentials, or network access.
+pub fn handle_setting(args: &crate::args::Args) -> Option<i32> {
+    let preference = args.set_openrouter_zdr?;
+    if args.command.is_some() {
+        eprintln!("[clud] --set-openrouter-zdr cannot be combined with a subcommand");
+        return Some(2);
+    }
+    let result = crate::clud_settings::home_dir_path().and_then(|home| {
+        crate::clud_settings::save_settings_patch_at(
+            &home,
+            crate::clud_settings::GlobalSettingsPatch {
+                openrouter_zdr: Some(preference.enabled()),
+                ..Default::default()
+            },
+        )?;
+        Ok(crate::clud_settings::settings_path_at(&home))
+    });
+    Some(match result {
+        Ok(path) => {
+            println!(
+                "[clud] OpenRouter ZDR is saved as {} in {}",
+                if preference.enabled() { "on" } else { "off" },
+                path.display()
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("[clud] could not save OpenRouter ZDR: {error}");
+            1
+        }
+    })
+}
+
+/// Audit metadata only; never included in OpenRouter's upstream request body.
+pub fn zdr_source(
+    args: &crate::args::Args,
+    provider: crate::backend::ModelProvider,
+) -> Option<crate::backend::PreferenceSource> {
+    use crate::backend::{ModelProvider, PreferenceSource};
+    (provider == ModelProvider::OpenRouter).then_some(if args.zdr {
+        PreferenceSource::Cli
+    } else if args.saved_openrouter_zdr.is_some() {
+        PreferenceSource::ProviderSetting
+    } else {
+        PreferenceSource::BuiltInDefault
+    })
+}
+
 /// Whether `slug` looks like an OpenRouter provider slug (`parasail`,
 /// `parasail/fp8`, `deepinfra/bf16`): lowercase ASCII letters, digits and
 /// `-`, `_`, `.`, `/`, not empty, not starting or ending with `/`.

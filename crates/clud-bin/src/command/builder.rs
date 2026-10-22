@@ -949,7 +949,9 @@ fn build_launch_plan_for_target_at(
         failover_allow_metered: args.failover_allow_metered,
         allowed_models: args.model_allowlist(),
         provider_only: args.provider_only.clone(),
-        zdr: args.zdr,
+        zdr: args.zdr
+            || (target.model_provider == ModelProvider::OpenRouter
+                && args.saved_openrouter_zdr == Some(true)),
         no_data_collection: args.no_data_collection,
         redact_secrets,
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),

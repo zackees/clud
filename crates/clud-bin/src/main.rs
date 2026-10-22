@@ -219,6 +219,9 @@ fn start_checkout_presence(
 /// Modes that must run before the crash reporter, the runtime-cache hop and
 /// every other piece of launch machinery. `Some` is the process exit code.
 fn dispatch_before_startup(args: &args::Args) -> Option<i32> {
+    if let Some(code) = clud::openrouter_routing::handle_setting(args) {
+        return Some(code);
+    }
     if let Some(code) = self_install::entry::run_explicit(args) {
         return Some(code);
     }
@@ -662,12 +665,14 @@ struct LaunchResolution {
 /// invalid combination before anything is bootstrapped. Writes the resolved
 /// model selection into `args`.
 fn resolve_launch(args: &mut args::Args) -> LaunchResolution {
+    let mut preferences_error = None;
     // Resolve saved routing policy before the picker: installed executables
     // do not imply that their providers are authorized.
     let (launch_preferences, preferences_known) =
         match clud_settings::load_launch_preferences_read_only() {
             Ok(preferences) => (preferences, true),
             Err(error) => {
+                preferences_error = Some(error.to_string());
                 eprintln!(
                     "[clud] warning: failed to load launch preferences: {error}; using defaults"
                 );
@@ -710,6 +715,13 @@ fn resolve_launch(args: &mut args::Args) -> LaunchResolution {
         auto_selected_harness,
         deepseek_credential_fallback,
     );
+    if launch_target.model_provider == backend::ModelProvider::OpenRouter {
+        if let Some(error) = preferences_error {
+            eprintln!("[clud] cannot resolve saved OpenRouter privacy policy: {error}");
+            std::process::exit(2);
+        }
+        args.saved_openrouter_zdr = launch_preferences.openrouter_zdr;
+    }
     validate_launch_target(args, launch_target);
     resolve_model_selection(args, launch_target, provider_profile);
     validate_model_boundaries(args, launch_target);
@@ -1732,6 +1744,8 @@ fn print_dry_run_and_exit(
         // OpenRouter upstream providers every request is pinned to, fallbacks
         // off (`--provider-only`).
         "provider_only": plan.provider_only,
+        "zdr": plan.zdr,
+        "zdr_source": clud::openrouter_routing::zdr_source(args, launch_target.model_provider),
         // Whether that boundary was typed or inherited from the previous
         // selection -- the runtime prints a green startup line for the
         // inherited case (#1257).

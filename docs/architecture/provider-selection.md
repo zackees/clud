@@ -351,6 +351,30 @@ unified gateway injects the same policy into OpenRouter requests. Other
 providers and harnesses without a supported request path reject these flags
 before reading credentials. These routing controls do not redact request text.
 
+To save ZDR for future OpenRouter launches across repositories (#1998):
+
+```sh
+clud --set-openrouter-zdr       # enable; explicit `on` is also accepted
+clud --openrouter --dry-run     # inspect zdr, zdr_source, route.upstream_routing
+clud --set-openrouter-zdr off   # disable the saved requirement
+```
+
+The setter updates only `providers.openrouter.zdr` in user settings through
+the existing locked, atomic settings transaction, reports the settings path,
+and exits before harness setup, credentials, or network access. It cannot be
+combined with `--dry-run`, `--zdr`, or a subcommand. Other saved preferences
+are preserved, including an enabled terminal companion.
+
+Both direct and unified OpenRouter launches inherit the saved value. Other
+providers ignore it. `--zdr` remains session-only and takes precedence over a
+saved `off`; neither launch nor dry-run saves that override. Dry-run reports
+the effective `zdr` and its `zdr_source`: `cli`, `provider_setting`, or
+`built_in_default` (null for other providers). Provenance is audit metadata,
+never an upstream request field. An unreadable/invalid preferences document
+refuses an OpenRouter launch rather than silently dropping a privacy policy.
+Unsupported request paths also refuse an inherited ZDR requirement. This
+configures clud requests; it does not change OpenRouter account settings.
+
 Once a launch is resolved, every routing decision it made — backend, upstreams,
 slots, allowlist, discovery, context, effort, timeouts and the launch checks —
 lives in one `ResolvedRoute`: see [route-plan.md](route-plan.md).

@@ -15,6 +15,9 @@ Provider/harness resolution happens before construction and is documented at
 Provider-neutral model/effort/context normalization and direct-vs-unified
 routing are documented at
 [docs/architecture/provider-selection.md](../../../../docs/architecture/provider-selection.md).
+The builder combines the session-only `--zdr` flag with the resolved saved
+OpenRouter preference into `LaunchPlan.zdr`; every renderer consumes the same
+policy. The dry-run DTO reports effective policy and provenance.
 
 ## Files
 
