@@ -79,6 +79,14 @@ def gate(*_args, **_kwargs):
         coderabbit = watcher.CodeRabbitObservation(
             "actionable", actionable=True, unresolved_threads=1, ids=frozenset({91})
         )
+    elif scenario in {"green", "scope"}:
+        checks = [watcher.CheckRow("linux", "pass", "SUCCESS")]
+        if scenario == "scope":
+            checks.append(watcher.CheckRow("macos", "pending", "IN_PROGRESS"))
+        coderabbit = watcher.CodeRabbitObservation("quiet")
+    elif scenario == "timeout":
+        checks = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
+        coderabbit = watcher.CodeRabbitObservation("quiet")
     else:
         checks = []
         coderabbit = watcher.CodeRabbitObservation("quiet")
@@ -93,4 +101,51 @@ def gate(*_args, **_kwargs):
 
 
 watcher.fetch_gate_snapshot = gate
-raise SystemExit(watcher.main(sys.argv[1:]))
+
+# No remote edge is permitted in this fixture, even if production adds a new read.
+def unexpected_remote(*_args, **_kwargs):
+    raise AssertionError("offline watcher fixture attempted an unexpected GitHub read")
+
+
+watcher.gh_json = unexpected_remote
+watcher.api_get = unexpected_remote
+
+if scenario in {"scope", "timeout"}:
+    clock = [0.0]
+    watcher.time.monotonic = lambda: clock[0]
+
+    def advance_clock(*_args):
+        clock[0] += 600.0
+
+    watcher._sleep_remaining_interval = advance_clock
+
+# #2004: deterministic live-session handshake; independent of watcher's outcomes.
+if os.environ.get("GH_WATCH_CONTROLLED_SESSION") == "1":
+    print("CONTROLLED_SESSION_READY", flush=True)
+    if sys.stdin.readline().strip() != "continue":
+        raise SystemExit("missing test controller release")
+
+def actual_watchdog_result():
+    """Exercise clud's real resumable-tool wrapper with a local blocked uv fixture."""
+    sys.path.insert(0, str(ROOT))
+    from tests import process
+
+    fake_bin = Path.cwd() / "watchdog-bin"
+    fake_bin.mkdir()
+    uv = fake_bin / "uv"
+    uv.write_text("#!/bin/sh\nsleep 2\n", encoding="utf-8")
+    uv.chmod(0o755)
+    env = dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+               CLUD_TEST_TOOL_COMMAND_TIMEOUT_MS="100")
+    result = process.run(
+        [os.environ["GH_WATCH_CLUD_BINARY"], "tool", "run", "github/pr_merge_watch.py",
+         "--", "123", "--repo", "zackees/clud"],
+        env=env, capture_output=True, text=True, timeout=10,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+raise SystemExit(actual_watchdog_result() if scenario == "watchdog"
+                 else watcher.main(sys.argv[1:]))
