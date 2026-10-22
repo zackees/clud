@@ -393,9 +393,7 @@ fn run_releases(options: InstallOptions) -> Outcome {
 fn open_download_page() -> i32 {
     #[cfg(feature = "installer-ci-fixture")]
     if let Some(log) = std::env::var_os("CLUD_INSTALLER_CI_BROWSER_LOG") {
-        return open_page_with(|url| {
-            std::fs::write(log, url).map_err(|error| error.to_string())
-        });
+        return open_page_with(|url| std::fs::write(log, url).map_err(|error| error.to_string()));
     }
     open_page_with(|url| open::that_detached(url).map_err(|error| error.to_string()))
 }
