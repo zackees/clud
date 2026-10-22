@@ -84,6 +84,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-catalog
+          overwrite: true
           path: candidate-fixture/catalog.json
           if-no-files-found: error
 
@@ -201,6 +202,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: candidate-evidence-${{ matrix.target }}
+          overwrite: true
           path: candidate-evidence/*
           if-no-files-found: warn
 
@@ -513,6 +515,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-evidence-${{ inputs.mode }}-${{ matrix.target }}
+          overwrite: true
           path: public-evidence/
           if-no-files-found: error
 
@@ -582,6 +585,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}-${{ matrix.nix_ld }}
+          overwrite: true
           path: public-nixos-evidence.txt
           if-no-files-found: warn
 
@@ -677,6 +681,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: public-distro-evidence-${{ inputs.mode }}-${{ matrix.distro }}-${{ matrix.arch }}
+          overwrite: true
           path: public-distro-evidence.txt
           if-no-files-found: warn
 
