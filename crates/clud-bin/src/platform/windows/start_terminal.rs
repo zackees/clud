@@ -1,5 +1,7 @@
 //! Preserve explicitly requested Command Prompt windows across session cleanup.
 
+use std::process::Command; // running-process: command-builder
+
 /// Only bare interactive Command Prompt requests leave session containment.
 /// All other `start` arguments retain Git Bash's normal implementation.
 pub fn bash_function() -> &'static str {
@@ -33,7 +35,7 @@ pub fn run() -> i32 {
 fn launch() -> std::io::Result<i32> {
     let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
     // running-process: command-builder
-    let mut command = std::process::Command::new(comspec);
+    let mut command = Command::new(comspec);
     command.args(["/D", "/C", "start", "", "cmd.exe"]);
     // Leave the inner PTY kill-on-close job. The inherited daemon marker
     // also spares the new console in clud's outer tracker and orphan sweep.
