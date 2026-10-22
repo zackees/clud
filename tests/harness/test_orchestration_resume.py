@@ -74,8 +74,14 @@ def native_resume_steps(captured: Path, scheduled: bool) -> list[dict[str, Any]]
     steps.extend([
         {"tool_use": {"name": "Workflow", "input_file": str(captured)}},
         _after({"is_error": False}, {"text": "NATIVE_RESUME_STARTED"}),
-        {"text": "NATIVE_GRAPH_RESUME_COMPLETE"},
     ])
+    if scheduled:
+        steps.extend([
+            {"tool_use": {"name": "ScheduleWakeup", "input": {"stop": True}}},
+            _after({"is_error": False}, {"text": "NATIVE_GRAPH_RESUME_COMPLETE"}),
+        ])
+    else:
+        steps.append({"text": "NATIVE_GRAPH_RESUME_COMPLETE"})
     return steps
 
 
@@ -174,11 +180,13 @@ def test_native_resume_only_reobserves_deferred_branch(
     ])
     script = _script(h, mode, _goals("a", "b", "c", "d", "e"), roles,
                      orchestration=graph, gateAttempts=1)
-    script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
-                               "steps": native_resume_steps(captured, scheduled)})
     if scheduled:
+        script["roles"][-1]["steps"].extend(native_resume_steps(captured, True)[2:])
         script["roles"].insert(0, {"name": "title", "match_prompt":
             "Write the title in the predominant language", "steps": [{"text": "Graph resume"}]})
+    else:
+        script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
+                                   "steps": native_resume_steps(captured, False)})
     if scheduled:
         result = scheduled_resume(h, script)
     else:
