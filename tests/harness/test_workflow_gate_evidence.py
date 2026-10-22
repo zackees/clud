@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -101,4 +102,6 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     evidence = json.dumps(result.requests)
     assert "NATIVE_WAIT_CAPABILITIES" in evidence, evidence
     assert '"setTimeout"' in evidence or '\\"setTimeout\\"' in evidence, evidence
-    print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", evidence)
+    print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", re.findall(
+        r"NATIVE_WAIT_CAPABILITIES.{0,500}", evidence,
+    )[:6])
