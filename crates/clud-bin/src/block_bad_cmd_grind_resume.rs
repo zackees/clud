@@ -51,7 +51,7 @@ fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String
             let base = input.pointer("/args/gateEpoch").and_then(Value::as_u64).unwrap_or(0);
             let initial = input.pointer("/args/gateEpochs").and_then(Value::as_object)
                 .is_none_or(|epochs| epochs.values().all(|epoch| epoch.as_u64() == Some(base)));
-            return (!initial).then(|| "Initial graph launches cannot advance observation epochs. \
+            return (!initial).then(|| "Initial graph launches cannot advance gateEpochs. \
                 Resume the completed native run using its own deferred manifest.".into());
         }
         if origin::allows(payload) {
