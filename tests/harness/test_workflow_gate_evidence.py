@@ -112,7 +112,6 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
         "    capabilities.timerError = String(error);\n"
         "  }\n"
         "} else { capabilities.timer = 'missing'; }\n"
-        "}\n"
         "return await agent('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities), "
         "{agentType: 'wait-capability-probe', label: 'wait-capabilities'});\n"
     )
