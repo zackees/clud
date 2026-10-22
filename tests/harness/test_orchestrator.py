@@ -1,9 +1,10 @@
-"""Run-plan validation on the real pinned Workflow runtime (#1338, V1–V6).
+"""Run-plan validation on the real pinned Workflow runtime (#1338, V1-V6).
 
 These cases deliberately use plan-only mode: invalid orchestration input must
 be rejected before even the read-only classification planner is started.
 Filesystem checkout safety and repository hook context need separate probes.
 """
+
 from __future__ import annotations
 
 import copy
@@ -81,7 +82,9 @@ def test_invalid_orchestration_stops_before_planning(harness: Harness, case: str
     script = _script(harness, [101], [_structured(_classify({101: ("bug", None)}, {}))])
     script["roles"][-1]["steps"][0]["tool_use"]["input"]["args"]["orchestration"] = plan
     before = harness.git("status", "--porcelain")
-    result = harness.run("Validate the supplied run plan before starting any role.", script, timeout=120)
+    result = harness.run(
+        "Validate the supplied run plan before starting any role.", script, timeout=120,
+    )
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     roles = {row["role"] for row in result.requests}
     assert roles == {"main"}, {"unexpected_roles": sorted(roles - {"main"})}
