@@ -2480,10 +2480,18 @@ mod tests {
             &facts,
         ));
         for role in [PLANNER, PREWORK, WORKER, REVIEWER] {
-            assert!(!allowed(role, "gh pr merge 34 --repo fork/project --squash", &facts));
+            assert!(!allowed(
+                role,
+                "gh pr merge 34 --repo fork/project --squash",
+                &facts
+            ));
         }
         for role in [PLANNER, PREWORK, LANDER, WORKER, REVIEWER] {
-            assert!(!allowed(role, "gh issue close 12 --repo fork/project", &facts));
+            assert!(!allowed(
+                role,
+                "gh issue close 12 --repo fork/project",
+                &facts
+            ));
         }
     }
 }
