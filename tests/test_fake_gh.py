@@ -665,3 +665,34 @@ def test_unknown_repository_does_not_fall_back_to_primary(world, capsys):
     state = _state(world)
     assert len(state["calls"]) == 1
     assert state["repositories"] == _two_repositories()["repositories"]
+
+
+def test_missing_release_is_a_failed_check(world, capsys):
+    world()
+    code, _, error = _run(capsys, "release", "view", "v0.9.0", "--repo", "o/r")
+    assert code == 1
+    assert "release not found" in error
+    assert _state(world).get("releases", {}) == {}
+
+
+def test_release_creation_and_lookup_are_repository_scoped(world, capsys):
+    world(_two_repositories())
+    code, url, _ = _run(capsys, "release", "create", "v0.9.0", "--repo", "o/sister")
+    assert code == 0 and url.strip() == "https://github.com/o/sister/releases/tag/v0.9.0"
+    code, out, _ = _run(capsys, "release", "view", "v0.9.0", "--repo", "o/sister", "--json", "tagName,publishedAt")
+    release = json.loads(out)
+    assert code == 0 and release["tagName"] == "v0.9.0" and release["publishedAt"]
+    assert _run(capsys, "release", "view", "v0.9.0", "--repo", "o/primary")[0] == 1
+    assert not _state(world)["repositories"]["o/primary"].get("releases")
+    code, out, _ = _run(capsys, "api", "repos/o/sister/releases/tags/v0.9.0")
+    assert code == 0 and json.loads(out)["tag_name"] == "v0.9.0"
+    code, out, _ = _run(capsys, "api", "repos/o/primary/releases")
+    assert code == 0 and json.loads(out) == []
+
+
+def test_draft_release_lookup_does_not_claim_publication(world, capsys):
+    world()
+    assert _run(capsys, "release", "create", "v-next", "--draft")[0] == 0
+    code, out, _ = _run(capsys, "release", "view", "v-next", "--json", "isDraft,publishedAt")
+    release = json.loads(out)
+    assert code == 0 and release["isDraft"] is True and release["publishedAt"] is None

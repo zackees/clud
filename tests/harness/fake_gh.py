@@ -631,6 +631,8 @@ def _api(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     owner, _, name = _repo(state).partition("/")
     endpoint = _api_endpoint(argv).replace("{owner}", owner).replace("{repo}", name)
     parts = endpoint.split("?", 1)[0].strip("/").split("/")
+    if len(parts) >= 4 and parts[0] == "repos" and parts[3] == "releases":
+        return _release_api(state, argv, parts, method)
     is_issues = len(parts) >= 5 and parts[0] == "repos" and parts[3] == "issues"
 
     # repos/o/r/issues/comments/{id}
@@ -1089,6 +1091,53 @@ def _pr(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     return 0
 
 
+def _release_json(state: dict, tag: str, value: dict) -> dict:
+    return {
+        "tagName": tag, "name": tag, "isDraft": False,
+        "url": f"https://github.com/{_repo(state)}/releases/tag/{tag}",
+        "publishedAt": None, **value,
+    }
+
+
+def _release(path: Path, state: dict, argv: list[str]) -> int:
+    if len(argv) < 3 or argv[2].startswith("-"):
+        print("fake gh: a literal release tag is required", file=sys.stderr)
+        return 1
+    tag = argv[2]
+    releases = state.setdefault("releases", {})
+    if argv[1] == "create":
+        if tag in releases:
+            print("release already exists", file=sys.stderr)
+            return 1
+        draft = "--draft" in argv
+        releases[tag] = _release_json(state, tag, {
+            "name": _flag(argv, "--title") or tag, "isDraft": draft,
+            "publishedAt": None if draft else _now(),
+        })
+        _save(path, state)
+        print(releases[tag]["url"])
+        return 0
+    if argv[1] == "view" and tag in releases:
+        return _emit(argv, _release_json(state, tag, releases[tag]))
+    print(f"release not found or unsupported operation: {tag}", file=sys.stderr)
+    return 1
+
+
+def _release_api(state: dict, argv: list[str], parts: list[str], method: str) -> int:
+    releases = state.get("releases", {})
+    if method != "GET":
+        return _not_found()
+    tags = list(releases) if len(parts) == 4 else parts[5:6]
+    if len(parts) != 4 and (len(parts) != 6 or parts[4] != "tags" or not tags or tags[0] not in releases):
+        return _not_found()
+    values = []
+    for tag in tags:
+        release = _release_json(state, tag, releases[tag])
+        values.append({"tag_name": tag, "draft": release["isDraft"],
+                       "published_at": release["publishedAt"], "html_url": release["url"]})
+    return _emit(argv, values if len(parts) == 4 else values[0])
+
+
 def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
     state.setdefault("calls", []).append(argv)
     _save(path, state)
@@ -1109,6 +1158,8 @@ def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
         return _issue(path, state, argv)
     if argv[:1] == ["pr"]:
         return _pr(path, state, argv)
+    if argv[:1] == ["release"]:
+        return _release(path, state, argv)
     if argv[:2] == ["repo", "view"]:
         return _emit(
             argv,
