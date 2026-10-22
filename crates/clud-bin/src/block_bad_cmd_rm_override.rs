@@ -60,7 +60,8 @@ fn does_not_write_settings(
     let Some(home) = home else {
         return false;
     };
-    let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, Some(home));
+    let script =
+        super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, Some(home));
     !script.has_error
         && script.invocations.iter().all(|invocation| {
             let writes = invocation.redirects.iter().any(|redirect| {
@@ -106,7 +107,10 @@ fn read_only_invocation(invocation: &Invocation) -> bool {
 fn forge_read(program: &str, words: &[Value]) -> bool {
     program == "gh"
         && words.get(1).and_then(Value::as_literal) == Some("issue")
-        && matches!(words.get(2).and_then(Value::as_literal), Some("list" | "view"))
+        && matches!(
+            words.get(2).and_then(Value::as_literal),
+            Some("list" | "view")
+        )
 }
 
 fn numeric_sed_read(program: &str, words: &[Value]) -> bool {
@@ -116,9 +120,14 @@ fn numeric_sed_read(program: &str, words: &[Value]) -> bool {
             .get(2)
             .and_then(Value::as_literal)
             .and_then(|script| script.strip_suffix('p'))
-            .is_some_and(|range| range.chars().all(|c| c.is_ascii_digit() || matches!(c, ',' | '$')))
+            .is_some_and(|range| {
+                range
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, ',' | '$'))
+            })
         && words.iter().skip(3).all(|word| {
-            word.as_literal().is_some_and(|operand| !operand.starts_with('-'))
+            word.as_literal()
+                .is_some_and(|operand| !operand.starts_with('-'))
         })
 }
 
