@@ -178,6 +178,22 @@ fn system_text(request: &Value) -> String {
     }
 }
 
+fn orchestration_tool_schemas(request: &Value) -> Vec<Value> {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| {
+            matches!(
+                tool.get("name").and_then(Value::as_str),
+                Some("Workflow" | "Agent")
+            )
+        })
+        .map(|tool| json!({"name": tool["name"], "input_schema": tool["input_schema"]}))
+        .collect()
+}
+
 /// Tool results sent since the last assistant turn.
 fn recent_tool_results(messages: &[Value]) -> Vec<Value> {
     let mut results = Vec::new();
@@ -378,6 +394,7 @@ fn respond_messages(
                 "t_start": t_start, "t_end": now_ms(),
                 "stream": request.get("stream"), "tools": tools,
                 "provider": request.get("provider"),
+                "orchestration_tools": orchestration_tool_schemas(request),
                 "tool_results": recent_tool_results(&messages),
                 "system": system_text(request),
                 "messages": messages,
@@ -478,6 +495,21 @@ fn respond_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orchestration_schema_log_keeps_only_the_two_native_interfaces() {
+        let request = json!({"tools": [
+            {"name": "Workflow", "input_schema": {"properties": {"name": {"type": "string"}}}},
+            {"name": "Bash", "input_schema": {"private": "unrelated"}},
+            {"name": "Agent", "input_schema": {"properties": {"cwd": {"type": "string"}}}}
+        ]});
+        let schemas = orchestration_tool_schemas(&request);
+        assert_eq!(schemas.len(), 2);
+        assert_eq!(schemas[0]["name"], "Workflow");
+        assert_eq!(schemas[1]["input_schema"]["properties"]["cwd"]["type"], "string");
+        assert!(!serde_json::to_string(&schemas).unwrap().contains("unrelated"));
+        assert!(orchestration_tool_schemas(&json!({})).is_empty());
+    }
 
     fn request(system: &str, messages: Value, tools: &[&str]) -> Value {
         json!({
