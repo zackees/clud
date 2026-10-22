@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import difflib
 import json
-import re
 import shlex
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.harness.harness import Harness, RunResult
+from tests.harness.harness import Harness
 from tests.harness.test_grind import (
     _after,
     _bash,
@@ -23,23 +22,7 @@ from tests.harness.test_grind import (
     _structured,
 )
 from tests.harness.test_grind_gate_binding import install_outcome_guard
-from tests.harness.test_grind_meta_of_metas import _told
-from tests.harness.test_workflow_gate_evidence import _message_texts
-
-
-def workflow_notices(result: RunResult) -> dict[str, str]:
-    notices = {}
-    for row in result.requests:
-        if row.get("role") != "main":
-            continue
-        for text in _message_texts(row.get("messages", [])):
-            for match in re.finditer(r"<task-notification>(.*?)</task-notification>",
-                                     text, re.DOTALL):
-                notice = match[1]
-                identity = re.search(r"<task-id>([^<]+)</task-id>", notice)
-                if identity:
-                    notices[identity[1]] = notice
-    return notices
+from tests.harness.workflow_results import workflow_notices, workflow_results
 
 
 def capture_resume_input(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -126,9 +109,10 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
         for journal in list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))[:4]:
             print("NATIVE_RESUME_JOURNAL", journal.name, journal.read_text()[:20000])
     _no_notes(result)
-    told = _told(result).replace("\\", "")
-    assert "grind-publication-resume/v1" in told, told[-4000:]
-    assert re.search(r'"remaining_goals"\s*:\s*\[\s*"b"\s*,\s*"c"\s*\]', told), told[-4000:]
+    outputs = workflow_results(result)
+    assert len(outputs) == 2, outputs
+    assert outputs[0]["resume"]["remaining_goals"] == ["b", "c"], outputs[0]
+    assert "resume" not in outputs[1], outputs[1]
     reference = json.loads(captured.read_text())
     assert reference["resumeFromRunId"].startswith("wf_")
     resumed = [row["n"] for row in result.requests
@@ -169,9 +153,10 @@ def test_stage_deferral_never_creates_publication_resume(
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
     assert {row["role"] for row in result.requests} == {"main"}
-    told = _told(result)
-    assert "deferred" in told, told[-4000:]
-    assert "grind-publication-resume/v1" not in told, told[-4000:]
+    outputs = workflow_results(result)
+    assert len(outputs) == 1, outputs
+    assert outputs[0]["goals"][0]["status"] == "deferred", outputs
+    assert "resume" not in outputs[0], outputs
     assert h.git("status", "--porcelain") == before
 
 
