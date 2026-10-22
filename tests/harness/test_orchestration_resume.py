@@ -117,7 +117,8 @@ def test_native_resume_only_reobserves_deferred_branch(harness: Harness, monkeyp
     if any(row.get("note") for row in result.requests):
         print("NATIVE_RESUME_REFERENCE", captured.read_text() if captured.exists() else "missing")
         for role in ("planner:a", "worker:a", "reviewer:a", "integrator:a"):
-            requests = [row for row in result.requests if row["role"] == role]
+            requests = [row for row in result.requests
+                        if row["role"] == role and row.get("turn") == 0]
             if len(requests) > 1:
                 first = json.dumps(requests[0]["messages"], indent=1).splitlines()
                 last = json.dumps(requests[-1]["messages"], indent=1).splitlines()
