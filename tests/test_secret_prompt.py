@@ -269,7 +269,9 @@ def test_native_secret_window_on_wayland(tmp_path: Path) -> None:
         pytest.skip("Wayland is a Linux desktop backend")
     weston = shutil.which("weston")
     if weston is None:
-        assert os.environ.get("CLUD_TEST_REQUIRE_SECRET_GUI") != "1", "Wayland coverage requires Weston"
+        assert os.environ.get("CLUD_TEST_REQUIRE_SECRET_GUI") != "1", (
+            "Wayland coverage requires Weston"
+        )
         pytest.skip("Weston is required for the Wayland window probe")
     runtime = tmp_path / "runtime"
     runtime.mkdir(mode=0o700)
