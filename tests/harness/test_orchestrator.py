@@ -15,6 +15,8 @@ import pytest
 from tests.harness.harness import Harness
 from tests.harness.test_grind_plan_only import (
     _classify,
+    _no_notes,
+    _path,
     _plan_phase,
     _script,
     _seed,
@@ -109,5 +111,6 @@ def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
     result = harness.run("Validate the graph and classify without doing implementation.", script)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     assert {row["role"] for row in result.requests} == {"main", "planner"}
-    assert '"planOnly"' in _told(result).replace('\\"', '"')
+    _no_notes(result)
+    assert _path(result) == "simple", _told(result)[-3000:]
     assert harness.git("status", "--porcelain") == before
