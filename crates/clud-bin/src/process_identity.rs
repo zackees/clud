@@ -117,6 +117,21 @@ impl ProcessIdentity {
             None => false,
         }
     }
+
+    /// Has the OS released this identity's process entry?
+    ///
+    /// Stricter than `!is_live()`, which turns false as soon as sysinfo stops
+    /// reporting a running process. On macOS that happens while the kernel is
+    /// still tearing the process down: the PID and start time remain visible
+    /// to `kinfo_proc` readers (psutil) until the entry is reaped (#1995).
+    /// Released means the PID no longer answers a liveness probe at all, or
+    /// it now belongs to a process with another start time.
+    pub fn released(&self) -> bool {
+        if !crate::platform::session_registry::os_probe_is_alive(self.pid) {
+            return true;
+        }
+        Self::observe(self.pid).is_some_and(|observed| !self.matches(&observed))
+    }
 }
 
 /// Creation time of the live process `pid` in 100 ns FILETIME ticks.
@@ -186,6 +201,17 @@ mod tests {
         let recorded = ProcessIdentity::new(4321, 1_700_000_042);
         let other = ProcessIdentity::new(4321, 1_700_000_000);
         assert!(!recorded.matches(&other));
+    }
+
+    /// #1995: a running process is not released; the same PID under
+    /// another start time (a recycled PID) is.
+    #[test]
+    fn only_a_gone_or_recycled_identity_is_released() {
+        let own = ProcessIdentity::new(std::process::id(), self_start_time());
+        assert!(own.has_start_time());
+        assert!(!own.released(), "this test process still holds its entry");
+        let recycled = ProcessIdentity::new(std::process::id(), self_start_time() + 7);
+        assert!(recycled.released());
     }
 
     #[test]

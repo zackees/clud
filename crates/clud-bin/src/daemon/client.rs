@@ -749,8 +749,31 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
         thread::sleep(Duration::from_millis(50));
     }
 
-    let _ = fs::remove_file(daemon_info_path(state_dir));
-    Ok(pid)
+    // #1995: sysinfo stops reporting a process before macOS has released
+    // its entry, and a caller that checks the same identity with another
+    // reader then still sees it alive. Stop reports success only once the
+    // OS has let go of the PID (or handed it to another process).
+    let release_deadline = Instant::now() + Duration::from_secs(5);
+    while !recorded.released() {
+        if Instant::now() >= release_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "daemon pid {pid} stopped, but the OS still holds its process entry 5s later"
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    match fs::remove_file(daemon_info_path(state_dir)) {
+        Ok(()) => Ok(pid),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(pid),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!("daemon pid {pid} stopped, but its daemon.json could not be removed: {err}"),
+        )),
+    }
 }
 
 fn terminate_recorded_daemon(recorded: &ProcessIdentity) {

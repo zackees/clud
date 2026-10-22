@@ -83,3 +83,33 @@ def test_shutdown_wait_timeout_keeps_the_final_live_check(monkeypatch):
     monkeypatch.setattr(psutil, "Process", lambda _pid: original)
     _daemon_helpers._wait_for_recorded_process_exit(original)
     assert _daemon_helpers.process_identity_is_alive(123, 1_700_000_000)
+
+
+class DeniedCmdline(RecordedProcess):
+    def ppid(self) -> int:
+        return 1
+
+    def cmdline(self) -> list[str]:
+        raise psutil.AccessDenied(123)
+
+
+def test_snapshot_names_the_field_that_failed(monkeypatch):
+    # #1995: a denied cmdline must not hide that status and create_time were
+    # readable and matched the recorded identity.
+    process = DeniedCmdline(psutil.STATUS_RUNNING)
+    monkeypatch.setattr(psutil, "Process", lambda _pid: process)
+    monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
+    snapshot = _daemon_helpers.identity_snapshot(123, 1_700_000_000)
+    assert "status='running'" in snapshot
+    assert "create_time_int_matches=True" in snapshot
+    assert "cmdline=<AccessDenied" in snapshot
+
+
+def test_wait_outcome_says_how_the_wait_ended():
+    assert _daemon_helpers._wait_for_recorded_process_exit(None).startswith("no verified")
+
+    class Slow:
+        def wait(self, timeout: float) -> None:
+            raise psutil.TimeoutExpired(timeout)
+
+    assert _daemon_helpers._wait_for_recorded_process_exit(Slow()) == "TimeoutExpired after 5s"
