@@ -156,3 +156,45 @@ def test_stage_deferral_never_creates_publication_resume(
     assert "deferred" in told, told[-4000:]
     assert "grind-publication-resume/v1" not in told, told[-4000:]
     assert h.git("status", "--porcelain") == before
+
+
+def test_native_resume_replays_one_unchanged_agent(harness: Harness, monkeypatch) -> None:
+    """Separate the runtime cache contract from grind's parallel execution."""
+    h = harness
+    captured = capture_resume_input(h, monkeypatch)
+    (h.config / "workflows").mkdir(exist_ok=True)
+    (h.config / "agents").mkdir(exist_ok=True)
+    (h.config / "agents" / "resume-cache-probe.md").write_text(
+        "---\nname: resume-cache-probe\ndescription: Native cache probe\ntools: [Bash]\n---\n"
+        "NATIVE_CACHE_PROBE_ROLE\n"
+    )
+    (h.config / "workflows" / "resume-cache-probe.js").write_text(
+        "export const meta = {name: 'resume-cache-probe', description: 'Native cache probe'};\n"
+        "return await agent('Write the cache probe once.', "
+        "{agentType: 'resume-cache-probe', label: 'cache-probe'});\n"
+    )
+    resume = {"tool_use": {"name": "Workflow", "input_file": str(captured)}}
+    script = {"roles": [
+        {"name": "cache-probe", "match": "NATIVE_CACHE_PROBE_ROLE", "steps": [
+            _bash("printf observed >> cache-probe.txt"),
+            _after({"is_error": False}, {"text": "CACHE_OBSERVATION_COMPLETE"}),
+        ]},
+        {"name": "main", "match_prompt": "</task-notification>", "steps": [
+            {"text": "unused"}, {"text": "unused"}, resume,
+            _after({"is_error": False}, {"text": "CACHE_RESUME_STARTED"}),
+        ]},
+        {"name": "main", "steps": [
+            {"tool_use": {"name": "Workflow", "input": {
+                "name": "resume-cache-probe", "args": {},
+            }}},
+            {"text": "CACHE_PROBE_STARTED"},
+        ]},
+    ]}
+    result = h.run("Observe the native unchanged-agent cache contract.", script)
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    calls = [row for row in result.hooks if row.get("event") == "PreToolUse"
+             and row.get("tool_name") == "Bash"
+             and row.get("tool_input", {}).get("command") == "printf observed >> cache-probe.txt"]
+    assert len(calls) == 1, {"calls": calls, "reference": captured.read_text()}
+    assert (h.repo / "cache-probe.txt").read_text() == "observed"
