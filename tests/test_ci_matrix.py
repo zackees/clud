@@ -491,7 +491,9 @@ def test_ci_windows_mode_runs_and_gates_on_the_routine_linux_lanes():
         block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n", 1)[0]
         assert "mode != 'windows'" not in block, job
     integration = text.split("\n  test-linux-x64-integration:\n", 1)[1].split("\n\n", 1)[0]
-    assert "needs.static.outputs.mode != 'windows'" in integration
+    assert "needs.static.outputs.mode == 'extended'" in integration
+    assert "needs.static.outputs.mode == 'full'" in integration
+    assert "needs.static.outputs.mode == 'windows'" not in integration
     windows = text.split("\n  build-windows-x64:\n", 1)[1].split("\n\n", 1)[0]
     assert "needs.static.outputs.mode == 'windows'" in windows
     gate = text.split("\n  ci-ok:\n", 1)[1]
