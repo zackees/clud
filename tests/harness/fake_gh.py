@@ -37,6 +37,8 @@ works unchanged:
   issues, PRs and default branch. Explicit repo flags, issue/PR URLs and REST
   endpoints select one; an unknown repo fails instead of reading the primary.
   Root ``calls`` records every original invocation, including failed selection.
+- ``release_after_views`` maps a tag to ``{after: N, release: {...}}`` to
+  publish it after N missing observations, without sleeping in a fixture.
 
 Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``pr list|create|edit|ready|merge|view|checks``, ``repo view`` (name and
@@ -1099,12 +1101,39 @@ def _release_json(state: dict, tag: str, value: dict) -> dict:
     }
 
 
+def _release_tag(argv: list[str]) -> str | None:
+    args = iter(argv[2:])
+    for arg in args:
+        if arg in {"--repo", "-R", "--json", "--jq", "-q", "--title", "--notes", "--target"}:
+            next(args, None)
+        elif arg == "--":
+            return next(args, None)
+        elif not arg.startswith("-"):
+            return arg
+    return None
+
+
+def _release_observation(path: Path, state: dict, argv: list[str], tag: str) -> None:
+    transition = state.get("release_after_views", {}).get(tag)
+    if argv[1] != "view" or tag in state["releases"] or not isinstance(transition, dict):
+        return
+    after = transition.get("after")
+    if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+        return
+    views = sum(call[:2] == ["release", "view"] and _release_tag(call) == tag
+                for call in state.get("calls", []))
+    if views > after:
+        state["releases"][tag] = _release_json(state, tag, transition.get("release", {}))
+        _save(path, state)
+
+
 def _release(path: Path, state: dict, argv: list[str]) -> int:
-    if len(argv) < 3 or argv[2].startswith("-"):
+    tag = _release_tag(argv)
+    if tag is None:
         print("fake gh: a literal release tag is required", file=sys.stderr)
         return 1
-    tag = argv[2]
     releases = state.setdefault("releases", {})
+    _release_observation(path, state, argv, tag)
     if argv[1] == "create":
         if tag in releases:
             print("release already exists", file=sys.stderr)
