@@ -414,6 +414,19 @@ impl ForegroundRuntime {
                 .map_or(unified.clone(), |upstreams| {
                     unified.with_integration_test_upstreams(upstreams)
                 });
+            let unified = unified
+                .with_launch_model(
+                    route.provider,
+                    route.slots.main.as_ref().map(|slot| slot.wire_id.as_str()),
+                )
+                .with_redaction(plan.redact_secrets)
+                .map_err(|error| BridgeError::Random(error.to_string()))?;
+            if route.redaction.enabled {
+                startup_notices.push(format!(
+                    "[clud] secret redaction on ({}): secrets are tokenized before leaving this machine and restored in responses",
+                    route.redaction.reason,
+                ));
+            }
             let config = BridgeConfig::default()
                 .with_unified_gateway(unified)
                 // #1257: the gateway refuses any model outside the launch's
@@ -1977,6 +1990,7 @@ pub(crate) mod tests {
             provider_only: Vec::new(),
             zdr: false,
             no_data_collection: false,
+            redact_secrets: None,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,

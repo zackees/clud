@@ -448,6 +448,26 @@ fn build_launch_plan_for_target_at(
         .flatten()
     });
 
+    let redact_secrets = if args.redact_secrets {
+        Some(true)
+    } else if args.no_redact_secrets {
+        Some(false)
+    } else {
+        None
+    };
+    let redaction = crate::secret_redaction::policy::Policy::resolve(
+        target.model_provider,
+        model_selection
+            .as_ref()
+            .and_then(|selection| selection.wire_model.as_deref()),
+        redact_secrets,
+        false,
+    );
+    let mut target = target;
+    if redaction.enabled && backend == Backend::Claude {
+        target.routing_mode = crate::backend::RoutingMode::Unified;
+    }
+
     let codex_uses_exec =
         matches!(backend, Backend::Codex) && has_noninteractive_prompt(args, backend);
     let codex_uses_resume = matches!(backend, Backend::Codex)
@@ -921,6 +941,7 @@ fn build_launch_plan_for_target_at(
         provider_only: args.provider_only.clone(),
         zdr: args.zdr,
         no_data_collection: args.no_data_collection,
+        redact_secrets,
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),
         pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
         route: None,

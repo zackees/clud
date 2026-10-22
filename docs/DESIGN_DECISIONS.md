@@ -7031,3 +7031,22 @@ mapped, gets consent from the environment only. See
 The worktree prompt control records explicit refusals as revocation. A later
 refusal replaces an earlier grant; prompts unrelated to worktrees retain the
 current decision. Negation after the worktree noun never grants permission.
+
+## DD-178: reversible secret redaction belongs to the gateway session
+
+**Context.** Provider-side one-way redaction replaces code and credential
+values the model needs to reproduce in edits (#1868). Direct harness requests
+cannot be intercepted by clud.
+
+**Decision.** Resolve the redaction policy before rendering a launch and route
+Claude sessions needing it through the unified gateway. Detect only named
+credential patterns and exact launch vault values. Tokenize with a random
+session HMAC key and an in-memory, zeroizing map; restore response text and
+JSON tool arguments before the harness sees them. Keep the policy across
+failover and redact again at final upstream send boundaries. Export only
+aggregate detector counts, never the mapping.
+
+**Consequences.** Tokens remain stable within a launch and differ across
+launches. Direct native Codex requests needing redaction fail the launch
+check. Provider privacy routing remains a separate control. See
+[secret-redaction.md](architecture/secret-redaction.md).

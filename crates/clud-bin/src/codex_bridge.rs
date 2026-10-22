@@ -17,6 +17,7 @@ use crate::failover::{FailoverLadder, FailoverRung};
 use crate::provider_catalog;
 use crate::provider_registry::AnthropicCompatRoute;
 use crate::route_health::{RouteLedger, RouteState, RouteVerdict};
+use crate::secret_redaction::stream::SharedSession;
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fmt;
@@ -129,6 +130,9 @@ pub struct UnifiedGatewayConfig {
     /// request forwarded to OpenRouter must carry. `None` leaves OpenRouter's
     /// own routing alone, which is the pre-#1863 behavior everywhere.
     upstream_routing: Option<crate::route_plan::ProviderRouting>,
+    redaction: Option<SharedSession>,
+    redaction_override: Option<bool>,
+    launch_model: Option<(ModelProvider, String)>,
     /// Which routes can serve right now. Shared across connections because a
     /// route drained on one turn must stay drained for the next one, and
     /// launch-scoped because a wedged account in this session must never
@@ -145,6 +149,9 @@ impl UnifiedGatewayConfig {
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
             failover: FailoverLadder::default(),
             upstream_routing: None,
+            redaction: None,
+            redaction_override: None,
+            launch_model: None,
             route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
         .with_route(ModelProvider::DeepSeek, deepseek_api_key)
@@ -229,6 +236,47 @@ impl UnifiedGatewayConfig {
     ) -> Self {
         self.upstream_routing = routing;
         self
+    }
+
+    /// Configure after credentials and test upstream overrides have resolved.
+    pub fn with_redaction(mut self, explicit: Option<bool>) -> Result<Self, getrandom::Error> {
+        self.redaction_override = explicit;
+        self.redaction = if explicit == Some(false) {
+            None
+        } else {
+            let keys = self
+                .anthropic_routes
+                .iter()
+                .map(|route| route.api_key.clone())
+                .collect();
+            Some(Arc::new(Mutex::new(
+                crate::secret_redaction::reversible::Session::new(keys)?,
+            )))
+        };
+        Ok(self)
+    }
+
+    /// Keep a user-selected provider wire ID routable without a static catalog row.
+    pub fn with_launch_model(mut self, provider: ModelProvider, wire: Option<&str>) -> Self {
+        self.launch_model = wire.map(|wire| (provider, wire.to_string()));
+        self
+    }
+
+    fn redactor_for(&self, provider: ModelProvider, model: Option<&str>) -> Option<&SharedSession> {
+        let training_allowed = provider == ModelProvider::OpenRouter
+            && self
+                .upstream_routing
+                .as_ref()
+                .is_some_and(|routing| routing.data_collection.as_deref() == Some("allow"));
+        crate::secret_redaction::policy::Policy::resolve(
+            provider,
+            model,
+            self.redaction_override,
+            training_allowed,
+        )
+        .enabled
+        .then_some(self.redaction.as_ref())
+        .flatten()
     }
 
     /// The body to forward for `provider`: the client's own bytes, or -- for an
@@ -354,7 +402,7 @@ impl fmt::Debug for UnifiedGatewayConfig {
 #[derive(Clone, Debug)]
 enum GatewayMode {
     Codex,
-    Unified(UnifiedGatewayConfig),
+    Unified(Box<UnifiedGatewayConfig>),
 }
 
 /// Resource and test-seam policy for one bridge launch.
@@ -454,7 +502,7 @@ impl BridgeConfig {
     /// Turn the existing launch-scoped bridge into the unified multiplexer.
     /// This remains an in-process foreground listener; it is never a daemon.
     pub fn with_unified_gateway(mut self, config: UnifiedGatewayConfig) -> Self {
-        self.gateway_mode = GatewayMode::Unified(config);
+        self.gateway_mode = GatewayMode::Unified(Box::new(config));
         self
     }
 
@@ -1566,7 +1614,8 @@ fn serve_context_compact(
         // `SessionStart(compact)` confirms Claude installed its summary.
         let result = crate::codex_pipeline::validate_canonical_history(&snapshot)
             .and_then(|()| {
-                build_pipeline(config, log, &conversation_key).map_err(PipelineError::Upstream)
+                build_pipeline(config, log, &conversation_key, codex_redactor(config))
+                    .map_err(PipelineError::Upstream)
             })
             .and_then(|pipeline| pipeline.compact_canonical_history(snapshot, shutdown))
             .and_then(|replacement| {
@@ -1687,6 +1736,7 @@ fn build_pipeline(
     config: &BridgeConfig,
     log: Option<&SharedBridgeLog>,
     conversation_key: &ConversationKey,
+    redaction: Option<&SharedSession>,
 ) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
     let mut credentials = match config.test_upstream_url.as_deref() {
         Some(base_url) => ResolvedCredentials::ApiKey(ApiKeyCredentials::new(
@@ -1709,7 +1759,8 @@ fn build_pipeline(
     // here would rotate the upstream prompt-cache key and session headers on
     // every turn, defeating cache reuse for a long Claude conversation.
     let mut client = UpstreamClient::new(credentials, upstream_config)
-        .with_session_id(conversation_key.id.clone());
+        .with_session_id(conversation_key.id.clone())
+        .with_redaction(redaction.cloned());
     if let Some(log) = log.cloned() {
         client = client.with_retry_observer(move |error, attempt, budget, backoff| {
             record_retry(&log, error, attempt, budget, backoff);
@@ -1720,6 +1771,13 @@ fn build_pipeline(
         pipeline = pipeline.with_default_model(model);
     }
     Ok(pipeline)
+}
+
+fn codex_redactor(config: &BridgeConfig) -> Option<&SharedSession> {
+    match &config.gateway_mode {
+        GatewayMode::Unified(unified) => unified.redactor_for(ModelProvider::Codex, None),
+        _ => None,
+    }
 }
 
 fn recover_marked_credentials<C: CredentialSource>(
@@ -1794,8 +1852,20 @@ fn serve_unified_messages(
     if refuse_if_outside_allowlist(stream, log, &config.allowed_models, model) {
         return;
     }
-    let mut attempt = UnifiedAttempt::initial(&resolved, model);
-    let turn = UnifiedTurn {
+    let original_model = model.to_string();
+    let mut attempt = UnifiedAttempt::for_launch(unified, &resolved, model);
+    let redaction =
+        unified.redactor_for(attempt.provider, attempt.model.as_deref().or(Some(model)));
+    let _redaction_report = crate::secret_redaction::status::Report::new(
+        unified.redaction.as_ref(),
+        config
+            .status_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .writer
+            .clone(),
+    );
+    let mut turn = UnifiedTurn {
         config,
         unified,
         shutdown,
@@ -1805,18 +1875,20 @@ fn serve_unified_messages(
         headers,
         log,
         cache_health,
+        redaction,
     };
 
     // Descend the ladder. Probing is enabled only while a further rung exists,
     // so a launch that configured no failover takes exactly today's path and
     // never buffers a byte it would not have buffered before.
     loop {
+        turn.retain_redaction(&attempt);
         let payload = match &attempt.model {
-            Some(model) => {
+            Some(model) if model != &original_model => {
                 request["model"] = serde_json::Value::String(model.clone());
                 serde_json::to_vec(&request).unwrap_or_default()
             }
-            None => body.to_vec(),
+            _ => body.to_vec(),
         };
         let fallback = unified.next_rung(attempt.spec.as_deref(), attempt.route);
         let probe = fallback.is_some();
@@ -1858,6 +1930,7 @@ fn serve_unified_messages(
                         attempt.route,
                         shutdown,
                         cache_health,
+                        turn.redaction,
                     );
                 };
                 warn_route_exhausted(attempt.route, verdict, state, Some(&rung));
@@ -1974,6 +2047,26 @@ struct UnifiedAttempt {
 }
 
 impl UnifiedAttempt {
+    fn for_launch(
+        unified: &UnifiedGatewayConfig,
+        resolved: &UnifiedCatalogMatch<'_>,
+        model: &str,
+    ) -> Self {
+        let Some((provider, wire)) = unified
+            .launch_model
+            .as_ref()
+            .filter(|(_, wire)| model == wire)
+        else {
+            return Self::initial(resolved, model);
+        };
+        Self {
+            provider: *provider,
+            route: crate::route_plan::conversation_route(*provider),
+            model: Some(wire.clone()),
+            spec: Some(wire.clone()),
+        }
+    }
+
     /// The first rung: the route the request's own model names.
     fn initial(resolved: &UnifiedCatalogMatch<'_>, model: &str) -> Self {
         let Some(entry) = resolved.entry else {
@@ -2016,6 +2109,15 @@ struct UnifiedTurn<'a> {
     headers: &'a [(String, String)],
     log: Option<&'a SharedBridgeLog>,
     cache_health: &'a SharedCacheHealth,
+    redaction: Option<&'a SharedSession>,
+}
+
+impl UnifiedTurn<'_> {
+    fn retain_redaction(&mut self, attempt: &UnifiedAttempt) {
+        self.redaction = self.redaction.or_else(|| {
+            self.unified.redactor_for(attempt.provider, attempt.model.as_deref())
+        });
+    }
 }
 
 /// Send one descent step to its provider.
@@ -2043,6 +2145,7 @@ fn dispatch_unified_attempt(
             probe,
             turn.cache_health,
             &config.status_usage,
+            turn.redaction,
         ),
         provider @ (ModelProvider::DeepSeek | ModelProvider::Kimi | ModelProvider::OpenRouter)
             if unified.route_for(provider).is_some() =>
@@ -2068,6 +2171,7 @@ fn dispatch_unified_attempt(
                 probe,
                 turn.cache_health,
                 &config.status_usage,
+                turn.redaction,
             )
         }
         ModelProvider::Codex if unified.codex_available => {
@@ -2085,6 +2189,7 @@ fn dispatch_unified_attempt(
                 Some(ConversationRoute::Codex),
                 turn.log,
                 turn.cache_health,
+                turn.redaction,
             );
             ProxyOutcome::local(200)
         }
@@ -2155,6 +2260,7 @@ fn finish_without_failover(
     route: ConversationRoute,
     shutdown: &AtomicBool,
     cache_health: &SharedCacheHealth,
+    redaction: Option<&SharedSession>,
 ) {
     let direct = match route {
         ConversationRoute::DeepSeek => unified.route_for(ModelProvider::DeepSeek),
@@ -2188,6 +2294,7 @@ fn finish_without_failover(
         false,
         cache_health,
         &config.status_usage,
+        redaction,
     );
 }
 
@@ -2207,6 +2314,7 @@ fn serve_unified_anthropic_proxy(
     probe: bool,
     cache_health: &SharedCacheHealth,
     status_usage: &SharedStatusUsage,
+    redaction: Option<&SharedSession>,
 ) -> ProxyOutcome {
     let provider = match route {
         ConversationRoute::Claude => AnthropicUsageProvider::Claude,
@@ -2247,6 +2355,7 @@ fn serve_unified_anthropic_proxy(
                 base_url,
                 path,
                 injected_api_key,
+                redaction,
             },
             body,
             headers,
@@ -2394,6 +2503,7 @@ fn serve_unified_count_tokens(
         false,
         cache_health,
         &config.status_usage,
+        unified.redactor_for(ModelProvider::Claude, Some(model)),
     );
 }
 
@@ -2412,6 +2522,21 @@ struct AnthropicProxyTarget<'a> {
     base_url: &'a str,
     path: &'a str,
     injected_api_key: Option<&'a str>,
+    redaction: Option<&'a SharedSession>,
+}
+
+fn redact_request<'a>(
+    body: &'a [u8],
+    session: Option<&SharedSession>,
+) -> io::Result<std::borrow::Cow<'a, [u8]>> {
+    let Some(session) = session else {
+        return Ok(std::borrow::Cow::Borrowed(body));
+    };
+    session
+        .lock()
+        .map_err(|_| io::Error::other("secret redaction state unavailable"))?
+        .redact_body(body)
+        .map_err(|_| io::Error::other("invalid request for secret redaction"))
 }
 
 /// What one proxy attempt did to the client connection.
@@ -2489,8 +2614,15 @@ fn serve_anthropic_proxy(
     probe: bool,
     usage: &mut StreamingUsage,
 ) -> ProxyOutcome {
+    let redacted = match redact_request(body, target.redaction) {
+        Ok(body) => body,
+        Err(_) => {
+            let _ = write_error(stream, 500);
+            return ProxyOutcome::local(500);
+        }
+    };
     let request = build_proxy_request(&target, headers, idle_timeout);
-    let response = match send_proxy_request(stream, request, body) {
+    let response = match send_proxy_request(stream, request, &redacted) {
         Ok(response) => response,
         Err(outcome) => return outcome,
     };
@@ -2543,18 +2675,53 @@ fn serve_anthropic_proxy(
         retry_after,
         request_id,
     };
+    if let Some(session) = target.redaction {
+        if content_type
+            .to_ascii_lowercase()
+            .contains("text/event-stream")
+        {
+            if !write_proxy_head(stream, &head, &[], idle_timeout) {
+                return ProxyOutcome::Committed { status };
+            }
+            let source = io::Cursor::new(prefix).chain(reader);
+            let mut restoring =
+                crate::secret_redaction::stream::RestoringReader::new(source, Arc::clone(session));
+            let relayed = relay_proxy_body(stream, &mut restoring, shutdown, usage);
+            finish_proxy_body(stream, relayed, &content_type);
+            return ProxyOutcome::Committed { status };
+        }
+        if status == 200 && target.path == "/v1/messages" {
+            prefix = match restore_response(&prefix, session) {
+                Ok(restored) => restored,
+                Err(_) => return ProxyOutcome::Declined(RouteVerdict::ProviderFault),
+            };
+        }
+    }
     if !write_proxy_head(stream, &head, &prefix, idle_timeout) {
         return ProxyOutcome::Committed { status };
     }
     usage.feed(&prefix);
     let relayed = relay_proxy_body(stream, reader.as_mut(), shutdown, usage);
+    finish_proxy_body(stream, relayed, &content_type);
+    ProxyOutcome::Committed { status }
+}
+
+fn restore_response(body: &[u8], session: &SharedSession) -> io::Result<Vec<u8>> {
+    session
+        .lock()
+        .map_err(|_| io::Error::other("secret redaction state unavailable"))?
+        .restore_body(body)
+        .map(|body| body.into_owned())
+        .map_err(|_| io::Error::other("invalid response for secret restoration"))
+}
+
+fn finish_proxy_body(stream: &mut TcpStream, relayed: ProxyRelay, content_type: &str) {
     if let Some(error) = relayed.stalled {
-        report_proxy_stall(stream, &error, relayed.forwarded, &content_type);
+        report_proxy_stall(stream, &error, relayed.forwarded, content_type);
     }
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
-    ProxyOutcome::Committed { status }
 }
 
 const MESSAGE_JSON_LIMIT: u64 = 16 * 1024 * 1024;
@@ -3067,6 +3234,7 @@ fn serve_codex_discovery_messages(
         None,
         log,
         cache_health,
+        None,
     );
 }
 
@@ -3104,8 +3272,16 @@ fn serve_messages(
     unified_route: Option<ConversationRoute>,
     log: Option<&SharedBridgeLog>,
     cache_health: &SharedCacheHealth,
+    redaction: Option<&SharedSession>,
 ) {
-    let pipeline = match build_pipeline(config, log, conversation_key) {
+    let redacted = match redact_request(body, redaction) {
+        Ok(body) => body,
+        Err(_) => {
+            let _ = write_error(stream, 500);
+            return;
+        }
+    };
+    let pipeline = match build_pipeline(config, log, conversation_key, redaction) {
         Ok(pipeline) => pipeline,
         Err(error) => {
             let failure = PipelineError::Upstream(error);
@@ -3118,13 +3294,14 @@ fn serve_messages(
         config,
         shutdown,
         conversations,
-        body,
+        body: &redacted,
         conversation_key,
         unified_route,
         log,
         cache_health,
         pipeline: &pipeline,
         message_id: &message_id,
+        redaction,
     };
 
     if streaming {
@@ -3146,6 +3323,7 @@ struct MessagesTurn<'a> {
     cache_health: &'a SharedCacheHealth,
     pipeline: &'a Pipeline<ResolvedCredentials>,
     message_id: &'a str,
+    redaction: Option<&'a SharedSession>,
 }
 
 /// Enter the turn's unified route, marking a cache boundary on a switch, and
@@ -3164,6 +3342,51 @@ fn cache_fuse_tripped_on_entry(
     lock_cache_health(turn.cache_health).health(conversation_id) == CacheHealth::FuseTripped
 }
 
+/// Restore translated frames and drain a partial token even on terminal errors.
+fn stream_with_redaction(
+    turn: &MessagesTurn<'_>,
+    writer: &mut EventStreamWriter<'_>,
+    history: &mut crate::codex_history::ConversationHistory,
+) -> Result<crate::codex_pipeline::StreamSummary, PipelineError> {
+    let mut restoring = turn
+        .redaction
+        .map(|session| crate::secret_redaction::stream::Frames::new(Arc::clone(session)));
+    let result = {
+        let mut sink = |frame: &str| -> Result<(), UpstreamError> {
+            let restored;
+            let frame = if let Some(restoring) = &mut restoring {
+                restored = restoring
+                    .rewrite(frame)
+                    .map_err(|_| UpstreamError::Downstream("secret restoration failed"))?;
+                &restored
+            } else {
+                frame
+            };
+            writer
+                .write_frame(frame)
+                .map_err(|_| UpstreamError::Downstream("client write failed"))
+        };
+        turn.pipeline.stream_with_history(
+            turn.body,
+            turn.message_id,
+            turn.shutdown,
+            &mut sink,
+            history,
+        )
+    };
+    if let Some(restoring) = &mut restoring {
+        let tail = restoring.finish().map_err(|_| {
+            PipelineError::Upstream(UpstreamError::Downstream("secret restoration failed"))
+        })?;
+        if !tail.is_empty() {
+            writer.write_frame(&tail).map_err(|_| {
+                PipelineError::Upstream(UpstreamError::Downstream("client write failed"))
+            })?;
+        }
+    }
+    result
+}
+
 /// The streaming (`"stream": true`) half of `serve_messages`.
 fn serve_messages_streaming(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
     let (config, log, conversation_key) = (turn.config, turn.log, turn.conversation_key);
@@ -3174,20 +3397,7 @@ fn serve_messages_streaming(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
             if cache_fuse_tripped_on_entry(history, turn) {
                 return Ok(None);
             }
-            let streamed = {
-                let mut sink = |frame: &str| -> Result<(), UpstreamError> {
-                    writer
-                        .write_frame(frame)
-                        .map_err(|_| UpstreamError::Downstream("client write failed"))
-                };
-                turn.pipeline.stream_with_history(
-                    turn.body,
-                    turn.message_id,
-                    turn.shutdown,
-                    &mut sink,
-                    history,
-                )
-            };
+            let streamed = stream_with_redaction(turn, &mut writer, history);
             if let Ok(summary) = &streamed {
                 if summary.history_append_rejected && writer.started() {
                     let _ = writer.finish();
@@ -3294,7 +3504,7 @@ fn serve_messages_complete(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
             let completed = turn
                 .pipeline
                 .complete_with_history(turn.body, turn.message_id, turn.shutdown, history)
-                .map(|completion| {
+                .and_then(|completion| {
                     if completion.pending_outputs_recovered > 0 {
                         log_pending_outputs_recovered(
                             log,
@@ -3303,6 +3513,15 @@ fn serve_messages_complete(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
                         );
                     }
                     let rendered = serde_json::to_vec(&completion.message).unwrap_or_default();
+                    let rendered = if let Some(session) = turn.redaction {
+                        restore_response(&rendered, session).map_err(|_| {
+                            PipelineError::Upstream(UpstreamError::Downstream(
+                                "secret restoration failed",
+                            ))
+                        })?
+                    } else {
+                        rendered
+                    };
                     if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
                         completion.clear_history_after_client_commit(history);
                     }
@@ -3316,6 +3535,7 @@ fn serve_messages_complete(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
                         completion.usage,
                         log,
                     );
+                    Ok(())
                 });
             Ok(Some(completed))
         }) {
@@ -4509,6 +4729,8 @@ fn resolve_test_upstream_override(
 
 #[cfg(test)]
 mod tests {
+    mod redaction_http;
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};

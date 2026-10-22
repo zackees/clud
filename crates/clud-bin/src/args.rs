@@ -147,6 +147,14 @@ pub struct Args {
     #[arg(long)]
     pub no_data_collection: bool,
 
+    /// Tokenize credentials before provider requests and restore them in responses.
+    #[arg(long, conflicts_with = "no_redact_secrets")]
+    pub redact_secrets: bool,
+
+    /// Disable automatic reversible secret redaction, including free models.
+    #[arg(long, conflicts_with = "redact_secrets")]
+    pub no_redact_secrets: bool,
+
     /// Reasoning effort, kept independent from the selected model.
     #[arg(long = "effort")]
     pub effort: Option<String>,
@@ -1696,6 +1704,8 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     let bool_flags: &[&str] = &[
         "--zdr",
         "--no-data-collection",
+        "--redact-secrets",
+        "--no-redact-secrets",
         "--installer",
         "--install-current",
         "--continue",

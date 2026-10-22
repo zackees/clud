@@ -813,6 +813,7 @@ def test_dry_run_exposes_the_resolved_route() -> None:
         "request_path_features",
         "openrouter_free_cost",
         "provider_only",
+        "secret_redaction",
     ]
     # D21: the request-path features are named, and the direct route says why
     # they are not offered here.

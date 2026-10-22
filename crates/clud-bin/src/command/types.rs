@@ -98,6 +98,9 @@ pub struct LaunchPlan {
     /// Exclude OpenRouter endpoints that collect request data.
     #[serde(default)]
     pub no_data_collection: bool,
+    /// Explicit reversible-redaction override; None uses route policy.
+    #[serde(default)]
+    pub redact_secrets: Option<bool>,
     /// True when `allowed_models` came from the *previous* model selection
     /// (no `--model` / `--allow-model` on the command line), not from an
     /// explicit pin (#1257). The runtime announces exactly that case as a
@@ -164,6 +167,7 @@ mod tests {
             provider_only: Vec::new(),
             zdr: false,
             no_data_collection: false,
+            redact_secrets: None,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,

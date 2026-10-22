@@ -23,6 +23,10 @@ single [`LaunchPlan`]. Submodules under `command/`, `daemon/`, `dnd/`, and
 the orchestration glue and standalone utilities consumed by both `main.rs` and
 the integration tests.
 
+`secret_redaction/` owns session-only reversible request tokenization, stream
+restoration and count-only status. See
+[secret-redaction.md](../../../docs/architecture/secret-redaction.md).
+
 ## Subdirectories
 
 - [command/](command/README.md) - `LaunchPlan` construction: backend argv
