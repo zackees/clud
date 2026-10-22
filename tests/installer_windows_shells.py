@@ -6,7 +6,8 @@ import json
 import shutil
 from pathlib import Path, PureWindowsPath
 
-from tests.process import CREATE_NEW_CONSOLE, run as run_process
+from tests.process import CREATE_NEW_CONSOLE
+from tests.process import run as run_process
 
 
 def git_bash_executable(git: Path) -> Path:
