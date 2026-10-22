@@ -212,8 +212,10 @@ failure rather than a deferred publication branch. Each observation uses a
 fresh native agent, with bounded native timer backoff between observations;
 independent goals continue while a gate waits. The result includes a small
 `grind-publication-resume/v1` manifest for precisely the deferred goals.
-Per-goal observation epochs preserve completed branches' native cache keys
-while allowing new observations on deferred branches. The router retains the
+Per-goal observation epochs change gate prompts only on deferred branches.
+Single-agent harness controls confirm native cache reuse, but full-graph
+resumption currently replays some completed reviewer and integrator calls;
+avoiding repeated completed work remains unverified. The router retains the
 original approved arguments and actual native launch references in run facts
 for same-session `/loop` resumption. Native resumption and scheduled handoff
 are undergoing harness verification; cross-repository execution remains under
