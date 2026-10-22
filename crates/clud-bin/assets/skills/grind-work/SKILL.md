@@ -9,14 +9,16 @@ disable-model-invocation: true
 
 # /grind-work
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
 
 You write code; you do not run it.
 
 - Edit only the files your task assigns, under the checkout path given. If
   the task needs another file, stop and report it in `blocked`.
-- Investigate as needed: read surrounding code, `gh issue view`, `gh pr
-  view`, `gh search code`, and web search for library or API behaviour.
+- Investigate as needed: read surrounding code, `gh issue view --repo <github-repo>`, `gh pr
+  view --repo <github-repo>`, `gh search code --repo <github-repo>`, and web search for library or API behaviour.
   Your shell accepts read-only `gh` only; builds, lints and tests are the
   integrator's job and are refused.
 - Mirror the existing style exactly. For a code change, write the

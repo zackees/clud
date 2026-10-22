@@ -10,21 +10,33 @@ disable-model-invocation: true
 
 # /grind-intake
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 Produces the ordered goal list the `/grind` router passes to the workflow:
 `[{id, title, brief}]`, plus the meta issue number (`meta`), the converted
-issue (`original`, only after a conversion), the repository root and default
-branch. It
+issue (`original`, only after a conversion), the repository root, the resolved
+GitHub repository (`github_repo`, `OWNER/REPO`) and default branch. It
 changes no code, so the RED -> GREEN rule applies later, in
 `/grind-integrate`.
 
 ## Sources
+
+**Resolve repository identity first.** Take `OWNER/REPO` from the user's
+explicit GitHub issue/PR/issues-page URL; for bare numbers, lists or prompts,
+read `git remote get-url origin`. Recognize GitHub HTTPS, SSH and
+`git@github.com:OWNER/REPO.git` URLs, removing the transport suffix `.git`.
+Keep this `<github-repo>` separate from the local checkout path. Report an
+unresolved or conflicting identity before creating or attaching anything.
+Pass `--repo <github-repo>` to repository-scoped `gh` commands and bundled
+GitHub tools; bind `{owner}/{repo}` in API endpoints to that same identity.
+Do not infer it from `gh repo view` or a fork's default upstream selection.
 
 `/grind` always runs on a meta issue. Route the argument in this order:
 
 1. **Normalize.** `https://github.com/<o>/<r>/issues/N` and a bare `N` route
    identically: pass the URL (or `N`) to the tool as given, and use `N`
    everywhere after that.
-2. **One issue.** Run `clud tool run github/is_meta_issue.py <N>` (a plain
+2. **One issue.** Run `clud tool run github/is_meta_issue.py -- <N> --repo <github-repo>` (a plain
    `clud`: clud's hook refuses a `"$CLUD_EXE"` program word). It
    prints JSON `{"meta": bool, "sub_issues": [{number, state}],
    "task_list_refs": [...]}`; exit 0 answered, 1 usage error, 2 a `gh` call
@@ -33,7 +45,7 @@ changes no code, so the RED -> GREEN rule applies later, in
    verbatim and stop: do not guess "not meta", create nothing.
    - **meta true:** each open child is a goal. `sub_issues` carry their
      state; a `task_list_refs` entry does not, so read its state with
-     `gh issue view <ref> --json state` (a ticked `- [x]` box is not
+     `gh issue view --repo <github-repo> <ref> --json state` (a ticked `- [x]` box is not
      "closed"). No conversion question. If every child is closed, print
      `Nothing to do: every sub-issue of #N is closed.` and stop, creating
      nothing.
@@ -45,11 +57,11 @@ changes no code, so the RED -> GREEN rule applies later, in
      text lists the proposed children (title and one-line scope each), with
      the options **Convert to a meta issue** and **Abort**.
      - **Convert:** first create every child, one per part: `gh issue
-       create` with a body that quotes that part of #N (markdown `>` quote)
+       create --repo <github-repo>` with a body that quotes that part of #N (markdown `>` quote)
        and says `Split from #N`. Only when every child exists, create the
        meta issue: its body starts with `Tracks #N` and links each child.
        Attach each child as a native sub-issue (see *Attach and verify*).
-       Then `gh issue comment N --body "Split into meta #<meta>; closes when
+       Then `gh issue comment --repo <github-repo> N --body "Split into meta #<meta>; closes when
        #<meta> closes."`. Do not close #N. Return `original: N`; the run
        proceeds on the new meta issue.
      - **Abort:** print the refusal below and stop.
@@ -69,17 +81,17 @@ changes no code, so the RED -> GREEN rule applies later, in
    child issue per deliverable first; only when all exist, create the meta
    issue (`Tracks` list of the children) and attach them. Goals are the
    children. One cohesive change is still one child under a meta.
-5. **Nothing.** List the repo's open issues (`gh issue list`), excluding
+5. **Nothing.** List the repo's open issues (`gh issue list --repo <github-repo>`), excluding
    ones with an open linked PR and ones labelled `grind:on-feature`
-   (`gh issue list --search '-label:grind:on-feature'`), ask the user which
+   (`gh issue list --repo <github-repo> --search '-label:grind:on-feature'`), ask the user which
    to take, then route the chosen set via 2 (one issue) or 3 (several).
    A `grind:followup` issue is eligible only when either:
    - its body marker `<!-- grind:followup ... stage=bugs ... -->` names the
      bugs stage, or
    - the marker's `feature-pr=<n>` PR is merged
-     (`gh pr view <n> --json state -q .state` prints `MERGED`).
+     (`gh pr view --repo <github-repo> <n> --json state -q .state` prints `MERGED`).
    Otherwise leave it out. When a follow-up is picked up, remove its label
-   (`gh issue edit <n> --remove-label grind:followup`). Follow-ups are never
+   (`gh issue edit --repo <github-repo> <n> --remove-label grind:followup`). Follow-ups are never
    sub-issues of the meta issue and do not count for the no-overlap check.
 
 `/grind` never closes the meta issue (or any issue) itself. Issues close

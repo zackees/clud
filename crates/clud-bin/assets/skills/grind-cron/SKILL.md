@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-cron
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 The harness owns repetition. Do not build an external loop, iteration cap,
 or DONE/BLOCKED marker; see `docs/architecture/grind.md` in the clud repo.
 
@@ -39,8 +41,8 @@ landed on a feature branch is labelled `grind:on-feature` and never lost.
 When a tick picks the next goal, skip `grind:on-feature` issues. A
 `grind:followup` issue is eligible only if its body marker
 `<!-- grind:followup ... stage=bugs ... -->` names the bugs stage, or its
-`feature-pr=<n>` PR is merged (`gh pr view <n> --json state -q .state` prints
-`MERGED`). On pickup, run `gh issue edit <n> --remove-label grind:followup`.
+`feature-pr=<n>` PR is merged (`gh pr view --repo <github-repo> <n> --json state -q .state` prints
+`MERGED`). On pickup, run `gh issue edit --repo <github-repo> <n> --remove-label grind:followup`.
 Follow-ups are never sub-issues of the meta issue and do not count for
 no-overlap. Same rule as `/grind-intake` step 5.
 

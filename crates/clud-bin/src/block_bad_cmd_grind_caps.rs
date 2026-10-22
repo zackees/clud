@@ -2455,4 +2455,43 @@ mod tests {
             run(false, false)
         );
     }
+
+    #[test]
+    fn issue_1897_scoped_reads_and_quoted_plan_body_fit_role_caps() {
+        let mut facts = run(false, false);
+        facts.meta = Some("10".into());
+        for role in [PLANNER, PREWORK, LANDER, WORKER, REVIEWER] {
+            for command in [
+                "gh issue view 12 --comments --repo fork/project",
+                "gh -R fork/project issue view 12 --json comments",
+                "gh pr view 34 --repo fork/project --json state",
+            ] {
+                assert!(allowed(role, command, &facts), "{role}: {command}");
+            }
+        }
+        assert!(allowed(
+            PREWORK,
+            "printf '%s' 'plan (preserve these parentheses)' | gh issue comment 10 --repo fork/project --body-file -",
+            &facts,
+        ));
+        assert!(!allowed(
+            PREWORK,
+            "printf '%s' 'plan' | gh issue comment 11 --repo fork/project --body-file -",
+            &facts,
+        ));
+        for role in [PLANNER, PREWORK, WORKER, REVIEWER] {
+            assert!(!allowed(
+                role,
+                "gh pr merge 34 --repo fork/project --squash",
+                &facts
+            ));
+        }
+        for role in [PLANNER, PREWORK, LANDER, WORKER, REVIEWER] {
+            assert!(!allowed(
+                role,
+                "gh issue close 12 --repo fork/project",
+                &facts
+            ));
+        }
+    }
 }

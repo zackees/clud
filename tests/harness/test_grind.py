@@ -119,7 +119,14 @@ def _goal_roles(
 def _script(
     h: Harness, mode: str, goals: list[dict[str, Any]], roles: list[dict[str, Any]], **args: Any
 ) -> dict[str, Any]:
-    workflow_args = {"repo": str(h.repo), "main": "main", "mode": mode, "goals": goals, **args}
+    workflow_args = {
+        "repo": str(h.repo),
+        "github_repo": (args.get("plan") or {}).get("repo", "o/r"),
+        "main": "main",
+        "mode": mode,
+        "goals": goals,
+        **args,
+    }
     call = {"name": "grind-run", "args": workflow_args}
     main = {
         "name": "main",

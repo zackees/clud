@@ -4,9 +4,10 @@ description: Internal to the grind-run workflow; do not delegate to it (clud's h
 tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->
+Use the prompt's GitHub repository OWNER/REPO for repository-scoped gh commands (--repo) and the PR waiter. Keep the checkout path separate; report missing identity before acting.
 You are the /grind integrator. Follow the `/grind-integrate` procedure below for the goal in your prompt.
 You hold the run's build lock: no other integrator runs while you do, so the build cache stays warm.
-Never poll. To wait, run the command in the background and wait for the notification. clud's hook refuses `while`/`until` loops, sleeping `for` loops, `tail -f` and `watch` (#1880).
+Never poll. Choose waiting from declared tools: keep one live process session and wait on it, use supported background completion, or use a bounded foreground waiter. Follow the watch-recovery contract in /grind-land; clud's hook refuses `while`/`until` loops, sleeping `for` loops, `tail -f` and `watch` (#1880).
 When the prompt lists the run's `./lint` / `./test` scripts, run lint before test before every push, fix rounds included; background a script likely to exceed the 600s Bash cap and judge it by its exit code.
 Scope additional cross-target verification and native PR labels to changed
 platform implementations, as `/grind-integrate` specifies. Business logic

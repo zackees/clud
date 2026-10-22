@@ -10,38 +10,62 @@ disable-model-invocation: true
 
 # /grind-land
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
 
 The integrator already proved RED -> GREEN locally; you confirm it on the
 server and merge.
 
-1. Watch: `clud tool run github/pr_merge_watch.py <n> --timeout 540` (a plain
-   `clud`: clud's hook refuses a `"$CLUD_EXE"` program word).
-   Run it bare; its exit code is the result (do not pipe it through `tail`).
-   Keep `--timeout` below your 600 s tool-call cap so the watch exits `4`
-   itself instead of being orphaned in the background.
+1. **Choose the wait budget and scope.** Check the declared execution tools
+   and the slowest selected CI lane, including queue/setup time. With a
+   persistent session or supported background completion, a typical bounded
+   watch is `clud tool run github/pr_merge_watch.py -- <n> --repo <github-repo> --timeout 1080 --require '.*'`.
+   Keep its deadline within the verified clud wrapper/runtime limit. With
+   foreground execution only, choose a deadline below that tool's actual cap;
+   do not assume every environment has a 600-second cap. A long-running lane
+   may need several bounded observations of the same CI.
+
+   Start once. Wait on the same live process with the declared session-wait
+   tool, or the supported background completion notification. Never restart
+   a live session. Run the waiter bare; its exit code is the result (do not
+   pipe it through `tail`). The shared capability and outcome contract is
+   [watch recovery](https://github.com/zackees/clud/blob/main/docs/architecture/hook-dispatch.md#watch-recovery-and-continuation-2004).
+   `--require '.*'` selects every reported check, including advisory lanes;
+   without it, green covers branch-required checks only. Preserve the same
+   repository, PR, head and selected scope when resuming. Add `--no-cancel`
+   when the user's policy requires keeping runs intact.
 2. By exit code:
-   - `0` (checks green, mergeable): `gh pr merge <n> --admin --squash
+   - `0` (checks green, mergeable): `gh pr merge --repo <github-repo> <n> --admin --squash
      --delete-branch`. Return `status=merged`. The watch never waits for
      CodeRabbit unless you pass `--coderabbit-wait N`; never pass it for a
      repo that suppresses CodeRabbit or a head validated by the local
      bosn -> act gate. Every `coderabbit=` note (`suppressed`, `absent`,
      `completed`, `rate_limited`, `skipped`, `pending`, `timeout`) is still
      `0`: merge.
-   - `1` (a required check failed): `gh pr checks <n>` and
-     `gh run view <run> --log-failed` for the failing job. Return
+   - `1` (a required check failed): `gh pr checks --repo <github-repo> <n>` and
+     `gh run view --repo <github-repo> <run> --log-failed` for the failing job. Return
      `status=needs_fix` with the failing job and the relevant log lines in
      `failure_log`.
    - `2` (new review activity): read the unresolved comments with
-     `gh pr view <n> --comments`. Return `status=needs_fix` with each
+     `gh pr view --repo <github-repo> <n> --comments`. Return `status=needs_fix` with each
      actionable comment in `failure_log`.
    - `3` (closed or merged elsewhere): report it; `status=merged` only if
-     `gh pr view` says merged, else `gave_up`.
-   - `4` (timeout): watch once more; a second timeout is `gave_up`.
+     `gh pr view --repo <github-repo>` says merged, else `gave_up`.
+   - `4` (timeout): incomplete observation. Revalidate the same CI and head;
+     after this waiter exits, continue a bounded watch while CI is healthy
+     and progressing. Do not rerun CI or spend a fix round because a watch
+     deadline expired. Repeated observations alone are not a CI failure.
+     If a verified external runtime limit prevents continuing, return
+     `status=gave_up` with an explicit incomplete summary and the repository,
+     PR, head, live CI run IDs, scope and resume command. Never claim green
+     or permanent goal blockage from a timeout.
    - `124` with JSON `status: in-progress` (clud's resumable watchdog):
-     watch again with the same args; never treat it as green. A second
-     watchdog stop is `gave_up`. Exit `124` without that JSON is an error,
-     so report it as `gave_up` rather than merging.
+     the wrapper stopped the waiter. Reconcile the same CI, then use the
+     same selector and arguments; never restart CI or treat this as green.
+     A live tool session is still running: keep waiting on it instead.
+     Handle a verified external runtime limit as for `4`. Exit `124`
+     without that JSON is an error; report the diagnostic rather than merge.
    - `5` (approval required: a fork PR's runs are `action_required`): stop
      and report it to the user; do not retry. Return `status=gave_up`.
    - `6` (never reported: a required check never got a check run although
@@ -49,7 +73,7 @@ server and merge.
      marker on a branch with required checks): report it as blocked. Return
      `status=gave_up`.
    - `7` (stale: a check is older than 14 days): re-run its workflow once,
-     e.g. `gh run rerun <id>`, then watch again; a second `7` is `gave_up`.
+     e.g. `gh run rerun --repo <github-repo> <id>`, then watch again; a second `7` is `gave_up`.
    - `8` (NO_CHECKS: no workflows, a `[skip ci]`-style marker on the head
      commit, or no check registered within the grace period): grind never
      merges an unvalidated head. First list the base branch's workflows:
@@ -90,35 +114,35 @@ server and merge.
      ignored, so concurrency cancellations are not failures.
 3. **Feature stage.** A goal PR in the feature stage has the feature branch
    as its base and merges into it only, never into `<main>`: on exit `0`
-   use `gh pr merge <n> --admin --merge` instead of step 2's command. No
+   use `gh pr merge --repo <github-repo> <n> --admin --merge` instead of step 2's command. No
    `--delete-branch` on any merge while the feature PR is open. Right after a
    goal PR merges into the feature branch, record it so the issue is never
    lost:
-   1. `gh label create grind:on-feature --force` (safe when it exists).
-   2. `gh issue edit <N> --add-label grind:on-feature` on the goal issue,
+   1. `gh label create --repo <github-repo> grind:on-feature --force` (safe when it exists).
+   2. `gh issue edit --repo <github-repo> <N> --add-label grind:on-feature` on the goal issue,
       and the same on the meta issue (the feature group's sub-meta in a meta
       of metas) and on the original issue when intake converted it into the
       meta. Adding a label twice is harmless.
-   3. `gh issue comment <N> --body '...'` with a readable line (`Landed on
+   3. `gh issue comment --repo <github-repo> <N> --body '...'` with a readable line (`Landed on
       feature branch <feature-branch> via #<gpr>; closes when feature PR
       #<fpr> merges.`) followed by the hidden marker, exactly
       `<!-- grind:v1 feature-pr=#<fpr> branch=<feature-branch> goal-pr=#<gpr> run=<run-id> -->`.
       On the meta (and original) issue, first read its comments
-      (`gh issue view <m> --json comments`); only if none carries a marker
+      (`gh issue view --repo <github-repo> <m> --json comments`); only if none carries a marker
       with `feature-pr=#<fpr>`, post the same marker without `goal-pr`.
-   4. `gh pr view <fpr> --json body`, then `gh pr edit <fpr> --body '...'`
+   4. `gh pr view --repo <github-repo> <fpr> --json body`, then `gh pr edit --repo <github-repo> <fpr> --body '...'`
       with `Closes #<N>` added and the goals table (goal, goal PR, status)
       updated; keep every other line. You have no file tools, so pass the
       body inline. View the body again and repeat the edit if `Closes #<N>`
       is missing: in parallel mode another lander may have edited it at the
       same moment. Only you add a goal's `Closes` line, and only after its
       goal PR merged, so a goal that never lands never closes.
-   Never `gh issue close`: the feature PR's `Closes` lines close the issues
+   Never `gh issue close --repo <github-repo>`: the feature PR's `Closes` lines close the issues
    when it merges into `<main>`, and clud's hook denies the command. The
    feature PR
    itself is merged only when the run's `feature_merge` is `auto`: once
-   every feature goal has landed and its checks are green, `gh pr ready
-   <feature-pr>` then `gh pr merge <feature-pr> --merge`; never `--admin`,
+   every feature goal has landed and its checks are green, `gh pr ready --repo <github-repo>
+   <feature-pr>` then `gh pr merge --repo <github-repo> <feature-pr> --merge`; never `--admin`,
    `--squash` or `--delete-branch` on it. If required review blocks the
    merge, stop and return "waiting for review". Under `later` or `comment`
    leave the feature PR alone. clud's command hook enforces these rules for

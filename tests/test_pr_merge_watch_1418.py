@@ -433,7 +433,10 @@ def test_queued_without_max_queued_keeps_waiting(watcher, env) -> None:
 
 def test_grind_land_documents_the_new_exit_codes_and_a_timeout_below_its_cap() -> None:
     body = LAND_SKILL.read_text()
-    assert "--timeout 540" in body
+    assert "--timeout 1080" in body
+    assert "deadline below that tool's actual cap" in body
+    assert "slowest selected CI lane" in body
+    assert "do not assume every environment has a 600-second cap" in body
     for code in ("`8`", "`9`", "`10`", "`11`", "NO_CHECKS", "mergeStateStatus"):
         assert code in body, code
 

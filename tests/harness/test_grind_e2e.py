@@ -345,6 +345,7 @@ def test_e2e_1_bugs_only_each_lands_on_main_and_the_meta_is_not_hand_closed(
     }
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": S1_META,
@@ -616,6 +617,7 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     }
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": S2_META,
@@ -943,6 +945,7 @@ def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(  # noqa: 
     # The deferred group's children stay out of this run's goals.
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": S3_TOP,
@@ -1103,6 +1106,7 @@ def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(  # noqa: 
     }
     args2 = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": S3_TOP,

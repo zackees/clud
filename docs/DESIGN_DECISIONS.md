@@ -7190,3 +7190,25 @@ separate runtime operation that clud cannot manufacture from CI success.
 
 The contract and offline validation limits live in
 [hook-dispatch.md](architecture/hook-dispatch.md#watch-recovery-and-continuation-2004).
+
+## DD-185: Grind carries an explicit forge identity through every role
+
+Issue #1897 exposed two independent inputs: the local checkout path and the
+GitHub repository that owns the issues and PRs. In a fork, gh's default can
+select upstream. Reusing the checkout field or leaving later commands
+unqualified can therefore read or mutate a different repository.
+
+Intake resolves the slug from the explicit input URL or origin. The workflow
+validates `github_repo` against recorded `plan.repo` before starting agents,
+keeps `repo` as the local path, and carries the forge identity through every
+prompt and repository-scoped command. Missing or conflicting identity fails
+before delegation. Existing role caps remain intact; supported issue-comment
+reads use `gh issue view`, and prework remains restricted to its meta issue.
+
+A bounded watch deadline is an observation limit. Slow healthy CI can outlive
+several observations, so the lander preserves its repository/head/run/scope
+and resumes after the old process exits. It selects execution and deadlines
+from declared capabilities instead of assuming a fixed 600-second tool cap
+or treating a second timeout as a failed goal. DD-184 owns the common wait
+contract. Controlled JavaScript, hook/CLI and offline watcher fixtures verify
+these procedures without claiming a live Claude Workflow integration.

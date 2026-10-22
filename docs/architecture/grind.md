@@ -78,6 +78,55 @@ Defects it found: #1828 (`./test` pty timing on the integrator host), and
 #1830 (classification flipped bug/feature for the same child across two
 launches).
 
+## Repository identity and bounded watch recovery (#1897)
+
+Intake resolves a GitHub `OWNER/REPO` from an explicit input URL or the
+checkout's `origin` remote. A fork's gh default can select its upstream, so
+every repository-scoped gh command and PR waiter receives an explicit
+`--repo`; API endpoints spell out that owner/name. An unresolved or
+conflicting identity stops before mutations or delegation.
+
+| Workflow field | Meaning |
+| --- | --- |
+| `repo` | Absolute local checkout path |
+| `github_repo` | Explicit GitHub `OWNER/REPO`, including plan-only calls |
+| `plan.repo` | The recorded forge identity; supplies `github_repo` when omitted |
+
+`grind-run` validates the slug and rejects missing, malformed or conflicting
+values before any agent starts. Comparison is case-insensitive. Every
+classification, prework, goal-role and final feature-landing prompt carries
+the selected GitHub repository separately from its checkout. The feature
+landing commands carry the same `--repo` explicitly.
+
+Planner/lander reads use the supported `gh issue view --repo OWNER/REPO N
+--comments` or `--json comments` forms. This does not grant general `gh api`
+access to capped roles. The task parser already understood the separator,
+but the top-level splitter still diverted its file list into backend
+passthrough; `grind-facts` now owns its raw `--` arguments end to end.
+The task separator (`grind-facts task --checkout ABS -- FILE...`), scoped gh
+reads and prework's quoted parentheses are covered through the real CLI/hook
+and Rust parser/role-cap tests.
+Prework still comments only on the recorded meta issue; other roles retain
+their existing mutation limits.
+
+The lander follows the shared [watch-recovery contract](hook-dispatch.md#watch-recovery-and-continuation-2004).
+Choose a bounded deadline from verified execution limits and the slowest
+selected CI lane, including setup and queue time. Keep one live waiter and
+use the declared session/background completion mechanism. Required-check
+green and all-reported-check green have distinct scopes; grind's normal
+all-check wait uses `--require '.*'`.
+
+Exit `4`, or resumable wrapper `124`, leaves CI incomplete. Reconcile the
+same repository, PR, head, run IDs and scope, then continue after the old
+waiter has stopped. Never restart live waiters or CI because an observation
+expired. Observation count alone neither spends a fix round nor proves a
+failure. A verified external runtime limit must be reported with the
+incomplete state and an exact resume command.
+
+Offline tests execute the production workflow body in a controlled JavaScript
+host, exercise real hook/CLI paths, and run the existing watcher with offline
+snapshots. They do not claim a real Claude Workflow or model integration.
+
 ## The DAG
 
 `/grind` is a router over bundled skills, one bundled workflow, and five

@@ -270,6 +270,7 @@ def _script(
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": mode,
         "meta": META,

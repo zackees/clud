@@ -16,7 +16,7 @@ def test_intake_classifies_meta_issues_with_the_bundled_tool() -> None:
     assert "is_meta_issue.py" in text
     # A `"$CLUD_EXE"` program word is refused by clud-cmd-scan's rm identity
     # check, so intake runs the tool through a plain `clud`.
-    assert "`clud tool run github/is_meta_issue.py <N>`" in text
+    assert "`clud tool run github/is_meta_issue.py -- <N> --repo <github-repo>`" in text
     assert '"$CLUD_EXE" tool run github/is_meta_issue.py' not in text
 
 
@@ -62,7 +62,7 @@ def test_intake_refuses_single_issues_with_do() -> None:
 def test_intake_reads_task_list_ref_states() -> None:
     # The tool reports task-list refs without a state; "nothing to do" needs one.
     text = _read("grind-intake")
-    assert "gh issue view <ref> --json state" in text
+    assert "gh issue view --repo <github-repo> <ref> --json state" in text
 
 
 def test_router_refuses_single_issues_with_do() -> None:

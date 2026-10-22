@@ -191,6 +191,7 @@ def _script(
     goals = ["101", "102", "103", "104"]
     args: dict[str, Any] = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "goals": [{"id": g, "title": f"child {g}", "brief": f"do {g}"} for g in goals],

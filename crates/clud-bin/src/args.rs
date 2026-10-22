@@ -1826,7 +1826,8 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     // subcommand missing from this list does not fail loudly: clud silently
     // swallows everything after `--` as backend passthrough, and the subcommand
     // sees an empty command vector.
-    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "safe-rm", "secret"];
+    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] =
+        &["tool", "test", "safe-rm", "secret", "grind-facts"];
 
     // Which subcommand we are inside, once one has been seen. `None` means the
     // tokens still belong to clud's own top-level flags.
@@ -1847,11 +1848,10 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         // on the tool path ever reads, is what made the documented invocation
         // fail with `run: missing command`.
         //
-        // The exception is deliberately one subcommand rather than "any
-        // subcommand": `ToolSubcommand::Run::args` is the only argument in this
-        // CLI declared `trailing_var_arg`, i.e. the only parser that asks for
-        // raw argv. Handing `--` to a subcommand that does not expect it makes
-        // clap reject the unknown flag and exit the process.
+        // Only the listed subcommands own raw argv. In particular, grind-facts
+        // needs its task file list after `--` (#1897). Handing `--` to a
+        // subcommand that does not expect it makes clap reject the unknown
+        // flag and exit the process.
         if arg == "--"
             && !subcommand.is_some_and(|name| SEPARATOR_OWNING_SUBCOMMANDS.contains(&name))
         {
@@ -2077,6 +2077,29 @@ mod grind_scripts_parse_tests {
         assert!(args.passthrough.is_empty());
         match args.command {
             Some(Command::GrindFacts { args }) => assert_eq!(args, vec!["path".to_string()]),
+            other => panic!("expected Command::GrindFacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grind_facts_keeps_task_files_after_its_separator() {
+        let task = [
+            "task",
+            "--checkout",
+            "/checkout",
+            "--",
+            "src/a.rs",
+            "-leading.rs",
+        ];
+        let raw = ["clud", "grind-facts"]
+            .into_iter()
+            .chain(task)
+            .map(String::from)
+            .collect();
+        let parsed = Args::parse_from_raw(raw);
+        assert!(parsed.passthrough.is_empty());
+        match parsed.command {
+            Some(Command::GrindFacts { args }) => assert_eq!(args, task),
             other => panic!("expected Command::GrindFacts, got {other:?}"),
         }
     }

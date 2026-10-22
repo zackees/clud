@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-integrate
 
+Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep the checkout path separate. For direct use, resolve an explicit GitHub issue/PR URL or `git remote get-url origin` first; report an unresolved identity before running repository commands.
+
 Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
 
 You hold the run's build lock, so nothing else builds while you do.
@@ -103,7 +105,7 @@ You hold the run's build lock, so nothing else builds while you do.
    If an existing label contradicts that selection, report the mismatch
    for owner correction; do not add further labels to compensate.
 6. **Review gate.** Run `/clud-review` on source-code changes.
-7. **Push and PR.** `git push -u origin <branch>`, then `gh pr create` with
+7. **Push and PR.** `git push -u origin <branch>`, then `gh pr create --repo <github-repo>` with
    `Closes #<id>` for an issue goal only when the PR's base is the
    repository's default branch; when the base is any other branch (e.g. a
    feature branch) use `Refs #<id>` instead, because GitHub only auto-closes

@@ -77,6 +77,7 @@ def _script(
     goals = [{"id": str(n), "title": f"child {n}", "brief": f"do {n}"} for n in children]
     args = {
         "repo": str(h.repo),
+        "github_repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "meta": META,
