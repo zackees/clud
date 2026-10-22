@@ -6,7 +6,7 @@ import json
 import shutil
 from pathlib import Path, PureWindowsPath
 
-from tests.process import run as run_process
+from tests.process import CREATE_NEW_CONSOLE, run as run_process
 
 
 def git_bash_executable(git: Path) -> Path:
@@ -43,7 +43,10 @@ def windows_shell_commands() -> dict[str, list[str]]:
             resolved["pwsh.exe"], "-NoProfile", "-NonInteractive",
             "-Command", powershell_lookup,
         ],
-        "cmd": [resolved["cmd.exe"], "/d", "/c", "where.exe clud && clud --version"],
+        "cmd": [
+            resolved["cmd.exe"], "/d", "/c",
+            "chcp 65001 >nul && where.exe clud && clud --version",
+        ],
         "git-bash": [
             str(bash), "--login", "-c",
             'cygpath -w "$(command -v clud)"; clud --version',
@@ -71,7 +74,8 @@ def persisted_windows_environment(env: dict[str, str]) -> dict[str, str]:
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     path = json.loads(result.stdout.decode("utf-8-sig"))
-    assert isinstance(path, str) and path, path
+    assert isinstance(path, str), path
+    assert path, path
     fresh = {key: value for key, value in env.items() if key.upper() != "PATH"}
     fresh["PATH"] = path
     return fresh
@@ -91,6 +95,8 @@ def assert_windows_shell_activation(
             capture_output=True,
             timeout=30,
             check=False,
+            # Keep cmd's explicit UTF-8 code page local to its own console.
+            creationflags=CREATE_NEW_CONSOLE if shell == "cmd" else 0,
         )
         assert result.returncode == 0, (shell, result.stderr.decode(errors="replace"))
         lines = result.stdout.decode("utf-8-sig").strip().splitlines()
