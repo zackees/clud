@@ -1626,12 +1626,14 @@ fn compose_launch_settings_document_with(
     mut settings: serde_json::Value,
     worktree_hooks: bool,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
-    if !plan.unsafe_mode {
-        let safety = crate::clud_hooks_compile::deletion_safety_fragment();
-        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
-            .map_err(BridgeError::Settings)?;
-        merge_deletion_denies(&mut settings, &safety)?;
-    }
+    let safety = if plan.unsafe_mode {
+        crate::clud_hooks_compile::settings_authority_fragment()
+    } else {
+        crate::clud_hooks_compile::deletion_safety_fragment()
+    };
+    crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
+        .map_err(BridgeError::Settings)?;
+    merge_deletion_denies(&mut settings, &safety)?;
     // #1962/#1971: build Claude Code's worktrees under `~/.clud/worktrees`.
     if worktree_hooks {
         let worktrees = crate::clud_hooks_compile::worktree_hooks_fragment();

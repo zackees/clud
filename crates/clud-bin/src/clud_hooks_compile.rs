@@ -81,6 +81,20 @@ pub const SETTINGS_FILE_DENIES: &[&str] = &[
     "Write(~/.clud/settings.json)",
 ];
 
+/// Settings consent remains required when session safety policy is disabled.
+#[must_use]
+pub fn settings_authority_fragment() -> Value {
+    json!({
+        "permissions": { "deny": SETTINGS_FILE_DENIES },
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": guarded_tools_matcher(),
+                "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
+            }]
+        }
+    })
+}
+
 #[must_use]
 pub fn deletion_safety_fragment() -> Value {
     let mut deny = crate::deletion_rules::generated().claude_denies;
