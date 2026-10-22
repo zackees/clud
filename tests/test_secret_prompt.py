@@ -184,7 +184,7 @@ def test_native_secret_window_can_render_and_deliver(tmp_path: Path) -> None:
         "CLUD_TEST_SECRET_PROMPT_GUI": "1",
     }
     argv = [CLUD, "secret", "--multiline", "--to-file", str(destination)]
-    required = env.get("CLUD_REQUIRE_SECRET_GUI") == "1"
+    required = env.get("CLUD_TEST_REQUIRE_SECRET_GUI") == "1"
     if sys.platform == "linux" and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
         xvfb = shutil.which("xvfb-run")
         if xvfb is None:
@@ -269,7 +269,7 @@ def test_native_secret_window_on_wayland(tmp_path: Path) -> None:
         pytest.skip("Wayland is a Linux desktop backend")
     weston = shutil.which("weston")
     if weston is None:
-        assert os.environ.get("CLUD_REQUIRE_SECRET_GUI") != "1", "Wayland coverage requires Weston"
+        assert os.environ.get("CLUD_TEST_REQUIRE_SECRET_GUI") != "1", "Wayland coverage requires Weston"
         pytest.skip("Weston is required for the Wayland window probe")
     runtime = tmp_path / "runtime"
     runtime.mkdir(mode=0o700)

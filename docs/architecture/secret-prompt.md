@@ -68,5 +68,5 @@ headless Weston compositor with software OpenGL, removes `DISPLAY`, and opens
 the window through Wayland. It waits on compositor startup output with a
 deadline and always terminates the compositor. Headless skips do not establish
 native window coverage.
-The native CI setup sets `CLUD_REQUIRE_SECRET_GUI=1`: there a missing display,
+The native CI setup sets `CLUD_TEST_REQUIRE_SECRET_GUI=1`: there a missing display,
 runtime or graphics context fails the probe rather than skipping coverage.
