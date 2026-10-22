@@ -100,9 +100,9 @@ def scheduled_resume(h: Harness, script: dict[str, Any]) -> RunResult:
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("scheduled", [False, True])
+@pytest.mark.parametrize("mode,scheduled", [("parallel", False), ("sequential", False), ("parallel", True)])
 def test_native_resume_only_reobserves_deferred_branch(
-    harness: Harness, monkeypatch, scheduled: bool,
+    harness: Harness, monkeypatch, mode: str, scheduled: bool,
 ) -> None:
     h = harness
     graph = {"session_repo": "o/r", "session_root": str(h.repo), "goals": [
@@ -130,7 +130,7 @@ def test_native_resume_only_reobserves_deferred_branch(
         gate_role("gate:b:initial", "b", "v-pending", False),
         gate_role("gate:e", "e", "v-ready", True),
     ])
-    script = _script(h, "parallel", _goals("a", "b", "c", "d", "e"), roles,
+    script = _script(h, mode, _goals("a", "b", "c", "d", "e"), roles,
                      orchestration=graph, gateAttempts=1)
     script["roles"].insert(-1, {"name": "main", "match_prompt": "</task-notification>",
                                "steps": native_resume_steps(captured, scheduled)})
