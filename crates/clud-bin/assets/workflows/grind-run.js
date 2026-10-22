@@ -185,7 +185,9 @@ const gateInteger = (name, fallback, minimum, maximum) => {
 }
 const GATE_ATTEMPTS = gateInteger('gateAttempts', 3, 1, 5)
 const GATE_BACKOFF_MS = gateInteger('gateBackoffMs', 1000, 1, 30000)
-const GATE_EPOCH = gateInteger('gateEpoch', 0, 0, 1000000000)
+// Each resume replays its history; cap that history before launching any agent.
+const MAX_GATE_EPOCH = 64
+const GATE_EPOCH = gateInteger('gateEpoch', 0, 0, MAX_GATE_EPOCH)
 // Resume only deferred branches: completed gate prompts must retain their native
 // cache keys. Epochs select fresh observations; they never assert readiness.
 const GATE_EPOCHS = args.gateEpochs ?? {}
@@ -193,7 +195,7 @@ if (!GATE_EPOCHS || typeof GATE_EPOCHS !== 'object' || Array.isArray(GATE_EPOCHS
   throw new Error('gateEpochs must map approved goal ids to integer epochs')
 }
 for (const [id, epoch] of Object.entries(GATE_EPOCHS)) {
-  if (!RUN_GOALS.has(id) || !Number.isInteger(epoch) || epoch < 0 || epoch > 1000000000) {
+  if (!RUN_GOALS.has(id) || !Number.isInteger(epoch) || epoch < 0 || epoch > MAX_GATE_EPOCH) {
     throw new Error(`invalid gate epoch for approved goal ${id}`)
   }
 }
@@ -1096,7 +1098,7 @@ const remaining = summary.filter(s => ORCHESTRATION && s.status === 'deferred' &
   s.gate && s.gate.when !== 'merged' && nonempty(s.gate.check)).map(s => String(s.goal))
 const nextEpochs = { ...GATE_EPOCHS }
 for (const id of remaining) {
-  if (gateEpoch(id) >= 1000000000) throw new Error(`gate epoch exhausted for ${id}`)
+  if (gateEpoch(id) >= MAX_GATE_EPOCH) throw new Error(`gate epoch exhausted for ${id}`)
   nextEpochs[id] = gateEpoch(id) + 1
 }
 const resume = remaining.length ? {
