@@ -97,7 +97,10 @@ fn free_model_redaction_routes_exactly_and_restores_nonstream_tool_input() {
         "raw free ID reached Anthropic"
     );
     bridge.shutdown().unwrap();
-    assert!(!log.exists(), "successful turns must not create forensic logs");
+    assert!(
+        !log.exists(),
+        "successful turns must not create forensic logs"
+    );
 }
 
 fn response_json(response: &str) -> serde_json::Value {
