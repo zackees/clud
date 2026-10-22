@@ -298,7 +298,7 @@ pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> HookInvo
     }
 }
 
-/// Set to `1` to bypass every command-hook check for the session.
+/// Set to `1` to bypass command policy, never settings-change authority.
 pub const ALLOW_ALL_CMDS_ENV: &str = "CLUD_ALLOW_ALL_CMDS";
 
 fn allow_all_cmds(value: Option<&str>) -> bool {

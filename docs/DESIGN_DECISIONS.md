@@ -6394,6 +6394,11 @@ commands without a mutation claim continue.
 
 ## DD-156: `--unsafe` is an explicit session policy, separate from backend permissions
 
+**Amended by #1999 / DD-183:** this switch still disables session safety
+rules, but cannot establish settings-change authority. The settings-only
+dispatcher and file-tool denies remain installed in unsafe launches. See the
+current scope in [unsafe-mode.md](architecture/unsafe-mode.md).
+
 **Context:** clud already launches agents with the backend's permission bypass
 by default, but its own command scanner, deletion rewrite, `rm` catastrophe
 floor, shell guards, and generated instructions still constrain their actions.

@@ -20,12 +20,21 @@ The normal command scanner refuses agent-authored changes to that marker.
 In unsafe mode, clud does not redirect `rm`, `rmdir`, or `unlink` to `safe-rm`,
 refuse `find -delete`, inject the deletion instruction paragraph, or install
 Claude deletion denies. The command-scan hook must not impose clud's built-in
-command, deletion, root-override, role, repeat, recursion, or command-gate
+command, deletion, role, repeat, recursion, or command-gate
 restrictions. Clud's `rm` alias must hand off to the real `rm` without its
 catastrophe checks or extra protective flags. Clud must not force shell
 `nounset` or its command gate. An explicit `safe-rm` call remains a request for
 its documented trash and location behavior; `--unsafe` never changes the
 meaning of a command the caller chose explicitly.
+
+Settings authority is separate from this session safety switch (#1999).
+Raw writes to the user settings file remain refused, including deletion-root
+changes. Claude retains a settings-only dispatcher and Edit/Write denies;
+Codex retains its catch-all dispatcher. The guard runs before the unsafe-mode
+and per-call command bypasses. A user can approve one exact change through
+the controlled settings command described in
+[rm-tools.md](rm-tools.md#user-approval-for-settings-changes-1999).
+Unsafe mode supplies no reusable or broader settings authority.
 
 Existing repository and user hooks are user policy, so their own decisions
 still run. Session bookkeeping, GC tracking, authentication routing, telemetry,
@@ -46,3 +55,6 @@ real `rm` call and `find -delete` pass without clud rewriting, while an
 explicit `safe-rm` retains its normal checks. Check that `--dry-run` reports
 the mode and that the unsafe marker cannot be set by an inherited environment
 value alone.
+Verify that raw shell and native file-tool settings writes are still refused
+even with unsafe and per-call bypass markers, and that unsafe Claude launch
+settings retain the settings dispatcher/denies without deletion-command denies.
