@@ -3876,6 +3876,7 @@ mod tests {
             "Agent",
             "EnterWorktree",
             "Workflow",
+            "StructuredOutput",
             "AskUserQuestion",
             "Write",
             "Edit",
