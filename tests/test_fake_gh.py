@@ -642,7 +642,8 @@ def test_repository_mutations_preserve_other_repositories(world, capsys):
     assert out.startswith("https://github.com/o/sister/issues/7#")
     state = _state(world)
     assert state["repositories"]["o/primary"]["issues"]["7"]["comments"] == []
-    assert state["repositories"]["o/sister"]["issues"]["7"]["comments"][0]["body"] == "sister only"
+    comments = state["repositories"]["o/sister"]["issues"]["7"]["comments"]
+    assert comments[0]["body"] == "sister only"
     assert state["calls"] == [argv]
 
 

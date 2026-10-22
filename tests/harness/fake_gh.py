@@ -33,6 +33,10 @@ works unchanged:
   "oid": str}``) and ``parent`` (int or None).
 - per PR: ``base``, ``draft``, ``body``, ``merge_method``, ``admin``,
   ``requires_review`` (alias ``reviews_required``) and ``approved``.
+- ``repositories`` maps owner/name to independent worlds with their own
+  issues, PRs and default branch. Explicit repo flags, issue/PR URLs and REST
+  endpoints select one; an unknown repo fails instead of reading the primary.
+  Root ``calls`` records every original invocation, including failed selection.
 
 Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``pr list|create|edit|ready|merge|view|checks``, ``repo view`` (name and
@@ -105,13 +109,25 @@ _API_VALUE_FLAGS = {
 }
 
 
+class _RepositoryState(dict):
+    """A repo view whose saves retain the entire locked multi-repo world."""
+
+    def __init__(self, root: dict, name: str):
+        super().__init__(root["repositories"][name])
+        self.root = root
+        self["repo"] = name
+        self.setdefault("fail", root.get("fail", False))
+        root["repositories"][name] = self
+
+
 def _load() -> tuple[Path, dict]:
     path = Path(os.environ["FAKE_GH_STATE"])
     return path, json.loads(path.read_text(encoding="utf-8"))
 
 
 def _save(path: Path, state: dict) -> None:
-    path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    root = state.root if isinstance(state, _RepositoryState) else state
+    path.write_text(json.dumps(root, indent=1), encoding="utf-8")
 
 
 @contextmanager
@@ -1107,10 +1123,55 @@ def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
     return 0
 
 
+def _without_repo_prefix(argv: list[str]) -> list[str]:
+    if argv[:1] in (["-R"], ["--repo"]):
+        return argv[2:]
+    if argv and (argv[0].startswith("--repo=") or argv[0].startswith("-R")):
+        return argv[1:]
+    return argv
+
+
+def _requested_repository(state: dict, argv: list[str]) -> str:
+    explicit = _flag(argv, "--repo") or _flag(argv, "-R")
+    if explicit:
+        return explicit
+    joined = next((arg[2:] for arg in argv if arg.startswith("-R") and len(arg) > 2), None)
+    if joined:
+        return joined
+    args = _without_repo_prefix(argv)
+    if args[:1] == ["api"]:
+        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", _api_endpoint(args))
+        if match and "{" not in match[1]:
+            return match[1]
+    target = args[2] if len(args) > 2 else ""
+    if args[:2] == ["repo", "view"] and re.fullmatch(r"[^/\s]+/[^/\s]+", target):
+        return target
+    match = re.match(r"https://github\.com/([^/]+/[^/]+)/(?:issues|pull)/", target)
+    return match[1] if match else _repo(state)
+
+
+def _repository_state(state: dict, argv: list[str]) -> _RepositoryState:
+    requested = _requested_repository(state, argv)
+    names = state["repositories"]
+    name = next((name for name in names if name.lower() == requested.lower()), None)
+    if name is None:
+        raise ValueError(f"unknown fixture repository {requested}")
+    return _RepositoryState(state, name)
+
+
 def main(argv: list[str]) -> int:
     path = Path(os.environ["FAKE_GH_STATE"])
     with _locked(path):
         _, state = _load()
+        if isinstance(state.get("repositories"), dict):
+            state.setdefault("calls", []).append(argv)
+            try:
+                selected = _repository_state(state, argv)
+            except ValueError as error:
+                _save(path, state)
+                print(str(error), file=sys.stderr)
+                return 1
+            return _dispatch(path, selected, _without_repo_prefix(argv))
         return _dispatch(path, state, argv)
 
 
