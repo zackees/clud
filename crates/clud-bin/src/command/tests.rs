@@ -17,7 +17,24 @@ use crate::clud_settings::DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE;
 
 fn parse(raw: &[&str]) -> Args {
     let raw: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
-    Args::parse_from_raw(raw)
+    let mut args = Args::parse_from_raw(raw);
+    // Production resolves live facts in main before building a plan. Keep
+    // these argv tests pure instead of querying this checkout or GitHub.
+    if let Some(crate::args::Command::Do {
+        target: Some(target),
+    }) = &args.command
+    {
+        args.do_rendered_prompt = Some(super::do_prompt::render(
+            target,
+            &Ok(super::do_kind::DoKind::Single),
+            &Ok(super::do_prompt::BranchFacts {
+                branch: Some("main".into()),
+                default_branch: "main".into(),
+                ..Default::default()
+            }),
+        ));
+    }
+    args
 }
 
 fn plan(raw: &[&str]) -> LaunchPlan {

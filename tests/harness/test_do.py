@@ -242,15 +242,6 @@ def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, targe
     _gh(harness, prs=[{"number": 812, "head": "feat/x", "state": "MERGED"}])
     seed = _cli_seed(harness, target)
     assert seed.startswith("/goal ")
-    # Feed the actual CLI seed through the real harness, with no recovery
-    # Skill call. The first model request must already have the live verdict.
-    result = harness.run(seed, ACK)
-    assert result.returncode == 0, result.stdout[-2000:]
-    text = result.prompt_text("main")
-    _rendered(text)
-    assert "Verdict: `stale_merged`" in text
-    assert "812" in text
-    assert "RED" in text and "GREEN" in text
     direct = process.run(
         [str(harness.clud), "do-prompt", target],
         cwd=str(harness.repo),
@@ -260,6 +251,16 @@ def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, targe
         timeout=60,
     )
     assert direct.returncode == 0, direct.stderr
+    # Feed the actual CLI seed through the real harness, with no recovery
+    # Skill call. The first model request must already have the live verdict.
+    result = harness.run(seed, ACK)
+    assert result.returncode == 0, result.stdout[-2000:]
+    text = result.prompt_text("main")
+    _rendered(text)
+    assert "Verdict: `stale_merged`" in text
+    assert "812" in text
+    assert "RED" in text
+    assert "GREEN" in text
     for line in direct.stdout.splitlines():
         if line.strip():
             assert json.dumps(line)[1:-1] in text, line

@@ -7083,3 +7083,20 @@ alias checks the requesting process chain and refuses ordinary agent callers.
 This protects against accidental capture, not hostile local process spoofing.
 No GUI fails clearly rather than requesting secrets through chat. The detailed
 contract lives in [secret-prompt.md](architecture/secret-prompt.md).
+
+## DD-180: explicit do launches render the goal contract before the harness
+
+**Context.** `/goal /do target` records `/do target` as goal text; it does not
+expand that nested skill. Loading do or grind through Skill is deliberately
+refused by their explicit-only policy (#2013).
+
+**Decision.** Render the live do procedure before CLI launch, using the same
+renderer as explicit `/do`, then pass that procedure to `/goal`. Resolve the
+target without shell interpolation. A meta issue reads the installed grind
+router with its base-directory context and retains the Workflow/agent
+capability refusal. Keep skill invocation metadata unchanged.
+
+**Consequences.** First-turn context includes the checkout verdict and full
+do contract. The router remains in its canonical skill file, keeping launch
+argv bounded. Session-only launches do not install missing assets; a missing
+router stops the handoff. Details: [skill-system.md](architecture/skill-system.md#explicit-do-launches).

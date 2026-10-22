@@ -1,8 +1,8 @@
 ---
 name: do
-description: "Implement one issue URL or free-form goal all the way to merged PRs, starting from the right branch: RED -> GREEN, review, test, push, watch CI to green, merge, clean checkout. Seeded by `clud do` as `/goal /do <target>`."
+description: "Implement one issue URL or free-form goal all the way to merged PRs, starting from the right branch: RED -> GREEN, review, test, push, watch CI to green, merge, clean checkout. `clud do` seeds /goal with this same rendered contract."
 triggers:
-  - When clud do seeds /goal /do <target>
+  - When the user explicitly runs /do or clud do
 disable-model-invocation: true
 allowed-tools: Bash(clud do-prompt:*)
 ---

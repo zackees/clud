@@ -28,16 +28,13 @@ After downloading and analyzing the logs:
 Then proceed with the validation process:
 {validation}";
 
-/// `clud do`'s seeded prompt. The contract itself lives in the bundled `/do`
-/// skill; `/goal` keeps the session going until it is met. A meta issue
-/// (open native sub-issues, decided in `main` by `do_kind`) goes to `/grind`.
-pub(super) fn build_do_prompt(target: &str, meta: bool) -> String {
-    let target = target.trim();
-    if meta {
-        format!("/goal /grind {target}")
-    } else {
-        format!("/goal /do {target}")
-    }
+/// Keep the rendered contract as goal text. Neither nested slash-command
+/// expansion nor a model-side Skill invocation is supported here (#2013).
+pub(super) fn build_do_prompt(rendered: Option<&str>) -> String {
+    let procedure = rendered.filter(|text| !text.trim().is_empty()).unwrap_or(
+        "Stop: the live /do procedure was not prepared. Tell the user and do not start work.",
+    );
+    format!("/goal {procedure}")
 }
 
 pub(super) const REBASE_PROMPT: &str = "\

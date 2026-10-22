@@ -55,6 +55,25 @@ escape in the tree.
 Installation is non-fatal. A failure logs a `[clud] note: ...` line and launch
 continues.
 
+## Explicit do launches
+
+`clud do` classifies its target and calls `command::do_prompt::render_current`
+before launch setup. That is also the renderer used by `clud do-prompt` for
+an explicitly entered `/do`. The CLI passes the resulting procedure as the
+text of `/goal`, preserving the harness's persistent goal without asking it
+to expand a nested slash command or invoke an explicit-only Skill tool.
+Missing preparation yields a stop instruction.
+
+A meta issue keeps the live starting-branch verdict and hands off through
+Read to the installed grind router, using the install registry's absolute
+path and the router's directory for leaf paths. This avoids duplicating the
+router or placing its entire body on the process command line. It requires
+the Claude harness, a foreground interactive launch, Workflow and bundled
+grind agents. Missing capabilities or unreadable assets stop work. The CLI
+does not install persistent assets during session-only setup. Ordinary
+prompt invocation policies are unchanged. See
+[DD-180](../DESIGN_DECISIONS.md#dd-180-explicit-do-launches-render-the-goal-contract-before-the-harness).
+
 ## Global Setup Flow
 
 `main()` resolves the backend, asks `launch_setup.rs` for a setup scope, and

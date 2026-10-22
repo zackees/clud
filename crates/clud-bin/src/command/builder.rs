@@ -46,6 +46,15 @@ const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
 /// predicate `main.rs` dispatches on — so the gate and the dispatch can never
 /// drift apart again.
 pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
+    if matches!(args.command, Some(Command::Do { .. })) && args.do_meta {
+        if !matches!(target.effective_harness, Backend::Claude) {
+            return Some("meta-issue `clud do` requires the Claude harness, whose Workflow tool and `/loop` the grind router needs; use `--harness claude`");
+        }
+        if args.subprocess || args.detach || args.detachable {
+            return Some("meta-issue `clud do` requires a foreground interactive PTY; remove `--subprocess`, `--detach` or `--detachable`");
+        }
+        return None;
+    }
     let Some(Command::Grind { url }) = &args.command else {
         return None;
     };
@@ -756,8 +765,8 @@ fn build_launch_plan_for_target_at(
             // follow-up input, so both Claude and Codex seed an interactive
             // session. `main` resolves the optional target before plan building.
             if seed_interactive_builtin {
-                if let Some(target) = target.as_deref() {
-                    let prompt = build_do_prompt(target, args.do_meta);
+                if target.is_some() {
+                    let prompt = build_do_prompt(args.do_rendered_prompt.as_deref());
                     push_prompt_interactive(&mut cmd, prompt);
                 }
             }
