@@ -325,9 +325,12 @@ def test_graph_resume_history_is_bounded_before_agents(harness: Harness, field: 
     result = h.run("Reject an excessive replay history before launching agents.", script)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     assert {row["role"] for row in result.requests} == {"main"}
-    notices = workflow_notices(result)
-    assert notices, result.stdout[-3000:]
-    assert field in str(notices), notices
+    if field == "gateEpochs":
+        errors = json.dumps([row.get("tool_results", []) for row in result.requests])
+        assert "Initial graph launches cannot advance gateEpochs" in errors, errors
+    else:
+        notices = workflow_notices(result)
+        assert "gateEpoch must be an integer from 0 to 64" in str(notices), notices
     assert h.git("status", "--porcelain") == before
 
 
