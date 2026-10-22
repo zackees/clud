@@ -154,6 +154,45 @@ def test_orchestrator_exception_keeps_workers_internal(harness: Harness) -> None
     assert {row["role"] for row in result.requests} == {"main"}
 
 
+def test_orchestrator_reads_issues_and_files_from_both_repos(harness: Harness) -> None:
+    """T4: the native advisor sees distinct same-number issues and dirty repos."""
+    h = harness
+    sister = h.root / "sister repo"
+    sister.mkdir()
+    h.git("init", "-q", "-b", "master", cwd=sister)
+    repositories = {}
+    for name, root in [("primary", h.repo), ("sister", sister)]:
+        (root / "context.txt").write_text(f"ORCHESTRATOR_FILE_{name.upper()}\n")
+        repositories[f"o/{name}"] = {
+            "repo": f"o/{name}", "default_branch": "main" if name == "primary" else "master",
+            "issues": {"7": {"title": name, "body": f"ORCHESTRATOR_ISSUE_{name.upper()}"}},
+        }
+    h.write_gh_state({"repo": "o/primary", "repositories": repositories})
+    steps = []
+    for name, root in [("primary", h.repo), ("sister", sister)]:
+        steps.append(_bash(f"gh issue view 7 --repo o/{name} --json body"))
+        steps.append(_after(
+            {"is_error": False, "content_contains": f"ORCHESTRATOR_ISSUE_{name.upper()}"},
+            {"tool_use": {"name": "Read", "input": {"file_path": str(root / "context.txt")}}},
+        ))
+        steps.append(_after(
+            {"is_error": False, "content_contains": f"ORCHESTRATOR_FILE_{name.upper()}"},
+            _bash(f"git -C {shlex.quote(str(root))} status --porcelain"),
+        ))
+    steps.append(_after({"is_error": False}, {"text": "BOTH_REPOSITORIES_INSPECTED"}))
+    before = [h.git("status", "--porcelain", cwd=root) for root in (h.repo, sister)]
+    result = h.run("Inspect both repositories without changing either.", orchestrator_script(steps))
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    seen = [row for row in result.requests if row["role"] == "orchestrator"]
+    assert seen
+    assert not any(block["is_error"] for row in seen for block in row["tool_results"])
+    text = str([row["tool_results"] for row in seen])
+    for marker in ["ISSUE_PRIMARY", "ISSUE_SISTER", "FILE_PRIMARY", "FILE_SISTER"]:
+        assert f"ORCHESTRATOR_{marker}" in text, marker
+    assert [h.git("status", "--porcelain", cwd=root) for root in (h.repo, sister)] == before
+
+
 def test_valid_orchestration_allows_readonly_planning(harness: Harness) -> None:
     """A valid graph must still reach classification; rejection is selective."""
     _seed(harness, [101])
