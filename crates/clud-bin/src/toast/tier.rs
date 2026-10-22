@@ -206,7 +206,10 @@ mod tests {
     fn windows_terminal_and_conhost_select_text_cells() {
         let env = env_of(&[("WT_SESSION", "abc"), ("TERM_PROGRAM", "")]);
         assert_eq!(decide(None, &env, false, false).tier, ToastTier::TextCells);
-        assert_eq!(decide(None, &env_of(&[]), false, false).tier, ToastTier::TextCells);
+        assert_eq!(
+            decide(None, &env_of(&[]), false, false).tier,
+            ToastTier::TextCells
+        );
     }
 
     #[test]
@@ -266,6 +269,9 @@ mod tests {
         let wezterm = env_of(&[("TERM_PROGRAM", "WezTerm")]);
         assert_eq!(decide(None, &wezterm, false, true).tier, ToastTier::Kitty);
         let opted_in = env_of(&[(TIER_OVERRIDE_ENV, "text")]);
-        assert_eq!(decide(None, &opted_in, false, true).tier, ToastTier::TextCells);
+        assert_eq!(
+            decide(None, &opted_in, false, true).tier,
+            ToastTier::TextCells
+        );
     }
 }

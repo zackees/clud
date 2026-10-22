@@ -35,7 +35,11 @@ fn assert_same(got: &vt100::Parser, want: &vt100::Parser, case: &str) {
 fn sequences_vt100_drops_land_where_their_equivalents_do() {
     let cases: &[(&str, &[u8], &[u8])] = &[
         ("REP", b"ab\x1b[3bX", b"abbbbX"),
-        ("REP box drawing", "\u{2500}\x1b[4b|".as_bytes(), "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}|".as_bytes()),
+        (
+            "REP box drawing",
+            "\u{2500}\x1b[4b|".as_bytes(),
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}|".as_bytes(),
+        ),
         ("HPA", b"hello\x1b[20`X", b"hello\x1b[20GX"),
         ("HPR", b"ab\x1b[5aX", b"ab\x1b[5CX"),
         ("VPR", b"ab\x1b[2eX", b"ab\x1b[2BX"),
@@ -53,7 +57,10 @@ fn sequences_vt100_drops_land_where_their_equivalents_do() {
 fn without_translation_the_shadow_drifts() {
     // The premise of #2028: vt100 really does drop these.
     let raw = direct(b"ab\x1b[3bX");
-    assert_ne!(raw.screen().contents(), direct(b"abbbbX").screen().contents());
+    assert_ne!(
+        raw.screen().contents(),
+        direct(b"abbbbX").screen().contents()
+    );
 }
 
 #[test]

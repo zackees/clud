@@ -25,7 +25,10 @@ enum Scan {
     /// A CSI that may still complete in the next chunk.
     Incomplete,
     /// A complete CSI of `len` bytes; `rewrite` is set when `vt100` drops it.
-    Complete { len: usize, rewrite: Option<Rewrite> },
+    Complete {
+        len: usize,
+        rewrite: Option<Rewrite>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -139,7 +142,9 @@ fn replacement(screen: &vt100::Screen, rewrite: Rewrite, sequence: &[u8]) -> Vec
         Rewrite::Forward(n) => format!("\x1b[{n}C").into_bytes(),
         Rewrite::Down(n) => format!("\x1b[{n}B").into_bytes(),
         Rewrite::TabForward(n) => {
-            let target = (col / TAB + n).saturating_mul(TAB).min(cols.saturating_sub(1));
+            let target = (col / TAB + n)
+                .saturating_mul(TAB)
+                .min(cols.saturating_sub(1));
             format!("\x1b[{}G", target + 1).into_bytes()
         }
         Rewrite::TabBack(n) => {
