@@ -27,7 +27,8 @@ def workflow_notices(result: RunResult) -> dict[str, str]:
 
 def workflow_results(result: RunResult) -> list[Any]:
     notices = workflow_notices(result)
-    assert notices, "no native Workflow completion notification"
+    errors = [row.get("tool_results", []) for row in result.requests if row.get("role") == "main"]
+    assert notices, "no native Workflow completion notification: " + json.dumps(errors)[-8000:]
     outputs = []
     for notice in notices.values():
         assert "<status>completed</status>" in notice, notice[-4000:]
