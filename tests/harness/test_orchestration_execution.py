@@ -1,6 +1,8 @@
 """Approved run dependencies must gate planning, independent of planner prose."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tests.harness.harness import Harness
@@ -60,6 +62,13 @@ def test_approved_merge_dependency_gates_planning(
     if upstream_succeeds:
         assert max(ran["lander:a:0"]) < min(ran["planner:b"])
         assert _merged(h) == ["grind/a", "grind/b", "grind/c"]
+        downstream = json.dumps(result.first_request("planner:b")["messages"])
+        assert "Upstream results (approved blockers):" in downstream
+        state = h.read_gh_state()
+        upstream_pr = next(pr for pr in state["prs"] if pr["head"] == "grind/a")
+        assert upstream_pr["url"] in downstream
+        independent = json.dumps(result.first_request("planner:c")["messages"])
+        assert "Upstream results (approved blockers):" not in independent
     else:
         assert not any(role.endswith(":b") or role.startswith("lander:b:") for role in ran)
         assert not (h.repo / "b.txt").exists()
