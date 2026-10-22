@@ -148,7 +148,8 @@ pub fn script_body() -> String {
          \x20       *) PATH=\"${{{SHIM_DIR_KEY}}}:${{PATH:-}}\"; export PATH ;;\n\
          \x20   esac\n\
          fi\n\
-         {ARM_LINE}"
+         {start_terminal}{ARM_LINE}",
+        start_terminal = crate::platform::start_terminal::bash_function(),
     )
 }
 

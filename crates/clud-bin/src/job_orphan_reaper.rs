@@ -1900,6 +1900,15 @@ mod lifecycle_tests {
                 },
                 expected: ReapDecisionReason::DeclaredDaemon,
             },
+            // #2007: a user-requested console leaves the inner PTY job,
+            // but can remain in the outer foreground tracking job.
+            Archetype {
+                image: "cmd.exe",
+                signal: |facts, pid| {
+                    facts.declared_daemons.insert(pid);
+                },
+                expected: ReapDecisionReason::DeclaredDaemon,
+            },
             // sccache: own double-fork, no marker, no breakaway. It owns a
             // listening endpoint, which is what makes it discoverable and
             // reusable by later unrelated invocations. Before #673 this row

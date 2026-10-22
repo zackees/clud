@@ -7031,3 +7031,22 @@ mapped, gets consent from the environment only. See
 The worktree prompt control records explicit refusals as revocation. A later
 refusal replaces an earlier grant; prompts unrelated to worktrees retain the
 current decision. Negation after the worktree noun never grants permission.
+
+## DD-177: explicit Command Prompt windows use the existing persistence contract
+
+**Context.** On Windows, `! start cmd.exe` opens a user console that should
+survive closing clud (#2007). A reaper spare alone cannot overcome the PTY's
+kernel kill-on-close job, and treating every `cmd.exe` as persistent would
+also preserve ordinary command wrappers.
+
+**Decision.** The Windows Bash startup adapter intercepts only a bare
+`start cmd` / `start cmd.exe`. A hidden multicall fast path uses the existing
+running-process breakaway daemon API to open the console with inherited
+cwd and environment. Its existing declared-daemon marker supplies the reaper
+spare reason. Unix supplies an empty startup adapter.
+
+**Consequences.** The explicit user terminal has an independent lifetime;
+other `start` argument forms retain stock behavior. The implementation needs
+no new process classification or dependency API. Real Windows tests must
+prove both containment escape and foreground cleanup survival. Details:
+[process-reaping.md](architecture/process-reaping.md#explicit-command-prompt-windows-on-windows-2007).

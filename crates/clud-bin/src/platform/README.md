@@ -29,3 +29,8 @@ then is reaped before the assertions. No production wait API is introduced.
 `unix/credential_file.rs` and `windows/credential_file.rs` validate the opened
 credential file before reading: ownership, regular-file identity, and private
 permissions or a protected owner-only DACL. `mod.rs` selects the host tree.
+
+`start_terminal` supplies the generated Bash adapter and hidden launch helper
+for explicit Windows Command Prompt windows; Unix supplies an empty adapter.
+The persistence contract is documented in
+[process-reaping.md](../../../../docs/architecture/process-reaping.md#explicit-command-prompt-windows-on-windows-2007).
