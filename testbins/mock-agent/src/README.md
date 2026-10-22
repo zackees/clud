@@ -100,6 +100,11 @@ It serves `POST /v1/messages` (SSE when `"stream": true`, JSON otherwise),
 `POST …/count_tokens` and `GET /v1/models`. Point Claude Code at it with
 `ANTHROPIC_BASE_URL`.
 
+Request logs retain tool names plus `orchestration_tools`, containing only
+the real `Workflow` and `Agent` input schemas when offered. Repository-context
+probes use these schemas to distinguish supported inputs from ignored or
+rejected guesses; unrelated tool schemas are not copied into that field.
+
 Script format:
 
 ```json

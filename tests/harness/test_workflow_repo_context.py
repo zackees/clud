@@ -91,7 +91,9 @@ def test_workflow_repo_context(harness: Harness, selection: str) -> None:
     before = [h.git("status", "--porcelain", cwd=root) for root in (h.repo, sister)]
     result = h.run("Run the fixture workflow once.", script, cmd_scan=False, timeout=120)
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
-    assert observed.is_file(), json.dumps(result.requests)[-4000:]
+    errors = [block for row in result.requests for block in row.get("tool_results", [])
+              if block["is_error"]]
+    assert observed.is_file(), errors
     identity = json.loads(observed.read_text())
     expected = h.repo if selection == "default" else sister
     assert identity["cwd"] == str(expected), {"selection": selection, "observed": identity}
@@ -119,6 +121,22 @@ def test_workflow_repo_context_authoring_reference(harness: Harness) -> None:
     results = [block for row in result.requests for block in row.get("tool_results", [])]
     assert results, result.requests
     assert not any(block["is_error"] for block in results), results
-    reference = "\n".join(block["content"] for block in results)
+    texts = []
+    for row in result.requests:
+        for message in row["messages"]:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content", [])
+            if isinstance(content, str):
+                texts.append(content)
+            else:
+                texts.extend(block["text"] for block in content if block.get("type") == "text")
+    reference = "\n".join(texts)
     assert "agent(" in reference, reference
     (harness.logs / "workflow-authoring.txt").write_text(reference)
+    signatures = [line for line in reference.splitlines()
+                  if "agent(prompt" in line or "opts.cwd" in line or "opts.repo" in line]
+    schemas = [tool for row in result.requests for tool in row.get("orchestration_tools", [])]
+    assert any(tool["name"] == "Workflow" for tool in schemas), schemas
+    print("WORKFLOW_AUTHORING_SIGNATURES", json.dumps(signatures)[:2500])
+    print("WORKFLOW_ORCHESTRATION_SCHEMAS", json.dumps(schemas[:2])[:6000])
