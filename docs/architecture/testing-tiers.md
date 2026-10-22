@@ -72,13 +72,16 @@ an all-skipped suite). Optional unit/integration shards retain their existing
 empty-selection behavior. The collection regression uses `--collect-only`
 and never starts a model or harness process.
 
-### Behavior the fixture relies on (Claude Code 2.1.282)
+### Behavior the fixture relies on (Claude Code 2.1.306)
 
 - Scripted tool calls from the backend really execute, headless via `claude -p`.
   `Agent` and `Workflow` are available.
 - Subagents and workflow agents send their own system prompt and a narrower
   tool list, so the script can tell roles apart.
 - A workflow agent's tool calls reach PreToolUse hooks with its `agent_type`.
+- Native `parallel`/`pipeline` branches own independent resume cache chains.
+  The older 2.1.282 pin shared one rolling chain across branches, so cached
+  calls returning immediately could change later calls' keys during resume.
 - A skill's `$ARGUMENTS` and `` !`cmd` `` are rendered at invocation.
   `UserPromptSubmit` can add context but cannot rewrite a prompt.
   `disable-model-invocation` hides skills from the model, but not agent types.
