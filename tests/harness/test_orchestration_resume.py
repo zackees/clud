@@ -196,5 +196,9 @@ def test_native_resume_replays_one_unchanged_agent(harness: Harness, monkeypatch
     calls = [row for row in result.hooks if row.get("event") == "PreToolUse"
              and row.get("tool_name") == "Bash"
              and row.get("tool_input", {}).get("command") == "printf observed >> cache-probe.txt"]
+    resumed = [row for row in result.requests if row.get("step", {}).get("tool_use", {}).get(
+        "input_file") == str(captured)]
+    assert len(resumed) == 1, resumed
+    assert "CACHE_RESUME_STARTED" in result.stdout
     assert len(calls) == 1, {"calls": calls, "reference": captured.read_text()}
     assert (h.repo / "cache-probe.txt").read_text() == "observed"
