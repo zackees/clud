@@ -53,7 +53,7 @@ def test_refuses_ambiguous_or_nonregular_executables(kind: str, binary: str, pro
         names.append(f"another/{binary}")
     payload = archive_bytes(kind, names, link=problem == "link")
     name = "fixture.zip" if kind == "zip" else "fixture.tar.gz"
-    with pytest.raises(ValueError, match="GitLab CLI (archive|executable)"):
+    with pytest.raises(ValueError, match=r"GitLab CLI (archive|executable)"):
         install_glab.verified_binary(payload, name, hashlib.sha256(payload).hexdigest())
 
 
@@ -73,7 +73,7 @@ def test_extracted_executable_is_bounded(kind: str, binary: str, monkeypatch) ->
     monkeypatch.setattr(install_glab, "MAX_BYTES", 256)
     assert len(payload) < install_glab.MAX_BYTES
     name = "fixture.zip" if kind == "zip" else "fixture.tar.gz"
-    with pytest.raises(ValueError, match="GitLab CLI (archive|executable)"):
+    with pytest.raises(ValueError, match=r"GitLab CLI (archive|executable)"):
         install_glab.verified_binary(payload, name, hashlib.sha256(payload).hexdigest())
 
 
