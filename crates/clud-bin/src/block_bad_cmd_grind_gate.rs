@@ -9,7 +9,6 @@ use serde_json::Value;
 
 use super::{block_bad_cmd_gate, block_bad_cmd_grind_caps, HookPayloadView};
 
-const MAX_WORKFLOWS: usize = 64;
 const MAX_METADATA_BYTES: u64 = 8192;
 const MAX_GOALS: usize = 256;
 const MAX_BLOCKERS: usize = 64;
@@ -137,16 +136,12 @@ fn native_label(payload: &HookPayloadView) -> Result<String, String> {
     for path in [&session_dir, &agents_dir, &workflows] {
         directory(path)?;
     }
-    let entries: Vec<_> = std::fs::read_dir(&workflows)
-        .map_err(|e| e.to_string())?
-        .take(MAX_WORKFLOWS + 1)
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
-    if entries.len() > MAX_WORKFLOWS {
-        return Err("too many workflow directories to resolve identity".into());
-    }
+    // A recurring native /loop keeps prior runs in this session directory.
+    // Stream entries with constant memory rather than limiting session lifetime.
+    let entries = std::fs::read_dir(&workflows).map_err(|e| e.to_string())?;
     let mut label = None;
     for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
         if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
         }
@@ -532,18 +527,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_approved_labels_and_excess_workflows_are_denied() {
+    fn duplicate_approved_labels_are_denied() {
         let mut fixture = Fixture::new();
         let goal = fixture.facts["orchestration"]["goals"][0].clone();
         fixture.facts["orchestration"]["goals"]
             .as_array_mut()
             .unwrap()
             .push(goal);
-        assert!(!fixture.allowed());
-        let fixture = Fixture::new();
-        for index in 0..MAX_WORKFLOWS {
-            fixture.metadata(&format!("wf-extra-{index}"), "unrelated", "unused");
-        }
         assert!(!fixture.allowed());
     }
 }
