@@ -17,6 +17,10 @@ const MAX_BLOCKERS: usize = 64;
 #[path = "block_bad_cmd_grind_gate_evidence.rs"]
 mod evidence;
 
+pub(super) fn guards_report_tool(tool: &str) -> bool {
+    tool == "StructuredOutput"
+}
+
 pub(super) fn rewrite(payload: &HookPayloadView) -> Result<String, String> {
     let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
     evidence::rewrite(payload, facts.facts().ok_or("missing valid run facts")?)
@@ -48,7 +52,7 @@ pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
         .facts()
         .ok_or_else(|| "missing valid run facts".to_string())
         .and_then(|facts| {
-            if payload.tool_name == "StructuredOutput" {
+            if guards_report_tool(&payload.tool_name) {
                 evidence::report(payload, facts)
             } else if block_bad_cmd_gate::gates_tool(&payload.tool_name) {
                 authorize(payload, facts)?;
