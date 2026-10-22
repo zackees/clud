@@ -308,3 +308,34 @@ def test_native_secret_window_on_wayland(tmp_path: Path) -> None:
     finally:
         compositor.terminate()
         compositor.wait(timeout=10)
+
+
+def test_required_gui_probes_cannot_skip_after_session_scrub(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import shutil
+    import sys
+
+    import pytest
+
+    from ci.env import scrub_clud_session_env
+
+    env = {**os.environ, "CLUD_TEST_REQUIRE_SECRET_GUI": "1"}
+    scrub_clud_session_env(env)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    def invoke(probe) -> None:
+        try:
+            probe(tmp_path)
+        except pytest.skip.Exception as error:
+            pytest.fail(f"mandatory GUI probe skipped after session scrub: {error}")
+
+    for probe, message in (
+        (test_native_secret_window_can_render_and_deliver, "native GUI coverage requires xvfb-run"),
+        (test_native_secret_window_on_wayland, "Wayland coverage requires Weston"),
+    ):
+        with pytest.raises(AssertionError, match=message):
+            invoke(probe)
