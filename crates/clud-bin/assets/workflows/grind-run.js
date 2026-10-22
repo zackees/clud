@@ -6,6 +6,7 @@ export const meta = {
   phases: [
     { title: 'Classify', detail: 'grind-planner plan-only: classify children, feature groups, threshold' },
     { title: 'Prework', detail: 'grind-prework: post the plan JSON comment on the meta issue' },
+    { title: 'Gate', detail: 'grind-gate: observe one approved publication check' },
     { title: 'Plan', detail: 'grind-planner: split each goal into disjoint file tasks' },
     { title: 'Work', detail: 'grind-worker: read/write files only' },
     { title: 'Review', detail: 'grind-reviewer: read/edit only' },
@@ -252,6 +253,9 @@ const REVIEW = { type: 'object', required: ['approved', 'summary'], properties: 
 // gate is ready. That still requires the approved check to succeed.
 const ARTIFACTS = { type: 'object', properties: {
   version: { type: 'string' }, tag: { type: 'string' }, release_url: { type: 'string' },
+} }
+const GATE = { type: 'object', required: ['ready', 'evidence'], properties: {
+  ready: { type: 'boolean' }, evidence: { type: 'string' },
 } }
 const INTEG = { type: 'object', required: ['pushed', 'summary'], properties: {
   pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' },
@@ -775,6 +779,14 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
 // goal is blocked rather than built on top of it (#1424).
 let DIRTY_AFTER = null
 
+const inspectGate = (g, blocker, index) => light(() => agent(
+  `Observe this approved dependency gate once.\n${ctx(g)}\n` +
+  `Upstream goal: ${blocker.goal}. Required condition: ${blocker.when}.\n` +
+  `Exact approved Bash check (copy verbatim):\n${blocker.check}\n` +
+  'Report ready only after successful native execution. Include the observed output as evidence. ' +
+  'A failed or denied check means not ready. Do not retry, sleep, edit or publish.',
+  opts('gate', `gate:${g.id}:${index}`, 'Gate', GATE)))
+
 // Enforce approved dependencies before a planner or worker touches this goal.
 // A missing stage or external publication needs a resumable gate, not guessed
 // success. Cross-repository execution needs a separately rooted session first.
@@ -785,13 +797,22 @@ const approvedBlock = async (g) => {
   if (approved.repo !== ORCHESTRATION.session_repo) {
     return blocked(`blocked: ${approved.repo} requires a separately rooted repository session`)
   }
-  for (const b of approved.blockers) {
+  for (const [index, b] of approved.blockers.entries()) {
     if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
       return blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
     }
     if (!(await landed[b.goal])) return blocked(depNote(b.goal), b)
     if (b.when !== 'merged') {
-      return blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b)
+      let observed = null
+      try {
+        observed = await inspectGate(g, b, index)
+      } catch (error) {
+        log(`goal ${g.id}: gate observation failed: ${error && error.message ? error.message : error}`)
+      }
+      if (!observed || observed.ready !== true) {
+        return { ...blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b),
+          status: 'deferred', gate_evidence: observed && observed.evidence || 'check unavailable' }
+      }
     }
   }
   return null

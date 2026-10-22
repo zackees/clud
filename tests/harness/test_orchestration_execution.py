@@ -90,7 +90,7 @@ def test_approved_merge_dependency_gates_planning(
 @pytest.mark.parametrize("condition", ["released", "tag", "published"])
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 def test_reported_release_artifacts_do_not_open_publication_gate(
-    harness: Harness, condition: str, mode: str,
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, condition: str, mode: str,
 ) -> None:
     h = harness
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
@@ -107,6 +107,12 @@ def test_reported_release_artifacts_do_not_open_publication_gate(
         ],
         "proposed_goals": [], "risks": [],
     }
+    h.write_run_facts({"phase": "execute", "orchestration": graph})
+    install_outcome_guard(h, monkeypatch)
+    roles.append({"name": "gate:b", "match": "You are the /grind gate checker", "steps": [
+        _bash("gh release view v0.9.0 --repo o/r"),
+        _after({"is_error": True}, _structured({"ready": False, "evidence": "check failed"})),
+    ]})
     result = h.run("Do not infer publication from reported artifacts.",
                    _script(h, mode, _goals("a", "b", "c"), roles, orchestration=graph),
                    timeout=300)
