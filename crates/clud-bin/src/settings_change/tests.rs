@@ -186,7 +186,11 @@ fn approval_expiring_during_lock_and_validation_is_refused_before_audit() {
     // path, avoiding a long sleep or scheduler-dependent expiry fixture.
     let result = commit_with_clock(prepared, || {
         calls += 1;
-        if calls == 1 { created } else { created + APPROVAL_LIFETIME + Duration::from_secs(1) }
+        if calls == 1 {
+            created
+        } else {
+            created + APPROVAL_LIFETIME + Duration::from_secs(1)
+        }
     });
     assert_eq!(calls, 2, "must check again under the settings lock");
     assert!(matches!(result, Err(Failure::Changed)));

@@ -122,10 +122,11 @@ fn reason_in(
         || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
     let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
     let writes_settings = script.invocations.iter().any(|invocation| {
-        protected_operand(invocation, home) || invocation.redirects.iter().any(|redirect| {
-            redirect.writes_file()
-                && home.is_none_or(|home| !safe_destination(&redirect.target, invocation, home))
-        })
+        protected_operand(invocation, home)
+            || invocation.redirects.iter().any(|redirect| {
+                redirect.writes_file()
+                    && home.is_none_or(|home| !safe_destination(&redirect.target, invocation, home))
+            })
     });
     if writes_settings
         || (names_override
@@ -146,8 +147,10 @@ fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
     let Some(home) = home else {
         return false;
     };
-    let mutator = matches!(invocation.effective_program().as_deref(),
-        Some("cp" | "mv" | "tee" | "install" | "dd" | "set-content" | "add-content" | "out-file"));
+    let mutator = matches!(
+        invocation.effective_program().as_deref(),
+        Some("cp" | "mv" | "tee" | "install" | "dd" | "set-content" | "add-content" | "out-file")
+    );
     let Some(cwd) = invocation.cwd.as_literal() else {
         return mutator;
     };
@@ -182,7 +185,7 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
     } else {
         target.to_string()
     };
-    let destination = if cfg!(windows) || !expanded.contains('\\') {
+    let destination = if crate::platform::host::WINDOWS || !expanded.contains('\\') {
         Path::new(cwd).join(&expanded)
     } else {
         crate::shell_ast::join_path(cwd, &expanded).into()
@@ -205,7 +208,11 @@ fn canonical_creation_target(path: &Path) -> std::path::PathBuf {
             for component in missing.iter().rev() {
                 canonical.push(component);
             }
-            return Path::new(&crate::shell_ast::join_path("", &canonical.to_string_lossy())).into();
+            return Path::new(&crate::shell_ast::join_path(
+                "",
+                &canonical.to_string_lossy(),
+            ))
+            .into();
         }
         let (Some(parent), Some(component)) = (ancestor.parent(), ancestor.file_name()) else {
             return path.to_path_buf();
@@ -344,23 +351,25 @@ mod tests {
             "mv staged.json .clud/settings.json",
             "tee .clud/settings.json < staged.json",
         ] {
-            assert!(reason_in(
-                command,
-                crate::block_bad_cmd::ShellDialect::Posix,
-                Some(home.path()),
-                Some(home.path()),
-            ).is_some(), "{command}");
+            assert!(
+                reason_in(
+                    command,
+                    crate::block_bad_cmd::ShellDialect::Posix,
+                    Some(home.path()),
+                    Some(home.path()),
+                )
+                .is_some(),
+                "{command}"
+            );
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn missing_settings_through_parent_alias_are_protected() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("home");
         std::fs::create_dir(&home).unwrap();
-        let alias = directory.path().join("alias");
-        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let alias = crate::platform::path_norm::test_alias(&home, &directory.path().join("alias"));
         assert!(protected_file(
             &alias.join(".clud/settings.json").to_string_lossy(),
             &directory.path().to_string_lossy(),
