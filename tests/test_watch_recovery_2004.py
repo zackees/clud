@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 import pytest
@@ -95,47 +96,55 @@ def test_recovery_keeps_one_live_process_until_its_real_terminal_result(
     denied = scan(tmp_path, "Bash", "command", "gh run watch 123 --exit-status")
     assert denied.returncode == 2, denied.stderr
     reason = denied.stdout + denied.stderr
-    assert "exec_command" in reason and "write_stdin" in reason
+    assert "exec_command" in reason
+    assert "write_stdin" in reason
     assert scan(tmp_path, "Bash", "command", WAITER).returncode == 0
     argv = [sys.executable, str(HARNESS), "--", "123", "--repo", "zackees/clud",
             "--timeout", "540", "--no-cancel", *extra]
     child = process.Popen(argv, env=watcher_env(tmp_path, scenario), cwd=tmp_path,
                           stdin=process.PIPE, stdout=process.PIPE, stderr=process.PIPE, text=True)
     session_id = child.pid
-    try:
-        assert str(child.next_stdout(timeout=10)).strip() == "CONTROLLED_SESSION_READY"
-        # An empty-input, bounded wait observes the same still-live process.
-        with pytest.raises(process.TimeoutExpired):
-            child.wait(timeout=0.01)
-        assert child.pid == session_id and child.poll() is None
-        marker = tmp_path / "already-authorized-next-action"
-        assert not marker.exists()
-        # Fixture control only; this is not input sent by write_stdin's empty wait.
-        assert child.stdin is not None
-        child.stdin.write("continue\n")
-        child.stdin.flush()
-        code = child.wait(timeout=15)
-        assert child.pid == session_id
-        assert code == expected, (child.stdout.read(), child.stderr.read())
-        if code == 0:
-            result = process.run(
-                [sys.executable, "-c", "from pathlib import Path; import sys; "
-                 "Path(sys.argv[1]).write_text('continued')", str(marker)],
-                capture_output=True, text=True, timeout=5,
-            )
-            assert result.returncode == 0, result.stderr
-            assert marker.read_text() == "continued"
-        else:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        completion = None
+        try:
+            assert str(child.next_stdout(timeout=10)).strip() == "CONTROLLED_SESSION_READY"
+            # Only the future observation expires; RunningChild.wait would kill on timeout.
+            completion = executor.submit(child.wait, timeout=15)
+            with pytest.raises(FutureTimeout):
+                completion.result(timeout=0.01)
+            assert child.pid == session_id
+            assert child.poll() is None
+            marker = tmp_path / "already-authorized-next-action"
             assert not marker.exists()
-            if code == 124:
-                stderr = child.stderr.read()
-                assert '"status":"in-progress"' in stderr or '"status": "in-progress"' in stderr
-                assert "resume_hint" in stderr
-        assert not (tmp_path / "cancels").exists()
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait(timeout=5)
+            # Fixture control only; this is not input sent by write_stdin's empty wait.
+            assert child.stdin is not None
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+            code = completion.result(timeout=15)
+            assert child.pid == session_id
+            assert code == expected, (child.stdout.read(), child.stderr.read())
+            if code == 0:
+                result = process.run(
+                    [sys.executable, "-c", "from pathlib import Path; import sys; "
+                     "Path(sys.argv[1]).write_text('continued')", str(marker)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                assert result.returncode == 0, result.stderr
+                assert marker.read_text() == "continued"
+            else:
+                assert not marker.exists()
+                if code == 124:
+                    stderr = child.stderr.read()
+                    assert '"status":"in-progress"' in stderr or '"status": "in-progress"' in stderr
+                    assert "resume_hint" in stderr
+            assert not (tmp_path / "cancels").exists()
+        finally:
+            if child.poll() is None:
+                child.kill()
+            if completion is not None:
+                completion.result(timeout=5)
+            else:
+                child.wait(timeout=5)
 
 
 def test_require_help_describes_precedence_and_all_check_scope(tmp_path: Path) -> None:
@@ -164,7 +173,8 @@ def test_exec_rewrite_updates_cmd_without_changing_unrelated_fields(tmp_path: Pa
     updated = json.loads(result.stdout)["hookSpecificOutput"]["updatedInput"]
     assert "safe-rm" in updated["cmd"]
     assert "command" not in updated
-    assert updated["shell"] == "bash" and updated["workdir"] == "."
+    assert updated["shell"] == "bash"
+    assert updated["workdir"] == "."
 
 
 def test_exec_honors_declared_shell_for_wait_syntax(tmp_path: Path) -> None:
@@ -185,7 +195,8 @@ def test_extra_command_fields_cannot_shadow_the_declared_cmd(tmp_path: Path, too
 def test_declared_background_completion_waits_for_the_existing_process(tmp_path: Path) -> None:
     """A controlled completion future models an exposed background notification."""
     denied = scan(tmp_path, "Bash", "command", "gh run watch 123")
-    assert "run_in_background" in denied.stderr and "completion notification" in denied.stderr
+    assert "run_in_background" in denied.stderr
+    assert "completion notification" in denied.stderr
     child = process.Popen(
         [sys.executable, str(HARNESS), "123", "--repo", "zackees/clud", "--no-cancel"],
         env=watcher_env(tmp_path, "green"), cwd=tmp_path,
@@ -225,22 +236,31 @@ def test_bounded_foreground_uses_the_waiters_own_terminal_deadline(
 
 def test_ambiguous_tool_names_offer_a_local_capability_probe(tmp_path: Path) -> None:
     denied = scan(tmp_path, "Bash", "command", "gh run watch 123")
-    assert "tool name" in denied.stderr and "harmless local process" in denied.stderr
+    assert "tool name" in denied.stderr
+    assert "harmless local process" in denied.stderr
     probe = process.Popen(
-        [sys.executable, "-c", "import sys; print('probe-ready', flush=True); sys.stdin.readline()"],
+        [sys.executable, "-c",
+         "import sys; print('probe-ready', flush=True); sys.stdin.readline()"],
         stdin=process.PIPE, stdout=process.PIPE, stderr=process.PIPE, text=True,
     )
-    try:
-        assert str(probe.next_stdout(timeout=5)).strip() == "probe-ready"
-        pid = probe.pid
-        with pytest.raises(process.TimeoutExpired):
-            probe.wait(timeout=0.01)
-        assert probe.pid == pid and probe.poll() is None
-        assert probe.stdin is not None
-        probe.stdin.write("complete probe\n")
-        probe.stdin.flush()
-        assert probe.wait(timeout=5) == 0
-    finally:
-        if probe.poll() is None:
-            probe.kill()
-        probe.wait(timeout=5)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        completion = None
+        try:
+            assert str(probe.next_stdout(timeout=5)).strip() == "probe-ready"
+            pid = probe.pid
+            completion = executor.submit(probe.wait, timeout=15)
+            with pytest.raises(FutureTimeout):
+                completion.result(timeout=0.01)
+            assert probe.pid == pid
+            assert probe.poll() is None
+            assert probe.stdin is not None
+            probe.stdin.write("complete probe\n")
+            probe.stdin.flush()
+            assert completion.result(timeout=5) == 0
+        finally:
+            if probe.poll() is None:
+                probe.kill()
+            if completion is not None:
+                completion.result(timeout=5)
+            else:
+                probe.wait(timeout=5)
