@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 
 def main() -> int:
@@ -30,6 +31,23 @@ def main() -> int:
         "tool_input": event.get("tool_input"),
         "prompt": event.get("prompt"),
     }
+    if event.get("tool_name") == "Workflow":
+        transcript = Path(event.get("transcript_path") or "/missing-transcript")
+        try:
+            with transcript.open("rb") as source:
+                source.seek(max(0, transcript.stat().st_size - 256 * 1024))
+                tail = source.read()
+            rows = []
+            for line in tail.splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if "version" in row:
+                    rows.append({key: row.get(key) for key in ("type", "sessionId", "version")})
+            record["transcript_versions"] = rows[-8:]
+        except OSError as error:
+            record["transcript_read_error"] = str(error)
     if "tool_response" in event:
         record["tool_response"] = event["tool_response"]
     with open(sys.argv[1], "a", encoding="utf-8") as log:
