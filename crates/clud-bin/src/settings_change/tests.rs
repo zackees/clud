@@ -197,3 +197,24 @@ fn approval_expiring_during_lock_and_validation_is_refused_before_audit() {
     assert_eq!(fs::read(path).unwrap(), original);
     assert!(!home.join(".clud/settings-audit.jsonl").exists());
 }
+
+#[test]
+fn changed_script_input_cannot_expand_or_replay_an_approved_operation() {
+    let (directory, home, mut expected) = world();
+    let script_input = directory.path().join("proposal.json");
+    fs::write(&script_input, "false").unwrap();
+    let mutation = setting("/web_term/enabled", &fs::read_to_string(&script_input).unwrap());
+    execute(&home, &mutation, |_| {
+        // Script inputs can change while the user reviews; the prepared
+        // operation must retain exactly the original value and key scope.
+        fs::write(&script_input, r#"{"enabled":true,"extra":"unapproved"}"#).unwrap();
+        Ok(())
+    }).unwrap();
+    expected["web_term"]["enabled"] = json!(false);
+    let path = super::super::settings_path_at(&home);
+    let saved = fs::read(&path).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&saved).unwrap(), expected);
+    let expanded = setting("/web_term", &fs::read_to_string(&script_input).unwrap());
+    assert!(matches!(execute(&home, &expanded, |_| Err(Failure::Unavailable)), Err(Failure::Unavailable)));
+    assert_eq!(fs::read(path).unwrap(), saved, "new input requires a new decision");
+}
