@@ -168,8 +168,11 @@ once after intake and presents the graph for approval before classification.
 The approved graph travels as `orchestration`, separately from classification
 stages. Its selected goals run in topological order, and approved merge
 dependencies settle before downstream planning, even when a per-goal planner
-omits them. Failed upstream goals block their dependents; independent goals
-can continue.
+omits them. Each dependent role receives its approved blockers' settled
+outcomes, including their reported PR URL and optional release artifacts
+(`version`, `tag`, `release_url`). Reported artifacts do not satisfy a
+publication gate. Failed upstream goals block their dependents; independent
+goals can continue.
 
 Publication checks, cross-stage resumption and separately rooted repository
 sessions remain under development in #1338 and #1422. The current graph path

@@ -25,6 +25,11 @@ def test_approved_merge_dependency_gates_planning(
 ) -> None:
     h = harness
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
+    upstream_lander = next(role for role in roles if role["name"] == "lander:a:0")
+    upstream_lander["steps"][-1]["tool_use"]["input"]["artifacts"] = {
+        "version": "0.9.0", "tag": "v0.9.0",
+        "release_url": "https://github.com/o/r/releases/tag/v0.9.0",
+    }
     if not upstream_succeeds:
         planner = next(role for role in roles if role["name"] == "planner:a")
         planner["steps"] = [_structured({
@@ -65,6 +70,8 @@ def test_approved_merge_dependency_gates_planning(
         downstream = json.dumps(result.first_request("planner:b")["messages"])
         assert "Upstream results (approved blockers):" in downstream
         assert "https://github.com/o/r/pull/grind/a" in downstream
+        assert 'v0.9.0' in downstream
+        assert "https://github.com/o/r/releases/tag/v0.9.0" in downstream
         independent = json.dumps(result.first_request("planner:c")["messages"])
         assert "Upstream results (approved blockers):" not in independent
     else:

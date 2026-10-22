@@ -248,11 +248,17 @@ const REVIEW = { type: 'object', required: ['approved', 'summary'], properties: 
   approved: { type: 'boolean' }, summary: { type: 'string' }, fixes_applied: { type: 'array', items: { type: 'string' } },
   must_verify: { type: 'array', items: { type: 'string' }, description: 'checks the integrator must run before pushing (focused test, reproduction, script); an unrun check goes here, never into a rejection' },
   problems: PROBLEMS } }
+// Reported artifacts are downstream context, never proof that a publication
+// gate is ready. That still requires the approved check to succeed.
+const ARTIFACTS = { type: 'object', properties: {
+  version: { type: 'string' }, tag: { type: 'string' }, release_url: { type: 'string' },
+} }
 const INTEG = { type: 'object', required: ['pushed', 'summary'], properties: {
-  pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
+  pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' },
+  artifacts: ARTIFACTS, problems: PROBLEMS } }
 const LAND = { type: 'object', required: ['status', 'summary'], properties: {
   status: { type: 'string', enum: ['merged', 'needs_fix', 'gave_up', 'tool_misuse'] }, summary: { type: 'string' }, failure_log: { type: 'string' },
-  command: { type: 'string', description: 'tool_misuse only: the command that failed' }, problems: PROBLEMS } }
+  command: { type: 'string', description: 'tool_misuse only: the command that failed' }, artifacts: ARTIFACTS, problems: PROBLEMS } }
 const PARK = { type: 'object', required: ['parked', 'clean', 'summary'], properties: {
   parked: { type: 'boolean', description: "true when the goal's changes were committed to the park branch" },
   branch: { type: 'string' }, files: { type: 'array', items: { type: 'string' } },
@@ -627,11 +633,11 @@ const review = ({ p, results }, g) => light(() => agent(
 const integrate = (p, g, note) => exclusive(() => agent(
   `Follow your built-in /grind-integrate procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nBranch: ${p.branch}\n` +
   `Base: origin/${baseOf(g)}${p.depends_on.length ? ` (it already contains ${p.depends_on.join(', ')}, which landed first)` : ''}\n` +
-  `${verifyBlock(p)}\n\n${note}${featureIntegrateNote(g)}`,
+  `${verifyBlock(p)}\n\n${note}${featureIntegrateNote(g)}\nReturn any release version, tag and release URL produced by this goal in artifacts; omit unknown values.`,
   opts('integrator', `integrate:${g.id}`, 'Integrate', INTEG)).then(r => collect(r, 'integrator', g.id)))
 
 const land = (p, g, pr, round) => agent(
-  `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.${featureLandNote(g)}`,
+  `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.${featureLandNote(g)}\nReturn any observed release version, tag and release URL in artifacts; omit unknown values.`,
   opts('lander', `land:${g.id}#${round}`, 'Land', LAND)).then(r => collect(r, 'lander', g.id))
 
 // Parking (#1424): in sequential mode every goal shares one checkout, so a
@@ -755,7 +761,10 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
       log(`goal ${g.id}: lander tool misuse ${agentErrors} of ${MAX_AGENT_ERRORS} (${l.command || l.summary}); landing again, no fix round`)
       l = await land(p, g, integ.pr_url, fixes)
     }
-    if (l && l.status === 'merged') return { merged: true, pushed: true, pr: integ.pr_url, note: l.summary }
+    if (l && l.status === 'merged') return {
+      merged: true, pushed: true, pr: integ.pr_url, note: l.summary,
+      artifacts: { ...(integ.artifacts || {}), ...(l.artifacts || {}) },
+    }
     if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pushed: true, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
     log(`goal ${g.id}: PR not green, fix round ${fixes + 1} of ${MAX_FIX}`)
     integ = await integrate(p, g, `FIX ROUND ${fixes + 1} of ${MAX_FIX}: the PR ${integ.pr_url} failed. Fix, re-verify${SCRIPTS ? ` (focused test, then ${scriptLines().join(', then ')})` : ''}, push to the same branch.\n${l.failure_log || l.summary}`)
