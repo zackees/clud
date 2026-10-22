@@ -421,7 +421,9 @@ fn orchestrator_read(words: &[String]) -> bool {
     }
     match sub.first().map(String::as_str) {
         Some("fetch") | None => false,
-        Some("ls-remote") => !sub.iter().any(|word| word.starts_with("-u") || word.contains("::")),
+        Some("ls-remote") => !sub
+            .iter()
+            .any(|word| word.starts_with("-u") || word.contains("::")),
         Some("worktree") => sub.get(1).is_some_and(|w| w == "list"),
         _ => is_git_read(&sub),
     }
