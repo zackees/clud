@@ -25,6 +25,14 @@ def main() -> None:
         process.run(["xdotool", "windowfocus", "--sync", window], timeout=10, check=True)
         if action == "changed":
             Path(target).write_text('{"concurrent":true}', encoding="utf-8")
+        if action == "target":
+            settings = Path(target)
+            original = settings.read_bytes()
+            settings.parent.rename(settings.parent.with_name("previous-config"))
+            replacement = settings.parent.with_name("replacement-config")
+            replacement.mkdir()
+            (replacement / settings.name).write_bytes(original)
+            settings.parent.symlink_to(replacement, target_is_directory=True)
         keys = ["Escape"] if action == "cancel" else ["Tab", "Return"]
         process.run(
             ["xdotool", "key", "--clearmodifiers", "--delay", "150", *keys],

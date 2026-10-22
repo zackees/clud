@@ -14,7 +14,7 @@ from tests.test_settings_authorization import _world
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="X11 native approval acceptance")
-@pytest.mark.parametrize("action", ["approve", "cancel", "roots", "changed"])
+@pytest.mark.parametrize("action", ["approve", "cancel", "roots", "changed", "target"])
 def test_settings_authorization_native_window(tmp_path: Path, action: str) -> None:
     binary, env, repo, settings = _world(tmp_path)
     assert shutil.which("xvfb-run"), "settings approval acceptance requires Xvfb"
@@ -43,9 +43,15 @@ def test_settings_authorization_native_window(tmp_path: Path, action: str) -> No
     if action == "cancel":
         assert outcome["returncode"] == 3, outcome
         assert settings.read_bytes() == original
+        assert not (settings.parent / "settings-audit.jsonl").exists()
     elif action == "changed":
         assert outcome["returncode"] != 0, outcome
         assert json.loads(settings.read_bytes()) == {"concurrent": True}
+        assert not (settings.parent / "settings-audit.jsonl").exists()
+    elif action == "target":
+        assert outcome["returncode"] != 0, outcome
+        assert settings.read_bytes() == original
+        assert not (settings.parent / "settings-audit.jsonl").exists()
     else:
         assert outcome["returncode"] == 0, outcome
         assert json.loads(settings.read_bytes()) == expected
