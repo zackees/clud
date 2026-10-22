@@ -124,9 +124,17 @@ fn approved_next_round(payload: &HookPayloadView) -> bool {
 }
 
 fn snapshot(payload: &HookPayloadView) -> Option<Value> {
-    let run = payload.tool_input.as_ref()?.get("resumeFromRunId")?.as_str()?;
+    let run = payload
+        .tool_input
+        .as_ref()?
+        .get("resumeFromRunId")?
+        .as_str()?;
     let directory = path(payload, run)?.parent()?.join("workflows");
-    if !std::fs::symlink_metadata(&directory).ok()?.file_type().is_dir() {
+    if !std::fs::symlink_metadata(&directory)
+        .ok()?
+        .file_type()
+        .is_dir()
+    {
         return None;
     }
     let file = directory.join(format!("{run}.json"));
@@ -135,7 +143,11 @@ fn snapshot(payload: &HookPayloadView) -> Option<Value> {
     }
     const MAX_SNAPSHOT: u64 = 1024 * 1024;
     let mut bytes = Vec::new();
-    std::fs::File::open(file).ok()?.take(MAX_SNAPSHOT + 1).read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(file)
+        .ok()?
+        .take(MAX_SNAPSHOT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.len() as u64 > MAX_SNAPSHOT {
         return None;
     }

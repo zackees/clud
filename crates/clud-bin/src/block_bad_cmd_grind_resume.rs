@@ -48,11 +48,19 @@ fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String
     if version.is_some_and(|version| version >= MIN_VERSION) {
         let input = payload.tool_input.as_ref()?;
         if input.get("resumeFromRunId").is_none_or(Value::is_null) {
-            let base = input.pointer("/args/gateEpoch").and_then(Value::as_u64).unwrap_or(0);
-            let initial = input.pointer("/args/gateEpochs").and_then(Value::as_object)
+            let base = input
+                .pointer("/args/gateEpoch")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let initial = input
+                .pointer("/args/gateEpochs")
+                .and_then(Value::as_object)
                 .is_none_or(|epochs| epochs.values().all(|epoch| epoch.as_u64() == Some(base)));
-            return (!initial).then(|| "Initial graph launches cannot advance gateEpochs. \
-                Resume the completed native run using its own deferred manifest.".into());
+            return (!initial).then(|| {
+                "Initial graph launches cannot advance gateEpochs. \
+                Resume the completed native run using its own deferred manifest."
+                    .into()
+            });
         }
         if origin::allows(payload) {
             return None;
@@ -276,11 +284,14 @@ mod tests {
         std::fs::write(&path, record(json!("2.1.306"), "session")).unwrap();
         let mut payload = payload(&path);
         payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
-        let response = json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
+        let response =
+            json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
         observe("PostToolUse", &response, &payload);
         completed_snapshot(&path);
-        payload.tool_input = Some(json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
-            "args": {"orchestration": {}, "gateEpochs": {}}}));
+        payload.tool_input = Some(
+            json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
+            "args": {"orchestration": {}, "gateEpochs": {}}}),
+        );
         assert!(reason_for(&payload, None).is_none());
         payload.tool_input.as_mut().unwrap()["args"]["gateEpochs"] = json!({"completed": 1});
         assert!(reason_for(&payload, None).is_some());
@@ -289,7 +300,9 @@ mod tests {
         assert!(reason_for(&payload, None).is_some());
         payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {},
             "gateEpochs": {"completed": 1}}}));
-        assert!(reason_for(&payload, None).unwrap().contains("Initial graph"));
+        assert!(reason_for(&payload, None)
+            .unwrap()
+            .contains("Initial graph"));
     }
 
     #[test]
