@@ -1128,7 +1128,9 @@ def _release_api(state: dict, argv: list[str], parts: list[str], method: str) ->
     if method != "GET":
         return _not_found()
     tags = list(releases) if len(parts) == 4 else parts[5:6]
-    if len(parts) != 4 and (len(parts) != 6 or parts[4] != "tags" or not tags or tags[0] not in releases):
+    if len(parts) != 4 and (
+        len(parts) != 6 or parts[4] != "tags" or not tags or tags[0] not in releases
+    ):
         return _not_found()
     values = []
     for tag in tags:

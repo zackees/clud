@@ -224,7 +224,8 @@ def test_unmet_publication_gate_defers_transitive_dependents_only(
     _no_notes(result)
     ran = _by_role(result)
     assert "gate:b" in ran
-    assert "planner:b" not in ran and "planner:c" not in ran, ran
+    assert "planner:b" not in ran, ran
+    assert "planner:c" not in ran, ran
     assert _merged(h) == ["grind/a", "grind/d"]
     told = _told(result)
     for goal in ("b", "c"):
