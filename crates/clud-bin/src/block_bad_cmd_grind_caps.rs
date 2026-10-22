@@ -347,7 +347,7 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
 /// Keep redirections and command-local environment overrides visible: the
 /// shared statement view deliberately omits those for other roles.
 fn orchestrator_shell_reason(command: &str) -> Option<String> {
-    use crate::shell_ast::{BaseEnv, Dialect, parse};
+    use crate::shell_ast::{parse, BaseEnv, Dialect};
     let script = parse(command, Dialect::Posix, &BaseEnv::default());
     let invalid = script.has_error
         || script.depth_capped
@@ -361,11 +361,20 @@ fn orchestrator_shell_reason(command: &str) -> Option<String> {
             || invocation.redirects.iter().any(|r| r.writes_file())
             || invocation.words.iter().any(|w| w.is_unknown())
         {
-            return Some(format!("{ORCHESTRATOR} may not write files or override command environment"));
+            return Some(format!(
+                "{ORCHESTRATOR} may not write files or override command environment"
+            ));
         }
-        let words: Vec<String> = invocation.words.iter().map(|w| w.text().to_string()).collect();
+        let words: Vec<String> = invocation
+            .words
+            .iter()
+            .map(|w| w.text().to_string())
+            .collect();
         if !orchestrator_read(&strip_gh_repo_flag(&words)) {
-            return Some(format!("{ORCHESTRATOR} permits read-only inspection, not `{}`", words.join(" ")));
+            return Some(format!(
+                "{ORCHESTRATOR} permits read-only inspection, not `{}`",
+                words.join(" ")
+            ));
         }
     }
     None
@@ -375,7 +384,9 @@ fn orchestrator_read(words: &[String]) -> bool {
     let Some(program) = words.first() else {
         return false;
     };
-    let inspection = ["ls", "cat", "head", "tail", "wc", "grep", "pwd", "echo", "test", "true"];
+    let inspection = [
+        "ls", "cat", "head", "tail", "wc", "grep", "pwd", "echo", "test", "true",
+    ];
     if inspection.contains(&program.as_str()) && inspect_ok(program, words) {
         return true;
     }
@@ -388,8 +399,17 @@ fn orchestrator_read(words: &[String]) -> bool {
     let Some(sub) = git_subcommand(words) else {
         return false;
     };
-    let forbidden = ["--output", "--ext-diff", "--textconv", "--upload-pack", "--exec"];
-    if sub.iter().any(|w| forbidden.iter().any(|flag| w.starts_with(flag))) {
+    let forbidden = [
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--upload-pack",
+        "--exec",
+    ];
+    if sub
+        .iter()
+        .any(|w| forbidden.iter().any(|flag| w.starts_with(flag)))
+    {
         return false;
     }
     match sub.first().map(String::as_str) {
@@ -1777,7 +1797,13 @@ mod tests {
             ] {
                 assert!(!allowed(role, command, &facts), "{command}");
             }
-            for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "AskUserQuestion"] {
+            for tool in [
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+                "AskUserQuestion",
+            ] {
                 assert!(tool_reason(role, tool, &facts).is_some(), "{tool}");
             }
         }
