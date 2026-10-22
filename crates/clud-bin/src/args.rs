@@ -283,6 +283,10 @@ pub struct Args {
     #[arg(long = "installer")]
     pub installer: bool,
 
+    /// Emit a structured installer outcome on stdout (explicit choice required).
+    #[arg(long = "installer-json", requires = "installer")]
+    pub installer_json: bool,
+
     /// Select the invoking executable for installation.
     #[arg(
         long = "install-current",
@@ -1724,6 +1728,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--redact-secrets",
         "--no-redact-secrets",
         "--installer",
+        "--installer-json",
         "--install-current",
         "--no-modify-path",
         "--continue",

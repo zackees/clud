@@ -22,6 +22,18 @@ count as installer success. Explicit `--no-modify-path` instead skips the
 activation plan entirely, preserves profiles/User Path, and reports binary
 installation with activation still required.
 
+`result.rs` defines the versioned `clud-installer-result/v1` outcome. Add
+`--installer-json` to an explicit current/version request to emit exactly one
+JSON object on stdout; interactive diagnostics and activation commands remain
+on stderr. Status distinguishes `complete`, `activation_required`, `refused`
+and `failed`; `binary_committed` records transaction acknowledgement and
+`activation_verified` records fresh-shell proof. A refused additional repair
+can therefore report a committed binary without claiming activation. Exit
+codes keep their ordinary meaning, including refusal/cancellation; code zero
+alone is insufficient to distinguish complete installation from install-only
+or a user declining the original confirmation. Invalid requests also receive
+a structured failure when the installer reporting flag parsed successfully.
+
 `catalog.rs` parses the bounded, duplicate-key rejecting v1 Catalog published
 at the Pages installer endpoint. `Catalog::compatible_releases` lists complete
 versions for a host, and `Catalog::resolve` chooses an exact version or the

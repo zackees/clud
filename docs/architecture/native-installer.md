@@ -17,6 +17,32 @@ for this mode. The result explicitly reports **activation required** and does
 not claim verified fresh name-based lookup. Exit 0 means the requested binary
 installation completed; it does not mean the invoking terminal was activated.
 
+For explicit current/version requests, `--installer-json` emits one
+`clud-installer-result/v1` JSON object on stdout. Progress, confirmation UI and
+terminal activation commands remain on stderr. The report includes the exit
+code, selected version/destination, stable reason code and these states:
+
+| Status | Meaning |
+| --- | --- |
+| `complete` | The binary was committed and fresh name-based lookup was verified. |
+| `activation_required` | The binary-only request completed; activation was not verified. |
+| `refused` | Required consent was unavailable, declined or canceled. |
+| `failed` | Request validation, planning, installation or activation failed. |
+
+`binary_committed` records an acknowledged transaction commit, while
+`activation_verified` records successful fresh-shell verification. A refused
+additional repair can report a committed binary with unverified activation.
+Failure without an acknowledged commit does not assert that rollback had no
+errors. Exit codes are preserved, so consumers must inspect `status` as well
+as the exit code. For example:
+
+```sh
+clud --installer --install-current --yes --installer-json
+```
+
+The flag requires an explicit install choice; it does not change permission
+requirements or admit the browser/menu output into the JSON stream.
+
 After a binary commit, output includes labeled commands for Bash/zsh and fish
 on POSIX, or PowerShell, Git Bash and Command Prompt on Windows. Labels avoid
 guessing the invoking shell from the account login shell. The commands update
