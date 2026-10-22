@@ -69,7 +69,7 @@ def prepare_probe(h: Harness) -> tuple[Path, str, Path]:
     return sister, command, observed
 
 
-@pytest.mark.parametrize("selection", ["default", "agent", "workflow"])
+@pytest.mark.parametrize("selection", ["default", "agent", "workflow", "session"])
 def test_workflow_repo_context(harness: Harness, selection: str) -> None:
     h = harness
     sister, command, observed = prepare_probe(h)
@@ -89,7 +89,10 @@ def test_workflow_repo_context(harness: Harness, selection: str) -> None:
         ]},
     ]}
     before = [h.git("status", "--porcelain", cwd=root) for root in (h.repo, sister)]
-    result = h.run("Run the fixture workflow once.", script, cmd_scan=False, timeout=120)
+    result = h.run(
+        "Run the fixture workflow once.", script, cmd_scan=False, timeout=120,
+        cwd=sister if selection == "session" else None,
+    )
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     errors = [block for row in result.requests for block in row.get("tool_results", [])
               if block["is_error"]]
