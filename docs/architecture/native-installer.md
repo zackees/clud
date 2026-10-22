@@ -154,3 +154,18 @@ This checks discovery through the older installer's own catalog fetch and
 picker. Evidence includes both source and installed digests
 and a separate older-installer terminal transcript. The selected stable must
 be newer than the fixed source version.
+
+### First-run and browser acceptance boundaries
+
+The native candidate-host suite drives the automatic first-run menu in a real
+PTY/ConPTY with no `clud` on PATH. It verifies that **Not now** is selected and
+that Escape and Ctrl-C exit before installation or startup writes. These
+interrupt checks do not establish Enter-to-decline continuation.
+
+The candidate-only `installer-ci-fixture` build can record the browser opener's
+URL instead of opening a desktop browser. The suite selects **Open download
+page**, requires the canonical install-page URL, and checks both successful
+opening and a failed opener with a readable URL fallback. Release binaries
+ignore this fixture variable. These checks establish menu routing and error
+reporting; clean-machine browser download, quarantine and security prompts
+still require consumer-machine evidence.
