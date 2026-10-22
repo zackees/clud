@@ -17,8 +17,9 @@ from tests.harness.test_grind import (
 
 @pytest.mark.parametrize("upstream_succeeds", [True, False])
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
+@pytest.mark.parametrize("staged", [False, True])
 def test_approved_merge_dependency_gates_planning(
-    harness: Harness, upstream_succeeds: bool, mode: str,
+    harness: Harness, upstream_succeeds: bool, mode: str, staged: bool,
 ) -> None:
     h = harness
     roles = [*_goal_roles(h, "a"), *_goal_roles(h, "b"), *_goal_roles(h, "c")]
@@ -40,9 +41,16 @@ def test_approved_merge_dependency_gates_planning(
         ],
         "proposed_goals": [], "risks": [],
     }
+    stage_args = {} if not staged else {
+        "plan_url": "https://github.com/o/r/issues/100#issuecomment-1000",
+        "plan": {"schema": "grind-plan/v1", "meta": 100, "stages": [
+            {"stage": "bugs", "base": "main", "children": ["b", "c"]},
+            {"stage": "feature", "group": "upstream", "base": "main", "children": ["a"]},
+        ]},
+    }
     result = h.run(
         "Execute the approved graph; do not infer dependencies from planner output.",
-        _script(h, mode, _goals("b", "a", "c"), roles, orchestration=graph),
+        _script(h, mode, _goals("b", "a", "c"), roles, orchestration=graph, **stage_args),
         timeout=300,
     )
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
