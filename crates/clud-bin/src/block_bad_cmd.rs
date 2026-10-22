@@ -3967,6 +3967,7 @@ mod tests {
                 // The wait-loop refusal scans `tool_input.command`, which
                 // Monitor carries as well as Bash.
                 || tool == "Monitor"
+                || block_bad_cmd_grind_gate::guards_report_tool(tool)
                 || crate::worktree_consent::tool_creates_worktree(tool, None)
                 || block_bad_cmd_grind_caps::tool_reason(
                     block_bad_cmd_grind_caps::PLANNER,
