@@ -189,8 +189,16 @@ symlinks, oversized metadata, wrong roots/roles/repositories and plan-only
 facts. The label cannot select a command outside that approved blocker.
 This relies on harness-owned metadata and router-owned run facts; it is not a
 sandbox against arbitrary processes that can modify those control files.
-The workflow does not yet start this role or interpret model reports as proof
-of readiness. Actual check execution, evidence and resumption remain open.
+The pre-tool hook claims one check attempt per native gate agent. Native Bash
+success/failure hooks record its outcome in a locked session-local sidecar;
+an interrupted or unrecognized result fails closed. A `StructuredOutput`
+report of `ready: true` requires a successful outcome matching the current
+approved check, label and root. Missing or pending evidence cannot release
+work. A retry needs a new native gate agent. These records share the harness
+session directory's lifecycle and trust boundary; they contain the binding
+and outcome, without command stdout/stderr.
+The workflow does not yet start this role. Workflow execution, native outcome
+coverage and resumption remain under development.
 
 ### Grind skills require explicit invocation
 

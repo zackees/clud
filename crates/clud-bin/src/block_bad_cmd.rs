@@ -459,6 +459,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let raw_payload = &payload;
     let Some(payload) = parse_payload_value(&payload, &cwd) else {
         append_log("unsupported_payload_shape");
         if let Some(code) = refuse_unverifiable_payload(
@@ -471,6 +472,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
         return 0;
     };
+    block_bad_cmd_grind_gate::observe(event, raw_payload, &payload);
     append_log(&format!(
         "tool_name={:?} cwd={:?} command={:?}",
         payload.tool_name,
