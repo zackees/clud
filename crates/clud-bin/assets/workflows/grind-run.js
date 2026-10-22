@@ -817,7 +817,14 @@ const approvedBlock = async (g) => {
     if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
       return blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
     }
-    if (!(await landed[b.goal])) return blocked(depNote(b.goal), b)
+    if (!(await landed[b.goal])) {
+      const upstream = outcome[b.goal]
+      if (upstream && upstream.status === 'deferred') {
+        return { ...blocked(depNote(b.goal), upstream.gate || b), status: 'deferred',
+          waiting_on: b.goal, gate_evidence: upstream.gate_evidence || 'upstream gate unavailable' }
+      }
+      return blocked(depNote(b.goal), b)
+    }
     if (b.when !== 'merged') {
       let observed = null
       try {

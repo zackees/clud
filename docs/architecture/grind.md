@@ -204,7 +204,10 @@ session directory's lifecycle and trust boundary; they contain the binding
 and outcome, without command stdout/stderr.
 The workflow starts this role after the approved upstream goal lands and
 before downstream planning. A successful native check releases that blocker;
-an unavailable or unsuccessful observation defers the dependent. Bounded
+an unavailable or unsuccessful observation defers the dependent and its
+transitive dependents, preserving the original gate and immediate blocker.
+Independent work continues; an upstream implementation failure remains a
+failure rather than a deferred publication branch. Bounded
 backoff, transitive `/loop` handoff and cross-repository execution remain
 under development.
 
