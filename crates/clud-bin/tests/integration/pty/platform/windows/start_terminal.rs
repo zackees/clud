@@ -108,6 +108,12 @@ fn check_started_terminal(request: &str) {
         .register_backend(fixture.process.pid().unwrap().unwrap(), "bash.exe");
     let terminal = wait_for_terminal(&fixture.process);
     fixture.terminal = Some(terminal);
+    assert!(
+        clud::process_scan::scan_env("CLUD")
+            .declared_daemons
+            .contains(&terminal.pid),
+        "opened Command Prompt did not inherit explicit persistence"
+    );
     fixture.process.close_impl().unwrap();
     assert!(terminal.is_live(), "opened Command Prompt died with PTY close");
     drop(fixture.tracker.take());
