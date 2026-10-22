@@ -24,7 +24,7 @@ def project_source(h: Harness, root: Path, name: str) -> None:
         "event = json.load(sys.stdin)\n"
         f"with open({log!r}, 'a') as stream:\n"
         f" stream.write(json.dumps({{'source': {name!r}, 'cwd': os.getcwd(), "
-        "'tool': event.get('tool_name')}}) + '\\n')\n"
+        "'tool': event.get('tool_name')}) + '\\n')\n"
     )
     command = f"{shlex.quote(sys.executable)} .claude/{name}-hook.py"
     settings = {
