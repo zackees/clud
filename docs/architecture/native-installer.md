@@ -26,6 +26,9 @@ returns to the original environment. Its PowerShell bootstrap is encoded as
 UTF-16LE to preserve literal `%` and `!` in directories even when the outer
 cmd has delayed expansion enabled. The other commands use their shell's
 literal quoting. Unrepresentable PATH entries receive an explicit diagnostic.
+The Windows encoding and shell flags follow Microsoft's
+[PowerShell CLI contract](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1)
+and [cmd contract](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd).
 
 `main.rs::run` calls `self_install::entry` after argument normalization and
 before utility dispatch, daemon startup, the runtime-cache hop, Windows

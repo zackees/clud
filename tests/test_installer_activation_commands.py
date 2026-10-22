@@ -10,10 +10,10 @@ import pytest
 from tests.process import run as run_process
 from tests.test_installer_native_entry import (
     clud_binary,
-    installer_target,  # noqa: F401 - pytest fixture imported for Windows isolation
     isolated_env,
     required_shell,
 )
+from tests.test_installer_native_entry import installer_target as installer_target
 
 
 def install_commands(env: dict[str, str]) -> dict[str, str]:
