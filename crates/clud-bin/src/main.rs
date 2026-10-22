@@ -277,6 +277,7 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
         // normal clud startup so hook/tool invocations do not connect to the
         // daemon, touch runtime-cache, start title keepers, or register as
         // foreground clud sessions.
+        args::Command::InternalStartCmd => clud::platform::start_terminal::run(),
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),
         args::Command::GrindFacts { args } => clud::grind_facts::run_cli(args),
@@ -882,6 +883,13 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         command::interactive_builtin_resume_error(args, launch_target.effective_harness)
     {
         eprintln!("[clud] error: {error}");
+        std::process::exit(2);
+    }
+    if args.redact_secrets && launch_target.effective_harness != backend::Backend::Claude {
+        eprintln!(
+            "[clud] error: {}",
+            clud::secret_redaction::policy::GATEWAY_REQUIRED
+        );
         std::process::exit(2);
     }
     validate_provider_only(args, launch_target);

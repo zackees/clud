@@ -57,6 +57,7 @@ fn plan(
         provider_only: Vec::new(),
         zdr: false,
         no_data_collection: false,
+        redact_secrets: None,
         pinned_from_previous_selection: false,
         coauthor: clud::attribution::Coauthor::default(),
         route: None,

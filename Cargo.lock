@@ -734,6 +734,7 @@ dependencies = [
  "getrandom 0.4.2",
  "gix-hash",
  "gix-index",
+ "hmac",
  "icy_sixel",
  "ignore",
  "image",

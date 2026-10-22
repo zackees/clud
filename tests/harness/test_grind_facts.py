@@ -51,7 +51,7 @@ def _planner_results(result: RunResult) -> str:
 
 
 def _worktree_add(h: Harness, name: str) -> tuple[str, str]:
-    path = f"{h.repo}-{name}"
+    path = str(h.home / ".clud" / "worktrees" / f"{h.repo.name}-wt-{name}")
     return path, f"git -C {h.repo} worktree add {path} -b grind/{name} origin/main"
 
 

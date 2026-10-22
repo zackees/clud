@@ -182,7 +182,11 @@ def _goal_roles(
     repo = str(h.repo)
     at = f"Goal {goal}:"
     parallel = mode == "parallel"
-    checkout = str(Path(h.root) / f"wt-{goal}") if parallel else str(_wt(h))
+    checkout = (
+        str(h.home / ".clud" / "worktrees" / f"{h.repo.name}-wt-{goal}")
+        if parallel
+        else str(_wt(h))
+    )
     plan = {
         "checkout": checkout,
         "branch": branch,

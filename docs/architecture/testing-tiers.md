@@ -54,6 +54,13 @@ Run it with `CLUD_REAL_CLAUDE_TESTS=1 pytest tests/harness`; it needs an
 installed Claude Code (`CLUD_REAL_CLAUDE` overrides the binary). In CI it runs
 in full mode as `Test linux-x64 (harness)`, against the Claude Code version
 pinned in `.github/workflows/_run-tests.yml`.
+The directory collection hook applies `real_claude` to actual test items
+before pytest's marker selection; a `pytestmark` variable in conftest alone
+is insufficient. The required harness lane rejects exit 5, a missing or
+invalid JUnit report, and a report containing no executed tests (including
+an all-skipped suite). Optional unit/integration shards retain their existing
+empty-selection behavior. The collection regression uses `--collect-only`
+and never starts a model or harness process.
 
 ### Behavior the fixture relies on (Claude Code 2.1.282)
 

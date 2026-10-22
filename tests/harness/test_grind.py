@@ -331,23 +331,16 @@ def test_the_main_session_cannot_delegate_to_a_grind_role(harness: Harness) -> N
 
 
 def test_router_skill_carries_the_docker_and_ci_preconditions(harness: Harness) -> None:
-    # A scripted model can't *decide* like a real one, so this pins what the
-    # router tells the model. The Skill tool result is only "Launching skill";
-    # the body arrives in the next request's messages.
-    load = {"skill": "grind", "args": "https://github.com/o/r/issues/1"}
+    # The router is explicit-only: type the slash command as the user would.
+    # A model-side Skill call is intentionally refused (#1510).
     script = {
         "default_text": "OK",
-        "roles": [
-            {
-                "name": "main",
-                "steps": [{"tool_use": {"name": "Skill", "input": load}}, {"text": "READ"}],
-            }
-        ],
+        "roles": [{"name": "main", "steps": [{"text": "READ"}]}],
     }
-    result = harness.run("grind it", script)
+    result = harness.run("/grind https://github.com/o/r/issues/1", script)
     assert "READ" in result.stdout, result.stdout[-2000:]
-    after = json.dumps([r["messages"] for r in result.requests if r["turn"] == 1])
-    assert "Docker/github actions disabled due to no docker running" in after
-    assert ".github/workflows/ci.yml" in after
-    assert "Finish (always, as the very last step)" in after
-    assert "git pull --ff-only origin <main>" in after
+    context = result.prompt_text("main")
+    assert "Docker/github actions disabled due to no docker running" in context
+    assert ".github/workflows/ci.yml" in context
+    assert "Finish (always, as the very last step)" in context
+    assert "git pull --ff-only origin <main>" in context

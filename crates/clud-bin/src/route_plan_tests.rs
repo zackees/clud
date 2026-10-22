@@ -39,6 +39,7 @@ fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         provider_only: Vec::new(),
         zdr: false,
         no_data_collection: false,
+        redact_secrets: None,
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
         route: None,
@@ -739,7 +740,8 @@ fn every_check_is_classified_for_every_backend() {
             vec![
                 "request_path_features",
                 "openrouter_free_cost",
-                "provider_only"
+                "provider_only",
+                "secret_redaction"
             ]
         );
         for check in &route.checks {

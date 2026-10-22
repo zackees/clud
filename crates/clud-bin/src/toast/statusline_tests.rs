@@ -63,6 +63,7 @@ fn an_orphaned_live_toast_goes_stale() {
             expires_ms: None,
         }),
         usage: None,
+        redaction: None,
         efforts: Vec::new(),
     };
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
@@ -1049,4 +1050,29 @@ fn effort_events_outside_the_window_are_ignored() {
     assert!(render_effort(b"{}", None, &events, 1_000 + window)
         .unwrap()
         .contains("agents: 1\u{d7}max"));
+}
+
+#[test]
+fn gateway_redaction_statistics_have_an_explicit_empty_status_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 293);
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(writer.path()).unwrap()).unwrap();
+    assert_eq!(value.get("redaction"), Some(&serde_json::Value::Null));
+}
+
+#[test]
+fn delayed_redaction_snapshots_cannot_decrease_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 294);
+    for count in [3, 1] {
+        writer.publish_redaction(crate::secret_redaction::reversible::Counts {
+            kinds: std::collections::BTreeMap::from([("vault".to_string(), count)]),
+            unknown_tokens: count,
+        });
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(writer.path()).unwrap()).unwrap();
+    assert_eq!(value["redaction"]["kinds"]["vault"], 3);
+    assert_eq!(value["redaction"]["unknown_tokens"], 3);
 }

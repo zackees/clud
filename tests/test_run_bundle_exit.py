@@ -236,3 +236,39 @@ def test_progress_journal_survives_the_repo_conftest_scrub(tmp_path: Path, monke
     entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
     assert [entry["event"] for entry in entries] == ["start", "finish"]
     assert all(entry["nodeid"].endswith("::test_child_env_is_scrubbed") for entry in entries)
+
+
+def test_required_harness_rejects_empty_and_wholly_skipped_results(tmp_path: Path) -> None:
+    report = tmp_path / "harness.xml"
+    assert not run_bundle.required_harness_result(5, report)
+    assert not run_bundle.required_harness_result(0, report)
+    for content in [
+        "invalid XML", "<testsuites/>",
+        "<testsuite><testcase><skipped/></testcase></testsuite>",
+    ]:
+        report.write_text(content, encoding="utf-8")
+        assert not run_bundle.required_harness_result(0, report)
+    report.write_text("<testsuite><testcase/><testcase><skipped/></testcase></testsuite>")
+    assert run_bundle.required_harness_result(0, report)
+    assert not run_bundle.required_harness_result(1, report)
+    assert run_bundle.report_pytest_exit(5), "optional empty shards retain their contract"
+
+
+def test_ci_marker_selects_real_harness_tests_without_running_them() -> None:
+    from tests.process import run as run_process
+
+    result = run_process(
+        [
+            sys.executable, "-m", "pytest", "--collect-only", "-q", "-m", "real_claude",
+            "tests/harness/test_smoke.py", "tests/test_run_bundle_exit.py",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout.decode()
+    assert "test_scripted_bash_call_runs_and_is_recorded" in output
+    assert "test_command_guard_denies_are_visible_to_the_script" in output
+    assert "test_success_codes_are_unchanged" not in output

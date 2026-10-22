@@ -51,6 +51,7 @@ pub mod session_tmp_continuation;
 pub mod shim_fs;
 pub mod shim_main;
 pub mod shim_telemetry;
+pub mod start_terminal;
 pub mod startup;
 pub mod subprocess;
 pub mod trampoline;

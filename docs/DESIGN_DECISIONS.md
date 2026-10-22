@@ -7032,8 +7032,45 @@ The worktree prompt control records explicit refusals as revocation. A later
 refusal replaces an earlier grant; prompts unrelated to worktrees retain the
 current decision. Negation after the worktree noun never grants permission.
 
+## DD-177: explicit Command Prompt windows use the existing persistence contract
 
-## DD-177: Credential prompts deliver to sinks without exposing values to agents
+**Context.** On Windows, `! start cmd.exe` opens a user console that should
+survive closing clud (#2007). A reaper spare alone cannot overcome the PTY's
+kernel kill-on-close job, and treating every `cmd.exe` as persistent would
+also preserve ordinary command wrappers.
+
+**Decision.** The Windows Bash startup adapter intercepts only a bare
+`start cmd` / `start cmd.exe`. A hidden multicall fast path uses the existing
+running-process breakaway daemon API to open the console with inherited
+cwd and environment. Its existing declared-daemon marker supplies the reaper
+spare reason. Unix supplies an empty startup adapter.
+
+**Consequences.** The explicit user terminal has an independent lifetime;
+other `start` argument forms retain stock behavior. The implementation needs
+no new process classification or dependency API. Real Windows tests must
+prove both containment escape and foreground cleanup survival. Details:
+[process-reaping.md](architecture/process-reaping.md#explicit-command-prompt-windows-on-windows-2007).
+
+## DD-178: reversible secret redaction belongs to the gateway session
+
+**Context.** Provider-side one-way redaction replaces code and credential
+values the model needs to reproduce in edits (#1868). Direct harness requests
+cannot be intercepted by clud.
+
+**Decision.** Resolve the redaction policy before rendering a launch and route
+Claude sessions needing it through the unified gateway. Detect only named
+credential patterns and exact launch vault values. Tokenize with a random
+session HMAC key and an in-memory, zeroizing map; restore response text and
+JSON tool arguments before the harness sees them. Keep the policy across
+failover and redact again at final upstream send boundaries. Export only
+aggregate detector counts, never the mapping.
+
+**Consequences.** Tokens remain stable within a launch and differ across
+launches. Direct native Codex requests needing redaction fail the launch
+check. Provider privacy routing remains a separate control. See
+[secret-redaction.md](architecture/secret-redaction.md).
+
+## DD-179: Credential prompts deliver to sinks without exposing values to agents
 
 The native credential prompt (#1708) is part of the existing multicall binary,
 using masked single and multiline egui fields with persistence disabled. The

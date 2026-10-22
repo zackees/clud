@@ -1,7 +1,14 @@
-//! Presentation-only API-key redaction. Operational argv and vault values stay
-//! intact; call this only at logging, diagnostics, and display boundaries.
+//! Presentation masking and session-owned reversible gateway redaction.
+//! Display helpers never mutate operational argv or vault values.
 
 use std::sync::OnceLock;
+
+mod detect;
+pub mod policy;
+pub mod reversible;
+mod session;
+pub mod status;
+pub mod stream;
 
 pub fn mask_key(key: &str) -> String {
     let suffix: String = key

@@ -47,6 +47,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             provider_only: Vec::new(),
             zdr: false,
             no_data_collection: false,
+            redact_secrets: None,
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
             route: None,
