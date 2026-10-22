@@ -114,7 +114,15 @@ const validateRunPlan = (plan) => {
   goals.forEach(g => g.blockers.forEach(b => graphBlocker(b, g, ids)))
   return { ...plan, goals: graphOrder(goals, ids) }
 }
-if (args.orchestration !== undefined) validateRunPlan(args.orchestration)
+const ORCHESTRATION = args.orchestration === undefined ? null : validateRunPlan(args.orchestration)
+const RUN_GOALS = new Map((ORCHESTRATION ? ORCHESTRATION.goals : []).map(g => [g.id, g]))
+if (ORCHESTRATION) {
+  const selected = new Map(args.goals.map(g => [String(g.id), g]))
+  for (const id of selected.keys()) {
+    if (!RUN_GOALS.has(id)) throw new Error(`run plan: selected goal ${id} was not approved`)
+  }
+  args.goals = ORCHESTRATION.goals.filter(g => selected.has(g.id)).map(g => selected.get(g.id))
+}
 
 const REPO = args.repo
 const MAIN = args.main || 'main'
@@ -645,7 +653,9 @@ args.goals.forEach((g, i) => {
   landed[g.id] = new Promise(r => { settle[g.id] = r })
 })
 const earlierDeps = (p, g) => {
-  const deps = (p.depends_on || []).map(d => { const id = goalIdOf[idKey(d)]; return id === undefined ? String(d) : String(id) })
+  const approved = RUN_GOALS.get(String(g.id))
+  const merged = approved ? approved.blockers.filter(b => b.when === 'merged').map(b => b.goal) : []
+  const deps = [...new Set([...(p.depends_on || []), ...merged])].map(d => { const id = goalIdOf[idKey(d)]; return id === undefined ? String(d) : String(id) })
   const kept = deps.filter(d => d in order && order[d] < order[g.id])
   const dropped = deps.filter(d => !kept.includes(d))
   if (dropped.length) log(`goal ${g.id}: ignoring depends_on ${dropped.join(', ')} (unknown, itself, or not listed earlier)`)
@@ -739,8 +749,32 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
 // goal is blocked rather than built on top of it (#1424).
 let DIRTY_AFTER = null
 
+// Enforce approved dependencies before a planner or worker touches this goal.
+// A missing stage or external publication needs a resumable gate, not guessed
+// success. Cross-repository execution needs a separately rooted session first.
+const approvedBlock = async (g) => {
+  const approved = RUN_GOALS.get(String(g.id))
+  if (!approved) return null
+  const blocked = (note, gate) => ({ merged: false, blocked: true, note, ...(gate ? { gate } : {}) })
+  if (approved.repo !== ORCHESTRATION.session_repo) {
+    return blocked(`blocked: ${approved.repo} requires a separately rooted repository session`)
+  }
+  for (const b of approved.blockers) {
+    if (!(b.goal in landed) || (!PARALLEL && !(b.goal in outcome))) {
+      return blocked(`blocked: dependency ${b.goal} has not settled in this execution stage`, b)
+    }
+    if (!(await landed[b.goal])) return blocked(depNote(b.goal), b)
+    if (b.when !== 'merged') {
+      return blocked(`blocked: dependency ${b.goal} still requires ${b.when} evidence`, b)
+    }
+  }
+  return null
+}
+
 const attemptGoal = async (g, state) => {
   if (!PARALLEL && DIRTY_AFTER !== null) return { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` }
+  const approved = await approvedBlock(g)
+  if (approved) return approved
   // Stuck-bug rule: a failed bug blocks only the feature children that list
   // it, whether it ran in this call or in the earlier bug-stage call.
   if (STUCK_BUG_BLOCKS) {
