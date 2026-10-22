@@ -22,7 +22,13 @@ fn setting(pointer: &str, value: &str) -> Mutation {
 
 #[test]
 fn approved_operation_preserves_roots_and_unrelated_values_without_seeding() {
-    let (_directory, home, mut expected) = world();
+    let (directory, home, mut expected) = world();
+    let root = directory.path().join("already-approved-data");
+    fs::create_dir(&root).unwrap();
+    expected["safe_rm"]["extra_roots"] = json!([
+        {"path": root, "reason": "Preserve the existing user decision exactly"}
+    ]);
+    fs::write(super::super::settings_path_at(&home), expected.to_string()).unwrap();
     let path = execute(&home, &setting("/web_term/enabled", "false"), |preview| {
         assert!(!preview.roots);
         assert_eq!(preview.changes.len(), 1);

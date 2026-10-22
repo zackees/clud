@@ -19,6 +19,14 @@ def test_settings_authorization_native_window(tmp_path: Path, action: str) -> No
     binary, env, repo, settings = _world(tmp_path)
     assert shutil.which("xvfb-run"), "settings approval acceptance requires Xvfb"
     assert shutil.which("xdotool"), "settings approval acceptance requires xdotool"
+    document = json.loads(settings.read_bytes())
+    if action == "approve":
+        existing_root = tmp_path / "existing-user-root"
+        existing_root.mkdir()
+        document["safe_rm"]["extra_roots"] = [{
+            "path": str(existing_root.resolve()), "reason": "Existing user decision",
+        }]
+        settings.write_text(json.dumps(document), encoding="utf-8")
     original = settings.read_bytes()
     expected = json.loads(original)
     mutation = ["set", "/web_term/enabled", "false", "--reason", "Test-owned preference"]
