@@ -45,7 +45,12 @@ fn encode(value: &Value) -> Result<Vec<u8>, String> {
 }
 
 pub(super) fn claim(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
-    let bytes = encode(&json!({"binding": binding(payload, facts)?, "outcome": "pending"}))?;
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|e| e.to_string())?;
+    let nonce: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let bytes = encode(&json!({
+        "binding": binding(payload, facts)?, "outcome": "pending", "nonce": nonce,
+    }))?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -53,6 +58,47 @@ pub(super) fn claim(payload: &HookPayloadView, facts: &Value) -> Result<(), Stri
         .map_err(|e| format!("one check attempt per gate agent: {e}"))?;
     file.lock_exclusive().map_err(|e| e.to_string())?;
     file.write_all(&bytes).map_err(|e| e.to_string())
+}
+
+fn wrapped(check: &str, nonce: &str) -> String {
+    format!(
+        "(\n{check}\n)\n__clud_gate_{nonce}=$?\nprintf '\\nCLUD_GATE_EXIT_{nonce}:%s\\n' \
+         \"$__clud_gate_{nonce}\"\n(exit \"$__clud_gate_{nonce}\")"
+    )
+}
+
+pub(super) fn rewrite(payload: &HookPayloadView, facts: &Value) -> Result<String, String> {
+    let mut file = open(payload, false)?;
+    FileExt::lock_shared(&file).map_err(|e| e.to_string())?;
+    let state = read(&mut file)?;
+    if state.get("binding") != Some(&binding(payload, facts)?)
+        || state.get("outcome").and_then(Value::as_str) != Some("pending")
+    {
+        return Err("gate has no matching pending execution".into());
+    }
+    Ok(wrapped(&bound_check(payload, facts)?, nonce(&state)?))
+}
+
+fn nonce(state: &Value) -> Result<&str, String> {
+    state.get("nonce").and_then(Value::as_str)
+        .filter(|nonce| nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| "invalid gate completion receipt".into())
+}
+
+fn completed_success(raw: &Value, state: &Value) -> bool {
+    let Some(response) = raw.get("tool_response") else { return false };
+    if response.get("interrupted").and_then(Value::as_bool) != Some(false)
+        || ["backgroundTaskId", "backgroundOutputPath", "timedOutAfterMs"].iter()
+            .any(|key| response.get(key).is_some_and(|value| !value.is_null()))
+        || ["backgroundedByUser", "backgroundedByTurnAbort", "backgroundedToDeliverMessage", "noExitStatus"]
+            .iter().any(|key| response.get(key).is_some_and(|value| value != &Value::Bool(false)))
+    {
+        return false;
+    }
+    let Ok(nonce) = nonce(state) else { return false };
+    let expected = format!("CLUD_GATE_EXIT_{nonce}:0");
+    response.get("stdout").and_then(Value::as_str)
+        .and_then(|stdout| stdout.lines().last()) == Some(expected.as_str())
 }
 
 fn open(payload: &HookPayloadView, write: bool) -> Result<File, String> {
@@ -91,7 +137,6 @@ pub(super) fn observe(
     if !matches!(event, "PostToolUse" | "PostToolUseFailure") {
         return Ok(());
     }
-    authorize(payload, facts)?;
     let mut file = open(payload, true)?;
     file.lock_exclusive().map_err(|e| e.to_string())?;
     let mut state = read(&mut file)?;
@@ -100,11 +145,15 @@ pub(super) fn observe(
     {
         return Err("gate outcome does not match its pending check".into());
     }
+    let check = bound_check(payload, facts)?;
+    let mut original = payload.clone();
+    original.command.clone_from(&check);
+    authorize(&original, facts)?;
+    if payload.command != check && payload.command != wrapped(&check, nonce(&state)?) {
+        return Err("tool outcome does not identify the approved execution".into());
+    }
     let success = event == "PostToolUse"
-        && raw
-            .pointer("/tool_response/interrupted")
-            .and_then(Value::as_bool)
-            == Some(false);
+        && completed_success(raw, &state);
     state["outcome"] = json!(if success { "success" } else { "failure" });
     let bytes = encode(&state)?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;

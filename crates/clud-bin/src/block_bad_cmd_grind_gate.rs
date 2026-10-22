@@ -17,6 +17,11 @@ const MAX_BLOCKERS: usize = 64;
 #[path = "block_bad_cmd_grind_gate_evidence.rs"]
 mod evidence;
 
+pub(super) fn rewrite(payload: &HookPayloadView) -> Result<String, String> {
+    let facts = crate::grind_facts::lookup(payload.session_id.as_deref());
+    evidence::rewrite(payload, facts.facts().ok_or("missing valid run facts")?)
+}
+
 pub(super) fn observe(event: &str, raw: &Value, payload: &HookPayloadView) {
     if payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE)
         || payload.tool_name != "Bash"
@@ -58,6 +63,11 @@ pub(super) fn reason(payload: &HookPayloadView) -> Option<String> {
 fn authorize(payload: &HookPayloadView, facts: &Value) -> Result<(), String> {
     if payload.tool_name != "Bash" {
         return Err("approved gate checks require the native Bash tool".into());
+    }
+    if payload.tool_input.as_ref().and_then(|input| input.get("run_in_background"))
+        .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return Err("gate checks must complete in the foreground".into());
     }
     let check = bound_check(payload, facts)?;
     if check != payload.command {
@@ -304,9 +314,15 @@ mod tests {
         evidence::claim(&fixture.payload, &fixture.facts).unwrap();
         assert!(evidence::claim(&fixture.payload, &fixture.facts).is_err());
         assert!(evidence::report(&report, &fixture.facts).is_err());
+        let state: Value = serde_json::from_slice(&std::fs::read(
+            fixture.root.path().join("session/gate-left-agent.json")
+        ).unwrap()).unwrap();
+        let nonce = state["nonce"].as_str().unwrap();
+        let response = json!({"tool_response": {"interrupted": false,
+            "stdout": format!("actual output\nCLUD_GATE_EXIT_{nonce}:0\n")}});
         evidence::observe(
             "PostToolUse",
-            &json!({"tool_response": {"interrupted": false}}),
+            &response,
             &fixture.payload,
             &fixture.facts,
         )
@@ -335,6 +351,38 @@ mod tests {
             assert!(evidence::report(&report, &fixture.facts).is_err());
             report.tool_input = Some(json!({"ready": false}));
             assert!(evidence::report(&report, &fixture.facts).is_ok());
+        }
+    }
+
+    #[test]
+    fn background_requests_cannot_claim_an_execution() {
+        let mut fixture = Fixture::new();
+        fixture.payload.tool_input = Some(json!({"run_in_background": true}));
+        assert!(authorize(&fixture.payload, &fixture.facts).is_err());
+    }
+
+    #[test]
+    fn nonzero_and_unfinished_receipts_cannot_report_ready() {
+        for (status, extra) in [
+            (1, json!({})), (0, json!({"backgroundTaskId": "still-running"})),
+            (0, json!({"timedOutAfterMs": 1000})),
+            (0, json!({"backgroundedByUser": true})),
+            (0, json!({"noExitStatus": true})),
+        ] {
+            let fixture = Fixture::new();
+            evidence::claim(&fixture.payload, &fixture.facts).unwrap();
+            let path = fixture.root.path().join("session/gate-left-agent.json");
+            let state: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let nonce = state["nonce"].as_str().unwrap();
+            let mut response = json!({"interrupted": false,
+                "stdout": format!("CLUD_GATE_EXIT_{nonce}:{status}\n")});
+            response.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            evidence::observe("PostToolUse", &json!({"tool_response": response}),
+                              &fixture.payload, &fixture.facts).unwrap();
+            let mut report = fixture.payload.clone();
+            report.tool_name = "StructuredOutput".into();
+            report.tool_input = Some(json!({"ready": true}));
+            assert!(evidence::report(&report, &fixture.facts).is_err());
         }
     }
 

@@ -849,6 +849,24 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 2;
     }
 
+    if payload.agent_type.as_deref() == Some(block_bad_cmd_grind_caps::GATE)
+        && event == PRE_TOOL_USE_EVENT && payload.tool_name == "Bash"
+    {
+        if deletion_rewrite.is_some() || evaluation.rewritten_command.is_some() {
+            return block_bad_cmd_gate::gate_deny("gate check conflicts with another rewrite");
+        }
+        let command = match block_bad_cmd_grind_gate::rewrite(&payload) {
+            Ok(command) => command,
+            Err(error) => return block_bad_cmd_gate::gate_deny(&error),
+        };
+        let Some(mut updated) = payload.tool_input.clone().filter(Value::is_object) else {
+            return block_bad_cmd_gate::gate_deny("gate check requires object-shaped tool_input");
+        };
+        updated["command"] = Value::String(command);
+        println!("{}", allow_with_updated_input_json(updated));
+        return 0;
+    }
+
     if deletion_rewrite.is_some() && evaluation.rewritten_command.is_some() {
         return block_bad_cmd_gate::gate_deny(
             "the deletion rewrite conflicts with another command rewrite",

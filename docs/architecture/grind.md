@@ -189,9 +189,14 @@ symlinks, oversized metadata, wrong roots/roles/repositories and plan-only
 facts. The label cannot select a command outside that approved blocker.
 This relies on harness-owned metadata and router-owned run facts; it is not a
 sandbox against arbitrary processes that can modify those control files.
-The pre-tool hook claims one check attempt per native gate agent. Native Bash
-success/failure hooks record its outcome in a locked session-local sidecar;
-an interrupted or unrecognized result fails closed. A `StructuredOutput`
+The pre-tool hook claims one check attempt per native gate agent. It wraps the
+approved read-only Bash expression with a per-attempt completion receipt that
+preserves its shell status. This is necessary because Bash may interpret a
+nonzero predicate status as a successful tool call and omit that status from
+its hook response. Native success/failure hooks require the matching zero-status
+receipt before recording success in the locked session-local sidecar.
+Explicit background requests are denied; timeout/background responses,
+interrupted checks and absent or unrecognized receipts fail closed. A `StructuredOutput`
 report of `ready: true` requires a successful outcome matching the current
 approved check, label and root. Missing or pending evidence cannot release
 work. A retry needs a new native gate agent. These records share the harness

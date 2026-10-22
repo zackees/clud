@@ -120,7 +120,9 @@ def test_reported_release_artifacts_do_not_open_publication_gate(
     _no_notes(result)
     ran = _by_role(result)
     assert "lander:a:0" in ran
-    assert not any(role.endswith(":b") or role.startswith("lander:b:") for role in ran)
+    assert "gate:b" in ran
+    assert not any(role in ran for role in ("planner:b", "worker:b", "reviewer:b", "integrator:b"))
+    assert not any(role.startswith("lander:b:") for role in ran)
     assert not (h.repo / "b.txt").exists()
     assert _merged(h) == ["grind/a", "grind/c"]
 
