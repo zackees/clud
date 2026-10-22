@@ -236,12 +236,18 @@ mod tests {
         let mut payload = payload(&path);
         payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
         assert!(!path.with_extension("").exists());
-        let response = json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
+        let response =
+            json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
         observe("PostToolUse", &response, &payload);
-        payload.tool_input = Some(json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
-            "args": {"orchestration": {}}}));
+        payload.tool_input = Some(
+            json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
+            "args": {"orchestration": {}}}),
+        );
         assert!(reason_for(&payload, None).is_none());
-        assert!(path.with_extension("").join("grind-resume-wf-new.json").is_file());
+        assert!(path
+            .with_extension("")
+            .join("grind-resume-wf-new.json")
+            .is_file());
     }
 
     #[test]
