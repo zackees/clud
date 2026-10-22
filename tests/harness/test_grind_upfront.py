@@ -242,6 +242,7 @@ def _route_and_plan(h: Harness, meta: str, children: list[int]) -> list[dict[str
     repo = h.repo
     plan_only = {
         "repo": str(repo),
+        "github_repo": "o/r",
         "main": "main",
         "meta": meta,
         "planOnly": True,
