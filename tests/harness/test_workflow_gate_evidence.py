@@ -82,14 +82,22 @@ def test_native_gate_evidence_hook_capabilities(
 def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     h = harness
     (h.config / "workflows").mkdir(exist_ok=True)
+    (h.config / "agents").mkdir(exist_ok=True)
+    (h.config / "agents" / "wait-capability-probe.md").write_text(
+        "---\nname: wait-capability-probe\ndescription: Fixture capability observer\n"
+        "tools: []\n---\nWAIT_CAPABILITY_OBSERVER_ROLE\n"
+    )
     (h.config / "workflows" / "wait-capability-probe.js").write_text(
         "export const meta = {name: 'wait-capability-probe', description: 'Wait capabilities'}\n"
         "const capabilities = {setTimeout: typeof setTimeout, sleep: typeof sleep, "
         "wait: typeof wait, Promise: typeof Promise};\n"
-        "log('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities));\n"
-        "return capabilities;\n"
+        "return await agent('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities), "
+        "{agentType: 'wait-capability-probe', label: 'wait-capabilities'});\n"
     )
     result = h.run("Observe native workflow wait capabilities without waiting.", {"roles": [
+        {"name": "wait-probe", "match": "WAIT_CAPABILITY_OBSERVER_ROLE", "steps": [
+            {"text": "WAIT_CAPABILITIES_OBSERVED"},
+        ]},
         {"name": "main", "steps": [
             {"tool_use": {"name": "Workflow", "input": {
                 "name": "wait-capability-probe", "args": {},
@@ -99,9 +107,7 @@ def test_native_workflow_wait_capabilities(harness: Harness) -> None:
     ]})
     assert result.returncode == 0, result.stderr + result.stdout[-3000:]
     _no_notes(result)
-    journals = list(h.config.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))
-    assert journals, result.stdout[-5000:]
-    evidence = "\n".join(path.read_text() for path in journals)
+    evidence = result.prompt_text("wait-probe")
     assert "NATIVE_WAIT_CAPABILITIES" in evidence, evidence
     assert '"setTimeout"' in evidence or '\\"setTimeout\\"' in evidence, evidence
     print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", re.findall(
