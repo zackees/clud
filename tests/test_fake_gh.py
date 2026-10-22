@@ -717,3 +717,19 @@ def test_release_can_appear_after_controlled_missing_observations(world, capsys)
     code, out, _ = _run(capsys, "release", "view", "v-next")
     assert code == 0
     assert json.loads(out)["publishedAt"] == "2026-10-22T00:00:00Z"
+
+
+@pytest.mark.parametrize("args", [
+    ["release", "view", "v-next", "--repo", "o/sister"],
+    ["release", "view", "--repo", "o/sister", "v-next"],
+    ["release", "view", "-Ro/sister", "v-next"],
+    ["--repo", "o/sister", "release", "view", "v-next"],
+])
+def test_release_lookup_accepts_repository_flag_positions(world, capsys, args):
+    state = _two_repositories()
+    state["repositories"]["o/sister"]["releases"] = {"v-next": {"publishedAt": "published"}}
+    world(state)
+    code, out, _ = _run(capsys, *args)
+    assert code == 0
+    assert json.loads(out)["tagName"] == "v-next"
+    assert json.loads(out)["url"] == "https://github.com/o/sister/releases/tag/v-next"
