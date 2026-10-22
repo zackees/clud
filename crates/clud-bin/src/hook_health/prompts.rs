@@ -255,6 +255,7 @@ fn backend_prompt_launch_plan(
         installer: false,
         install_current: false,
         install_version: None,
+        no_modify_path: false,
         force: false,
         experimental_daemon_centralized: false,
         daemon_state_dir: None,
