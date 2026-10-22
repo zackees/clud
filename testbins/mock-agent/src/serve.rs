@@ -377,6 +377,7 @@ fn respond_messages(
                 "n": n, "role": role, "turn": turn, "step": step, "note": note,
                 "t_start": t_start, "t_end": now_ms(),
                 "stream": request.get("stream"), "tools": tools,
+                "provider": request.get("provider"),
                 "tool_results": recent_tool_results(&messages),
                 "system": system_text(request),
                 "messages": messages,
