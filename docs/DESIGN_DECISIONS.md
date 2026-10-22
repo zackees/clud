@@ -7171,3 +7171,22 @@ Clients without a usable desktop fail explicitly. The mechanism does not
 claim isolation from arbitrary malicious local processes or unseen script
 internals. Bounds, refusal behavior, auditing and supported tool routes are
 documented in [rm-tools.md](architecture/rm-tools.md#user-approval-for-settings-changes-1999).
+
+## DD-184: Wait recovery follows execution capabilities and completion scope
+
+Issue #2004 showed that a refusal recommending only Claude's background-task
+mechanism can strand an agent whose runtime instead exposes persistent process
+sessions. A normalized hook tool name does not reliably identify the client.
+The guard keeps its polling ban and names conditional recovery paths from
+declared capabilities, with a harmless local probe only when declarations are
+insufficient. The existing bounded waiter owns remote observation; clud does
+not add an agent relaunch or polling controller.
+
+A live handle and an observation deadline are incomplete states. Terminal
+results control the already-authorized next action, and green applies only
+to the selected check scope. An explicit `--require` overrides protection;
+`--require '.*'` waits for all reported checks. Persisted goal resumption is a
+separate runtime operation that clud cannot manufacture from CI success.
+
+The contract and offline validation limits live in
+[hook-dispatch.md](architecture/hook-dispatch.md#watch-recovery-and-continuation-2004).

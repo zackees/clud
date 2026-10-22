@@ -205,11 +205,16 @@ The only narrowly permitted Rust exception is a test that must use raw `std::pro
 
 ### Waiting: background + notify, never a loop
 
-Never poll. To wait, run the command in the background and wait for the notification.
+Never poll. Select a wait mechanism from declared runtime capabilities.
+With `exec_command` / `write_stdin`, start once and wait with empty input on
+the same live session. With supported background tasks, wait for completion
+notification. A bounded foreground waiter is also valid. See
+[watch recovery](docs/architecture/hook-dispatch.md#watch-recovery-and-continuation-2004)
+for capability verification, exit handling, completion scope and goal resume.
 clud's `block_bad_cmd` hook refuses hand-written waits for the main agent and
 every sub-agent (`while`/`until`, a `for` loop that sleeps, a `sleep` chained
-to a `gh` status read, `tail -f`, `watch`); use `run_in_background`, or a tool
-with its own deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`)
+to a `gh` status read, `tail -f`, `watch`); use the supported session/background
+wait, or a tool with its own deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`)
 ([#1880](https://github.com/zackees/clud/issues/1880),
 [DD-168](docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not)).
 

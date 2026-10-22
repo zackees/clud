@@ -1,5 +1,5 @@
-//! zackees/clud#1880: hand-written waits are refused; background + notify is
-//! the only general way to wait. Fixtures are the exact commands from the
+//! zackees/clud#1880/#2004: hand-written waits are refused; use a verified
+//! process-session wait or background completion notification. Fixtures are the exact commands from the
 //! issue's session and its transcript analysis.
 
 use super::tests::temp_env;
