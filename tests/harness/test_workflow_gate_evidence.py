@@ -76,3 +76,29 @@ def test_native_gate_evidence_hook_capabilities(
     print("NATIVE_GATE_EVIDENCE_CAPABILITIES", json.dumps({
         "check_succeeds": check_succeeds, "observed": observed,
     }, sort_keys=True))
+
+
+def test_native_workflow_wait_capabilities(harness: Harness) -> None:
+    h = harness
+    (h.config / "workflows").mkdir(exist_ok=True)
+    (h.config / "workflows" / "wait-capability-probe.js").write_text(
+        "export const meta = {name: 'wait-capability-probe', description: 'Wait capabilities'}\n"
+        "const capabilities = {setTimeout: typeof setTimeout, sleep: typeof sleep, "
+        "wait: typeof wait, Promise: typeof Promise};\n"
+        "log('NATIVE_WAIT_CAPABILITIES ' + JSON.stringify(capabilities));\n"
+        "return capabilities;\n"
+    )
+    result = h.run("Observe native workflow wait capabilities without waiting.", {"roles": [
+        {"name": "main", "steps": [
+            {"tool_use": {"name": "Workflow", "input": {
+                "name": "wait-capability-probe", "args": {},
+            }}},
+            {"text": "WAIT_CAPABILITY_PROBE_DONE"},
+        ]},
+    ]})
+    assert result.returncode == 0, result.stderr + result.stdout[-3000:]
+    _no_notes(result)
+    evidence = json.dumps(result.requests)
+    assert "NATIVE_WAIT_CAPABILITIES" in evidence, evidence
+    assert '"setTimeout"' in evidence or '\\"setTimeout\\"' in evidence, evidence
+    print("NATIVE_WORKFLOW_WAIT_CAPABILITIES", evidence)
