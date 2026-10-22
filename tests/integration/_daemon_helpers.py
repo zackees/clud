@@ -220,39 +220,85 @@ def extract_session_id(line: str) -> str | None:
 #
 # 45 covers both phases plus margin and stays well under pytest-timeout's
 # per-test ceiling of 90 (`pyproject.toml`), so a genuine hang is still
-# reported rather than waiting forever.
+# reported rather than waiting forever. It does not cover every bounded step
+# before the announcement: daemon auto-start may take up to 20s on its own,
+# and the launcher's `Create` deadline (`create_session_budget`, 40s) adds the
+# login-env refresh. So a timeout here is not proof of a hang; #2000 made it
+# report the launch stages and the daemon's admission events, which say
+# which step the time went to.
 _SESSION_ID_TIMEOUT = 45.0
 
 
-def read_session_id(proc: process.Popen[str], timeout: float = _SESSION_ID_TIMEOUT) -> str:
+def read_session_id(
+    proc: process.Popen[str],
+    timeout: float = _SESSION_ID_TIMEOUT,
+    *,
+    describe: Callable[[], str] | None = None,
+) -> str:
+    """Wait for the launcher's session announcement.
+
+    On a timeout (#2000) the error carries every line the launcher printed,
+    whether it was still running, a bounded drain of both pipes, and
+    `describe()` (the launch's stage trace and daemon state), so one failure
+    names the stage that stalled. Nothing here waits for pipe EOF: a daemon
+    may hold the write ends after the launcher is gone.
+    """
     assert proc.stderr is not None
     deadline = time.time() + timeout
+    seen: list[str] = []
     while time.time() < deadline:
         line = proc.stderr.readline()
+        if line:
+            seen.append(line.rstrip("\n"))
         session_id = extract_session_id(line)
         if session_id is not None:
             return session_id
         if proc.poll() is not None:
-            # A daemon may inherit the write ends of these pipes after the
-            # launcher exits. A stream `.read()` can then wait forever for EOF.
-            # The running-process queue reads have finite deadlines instead.
-            def pending(stream: str) -> str:
-                try:
-                    next_line = (
-                        proc.next_stdout(timeout=0.2)
-                        if stream == "stdout"
-                        else proc.next_stderr(timeout=0.2)
-                    )
-                except TimeoutError:
-                    return "<no line within 0.2s>"
-                return repr(next_line)
-
             raise AssertionError(
                 "clud exited early while waiting for session id: "
                 f"exit={proc.returncode}, last_line={line!r}, "
-                f"next_stdout={pending('stdout')}, next_stderr={pending('stderr')}"
+                f"next_stdout={_pending(proc, 'stdout')}, "
+                f"next_stderr={_pending(proc, 'stderr')}"
             )
-    raise AssertionError("timed out waiting for daemon session id")
+    running = proc.poll() is None
+    raise AssertionError(
+        f"timed out waiting for daemon session id after {timeout:.0f}s "
+        f"(launcher {'still running' if running else f'exited {proc.returncode}'})\n"
+        f"--- stderr lines seen ---\n" + ("\n".join(seen) or "<none>") + "\n"
+        f"next_stdout={_pending(proc, 'stdout')}, next_stderr={_pending(proc, 'stderr')}\n"
+        + (describe() if describe is not None else "")
+    )
+
+
+def _pending(proc: process.Popen[str], stream: str) -> str:
+    """The next line on `stream` within 0.2s, never an unbounded read."""
+    try:
+        next_line = (
+            proc.next_stdout(timeout=0.2) if stream == "stdout" else proc.next_stderr(timeout=0.2)
+        )
+    except TimeoutError:
+        return "<no line within 0.2s>"
+    return repr(next_line)
+
+
+def _describe_launch(trace_path: str, env: dict[str, str]) -> str:
+    """The launch's stage trace and the daemon state behind it (#2000)."""
+    parts = [f"--- launch stages ---\n{_read_exit_stages(trace_path)}"]
+    state = env.get("CLUD_DAEMON_STATE_DIR")
+    if state:
+        root = Path(state)
+        events = root / "daemon-events.jsonl"
+        try:
+            tail = events.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+            parts.append("--- daemon-events.jsonl (tail) ---\n" + "\n".join(tail))
+        except OSError as err:
+            parts.append(f"--- daemon-events.jsonl ---\n<{err}>")
+        try:
+            listing = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+            parts.append("--- state dir ---\n" + ("\n".join(listing[:200]) or "<empty>"))
+        except OSError as err:
+            parts.append(f"--- state dir ---\n<{err}>")
+    return "\n".join(parts)
 
 
 def read_session_id_from_text(stderr: str) -> str:
@@ -763,7 +809,7 @@ def launch_detached(
         cwd=cwd,
     )
     _EXIT_TRACES[id(proc)] = trace_path
-    session_id = read_session_id(proc)
+    session_id = read_session_id(proc, describe=lambda: _describe_launch(trace_path, env))
     return proc, session_id
 
 

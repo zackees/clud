@@ -994,6 +994,27 @@ fn parse_worker_spawn_budget(raw: Option<&str>) -> Duration {
         .map_or(DEFAULT_WORKER_SPAWN_BUDGET, Duration::from_secs)
 }
 
+/// The worst case [`daemon_create_session`] may legitimately take: two
+/// worker phases of [`worker_spawn_budget`] each, plus the login-env refresh
+/// and the spec writes. A launcher waiting on `Create` uses this as its
+/// deadline, so a stalled admission is reported rather than waited on (#2000).
+pub(super) fn create_session_budget() -> Duration {
+    const ADMISSION_MARGIN: Duration = Duration::from_secs(10);
+    worker_spawn_budget() * 2 + ADMISSION_MARGIN
+}
+
+fn log_create_phase(state_dir: &Path, op: &str, session_id: Option<&str>, started: Instant) {
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    daemon_events::log_event(
+        state_dir,
+        op,
+        [
+            ("session_id", serde_json::json!(session_id)),
+            ("elapsed_ms", serde_json::json!(elapsed_ms)),
+        ],
+    );
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -1005,7 +1026,11 @@ fn daemon_create_session(
 ) -> io::Result<SessionSnapshot> {
     // Refresh before each admission as the low-latency path after an installer
     // or `setx` update. The timer is only the idle-daemon backstop.
+    let admission_started = Instant::now();
     spec.login_env = super::login_env::snapshot_for_new_session();
+    // #2000: each admission phase leaves an event, so a launcher that timed
+    // out can be matched to the phase the daemon was in.
+    log_create_phase(state_dir, "create_login_env", None, admission_started);
     fs::create_dir_all(specs_dir(state_dir))?;
     fs::create_dir_all(sessions_dir(state_dir))?;
 
@@ -1058,6 +1083,7 @@ fn daemon_create_session(
     worker
         .start()
         .map_err(|err| io::Error::other(err.to_string()))?;
+    log_create_phase(state_dir, "create_worker_started", Some(&session_id), admission_started);
 
     // Issue #305: each startup phase gets its own budget, measured from its
     // own start.
@@ -1091,6 +1117,8 @@ fn daemon_create_session(
             }
         }
     };
+
+    log_create_phase(state_dir, "create_snapshot_seen", Some(&session_id), admission_started);
 
     // Verify the worker's TCP listener is actually accepting connections
     // before reporting the session as ready. If the backend exits immediately,
@@ -1129,6 +1157,7 @@ fn daemon_create_session(
         }
     }
 
+    log_create_phase(state_dir, "create_ready", Some(&session_id), admission_started);
     workers
         .lock()
         .expect("workers mutex poisoned")

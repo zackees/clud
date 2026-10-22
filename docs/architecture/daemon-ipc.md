@@ -81,6 +81,19 @@ through to TCP on any miss — `RUNNING_PROCESS_DISABLE=1`, no
 the authoritative path in the sense that it always works, but it is not the
 common one.
 
+**`Create` is the exception (#2000):** it always goes over TCP with a deadline
+of `create_session_budget()` (`server.rs`): two worker-startup phases of
+`CLUD_DAEMON_WORKER_SPAWN_BUDGET_SECS` each plus a 10 s admission margin, 40 s
+by default. The frame lane has no read deadline. A miss after the frame was
+sent would also fall through and re-send `Create` over TCP, and `Create` is not
+idempotent: it could start a second worker. A stalled admission therefore
+fails the launch with `daemon did not admit the session within Ns`, and
+`daemon_create_session` logs one `daemon-events.jsonl` event per phase
+(`create_login_env`, `create_worker_started`, `create_snapshot_seen`,
+`create_ready`, each with `elapsed_ms`) that names where the time went. The
+launcher wraps `ensure_daemon` and the `Create` round trip in the
+`daemon-ensure` / `daemon-create` launch stages (`CLUD_EXIT_TIMING_FILE`).
+
 > **The named pipe is the default, not the rejected alternative.** An earlier
 > revision of this doc cited `DESIGN_DECISIONS.md` for choosing "TCP+JSON over
 > named pipes / Unix sockets". That is now backwards and produced at least one
