@@ -232,7 +232,10 @@ calls completed in a different order. The PreToolUse hook checks the latest
 matching session-version record in a bounded tail of the harness transcript.
 An older, missing or unrecognized version refuses graph launch or resumption.
 Native PostToolUse launch receipts also bind each cache to its originating
-supported runtime, session, run ID and script path. A runtime upgrade does not
+supported runtime, session, run ID and script path. A resume must also match the
+completed native workflow snapshot: preserve every original argument and use
+exactly its returned next epoch map. Missing snapshots, exhausted manifests or
+model-invented epoch advances fail closed. A runtime upgrade does not
 migrate an old cache; missing or incompatible provenance refuses resumption.
 Keep the deferred manifest and launch references, report the unsupported
 capability, and do not run Finish or restart completed goals. The check
