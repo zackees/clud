@@ -47,12 +47,19 @@ fn reason_for(payload: &HookPayloadView, facts: Option<&Value>) -> Option<String
     let version = transcript_version(payload);
     if version.is_some_and(|version| version >= MIN_VERSION) {
         let input = payload.tool_input.as_ref()?;
-        if input.get("resumeFromRunId").is_none_or(Value::is_null) || origin::allows(payload) {
+        if input.get("resumeFromRunId").is_none_or(Value::is_null) {
+            let base = input.pointer("/args/gateEpoch").and_then(Value::as_u64).unwrap_or(0);
+            let initial = input.pointer("/args/gateEpochs").and_then(Value::as_object)
+                .is_none_or(|epochs| epochs.values().all(|epoch| epoch.as_u64() == Some(base)));
+            return (!initial).then(|| "Initial graph launches cannot advance observation epochs. \
+                Resume the completed native run using its own deferred manifest.".into());
+        }
+        if origin::allows(payload) {
             return None;
         }
         return Some(
             "Graph resume refused: the originating Workflow cache has no verified \
-            supported-runtime receipt. A runtime upgrade does not migrate old cache keys. \
+            supported-runtime receipt or the arguments do not match its native deferred manifest. A runtime upgrade does not migrate old cache keys. \
             Keep orchestration_resume and its manifest; report unsupported cache provenance. \
             Do not run Finish, bypass the refusal, or restart completed goals."
                 .into(),
@@ -141,6 +148,15 @@ mod tests {
         json!({"type": "assistant", "sessionId": session, "version": version}).to_string() + "\n"
     }
 
+    fn completed_snapshot(path: &std::path::Path) {
+        let directory = path.with_extension("").join("workflows");
+        std::fs::create_dir_all(&directory).unwrap();
+        let snapshot = json!({"runId": "wf-new", "scriptPath": "/native/script.js",
+            "status": "completed", "args": {"orchestration": {}},
+            "result": {"resume": {"schema": "grind-publication-resume/v1", "gateEpochs": {}}}});
+        std::fs::write(directory.join("wf-new.json"), snapshot.to_string()).unwrap();
+    }
+
     #[test]
     fn rejects_older_unknown_and_malformed_versions_without_changing_manifest() {
         let root = tempfile::tempdir().unwrap();
@@ -203,7 +219,7 @@ mod tests {
         observe("PreToolUse", &response, &payload);
         payload.tool_input = Some(
             json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
-            "args": {"orchestration": {}}}),
+            "args": {"orchestration": {}, "gateEpochs": {}}}),
         );
         assert!(reason_for(&payload, None).is_some());
         payload
@@ -215,6 +231,8 @@ mod tests {
             .remove("resumeFromRunId");
         observe("PostToolUse", &response, &payload);
         payload.tool_input.as_mut().unwrap()["resumeFromRunId"] = json!("wf-new");
+        payload.tool_input.as_mut().unwrap()["args"]["gateEpochs"] = json!({});
+        completed_snapshot(&path);
         assert!(reason_for(&payload, None).is_none());
         payload.tool_input.as_mut().unwrap()["scriptPath"] = json!("/another/script.js");
         assert!(reason_for(&payload, None).is_some());
@@ -241,13 +259,37 @@ mod tests {
         observe("PostToolUse", &response, &payload);
         payload.tool_input = Some(
             json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
-            "args": {"orchestration": {}}}),
+            "args": {"orchestration": {}, "gateEpochs": {}}}),
         );
+        completed_snapshot(&path);
         assert!(reason_for(&payload, None).is_none());
         assert!(path
             .with_extension("")
             .join("grind-resume-wf-new.json")
             .is_file());
+    }
+
+    #[test]
+    fn native_manifest_binds_epochs_and_every_other_resume_argument() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        std::fs::write(&path, record(json!("2.1.306"), "session")).unwrap();
+        let mut payload = payload(&path);
+        payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {}}}));
+        let response = json!({"tool_response": {"runId": "wf-new", "scriptPath": "/native/script.js"}});
+        observe("PostToolUse", &response, &payload);
+        completed_snapshot(&path);
+        payload.tool_input = Some(json!({"resumeFromRunId": "wf-new", "scriptPath": "/native/script.js",
+            "args": {"orchestration": {}, "gateEpochs": {}}}));
+        assert!(reason_for(&payload, None).is_none());
+        payload.tool_input.as_mut().unwrap()["args"]["gateEpochs"] = json!({"completed": 1});
+        assert!(reason_for(&payload, None).is_some());
+        payload.tool_input.as_mut().unwrap()["args"] = json!({"orchestration": {}, "gateEpochs": {},
+            "goals": [{"id": "completed"}]});
+        assert!(reason_for(&payload, None).is_some());
+        payload.tool_input = Some(json!({"name": "grind-run", "args": {"orchestration": {},
+            "gateEpochs": {"completed": 1}}}));
+        assert!(reason_for(&payload, None).unwrap().contains("Initial graph"));
     }
 
     #[test]

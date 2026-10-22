@@ -67,6 +67,7 @@ pub(super) fn allows(payload: &HookPayloadView) -> bool {
             && receipt.get("run") == input.and_then(|input| input.get("resumeFromRunId"))
             && receipt.get("script") == input.and_then(|input| input.get("scriptPath"))
             && version.is_some_and(|version| version >= MIN_VERSION)
+            && approved_next_round(payload)
     })
 }
 
@@ -87,6 +88,55 @@ fn read(payload: &HookPayloadView) -> Option<Value> {
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() as u64 > MAX_RECEIPT {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+// Epoch maps are control input, not model assertions of completed work. Bind
+// them to the native completed run's own result and preserve all original args.
+fn approved_next_round(payload: &HookPayloadView) -> bool {
+    let Some(snapshot) = snapshot(payload) else {
+        return false;
+    };
+    let Some(input) = payload.tool_input.as_ref() else {
+        return false;
+    };
+    let Some(resume) = snapshot.pointer("/result/resume") else {
+        return false;
+    };
+    if snapshot.get("status").and_then(Value::as_str) != Some("completed")
+        || snapshot.get("runId") != input.get("resumeFromRunId")
+        || snapshot.get("scriptPath") != input.get("scriptPath")
+        || resume.get("schema").and_then(Value::as_str) != Some("grind-publication-resume/v1")
+        || resume.get("exhausted").and_then(Value::as_bool) == Some(true)
+    {
+        return false;
+    }
+    let Some(mut expected) = snapshot.get("args").and_then(Value::as_object).cloned() else {
+        return false;
+    };
+    let Some(epochs) = resume.get("gateEpochs").filter(|epochs| epochs.is_object()) else {
+        return false;
+    };
+    expected.insert("gateEpochs".into(), epochs.clone());
+    input.get("args") == Some(&Value::Object(expected))
+}
+
+fn snapshot(payload: &HookPayloadView) -> Option<Value> {
+    let run = payload.tool_input.as_ref()?.get("resumeFromRunId")?.as_str()?;
+    let directory = path(payload, run)?.parent()?.join("workflows");
+    if !std::fs::symlink_metadata(&directory).ok()?.file_type().is_dir() {
+        return None;
+    }
+    let file = directory.join(format!("{run}.json"));
+    if !std::fs::symlink_metadata(&file).ok()?.file_type().is_file() {
+        return None;
+    }
+    const MAX_SNAPSHOT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file).ok()?.take(MAX_SNAPSHOT + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_SNAPSHOT {
         return None;
     }
     serde_json::from_slice(&bytes).ok()
