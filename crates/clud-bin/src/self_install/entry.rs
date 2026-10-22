@@ -441,11 +441,21 @@ mod tests {
         for (flags, expected) in [
             (vec!["--installer", "--no-modify-path"], Request::Menu),
             (
-                vec!["--installer", "--install-current", "--no-modify-path", "--yes"],
+                vec![
+                    "--installer",
+                    "--install-current",
+                    "--no-modify-path",
+                    "--yes",
+                ],
                 Request::Current,
             ),
             (
-                vec!["--installer", "--install-version", "2.8.14", "--no-modify-path"],
+                vec![
+                    "--installer",
+                    "--install-version",
+                    "2.8.14",
+                    "--no-modify-path",
+                ],
                 Request::Exact("2.8.14".into()),
             ),
         ] {
@@ -455,7 +465,12 @@ mod tests {
             assert!(parsed.no_modify_path);
             assert_eq!(explicit_request(&parsed).unwrap(), Some(expected));
         }
-        let split = parse(&["clud", "--installer", "--install-current", "--no-modify-path"]);
+        let split = parse(&[
+            "clud",
+            "--installer",
+            "--install-current",
+            "--no-modify-path",
+        ]);
         assert!(split.no_modify_path);
         assert!(split.passthrough.is_empty());
         assert_eq!(explicit_request(&split).unwrap(), Some(Request::Current));
