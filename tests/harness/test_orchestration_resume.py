@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from tests.harness.harness import Harness
+from tests.harness.harness import Harness, RunResult
 from tests.harness.test_grind import (
     _after,
     _bash,
@@ -24,6 +24,23 @@ from tests.harness.test_grind import (
 )
 from tests.harness.test_grind_gate_binding import install_outcome_guard
 from tests.harness.test_grind_meta_of_metas import _told
+from tests.harness.test_workflow_gate_evidence import _message_texts
+
+
+
+def workflow_notices(result: RunResult) -> dict[str, str]:
+    notices = {}
+    for row in result.requests:
+        if row.get("role") != "main":
+            continue
+        for text in _message_texts(row.get("messages", [])):
+            for match in re.finditer(r"<task-notification>(.*?)</task-notification>",
+                                     text, re.DOTALL):
+                notice = match[1]
+                identity = re.search(r"<task-id>([^<]+)</task-id>", notice)
+                if identity:
+                    notices[identity[1]] = notice
+    return notices
 
 
 def capture_resume_input(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -200,5 +217,10 @@ def test_native_resume_replays_one_unchanged_agent(harness: Harness, monkeypatch
         "input_file") == str(captured)]
     assert len(resumed) == 1, resumed
     assert "CACHE_RESUME_STARTED" in result.stdout
+    notices = workflow_notices(result)
+    assert len(notices) == 2, notices
+    for notice in notices.values():
+        assert "<status>completed</status>" in notice, notice
+        assert "<result>" in notice and "CACHE_OBSERVATION_COMPLETE" in notice, notice
     assert len(calls) == 1, {"calls": calls, "reference": captured.read_text()}
     assert (h.repo / "cache-probe.txt").read_text() == "observed"
