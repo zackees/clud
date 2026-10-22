@@ -173,3 +173,23 @@ fn previews_hide_unchanged_siblings_and_reject_invalid_pointers() {
         assert!(prepare(&home, &setting(pointer, "false")).is_err());
     }
 }
+
+#[test]
+fn approval_expiring_during_lock_and_validation_is_refused_before_audit() {
+    let (_directory, home, _) = world();
+    let path = super::super::settings_path_at(&home);
+    let original = fs::read(&path).unwrap();
+    let prepared = prepare(&home, &setting("/web_term/enabled", "false")).unwrap();
+    let created = prepared.preview.created;
+    let mut calls = 0;
+    // A deterministic clock models time consumed by the real lock/validation
+    // path, avoiding a long sleep or scheduler-dependent expiry fixture.
+    let result = commit_with_clock(prepared, || {
+        calls += 1;
+        if calls == 1 { created } else { created + APPROVAL_LIFETIME + Duration::from_secs(1) }
+    });
+    assert_eq!(calls, 2, "must check again under the settings lock");
+    assert!(matches!(result, Err(Failure::Changed)));
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert!(!home.join(".clud/settings-audit.jsonl").exists());
+}

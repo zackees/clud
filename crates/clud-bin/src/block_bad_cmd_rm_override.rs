@@ -122,7 +122,7 @@ fn reason_in(
         || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
     let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
     let writes_settings = script.invocations.iter().any(|invocation| {
-        invocation.redirects.iter().any(|redirect| {
+        protected_operand(invocation, home) || invocation.redirects.iter().any(|redirect| {
             redirect.writes_file()
                 && home.is_none_or(|home| !safe_destination(&redirect.target, invocation, home))
         })
@@ -137,6 +137,27 @@ fn reason_in(
     } else {
         None
     }
+}
+
+fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
+    if read_only_invocation(invocation) {
+        return false;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    let mutator = matches!(invocation.effective_program().as_deref(),
+        Some("cp" | "mv" | "tee" | "install" | "dd" | "set-content" | "add-content" | "out-file"));
+    let Some(cwd) = invocation.cwd.as_literal() else {
+        return mutator;
+    };
+    invocation.effective_argv().iter().skip(1).any(|word| {
+        word.as_literal().map_or(mutator, |word| {
+            // A known protected operand on an unknown writer is refused too:
+            // passing a target to a script does not establish its authority.
+            protected_file(word.strip_prefix("of=").unwrap_or(word), cwd, home)
+        })
+    })
 }
 
 fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> bool {
@@ -161,16 +182,37 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
     } else {
         target.to_string()
     };
-    let destination = crate::shell_ast::join_path(cwd, &expanded);
+    let destination = if cfg!(windows) || !expanded.contains('\\') {
+        Path::new(cwd).join(&expanded)
+    } else {
+        crate::shell_ast::join_path(cwd, &expanded).into()
+    };
     let settings = crate::clud_settings::settings_path_at(home);
     let canonical = |path: &Path| {
-        crate::path_norm::canonicalize_plain(path)
-            .unwrap_or_else(|_| path.to_path_buf())
+        canonical_creation_target(path)
             .to_string_lossy()
             .replace('\\', "/")
             .to_ascii_lowercase()
     };
-    canonical(Path::new(&destination)) == canonical(&settings)
+    canonical(&destination) == canonical(&settings)
+}
+
+fn canonical_creation_target(path: &Path) -> std::path::PathBuf {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut canonical) = crate::path_norm::canonicalize_plain(ancestor) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return Path::new(&crate::shell_ast::join_path("", &canonical.to_string_lossy())).into();
+        }
+        let (Some(parent), Some(component)) = (ancestor.parent(), ancestor.file_name()) else {
+            return path.to_path_buf();
+        };
+        missing.push(component);
+        ancestor = parent;
+    }
 }
 
 fn read_only_invocation(invocation: &Invocation) -> bool {
@@ -330,7 +372,7 @@ mod tests {
         reason_in(
             command,
             crate::block_bad_cmd::ShellDialect::Posix,
-            None,
+            Some(Path::new("/repo")),
             Some(Path::new("/home/u")),
         )
     }

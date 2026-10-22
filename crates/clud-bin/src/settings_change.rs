@@ -461,7 +461,14 @@ fn unchanged(current: &Snapshot, approved: &Snapshot) -> bool {
 }
 
 fn commit(prepared: Prepared) -> Result<PathBuf, Failure> {
-    if prepared.preview.created.elapsed() > APPROVAL_LIFETIME {
+    commit_with_clock(prepared, Instant::now)
+}
+
+fn commit_with_clock(
+    prepared: Prepared,
+    mut now: impl FnMut() -> Instant,
+) -> Result<PathBuf, Failure> {
+    if now().duration_since(prepared.preview.created) > APPROVAL_LIFETIME {
         return Err(Failure::Changed);
     }
     let current = snapshot(&prepared.snapshot.home)?;
@@ -485,6 +492,10 @@ fn commit(prepared: Prepared) -> Result<PathBuf, Failure> {
         }
     }
     validate_document(&prepared.updated)?;
+    // Lock contention and validation consume the same approval lifetime.
+    if now().duration_since(prepared.preview.created) > APPROVAL_LIFETIME {
+        return Err(Failure::Changed);
+    }
     append_audit(parent, &prepared.preview, "approved")?;
     if super::write_settings(&prepared.snapshot.target, &prepared.updated).is_err() {
         let _ = append_audit(parent, &prepared.preview, "write_failed");
