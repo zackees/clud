@@ -70,3 +70,21 @@ deadline and always terminates the compositor. Headless skips do not establish
 native window coverage.
 The native CI setup sets `CLUD_TEST_REQUIRE_SECRET_GUI=1`: there a missing display,
 runtime or graphics context fails the probe rather than skipping coverage.
+
+The named GitLab consumer acceptance uses the real `glab auth login --stdin`
+and `glab auth status` commands with a synthetic token and a loopback GitLab API.
+The native prompt supplies the token directly to the login process. The status
+command must make another authenticated request using the saved credential.
+Both command outputs are captured and checked for the sentinel; the prompt's
+agent-facing output remains `stored`. The fixture disables update checks,
+clears inherited GitLab authentication/host overrides, and uses an isolated
+configuration directory. Its explicit file-storage option applies only to the
+synthetic test account and never changes the user's keychain.
+
+`ci/install_glab.py` provisions GitLab CLI 1.124.0 for the six native unit-test
+targets through the existing test workflow. Each official release archive has
+a pinned SHA256; only its bounded regular executable is copied to the runner's
+temporary directory. `CLUD_TEST_GLAB_BINARY` points the test to that executable.
+Mandatory native coverage fails if it is missing. This dependency belongs to
+CI; clud still ships one multicall executable and requires no GitLab CLI for
+its other secret sinks.

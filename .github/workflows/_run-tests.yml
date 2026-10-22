@@ -100,6 +100,15 @@ jobs:
         if: inputs.suite == 'harness'
         run: npm install -g @anthropic-ai/claude-code@2.1.282
 
+      - name: Install pinned GitLab CLI for secret acceptance
+        if: inputs.suite == 'unit'
+        shell: bash
+        run: >-
+          "$VENV_PY" -m ci.install_glab
+          --target "${{ inputs.target }}"
+          --destination "$RUNNER_TEMP/clud-glab"
+          --github-env "$GITHUB_ENV"
+
       # Run the focused GUI check before the broad integration suite, which can
       # hang independently. setup-exec has unpacked the wheel into bundle/dist.
       - name: Smoke installed Kitty GUI headlessly
