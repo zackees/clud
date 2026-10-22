@@ -407,16 +407,13 @@ fn orchestrator_read(words: &[String]) -> bool {
         "--upload-pack",
         "--exec",
     ];
-    if sub
-        .iter()
-        .any(|w| {
-            let option = w.split('=').next().unwrap_or(w);
-            option.len() > 2
-                && forbidden
-                    .iter()
-                    .any(|flag| option.starts_with(flag) || flag.starts_with(option))
-        })
-    {
+    if sub.iter().any(|w| {
+        let option = w.split('=').next().unwrap_or(w);
+        option.len() > 2
+            && forbidden
+                .iter()
+                .any(|flag| option.starts_with(flag) || flag.starts_with(option))
+    }) {
         return false;
     }
     match sub.first().map(String::as_str) {
