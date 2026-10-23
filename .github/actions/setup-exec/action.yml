@@ -42,8 +42,12 @@ runs:
         # otherwise-green Windows jobs red. Disable only that cache path.
         enable-cache: ${{ runner.os != 'Windows' }}
 
-    - name: Cache venv
-      uses: actions/cache@v4
+    # Read-only everywhere but `main` pushes (CACHE-003): a PR or branch save
+    # is scoped to that ref, so nothing else can restore it, yet it still
+    # counts against the 10 GB budget and pushes live entries into LRU.
+    - name: Restore venv
+      id: venv-cache
+      uses: actions/cache/restore@v4
       with:
         path: .venv
         key: venv-exec-${{ runner.os }}-${{ runner.arch }}-py3.11-${{ hashFiles('uv.lock') }}
@@ -59,6 +63,13 @@ runs:
     - name: Sync
       shell: bash
       run: uv sync --frozen --no-default-groups --group test --no-install-project --python 3.11
+
+    - name: Save venv
+      if: steps.venv-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v4
+      with:
+        path: .venv
+        key: ${{ steps.venv-cache.outputs.cache-primary-key }}
 
     # See the identical step in ../setup-build: `uv run` would sync the project
     # and trigger a PEP 517 maturin build -- which on an exec runner hits the

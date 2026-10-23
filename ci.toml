@@ -69,14 +69,12 @@ uv         = { via = "setup-uv",                  max = "5MB",    per = "platfor
 # `cargoregistry` is a real `setup-soldr:*` shape (resolve-setup.ts:1055).
 cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = true, per = "none", evict = "lru", promote = "ancestor" }
 
-# KNOWN GAP: this repository's own `venv-build-<OS>-<arch>-py<ver>-*` and
-# `venv-exec-<OS>-<arch>-py<ver>-*` keys (7 live entries, ~264 MB) come from
-# .github/actions/setup-build and setup-exec writing through the sanctioned
-# actions/cache wrapper, with their own literal prefixes. No `[cache.family].via`
-# resolves to them -- `via = "ci-lint"` builds `<family-id>-v1-`, and the
-# `setup-soldr:*` values each own a fixed prefix. Declaring a family that does
-# not match would be fiction, so they stay undeclared and `ci-lint cache audit`
-# reports them as CACHE-001. Filed as a schema gap rather than papered over.
+# This repository's own venv caches (.github/actions/setup-build and
+# setup-exec), declared by literal prefix (zackees/ci.yml#347). Undeclared,
+# the janitor would sweep them as CACHE-001 and every run would rebuild them.
+# Only `main` pushes save them; every other run restores read-only.
+venv-build = { prefix = "venv-build-", max = "80MB",  lockfile = true, per = "platform", evict = "lru" }
+venv-exec  = { prefix = "venv-exec-",  max = "120MB", lockfile = true, per = "platform", evict = "lru" }
 
 # Promotion (CACHE-024, #185, zackees/ci.yml#335). zackees/ci.yml standardizes
 # promotion on setup-soldr's ancestor encoding -- shortest parent-edge distance
