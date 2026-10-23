@@ -82,9 +82,10 @@ runs:
       with:
         toolchain: ${{ inputs.toolchain }}
         cache: true
-        # Off `main` (a workflow_dispatch on a branch, a tag) `auto` would
-        # still save, into a ref-scoped entry no other run can restore.
-        save-cache: ${{ github.ref == 'refs/heads/main' && inputs.save-cache || 'false' }}
+        # `auto` saves only on the default branch: a PR, branch dispatch or
+        # tag entry is ref-scoped, so nothing else could restore it
+        # (zackees/setup-soldr#587). Locally (act) it saves fully.
+        save-cache: ${{ inputs.save-cache }}
         # setup-soldr#559: a failed or cancelled job saves no build outputs
         # (its store may be partial; an exact-hit key is never re-saved).
         job-status: ${{ job.status }}
