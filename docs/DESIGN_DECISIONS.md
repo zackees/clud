@@ -3950,6 +3950,9 @@ without persisting prompts, raw session ids, or agent ids. The status-line
 callback already receives the transcript path, so direct routes need no
 listener in the request path. Native Codex without that callback still needs
 bridge-observed usage to display a triple.
+
+**Amended by #2045 / DD-186:** the ledger lives for one conversation, not the
+launch; a new main transcript starts it over.
 ## DD-085: Keep OpenRouter's changing price inventory separate from the model catalog
 
 **Context:** zackees/clud#1256. OpenRouter's model inventory and token prices
@@ -7212,3 +7215,27 @@ from declared capabilities instead of assuming a fixed 600-second tool cap
 or treating a second timeout as a failed goal. DD-184 owns the common wait
 contract. Controlled JavaScript, hook/CLI and offline watcher fixtures verify
 these procedures without claiming a live Claude Workflow integration.
+
+## DD-186: Status-line usage is scoped to one conversation
+
+**Context:** zackees/clud#2045. Both usage ledgers, the bridge totals and the
+direct-route transcript ledger (DD-084), were launch-scoped. After `/clear`
+the status line and title kept the previous conversation's model and token
+totals, so a fresh conversation appeared to have spent hundreds of thousands
+of tokens.
+
+**Decision:** The displayed totals cover the current conversation. The
+transcript ledger records a hash of the main `transcript_path` and starts
+over, deleting the stale snapshot, when Claude Code reports a different one.
+The bridge's existing `SessionStart`/`clear` lifecycle hook zeroes its totals
+and increments a usage generation. `StatusStateWriter` orders snapshots by
+`(generation, request_count)`, so a worker that finishes after the clear
+cannot resurrect the old totals. `/compact` keeps the transcript and the
+totals.
+
+**Rationale:** The number on screen is read as "what this conversation cost",
+and `/clear` is the user's explicit conversation boundary. A transcript change
+is the boundary signal direct routes already receive; bridged routes already
+receive the clear hook. The generation keeps the out-of-order guard intact
+instead of weakening it to allow lower counts. Bridged `/resume` has no hook
+and still continues the running totals.
