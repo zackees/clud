@@ -30,17 +30,26 @@ tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.dylint]
 run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "dylint"]
-exclude = ["tests/test_*.py"]
+# Rust lanes read nothing in root tests/, docs/, bench/ or root *.md except
+# the fixture `openrouter_catalog.rs` embeds (#2040).
+exclude = ["tests/**", "docs/**", "bench/**", "*.md"]
+keep = ["tests/fixtures/**"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.clippy]
 run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "lint-linux-x64"]
-exclude = ["tests/test_*.py"]
+# Rust lanes read nothing in root tests/, docs/, bench/ or root *.md except
+# the fixture `openrouter_catalog.rs` embeds (#2040).
+exclude = ["tests/**", "docs/**", "bench/**", "*.md"]
+keep = ["tests/fixtures/**"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.build]
 run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "build-linux-x64"]
-exclude = ["tests/test_*.py"]
+# Rust lanes read nothing in root tests/, docs/, bench/ or root *.md except
+# the fixture `openrouter_catalog.rs` embeds (#2040).
+exclude = ["tests/**", "docs/**", "bench/**", "*.md"]
+keep = ["tests/fixtures/**"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.unit]
