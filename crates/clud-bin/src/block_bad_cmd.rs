@@ -775,7 +775,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // block the hook itself — fall back to the documented off default.
     let pr_wait_fail_fast_enabled =
         crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true);
-    let rust_use_soldr = config.rust.use_soldr;
+    let rust_use_soldr = config.rust.use_soldr && in_rust_tree(&payload.cwd);
     let mut evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         effective_command,
         Some(&payload.cwd),
@@ -1976,6 +1976,17 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
     let _ = force_rm_resolver;
     evaluation
+}
+
+/// True when `cwd` is at or below a `Cargo.toml` or `rust-toolchain(.toml)`.
+///
+/// The soldr rule only applies inside a Rust tree (#2065). Elsewhere, such as
+/// `$HOME` or an extracted sdist in a Python project, bare `cargo`/`rustc` is
+/// left alone: there is no workspace for soldr to resolve a toolchain from.
+fn in_rust_tree(cwd: &Path) -> bool {
+    const MARKERS: &[&str] = &["Cargo.toml", "rust-toolchain.toml", "rust-toolchain"];
+    cwd.ancestors()
+        .any(|dir| MARKERS.iter().any(|marker| dir.join(marker).is_file()))
 }
 
 struct EvaluationContext<'a> {
@@ -4939,6 +4950,26 @@ mod tests {
                 .reason
                 .is_none()
         );
+    }
+
+    #[test]
+    fn soldr_rule_applies_only_inside_a_rust_tree() {
+        // #2065: outside a Rust tree there is no workspace for soldr to pin.
+        let plain = tempdir().unwrap();
+        let nested = plain.path().join("sdist").join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!in_rust_tree(&nested));
+
+        for marker in ["Cargo.toml", "rust-toolchain.toml", "rust-toolchain"] {
+            let root = tempdir().unwrap();
+            let sub = root.path().join("crates").join("x");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(root.path().join(marker), "").unwrap();
+            assert!(
+                in_rust_tree(&sub),
+                "{marker} in an ancestor marks a Rust tree"
+            );
+        }
     }
 
     #[test]
