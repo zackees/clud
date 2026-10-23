@@ -30,15 +30,23 @@ runs:
     # The packages themselves come from an Actions cache (#2073): a mirror
     # outage failed a unit shard even with the bounded install below. Only a
     # cache miss touches the mirror; only `main` pushes save (CACHE-003).
+    # ImageOS/ImageVersion are runner process env, not workflow `env`, so
+    # `${{ env.ImageVersion }}` is empty in a key; read them from the shell.
+    - name: Resolve runner image
+      id: runner-image
+      if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
+      shell: bash
+      run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
     - name: Restore Linux native window runtime packages
       id: gui-debs
       if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
       uses: actions/cache/restore@v4
       with:
         path: ~/gui-runtime-debs
-        key: gui-debs-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-v1
+        key: gui-debs-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.id }}-v1
         restore-keys: |
-          gui-debs-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+          gui-debs-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install Linux native window runtime
       id: gui-install
