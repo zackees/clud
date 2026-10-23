@@ -109,6 +109,9 @@ runs:
         # recompile, against all 462 when the cook ran in the host env.
         # `--target` is load-bearing: without it the cook is a host cook.
         prebuild-deps: soldr-cook
+        # EXPERIMENT (setup-soldr#592): let cargo fetch crate sources instead
+        # of restoring a 44k-file registry archive (40s on a warm build).
+        cargo-registry-cache: false
         prebuild-deps-flags: --target ${{ inputs.target }} --workspace${{ inputs.profile == 'release' && ' --release' || '' }}
 
     # soldr's blessed cross-compile bootstrap -- one invocation shape for every
