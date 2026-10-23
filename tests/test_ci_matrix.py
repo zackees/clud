@@ -560,11 +560,9 @@ def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
     setup = (CI_YML.parent.parent / "actions" / "setup-build" / "action.yml").read_text(
         encoding="utf-8"
     )
-    # The caller's policy still reaches setup-soldr, but only on `main` (#2038).
-    assert (
-        "save-cache: ${{ github.ref == 'refs/heads/main' && inputs.save-cache || 'false' }}"
-        in setup
-    )
+    # The caller's policy reaches setup-soldr unchanged: its `auto` already
+    # skips every ref but the default branch (zackees/setup-soldr#587).
+    assert "save-cache: ${{ inputs.save-cache }}" in setup
 
 
 def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None:
