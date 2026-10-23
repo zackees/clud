@@ -313,6 +313,8 @@ jobs:
           sparse-checkout: ci_lint
       - name: Set up maintenance runtime
         uses: ./.github/actions/setup-exec
+        with:
+          native-window-runtime: false
       # Pre-pruning spends live deletes, so it must only happen on a push that
       # actually changed a lockfile.
       - name: Detect a lockfile change

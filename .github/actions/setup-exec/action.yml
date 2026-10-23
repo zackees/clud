@@ -13,6 +13,13 @@ inputs:
       wheel smoke (#1545), which needs no bundle.
     required: false
     default: ""
+  native-window-runtime:
+    description: >-
+      Install the Linux graphics packages the native-window tests need.
+      Maintenance jobs pass false: they run no tests, and `apt-get update`
+      alone has hung cache-maint past its timeout, skipping the build (#2038).
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -21,7 +28,7 @@ runs:
     # test display is Xvfb. In particular, winit panics without the X11 XKB
     # runtime instead of returning a graphics-initialization error (#1708).
     - name: Install Linux native window runtime
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
       shell: bash
       run: |
         sudo apt-get update -qq
