@@ -122,6 +122,7 @@ def test_minimal_and_extended_modes_are_strict_subsets():
         ("pull_request", "", "ci:full", "full"),
         ("push", "", "", "minimal"),
         ("merge_group", "", "", "full"),
+        ("schedule", "", "", "full"),
     ],
 )
 def test_resolve_tier(event, dispatch, labels, expected):

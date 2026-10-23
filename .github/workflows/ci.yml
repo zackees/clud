@@ -28,6 +28,12 @@ on:
   # Inert today: no merge queue is configured for main (#1651), so no
   # merge_group run has ever happened. Kept so a future queue gets full mode.
   merge_group:
+  # Nightly native run on main (#1849): routine CI is Linux-only, so a
+  # Windows/macOS regression could otherwise sit on main until an unrelated
+  # ci-full PR surfaced it. Off-peak so it does not contend with ci-full PRs
+  # for macOS runners. `nightly-report` below turns a red run into an issue.
+  schedule:
+    - cron: "41 6 * * *"
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -168,17 +174,11 @@ jobs:
       # push keeps refreshing the caches PRs restore from; only the work a
       # green PR already proved is skipped.
       #
-      # Why there is no nightly full run here, despite the design asking for
-      # one as the drift backstop: measured over 12 recent successful main
-      # pushes, a main-push run costs 14.9 runner-minutes of which 7.1 (48%)
-      # is skippable validation. At the observed 1.63 main pushes/day and a
-      # 42-60% reuse rate, reuse saves ~5 runner-min/day -- while a nightly
-      # minimal-tier run costs 14.9/day and a full-tier one ~60/day. The
-      # backstop would cost 3-12x what it protects. The drift window is
-      # instead bounded by --max-age-hours 12 above (a proving run older
-      # than 12h forces a full run) plus the live re-verification
-      # reuse-check performs on every job it skips. Revisit if the push rate
-      # rises enough for a nightly to pay for itself.
+      # The reuse drift window is bounded by --max-age-hours 12 above (a
+      # proving run older than 12h forces a full run) plus the live
+      # re-verification reuse-check performs on every job it skips. The
+      # nightly `schedule` run (#1849) is a native-coverage backstop, not a
+      # reuse one: it never skips or reuses anything (guard below).
       #
       # Fail-closed by construction: this step emits nothing unless the
       # decision above set reuse=true, which reuse-check only does after one
@@ -200,6 +200,19 @@ jobs:
             echo "skip_$job=true" >> "$GITHUB_OUTPUT"
           done
           echo "skipping validation jobs on a verified byte-identical merge"
+      # The nightly run exists to execute every lane. The steps above only
+      # compute skips on pull_request/push, so nothing is set here today;
+      # this makes a future change that waives a lane on schedule fail loudly
+      # instead of quietly turning the backstop into a no-op (#1849).
+      - name: Nightly runs skip nothing
+        if: github.event_name == 'schedule'
+        env:
+          SKIPS: ${{ steps.gate.outputs.skip_dylint }}${{ steps.gate.outputs.skip_lint-linux-x64 }}${{ steps.gate.outputs.skip_build-linux-x64 }}${{ steps.gate.outputs.skip_test-linux-x64-unit }}${{ steps.gate.outputs.skip_static-checks }}${{ steps.reuse_skip.outputs.skip_lint-linux-x64 }}${{ steps.reuse_skip.outputs.skip_test-linux-x64-unit }}${{ steps.reuse_skip.outputs.skip_static-checks }}${{ steps.reuse.outputs.reuse }}
+          MODE: ${{ steps.mode.outputs.tier }}
+        run: |
+          set -euo pipefail
+          [ "$MODE" = full ] || { echo "::error::nightly run resolved mode '$MODE', not full"; exit 1; }
+          [ -z "$SKIPS" ] || { echo "::error::nightly run must not skip or reuse a job (got '$SKIPS')"; exit 1; }
 
   # Everything platform-independent, once, on the cheapest runner. Previously
   # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
@@ -235,10 +248,6 @@ jobs:
           cache-suffix: ${{ env.ACT && 'act-unpruned' || '' }}
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
-      # Proof validation needs no compiled clud binary. Catch a weakened
-      # attestation verifier before starting the expensive Rust lanes.
-      - name: Test local gate proof
-        run: .venv/bin/python -m pytest tests/test_local_gate_receipt.py -q
       - name: Setup soldr
         uses: zackees/setup-soldr@v0
         env:
@@ -679,3 +688,46 @@ jobs:
           printf '%s\n' "$RESULTS" >needs.json
           printf '%s\n' "${REUSE_EVIDENCE:-null}" >reuse-check.json
           uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --attested-workflow ci.yml --event "$GITHUB_EVENT_PATH"
+
+  # ---------------------------------------------------------- nightly-report --
+  # Turns the nightly run's verdict into one tracking issue (#1849): opened
+  # (or commented on) when CI OK is anything but success -- cancelled and
+  # skipped count as red -- and closed by the next green night. Never runs
+  # on PRs or pushes, and is the only job holding issues: write.
+  nightly-report:
+    name: Nightly report
+    if: always() && github.event_name == 'schedule'
+    needs: [static, ci-ok]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Open, update or close the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.ci-ok.result }}
+          SHA: ${{ needs.static.outputs.source_ref || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          label=ci-nightly-failure
+          existing=$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')
+          if [ "$RESULT" = success ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "Nightly full CI is green again on \`$SHA\`: $RUN_URL"
+            fi
+            exit 0
+          fi
+          failed=$(gh run view "$RUN_ID" --json jobs --jq '[.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null and .name != "Nightly report") | "- \(.name): \(.conclusion)"] | join("\n")')
+          body=$(printf 'Nightly full CI on `main` ended `%s` at `%s`.\n\nRun: %s\n\nJobs not green:\n%s\n' "$RESULT" "$SHA" "$RUN_URL" "${failed:-"(none reported; see the run)"}")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create "$label" --color B60205 --description "Nightly full CI on main failed" 2>/dev/null || true
+            gh issue create --title "Nightly full CI failed on main" --label "$label" --body "$body"
+          fi

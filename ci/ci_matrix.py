@@ -94,7 +94,8 @@ def resolve_tier(  # noqa: C901
         if not provenance_verified:
             raise ValueError("full dispatch requires verified source/workflow provenance")
         return "full"
-    if event_name == "merge_group":
+    # The nightly native run on main (#1849): every lane, no labels to read.
+    if event_name in ("merge_group", "schedule"):
         return "full"
     if event_name == "push":
         return "minimal"
