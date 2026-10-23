@@ -484,6 +484,29 @@ def test_ci_windows_label_selects_linux_x64_and_windows_x64():
     assert resolve_tier("pull_request", "", "ci-windows,ci-full") == "full"
 
 
+def test_ci_macos_label_selects_linux_x64_and_both_darwin_triples():
+    """Native macOS evidence without ci-full's Windows and Linux ARM lanes."""
+    assert resolve_tier("pull_request", "", "ci-macos") == "macos"
+    assert [t.triple for t in selected("macos")] == [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+    ]
+    assert resolve_tier("pull_request", "", "ci-macos,ci-test") == "extended"
+    assert resolve_tier("pull_request", "", "ci-macos,ci-full") == "full"
+    with pytest.raises(ValueError, match="ci-full"):
+        resolve_tier("pull_request", "", "ci-macos,ci-windows")
+    text = CI_YML.read_text(encoding="utf-8")
+    for job in ("build-macos-arm", "build-macos-x64"):
+        block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n", 1)[0]
+        assert "needs.static.outputs.mode == 'macos'" in block, job
+    for job in ("build-windows-x64", "build-windows-arm", "build-linux-arm"):
+        block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n", 1)[0]
+        assert "'macos'" not in block, job
+    integration = text.split("\n  test-linux-x64-integration:\n", 1)[1].split("\n\n", 1)[0]
+    assert "'macos'" not in integration
+
+
 def test_ci_windows_mode_runs_and_gates_on_the_routine_linux_lanes():
     """#1652: with no merge queue, a green `CI OK` in windows mode must imply the
     routine (minimal) Linux lanes passed on the same run, hence the same SHA."""
@@ -616,7 +639,7 @@ def test_attested_skip_is_wired_to_the_shared_verifier() -> None:
         assert f"- {job}" in gate, job
         assert f"skip_{job}" not in gate, job
     # A label that selects lanes the local plan does not run must never trust.
-    for label in ("ci-test", "ci-windows", "ci-full", "ci:full"):
+    for label in ("ci-test", "ci-windows", "ci-macos", "ci-full", "ci:full"):
         assert f'"{label}"' in trust.split("full-labels", 1)[1].split("\n", 1)[0], label
 
 

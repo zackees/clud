@@ -188,6 +188,7 @@ the rm guard (#1746).
 |---|---|
 | *(none)* | Static checks, Linux x64 build + unit, and Dylint (which also compiles check-only for `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, so it catches macOS-only compile errors) |
 | `ci-windows` | Static checks plus the Windows x64 build, unit and integration lanes (fast Windows iteration) |
+| `ci-macos` | Routine Linux x64 plus the macOS arm64 and x64 build, unit and integration lanes (fast macOS iteration) |
 | `ci-test` | Linux x64 integration plus Windows x64 |
 | `ci-full` | All six targets, including hosted macOS arm64 and x64 |
 

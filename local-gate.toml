@@ -137,6 +137,6 @@ skip = [
 ]
 covered-by = { "ci.yml:static-checks" = ["static"], "ci.yml:dylint" = ["dylint"], "ci.yml:lint-linux-x64" = ["clippy"], "ci.yml:build-linux-x64" = ["build"], "ci.yml:test-linux-x64-unit" = ["unit"] }
 # Labels that select lanes the local plan does not run.
-full-labels = ["ci-test", "ci-windows", "ci-full", "ci:full"]
+full-labels = ["ci-test", "ci-windows", "ci-macos", "ci-full", "ci:full"]
 # The CI helpers only the skipped jobs run.
 surfaces = ["ci/**"]

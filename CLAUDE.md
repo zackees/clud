@@ -347,7 +347,8 @@ Routine PRs and `main` updates run Linux x64 build + unit tests only. Use litera
 targets, including both hosted macOS architectures, and Dylint; existing
 `ci:full` labels remain equivalent. `ci-windows` runs the routine Linux x64
 lanes plus the Windows x64 build and suites for fast Windows iteration;
-`CI OK` gates on all of them (#1652). There is **no merge queue** (the
+`ci-macos` does the same with both macOS triples instead. `CI OK` gates on
+all of them (#1652). There is **no merge queue** (the
 `merge_group` trigger is inert): PR CI tests the head SHA, and `main`'s push
 run is the only test of the merged tree. Manual full CI pins every job to a verified
 candidate SHA. See
@@ -360,8 +361,8 @@ because a local run failed to complete. Reserve native tiers for changes to
 platform adapters, native API/FFI handling, OS-specific behavior or platform
 runtime contracts. Name that change and what the extra native lanes prove in
 the PR body; choose the smallest tier covering the affected platforms
-(`ci-windows` for Windows-only implementation changes, `ci-full` when macOS
-or the full platform set is affected). Release validation remains full.
+(`ci-windows` for Windows-only implementation changes, `ci-macos` for
+macOS-only ones, `ci-full` when the full platform set is affected). Release validation remains full.
 See [label selection](docs/architecture/ci.md#when-to-add-native-ci-labels).
 
 | File | Role |

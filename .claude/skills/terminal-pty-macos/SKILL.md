@@ -1,6 +1,6 @@
 ---
 name: terminal-pty-macos
-description: Use before changing or debugging clud's terminal/PTY path on macOS (POSIX PTY, raw mode, libc termios/openpty type differences from Linux, escape sequences, terminal restore). Covers what differs from Linux, how to catch macOS-only compile errors early, and when a macOS platform implementation change needs ci-full; shared business logic calling platform code stays on routine CI.
+description: Use before changing or debugging clud's terminal/PTY path on macOS (POSIX PTY, raw mode, libc termios/openpty type differences from Linux, escape sequences, terminal restore). Covers what differs from Linux, how to catch macOS-only compile errors early, and when a macOS platform implementation change needs ci-macos; shared business logic calling platform code stays on routine CI.
 ---
 
 # Terminal / PTY on macOS
@@ -62,7 +62,8 @@ resumable scanners, and restore from `Drop`. In addition:
 2. Push. On routine PRs the **Dylint** job also compiles check-only for
    `aarch64-apple-darwin`. It caught a macOS-only compile error while #1709
    was in progress, so read its result before anything else.
-3. Add `ci-full` only when the diff changes macOS/POSIX platform
+3. Add `ci-macos` (both Darwin lanes plus routine Linux; `ci-full` only
+   when other platforms are affected too) only when the diff changes macOS/POSIX platform
    implementation or its native runtime contract (for example termios or
    native PTY API handling). Name the changed implementation and what the
    macOS lanes prove in the PR body. Shared pump orchestration, stream
@@ -81,7 +82,7 @@ and Dylint proves only that the code compiles for macOS.
 
 ## Known behaviours and gotchas
 
-- `ci-full` is the only label that runs macOS. `ci-windows` and `ci-test`
+- `ci-macos` and `ci-full` are the labels that run macOS. `ci-windows` and `ci-test`
   do not ([ci.md § Current CI selection](../../../docs/architecture/ci.md#current-ci-selection)).
 - The `pty` test harness runs inside a pseudo-terminal in CI with
   `CLUD_REQUIRE_PTY=1` on every platform, so a test that would skip locally

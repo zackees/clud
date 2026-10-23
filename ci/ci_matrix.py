@@ -22,7 +22,7 @@ from typing import Literal
 # uses it (#863).
 Strategy = Literal["native", "soldr"]
 TargetTier = Literal["core", "full"]
-Mode = Literal["minimal", "extended", "full", "windows"]
+Mode = Literal["minimal", "extended", "full", "windows", "macos"]
 
 FULL_TIER_LABEL = "ci-full"
 EXTENDED_TIER_LABEL = "ci-test"
@@ -31,6 +31,10 @@ EXTENDED_TIER_LABEL = "ci-test"
 #: queue, so `main`'s push run is the only test of the merged tree; see
 #: docs/architecture/ci.md#current-ci-selection.
 WINDOWS_TIER_LABEL = "ci-windows"
+#: macOS iteration mode: the routine Linux x64 lanes plus both Darwin builds
+#: and suites (Apple Silicon and Intel), without ci-full's Windows and Linux
+#: ARM lanes. Same `CI OK` contract as ci-windows.
+MACOS_TIER_LABEL = "ci-macos"
 LEGACY_FULL_TIER_LABEL = "ci:full"
 
 
@@ -106,6 +110,7 @@ def resolve_tier(  # noqa: C901
         FULL_TIER_LABEL,
         EXTENDED_TIER_LABEL,
         WINDOWS_TIER_LABEL,
+        MACOS_TIER_LABEL,
     }
     if unknown:
         raise ValueError(f"unknown CI labels: {', '.join(sorted(unknown))}")
@@ -113,8 +118,15 @@ def resolve_tier(  # noqa: C901
         return "full"
     if EXTENDED_TIER_LABEL in labels:
         return "extended"
+    if WINDOWS_TIER_LABEL in labels and MACOS_TIER_LABEL in labels:
+        # One mode per run; both native sets together is what ci-full is for.
+        raise ValueError(
+            f"{WINDOWS_TIER_LABEL} and {MACOS_TIER_LABEL} together: use {FULL_TIER_LABEL}"
+        )
     if WINDOWS_TIER_LABEL in labels:
         return "windows"
+    if MACOS_TIER_LABEL in labels:
+        return "macos"
     return "minimal"
 
 
@@ -128,6 +140,8 @@ def selected(tier: Mode | TargetTier) -> list[Target]:
     if tier == "windows":
         # #1652: the routine Linux x64 lanes run too, so CI OK covers them.
         return [TARGETS[0], *(t for t in TARGETS if t.triple == "x86_64-pc-windows-msvc")]
+    if tier == "macos":
+        return [TARGETS[0], *(t for t in TARGETS if t.triple.endswith("-apple-darwin"))]
     raise ValueError(f"unsupported CI tier: {tier}")
 
 

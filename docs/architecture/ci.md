@@ -462,6 +462,13 @@ those lanes pass; `ci-test`/`ci-full` take
 precedence. No merge queue backs this label; see
 [What protects `main` today](#what-protects-main-today).
 
+`ci-macos` is the same iteration mode for macOS: every routine Linux x64 lane
+plus the build and suites of both Darwin triples (`aarch64-apple-darwin` on
+`macos-15`, `x86_64-apple-darwin` on `macos-15-intel`), and nothing else
+native. Use it for macOS-only evidence instead of paying for ci-full's Windows
+and Linux ARM lanes. `ci-windows` and `ci-macos` together are rejected; that
+combination is `ci-full`.
+
 `ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
 every push needs all six targets.
 
@@ -470,10 +477,11 @@ every push needs all six targets.
 | `minimal` | Linux Dylint (host + Windows/macOS cross-target) + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
 | `windows` | minimal + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
+| `macos` | minimal + both Darwin triples' build, unit and integration | PR labeled `ci-macos` |
 | `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch, the nightly `schedule` run (a `merge_group` event would select it, but none is configured) |
 
 `ci-test` covers Linux and Windows product build/tests. Both hosted macOS
-architectures run product tests only in `ci-full` and release validation;
+architectures run product tests only in `ci-macos`, `ci-full` and release validation;
 the macOS Dylint cross-target pass runs in every mode. Routine events use
 Linux x64 for fast feedback. Nothing runs the complete matrix before merge
 unless the PR carries `ci-full`; see below.
@@ -490,8 +498,8 @@ helper is not a platform implementation change.
 
 Before adding a label, identify the changed implementation and the native
 behavior the selected lanes validate in the PR body. Use `ci-windows` for
-Windows-only implementation changes; use `ci-full` for macOS or platform
-changes requiring the complete matrix. An incomplete local test run does
+Windows-only implementation changes, `ci-macos` for macOS-only ones, and
+`ci-full` for platform changes requiring the complete matrix. An incomplete local test run does
 not justify expanding coverage: routine remote CI supplies that evidence.
 
 PR #1769's shared pump helper extraction is the negative example: it called
