@@ -77,7 +77,7 @@ cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = 
 venv-build = { prefix = "venv-build-", max = "80MB",  lockfile = true, per = "platform", evict = "lru" }
 venv-exec  = { prefix = "venv-exec-",  max = "120MB", lockfile = true, per = "platform", evict = "lru" }
 # GUI runtime packages for the Linux unit shards (#2073), keyed per runner image.
-gui-debs   = { prefix = "gui-debs-",   max = "60MB",  per = "platform", evict = "lru" }
+gui-debs   = { prefix = "gui-debs-",   max = "200MB", per = "platform", evict = "lru" }
 
 # Promotion (CACHE-024, #185, zackees/ci.yml#335). zackees/ci.yml standardizes
 # promotion on setup-soldr's ancestor encoding -- shortest parent-edge distance
