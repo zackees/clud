@@ -476,3 +476,51 @@ fn the_current_process_executable_is_not_deleted() {
         assert!(!daemon_executable_deleted(std::process::id()));
     }
 }
+
+/// A peer that reads the request and then never answers or closes.
+fn spawn_hung_peer() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&connections);
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            seen.fetch_add(1, Ordering::SeqCst);
+            held.push(stream);
+        }
+    });
+    (port, connections)
+}
+
+#[test]
+fn a_stalled_admission_times_out_once_instead_of_waiting_forever() {
+    // #2000: `Create` used to wait on the daemon with no deadline at all.
+    let tmp = tempfile::tempdir().unwrap();
+    let (port, connections) = spawn_hung_peer();
+    write_daemon_info(tmp.path(), std::process::id(), port);
+    let started = std::time::Instant::now();
+    let err = send_admission_over_tcp(
+        tmp.path(),
+        &DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
+        Duration::from_millis(300),
+    )
+    .expect_err("a daemon that never answers must not be waited on forever");
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+    assert!(err.to_string().contains("daemon-events.jsonl"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "a timed-out admission must not be re-sent"
+    );
+}
+
+#[test]
+fn the_create_budget_covers_both_worker_phases() {
+    let budget = super::super::server::create_session_budget();
+    assert!(budget >= Duration::from_secs(30), "{budget:?}");
+}

@@ -839,7 +839,15 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
     // this path, so `clud loop --repeat ...` under an experimental-daemon
     // launch was failing here with PermissionDenied.
     grant_daemon_spawn();
-    if let Err(err) = ensure_daemon(&state_dir) {
+    // #2000: breadcrumbs for a launcher that never announces its session.
+    let trace = crate::stage_trace::stderr_enabled(args.verbose);
+    let ensured = crate::stage_trace::scoped(
+        trace,
+        crate::stage_trace::Phase::Launch,
+        "daemon-ensure",
+        || ensure_daemon(&state_dir),
+    );
+    if let Err(err) = ensured {
         if super::client::is_incompatible_daemon_error(&err) {
             super::client::print_incompatible_daemon_error(&err);
             return 1;
@@ -917,7 +925,13 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             login_env: Vec::new(),
         }),
     };
-    let response = match send_daemon_request(&state_dir, &request) {
+    let sent = crate::stage_trace::scoped(
+        trace,
+        crate::stage_trace::Phase::Launch,
+        "daemon-create",
+        || send_daemon_request(&state_dir, &request),
+    );
+    let response = match sent {
         Ok(response) => response,
         Err(err) => {
             eprintln!("[clud] daemon request failed: {}", err);

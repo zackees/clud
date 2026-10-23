@@ -411,6 +411,14 @@ pub(super) fn send_daemon_request(
     state_dir: &Path,
     request: &DaemonRequest,
 ) -> io::Result<DaemonResponse> {
+    // #2000: `Create` is not idempotent and its admission can take tens of
+    // seconds, so it never takes the frame lane. That lane has no deadline,
+    // and a miss after the frame was sent would re-send `Create` over TCP and
+    // could spawn a second worker. Over TCP it is bounded by the daemon's own
+    // admission budget, so a stall surfaces as an error the launcher reports.
+    if matches!(request, DaemonRequest::Create { .. }) {
+        return send_admission_over_tcp(state_dir, request, super::server::create_session_budget());
+    }
     // Fast path: running-process broker v1 frame lane (Hello-skip via
     // the daemon identity sidecar). Any miss — `RUNNING_PROCESS_DISABLE=1`,
     // no sidecar, connect/wire failure — falls through to the legacy TCP
@@ -419,6 +427,32 @@ pub(super) fn send_daemon_request(
         return Ok(response);
     }
     send_daemon_request_over_tcp(state_dir, request, None)
+}
+
+/// One TCP round trip bounded by `budget`, with a timeout reported as the
+/// admission stall it is rather than as a bare socket error.
+fn send_admission_over_tcp(
+    state_dir: &Path,
+    request: &DaemonRequest,
+    budget: Duration,
+) -> io::Result<DaemonResponse> {
+    send_daemon_request_over_tcp(state_dir, request, Some(budget)).map_err(|err| {
+        if matches!(
+            err.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "daemon did not admit the session within {}s ({err}); its admission \
+                     phases are in daemon-events.jsonl",
+                    budget.as_secs()
+                ),
+            )
+        } else {
+            err
+        }
+    })
 }
 
 fn send_daemon_request_over_tcp(
