@@ -1,7 +1,9 @@
 name: Dylint
 
-# One Linux Dylint job is called from ci.yml under its concurrency group. It
-# lints the host, then cross-checks Windows MSVC and macOS arm64 from Linux.
+# Linux Dylint, called from ci.yml under its concurrency group: the host pass
+# and the Windows MSVC / macOS arm64 cross-check passes run as parallel legs
+# of one Linux matrix (#2061). Run back to back they made Dylint the slowest
+# required job once the build's dependency cook went warm.
 
 on:
   workflow_call:
@@ -31,8 +33,12 @@ env:
 
 jobs:
   dylint:
-    name: Dylint
+    name: Dylint (${{ matrix.pass }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [host, x86_64-pc-windows-msvc, aarch64-apple-darwin]
     timeout-minutes: 30
     defaults:
       run:
@@ -57,7 +63,9 @@ jobs:
           dylint-link-version: 6.0.3
           # zccache keeps each target's nightly check-mode dependency units
           # (saved from main only). Warm passes check just workspace crates.
-          cache-key-suffix: dylint-zccache
+          # One key per leg: the legs check different targets, and a shared
+          # key would let three writers race for one immutable entry.
+          cache-key-suffix: dylint-zccache-${{ matrix.pass }}
           prebuild-deps: none
           linker: platform-default
           cache-payload-warn-bytes: 2GiB
@@ -80,11 +88,13 @@ jobs:
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare 2>&1 | tee "$RUNNER_TEMP/dylint-prepare.log"
           sed -n 's/^soldr: dylint prepare: tool bin dir //p' "$RUNNER_TEMP/dylint-prepare.log" >> "$GITHUB_PATH"
       - name: Check dylint formatting
+        if: matrix.pass == 'host'
         run: |
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
           soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
       - name: Test dylint crate
+        if: matrix.pass == 'host'
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
           # enforce_platform_boundary's UI test (`ui/boundary.rs`) launches
@@ -104,12 +114,14 @@ jobs:
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 CARGO_TARGET_DIR="$PWD/target/dylint-tests" \
             soldr cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
       - name: Run dylint over workspace
+        if: matrix.pass == 'host'
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
       # Late lints only see code that compiles for the checked target, so the
       # host pass never reaches `cfg(windows)` / `cfg(target_os = "macos")`
       # code. These check-only passes cover it from Linux with the same
       # prebuilt driver; soldr installs the nightly's target `rust-std`.
       - name: Run dylint for x86_64-pc-windows-msvc
+        if: matrix.pass == 'x86_64-pc-windows-msvc'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:
@@ -118,6 +130,7 @@ jobs:
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target x86_64-pc-windows-msvc
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target x86_64-pc-windows-msvc
       - name: Run dylint for aarch64-apple-darwin
+        if: matrix.pass == 'aarch64-apple-darwin'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:

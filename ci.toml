@@ -60,7 +60,8 @@ pr       = { mode = "none", families = [], max-per-pr = "0MB", budget = "0MB", t
 
 [cache.family]
 # 1.17-1.38 GiB observed per entry; keyed per build target (build-<target>,
-# dylint-zccache, static), so `per = "platform"` is the honest shape.
+# dylint-zccache-<pass> x3 (#2061), static), so `per = "platform"` is the
+# honest shape.
 compile    = { via = "setup-soldr:build-cache",    max = "1400MB", lockfile = true, per = "platform", evict = "lru", promote = "ancestor" }
 deps       = { via = "setup-soldr:cook",          max = "250MB",  lockfile = true, per = "none",     evict = "lru", promote = "ancestor" }
 toolchain  = { via = "setup-soldr:solo-toolchain", max = "210MB",  per = "none",                evict = "lru" }
