@@ -30,11 +30,22 @@ runs:
     - name: Install Linux native window runtime
       if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
       shell: bash
+      # Install from the image's own package lists first: an unbounded
+      # `apt-get update` against a slow mirror held a unit shard for 11+
+      # minutes (#2063). Only a stale list falls back to a bounded update.
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends \
-          xvfb xauth xfonts-base xdotool weston libgl1-mesa-dri libegl1 libgles2 \
-          libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1
+        set -euo pipefail
+        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+        pkgs=(xvfb xauth xfonts-base xdotool weston libgl1-mesa-dri libegl1 libgles2
+              libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1)
+        install() {
+          sudo timeout 240 apt-get "${apt_opts[@]}" install -y --no-install-recommends "${pkgs[@]}"
+        }
+        if ! install; then
+          echo "::warning::package install from the image lists failed; refreshing them"
+          sudo timeout 120 apt-get "${apt_opts[@]}" update -qq
+          install
+        fi
 
     - uses: actions/setup-python@v5
       with:
