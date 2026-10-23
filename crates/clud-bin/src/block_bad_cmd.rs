@@ -4656,11 +4656,14 @@ mod tests {
             assert!(reason.contains("pr_merge_watch"), "{reason}");
             assert!(reason.contains("merge queue"), "{reason}");
         }
-        assert!(
-            evaluate_command("clud tool run github/pr_merge_watch.py -- 1847", None, false, &[])
-                .reason
-                .is_none()
-        );
+        assert!(evaluate_command(
+            "clud tool run github/pr_merge_watch.py -- 1847",
+            None,
+            false,
+            &[]
+        )
+        .reason
+        .is_none());
     }
 
     #[test]
