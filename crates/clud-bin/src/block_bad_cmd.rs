@@ -4643,6 +4643,25 @@ mod tests {
     }
 
     #[test]
+    fn merge_wait_refusals_name_the_watcher_as_the_way_to_wait_for_a_merge() {
+        // #2035: every refused way to wait for a queued PR must point at the
+        // watcher, which follows the merge queue to MERGED or an ejection.
+        for command in [
+            "sleep 540; gh pr view 1847 --json state",
+            "gh run watch 39887326901 --exit-status",
+        ] {
+            let reason = evaluate_command(command, None, false, &[])
+                .reason
+                .unwrap_or_else(|| panic!("{command} should be denied"));
+            assert!(reason.contains("pr_merge_watch"), "{reason}");
+            assert!(reason.contains("merge queue"), "{reason}");
+        }
+        assert!(evaluate_command("clud tool run github/pr_merge_watch.py -- 1847", None, false, &[])
+            .reason
+            .is_none());
+    }
+
+    #[test]
     fn allows_pr_status_snapshots_searches_prose_and_blessed_watcher() {
         for command in [
             "gh pr checks 528",
