@@ -499,7 +499,8 @@ jobs:
   build-macos-arm:
     name: Build macos-arm
     needs: static
-    if: needs.static.outputs.mode == 'full'
+    # `macos` is the ci-macos iteration mode: both Darwin lanes, nothing else native.
+    if: needs.static.outputs.mode == 'full' || needs.static.outputs.mode == 'macos'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -587,7 +588,8 @@ jobs:
   build-macos-x64:
     name: Build macos-x64
     needs: static
-    if: needs.static.outputs.mode == 'full'
+    # `macos` is the ci-macos iteration mode: both Darwin lanes, nothing else native.
+    if: needs.static.outputs.mode == 'full' || needs.static.outputs.mode == 'macos'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
