@@ -122,7 +122,10 @@ def _strip_debug(staging: Path, target: str) -> None:
         return
     from ci import process
 
-    binaries = [*sorted((staging / "target").rglob("*")), *sorted((staging / "tests").rglob("*"))]
+    binaries = [
+        *sorted((staging / "target").rglob("*")),
+        *sorted((staging / "tests").rglob("*")),
+    ]
     for path in binaries:
         if not path.is_file():
             continue
