@@ -141,6 +141,7 @@ jobs:
           profile: ${{ inputs.profile }}
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
           save-cache: ${{ inputs.save-cache }}
+          cook: ${{ inputs.compile }}
 
       # Every cargo/maturin invocation goes through ci/xbuild.py so the
       # per-strategy environment (zig wrappers, the SDKROOT/CMake plumbing on

@@ -305,7 +305,10 @@ def test_ci_setup_soldr_cooks_only_with_the_build_target() -> None:
     """
     build_setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
     text = build_setup.read_text(encoding="utf-8")
-    assert "prebuild-deps: soldr-cook" in text
+    assert "prebuild-deps: ${{ inputs.cook == 'true' && 'soldr-cook' || 'none' }}" in text
+    # A lint-only call checks dependencies and reuses no cooked unit (#2071).
+    reusable = (ROOT / ".github" / "workflows" / "_build-target.yml").read_text(encoding="utf-8")
+    assert "cook: ${{ inputs.compile }}" in reusable
     assert (
         "prebuild-deps-flags: --target ${{ inputs.target }} --workspace"
         "${{ inputs.profile == 'release' && ' --release' || '' }}"
