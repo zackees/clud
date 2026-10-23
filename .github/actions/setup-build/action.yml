@@ -27,6 +27,14 @@ inputs:
     description: Rust toolchain version (must match rust-toolchain.toml).
     required: false
     default: "1.95.0"
+  cook:
+    description: >
+      Cook every dependency before the build ('true' | 'false'). A lint-only
+      job (Clippy) checks dependencies instead of building them, so it reuses
+      none of the cooked units and would only pay the ~1 GB cook-base
+      restore (#2071).
+    required: false
+    default: "true"
   save-cache:
     description: >
       setup-soldr save-cache policy (auto | true | false). A job that shares
@@ -108,7 +116,7 @@ runs:
         # build reuses: on the clud workspace 0 of 462 dependency units
         # recompile, against all 462 when the cook ran in the host env.
         # `--target` is load-bearing: without it the cook is a host cook.
-        prebuild-deps: soldr-cook
+        prebuild-deps: ${{ inputs.cook == 'true' && 'soldr-cook' || 'none' }}
         # EXPERIMENT (setup-soldr#592): let cargo fetch crate sources instead
         # of restoring a 44k-file registry archive (40s on a warm build).
         cargo-registry-cache: false
