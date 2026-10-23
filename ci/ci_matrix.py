@@ -80,7 +80,7 @@ SUITES: tuple[str, ...] = ("unit", "integration")
 #: separate machines are the only parallelism that helps. The names are the
 #: matrix values in `ci.yml` and, through them, the job names `ci/release_gate.py`
 #: requires.
-LINUX_X64_UNIT_SHARDS: tuple[str, ...] = ("rust", "py1of2", "py2of2")
+LINUX_X64_UNIT_SHARDS: tuple[str, ...] = ("rust", "py1of3", "py2of3", "py3of3")
 
 
 def resolve_tier(  # noqa: C901

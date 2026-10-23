@@ -162,12 +162,15 @@ jobs:
           --workflow ci.yml --mode enforce --github-output --out reuse-check.json
           --max-age-hours 12
           --required-job 'Static checks'
-          --required-job 'Dylint / Dylint'
+          --required-job 'Dylint / Dylint (host)'
+          --required-job 'Dylint / Dylint (x86_64-pc-windows-msvc)'
+          --required-job 'Dylint / Dylint (aarch64-apple-darwin)'
           --required-job 'Clippy linux-x64 / x86_64-unknown-linux-gnu'
           --required-job 'Build linux-x64 / x86_64-unknown-linux-gnu'
           --required-job 'Test linux-x64 (unit) (rust) / x86_64-unknown-linux-gnu unit'
-          --required-job 'Test linux-x64 (unit) (py1of2) / x86_64-unknown-linux-gnu unit'
-          --required-job 'Test linux-x64 (unit) (py2of2) / x86_64-unknown-linux-gnu unit'
+          --required-job 'Test linux-x64 (unit) (py1of3) / x86_64-unknown-linux-gnu unit'
+          --required-job 'Test linux-x64 (unit) (py2of3) / x86_64-unknown-linux-gnu unit'
+          --required-job 'Test linux-x64 (unit) (py3of3) / x86_64-unknown-linux-gnu unit'
       # GEN-021 strategy (i) from docs/designs/default-branch-verified-reuse.md
       # section 8: on a reused push, skip the VALIDATION jobs and keep the
       # CACHE WRITERS. Dylint and Build linux-x64 still run, so every main
@@ -431,7 +434,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [rust, py1of2, py2of2]
+        shard: [rust, py1of3, py2of3, py3of3]
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}

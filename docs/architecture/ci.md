@@ -30,9 +30,9 @@ zccache namespace read-only (`save-cache: false`) so the two jobs never race to
 write one immutable cache key. Windows and macOS clippy stay inside their
 build jobs (they run only in `ci-test`/`ci-full`).
 
-The Linux x64 unit suite runs as three parallel jobs (`test-linux-x64-unit`, a
+The Linux x64 unit suite runs as four parallel jobs (`test-linux-x64-unit`, a
 matrix over `LINUX_X64_UNIT_SHARDS` in `ci/ci_matrix.py`): the Rust harnesses
-(`rust`) and each half of the pytest suite (`py1of2`, `py2of2`, split by file
+(`rust`) and each third of the pytest suite (`py1of3`..`py3of3`, split by file
 with recorded weights in `ci/unit_shard_weights.json`, `ci/pytest_shard.py`).
 It was one ~190 s job: ~55 s of harnesses, then ~135 s of serial pytest. The
 suite is CPU-bound (every test launches real `clud` processes) and a hosted

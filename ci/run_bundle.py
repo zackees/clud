@@ -479,7 +479,7 @@ def parse_shard(name: str) -> Shard:
     """`all` (default) | `rust` | `py<k>of<n>`.
 
     The Linux x64 unit lane is split into independent jobs (see
-    `ci/pytest_shard.py`): `rust` runs the Rust harnesses, `py1of2`/`py2of2`
+    `ci/pytest_shard.py`): `rust` runs the Rust harnesses, `py1of3`..`py3of3`
     each run half of the pytest suite. `all` is the whole suite in one job,
     which every other lane still uses.
     """
