@@ -324,6 +324,16 @@ jobs:
           PYTHONPATH: .ci-lint
           GITHUB_TOKEN: ${{ github.token }}
         run: '"$VENV_PY" -m ci_lint cache preprune --repo . --lockfile-changed --max-deletes 50'
+      # Every main push sweeps what preprune cannot see: generations superseded
+      # by a key-prefix change (soldr or config hash), entries saved on other
+      # refs, retired families, then LRU down to [cache].budget. Without it the
+      # repo sat at 10.5 GB and GitHub's own LRU evicted main's live build
+      # cache, so PRs restored a day-old fallback at a 67% hit rate (#2037).
+      - name: Sweep superseded and off-branch cache entries
+        env:
+          PYTHONPATH: .ci-lint
+          GITHUB_TOKEN: ${{ github.token }}
+        run: '"$VENV_PY" -m ci_lint cache janitor --repo . --default-branch main --max-deletes 50'
 
   # ---------------------------------------------------------------- dylint --
   # Dylint is required in every mode. The reusable workflow runs the custom

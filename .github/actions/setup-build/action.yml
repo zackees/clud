@@ -49,8 +49,12 @@ runs:
     # Keyed on OS+arch even though every build job now runs on the same Linux
     # image: a venv holds platform-specific wheels, so a shared key would hand a
     # Linux venv to any future non-Linux builder.
-    - name: Cache venv
-      uses: actions/cache@v4
+    # Read-only everywhere but `main` pushes (CACHE-003): a PR or branch save
+    # is scoped to that ref, so nothing else can restore it, yet it still
+    # counts against the 10 GB budget and pushes live entries into LRU.
+    - name: Restore venv
+      id: venv-cache
+      uses: actions/cache/restore@v4
       with:
         path: .venv
         key: venv-build-${{ runner.os }}-${{ runner.arch }}-py3.11-${{ hashFiles('uv.lock') }}
@@ -78,7 +82,9 @@ runs:
       with:
         toolchain: ${{ inputs.toolchain }}
         cache: true
-        save-cache: ${{ inputs.save-cache }}
+        # Off `main` (a workflow_dispatch on a branch, a tag) `auto` would
+        # still save, into a ref-scoped entry no other run can restore.
+        save-cache: ${{ github.ref == 'refs/heads/main' && inputs.save-cache || 'false' }}
         # setup-soldr#559: a failed or cancelled job saves no build outputs
         # (its store may be partial; an exact-hit key is never re-saved).
         job-status: ${{ job.status }}
@@ -167,6 +173,13 @@ runs:
     - name: Sync
       shell: bash
       run: uv sync --frozen --group dev --no-install-project --python 3.11
+
+    - name: Save venv
+      if: steps.venv-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v4
+      with:
+        path: .venv
+        key: ${{ steps.venv-cache.outputs.cache-primary-key }}
 
     # Export the synced venv's interpreter and use it directly everywhere
     # instead of `uv run`. `pyproject.toml:1-3` sets `build-backend = "soldr"`,
