@@ -470,7 +470,7 @@ every push needs all six targets.
 | `minimal` | Linux Dylint (host + Windows/macOS cross-target) + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
 | `windows` | minimal + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
-| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch (a `merge_group` event would select it, but none is configured) |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch, the nightly `schedule` run (a `merge_group` event would select it, but none is configured) |
 
 `ci-test` covers Linux and Windows product build/tests. Both hosted macOS
 architectures run product tests only in `ci-full` and release validation;
@@ -516,6 +516,15 @@ happened. So:
   runs the `minimal` tier. It reports after the merge; it does not block it.
 - The `merge_group:` trigger in `ci.yml` is inert. It stays so that a queue,
   once enabled, runs the `full` tier.
+- A nightly `schedule` run (`41 6 * * *`, #1849) runs the `full` tier on
+  `main`'s head, so a native-only regression surfaces within a day instead
+  of waiting for an unrelated `ci-full` PR. It never skips or reuses a lane:
+  attestations and reuse are computed only for `pull_request`/`push`, and
+  the `Nightly runs skip nothing` step in `CI mode` fails if either is ever
+  set on a schedule. The `nightly-report` job, the only one with
+  `issues: write`, opens or comments on a `ci-nightly-failure` issue when
+  `CI OK` is anything but `success` (cancelled counts as red), and closes
+  it on the next green night. Cost: about 200 runner-minutes per night.
 
 #### `ci-windows` keeps the routine Linux lanes (#1652, decided)
 

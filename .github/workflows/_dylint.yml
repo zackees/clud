@@ -110,10 +110,18 @@ jobs:
       # code. These check-only passes cover it from Linux with the same
       # prebuilt driver; soldr installs the nightly's target `rust-std`.
       - name: Run dylint for x86_64-pc-windows-msvc
+        # Scoped to the check-only cross passes: a warning only this target
+        # sees (an import unused off-Linux, #1837) must fail here (#1849).
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target x86_64-pc-windows-msvc
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target x86_64-pc-windows-msvc
       - name: Run dylint for aarch64-apple-darwin
+        # Scoped to the check-only cross passes: a warning only this target
+        # sees (an import unused off-Linux, #1837) must fail here (#1849).
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target aarch64-apple-darwin
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target aarch64-apple-darwin
