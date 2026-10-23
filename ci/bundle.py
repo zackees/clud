@@ -107,6 +107,34 @@ def _copy(src: Path, dst: Path) -> None:
         dst.chmod(dst.stat().st_mode | 0o111)
 
 
+def _strip_debug(staging: Path, target: str) -> None:
+    """Drop DWARF from the staged Linux binaries (#2066).
+
+    Even at `debug = "line-tables-only"` about two thirds of each ELF is
+    `.debug_*`: stripping took the measured bundle from 273 MB to 125 MB, and
+    the exec runner downloads it on the build -> unit critical path. Panic
+    messages keep `file:line` (from `Location`, not DWARF); only symbolized
+    backtrace lines are lost. Windows and macOS keep debug info in sidecars,
+    so only Linux is stripped. Best effort: a host `strip` that cannot read a
+    cross target leaves that binary unstripped rather than failing the pack.
+    """
+    if "linux" not in target:
+        return
+    from ci import process
+
+    binaries = [
+        *sorted((staging / "target").rglob("*")),
+        *sorted((staging / "tests").rglob("*")),
+    ]
+    for path in binaries:
+        if not path.is_file():
+            continue
+        result = process.run(["strip", "--strip-debug", str(path)], capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            print(f"::warning::left {path.name} unstripped: {detail}")
+
+
 def pack(target: str, profile: str, dest: Path) -> int:  # noqa: C901
     built = target_dir(target, profile)
     if not built.is_dir():
@@ -165,6 +193,7 @@ def pack(target: str, profile: str, dest: Path) -> int:  # noqa: C901
         "wheels": [wheel.name for wheel in wheels],
     }
     (staging / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _strip_debug(staging, target)
 
     dest.mkdir(parents=True, exist_ok=True)
     archive = dest / ARCHIVE_NAME
