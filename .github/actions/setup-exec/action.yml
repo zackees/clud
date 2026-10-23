@@ -27,7 +27,21 @@ runs:
     # Native credential windows need a real graphics stack even when their
     # test display is Xvfb. In particular, winit panics without the X11 XKB
     # runtime instead of returning a graphics-initialization error (#1708).
+    # The packages themselves come from an Actions cache (#2073): a mirror
+    # outage failed a unit shard even with the bounded install below. Only a
+    # cache miss touches the mirror; only `main` pushes save (CACHE-003).
+    - name: Restore Linux native window runtime packages
+      id: gui-debs
+      if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/gui-runtime-debs
+        key: gui-debs-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-v1
+        restore-keys: |
+          gui-debs-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+
     - name: Install Linux native window runtime
+      id: gui-install
       if: runner.os == 'Linux' && inputs.native-window-runtime == 'true'
       shell: bash
       # Install from the image's own package lists first: an unbounded
@@ -35,9 +49,19 @@ runs:
       # minutes (#2063). Only a stale list falls back to a bounded update.
       run: |
         set -euo pipefail
-        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+                  -o APT::Keep-Downloaded-Packages=true)
         pkgs=(xvfb xauth xfonts-base xdotool weston libgl1-mesa-dri libegl1 libgles2
               libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1)
+        debs="$HOME/gui-runtime-debs"
+        mkdir -p "$debs"
+        if compgen -G "$debs/*.deb" >/dev/null; then
+          sudo cp "$debs"/*.deb /var/cache/apt/archives/
+          if sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"; then
+            exit 0
+          fi
+          echo "::warning::cached GUI runtime packages were incomplete; using the mirror"
+        fi
         install() {
           sudo timeout 240 apt-get "${apt_opts[@]}" install -y --no-install-recommends "${pkgs[@]}"
         }
@@ -46,6 +70,21 @@ runs:
           sudo timeout 120 apt-get "${apt_opts[@]}" update -qq
           install
         fi
+        cp /var/cache/apt/archives/*.deb "$debs"/ 2>/dev/null || true
+        if compgen -G "$debs/*.deb" >/dev/null; then
+          echo "debs=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save Linux native window runtime packages
+      if: >-
+        runner.os == 'Linux' && inputs.native-window-runtime == 'true'
+        && steps.gui-debs.outputs.cache-hit != 'true'
+        && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.gui-install.outputs.debs == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/gui-runtime-debs
+        key: ${{ steps.gui-debs.outputs.cache-primary-key }}
 
     - uses: actions/setup-python@v5
       with:
