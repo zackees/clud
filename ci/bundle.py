@@ -131,7 +131,8 @@ def _strip_debug(staging: Path, target: str) -> None:
             continue
         result = process.run(["strip", "--strip-debug", str(path)], capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"::warning::left {path.name} unstripped: {(result.stderr or result.stdout).strip()}")
+            detail = (result.stderr or result.stdout).strip()
+            print(f"::warning::left {path.name} unstripped: {detail}")
 
 
 def pack(target: str, profile: str, dest: Path) -> int:  # noqa: C901
