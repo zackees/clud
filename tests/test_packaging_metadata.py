@@ -293,28 +293,27 @@ def test_install_script_uses_wheel_with_legacy_fallback() -> None:
     assert "command -v python3" in text # asserts the installer's fallback; python-name-lint: allow
 
 
-def test_ci_setup_soldr_never_cooks_before_the_toolchain_is_prepared() -> None:
-    """The dependency cook runs inside the setup-soldr step, which executes
-    BEFORE `soldr prepare` exports the blessed toolchain env — so any cook at
-    that point compiles against the host env and its artifacts fingerprint
-    against different linker/CC settings than the real build. The first PR
-    validation run spent six minutes doing exactly that and then reported 393
-    misses with a 0% hit rate.
-
-    Since #859 no lane is `native`, so the old conditional key matched
-    nothing anyway (#863) — the honest state is a plain `none`. Re-enabling
-    the cook requires cooking AFTER prepare; a conditional keyed on any
-    strategy here is either dead or wrong, which is why this asserts the
-    literal.
+def test_ci_setup_soldr_cooks_only_with_the_build_target() -> None:
+    """The dependency cook runs inside the setup-soldr step, before
+    `Prepare cross toolchain` exports the blessed toolchain env. That is only
+    correct because `soldr cook --target X` applies the same blessed prep as
+    `soldr build --target X` (zackees/soldr#3858, soldr 0.9.39): a cook
+    without `--target` is a host cook whose units the build rebuilds, which is
+    why clud ran with `prebuild-deps: none` until #2049. So the build lane
+    cooks, and only ever with its own target and the build's profile; every
+    other setup-soldr consumer stays off.
     """
-    setup_workflows = _setup_soldr_sources()
-    assert setup_workflows
-
     build_setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
-    assert "prebuild-deps: none" in build_setup.read_text(encoding="utf-8")
-    for path in setup_workflows:
-        text = path.read_text(encoding="utf-8")
-        assert "prebuild-deps: soldr-cook" not in text
+    text = build_setup.read_text(encoding="utf-8")
+    assert "prebuild-deps: soldr-cook" in text
+    assert (
+        "prebuild-deps-flags: --target ${{ inputs.target }} --workspace"
+        "${{ inputs.profile == 'release' && ' --release' || '' }}"
+    ) in text
+    for path in _setup_soldr_sources():
+        if path == build_setup:
+            continue
+        assert "prebuild-deps: soldr-cook" not in path.read_text(encoding="utf-8"), path
 
 
 def test_soldr_workflows_can_quarantine_yanked_dependency_caches() -> None:
@@ -336,7 +335,5 @@ def test_ci_setup_soldr_cook_profile_matches_the_real_build() -> None:
 
     setup_text = setup.read_text(encoding="utf-8")
     build_text = build.read_text(encoding="utf-8")
-    assert "prebuild-deps-flags: ${{ inputs.profile == 'release' && '--release' || '' }}" in (
-        setup_text
-    )
+    assert "${{ inputs.profile == 'release' && ' --release' || '' }}" in setup_text
     assert "profile: ${{ inputs.profile }}" in build_text
