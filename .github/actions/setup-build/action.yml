@@ -89,6 +89,12 @@ runs:
         # (its store may be partial; an exact-hit key is never re-saved).
         job-status: ${{ job.status }}
         build-cache-mode: thin
+        # The 6 GiB default cap is measured before compression. clud's store
+        # compresses to about 1 GB but crossed 6 GiB raw, so every `main`
+        # save was skipped and PRs restored a stale entry at a 67% hit rate
+        # (#2050). The janitor still holds the compressed entry to ci.toml's
+        # `compile` max.
+        cache-payload-max-bytes: 8GiB
         shims: true
         linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
         preserve-source-mtimes: true
