@@ -219,7 +219,11 @@ def test_every_build_waits_for_mode_and_full_is_complete():
     assert "- dylint" in text.split("\n  ci-ok:\n", 1)[1]
     dylint_workflow = (CI_YML.parent / "_dylint.yml").read_text(encoding="utf-8")
     assert "runs-on: ubuntu-24.04" in dylint_workflow
-    assert "matrix:" not in dylint_workflow
+    # A Linux-only matrix: the host and cross-check passes run in parallel
+    # (#2061); #1512 removed native macOS/Windows Dylint runners.
+    assert "pass: [host, x86_64-pc-windows-msvc, aarch64-apple-darwin]" in dylint_workflow
+    assert "runs-on: macos" not in dylint_workflow
+    assert "runs-on: windows" not in dylint_workflow
     for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
         block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
         # Accept either `needs: static` or `needs: [static, ...]`: the

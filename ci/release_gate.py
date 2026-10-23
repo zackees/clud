@@ -15,7 +15,11 @@ _NAMES = ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "
 assert len(_NAMES) == len(TARGETS)
 
 REQUIRED_JOBS = frozenset(
-    {"Static checks", "Dylint / Dylint", "CI OK"}
+    {"Static checks", "CI OK"}
+    | {
+        f"Dylint / Dylint ({dylint_pass})"
+        for dylint_pass in ("host", "x86_64-pc-windows-msvc", "aarch64-apple-darwin")
+    }
     | {f"Build {name} / {target.triple}" for name, target in zip(_NAMES, TARGETS, strict=True)}
     | {
         f"Test {name} ({suite}) / {target.triple} {suite}"

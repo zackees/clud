@@ -11,8 +11,8 @@ The literal `ci-test` PR label adds Linux x64 integration and Windows x64.
 Linux integration stays in `ci-full` and release validation too;
 it was moved out of ordinary runs after the measured minimal lane exceeded
 the 12.5% runner-minute budget.
-Every PR runs one Linux Dylint job for the custom late lint: a host pass plus
-check-only cross-target passes for `x86_64-pc-windows-msvc` and
+Every PR runs Linux Dylint for the custom late lint: a host pass plus
+parallel check-only cross-target passes for `x86_64-pc-windows-msvc` and
 `aarch64-apple-darwin`. Full local `bash lint` runs the host Dylint pass after
 Clippy. `ci-full` (and
 existing `ci:full` labels) and manual full runs select all
@@ -1129,14 +1129,16 @@ each target; Soldr's verified 6.0.3 tools and nightly driver stay prebuilt, so
 no pass builds a toolchain. Dylint lints only workspace crates, but each pass
 must first type-check every dependency with that nightly, which the stable
 build caches cannot supply. zccache caches those check units per target in the
-`dylint-zccache` build-cache entry, saved from `main` only: measured warm, the
+`dylint-zccache-<pass>` build-cache entry per matrix leg, saved from `main` only: measured warm, the
 host/Windows/macOS passes took 28s/49s/69s at a 100% hit rate, against
 2m45s/2m41s/1m21s with `ZCCACHE_DISABLE` set. The rest of a warm cross pass
 downloads that target's `rust-std` and cross sysroot (LLVM, MSVC or Apple SDK)
 each run. One triple per OS is enough for the same reason
 Clippy needs only two: this workspace gates by OS, not architecture. The
 `CI OK` gate requires the Dylint result even on an unlabeled PR, and
-`ci/release_gate.py` pins the check name `Dylint / Dylint`.
+`ci/release_gate.py` pins the three leg names `Dylint / Dylint (<pass>)`.
+The passes are parallel legs of one Linux matrix (#2061): back to back they
+took 5m20s and were the slowest required job once the build cook went warm.
 
 **Doc-tests run once.** They were covered by the old `cargo test --workspace`
 but produce no harness binary, so they cannot ride along in a bundle. They are
