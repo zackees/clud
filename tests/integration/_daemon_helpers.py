@@ -584,14 +584,70 @@ def _recorded_process(pid: int | None, start_time: int | None) -> psutil.Process
         return None
 
 
-def _wait_for_recorded_process_exit(recorded: psutil.Process | None) -> None:
+def _wait_for_recorded_process_exit(recorded: psutil.Process | None) -> str:
+    """Wait for the retained process; return how the wait ended."""
     if recorded is None:
-        return
+        return "no verified handle retained before stop"
     try:
         recorded.wait(timeout=5)
-    except psutil.Error:
+    except psutil.TimeoutExpired:
+        return "TimeoutExpired after 5s"
+    except psutil.Error as error:
         # The final identity check remains authoritative, including access denial.
-        pass
+        return f"raised {error!r}"
+    return "returned"
+
+
+def identity_snapshot(pid: int, start_time: int) -> str:
+    """Every psutil/OS reading of `pid` at one moment, each field separately.
+
+    #1995: the old diagnostics collapsed every inspection failure into
+    `<unavailable>`, so a macOS run could not say whether `status()`,
+    `create_time()` or `cmdline()` was the call that was denied.
+    """
+    fields: list[str] = []
+
+    def read(name: str, probe: Callable[[], object]) -> None:
+        try:
+            fields.append(f"{name}={probe()!r}")
+        except Exception as error:  # every failure is a reading
+            fields.append(f"{name}=<{type(error).__name__}: {error}>")
+
+    def kill_zero() -> str:
+        try:
+            os.kill(pid, 0)
+        except OSError as error:
+            return f"errno {error.errno}"
+        return "ok"
+
+    read("pid_exists", lambda: psutil.pid_exists(pid))
+    read("kill0", kill_zero)
+    try:
+        handle = psutil.Process(pid)
+    except psutil.Error as error:
+        fields.append(f"process=<{type(error).__name__}: {error}>")
+        return f"pid={pid} recorded_start={start_time} " + " ".join(fields)
+    read("is_running", handle.is_running)
+    read("status", handle.status)
+    read("create_time", handle.create_time)
+    read("create_time_int_matches", lambda: int(handle.create_time()) == start_time)
+    read("ppid", handle.ppid)
+    read("cmdline", handle.cmdline)
+    return f"pid={pid} recorded_start={start_time} " + " ".join(fields)
+
+
+def _daemon_info_state(info_path: Path) -> str:
+    try:
+        stat = info_path.stat()
+    except FileNotFoundError:
+        return "daemon.json: removed"
+    except OSError as error:
+        return f"daemon.json: <{error!r}>"
+    try:
+        body = info_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        body = f"<{error!r}>"
+    return f"daemon.json: present, mtime={stat.st_mtime:.3f}, contents={body!r}"
 
 
 def _daemon_cleanup_diagnostics(
@@ -688,14 +744,43 @@ def stop_daemon(
             )
         ) from error
 
-    if result.returncode == 0:
-        _wait_for_recorded_process_exit(recorded)
+    wait_outcome = (
+        _wait_for_recorded_process_exit(recorded) if result.returncode == 0 else "not waited"
+    )
     identity_alive = (
         pid is not None and start_time is not None and process_identity_is_alive(pid, start_time)
     )
-    if result.returncode != 0 or identity_alive or info_path.exists():
+    # #1995: capture the state at the gate itself, before anything else runs.
+    gate_snapshot = (
+        identity_snapshot(pid, start_time) if pid is not None and start_time is not None else ""
+    )
+    info_remains = info_path.exists()
+    if result.returncode != 0 or identity_alive or info_remains:
+        failed = [
+            term
+            for term, bad in (
+                ("returncode", result.returncode != 0),
+                ("identity_alive", identity_alive),
+                ("daemon.json remains", info_remains),
+            )
+            if bad
+        ]
+        reprobes = []
+        if pid is not None and start_time is not None:
+            # Reported only: shows whether the state was transient or stuck.
+            for attempt in range(5):
+                time.sleep(0.1)
+                reprobes.append(
+                    f"  +{(attempt + 1) * 100}ms alive="
+                    f"{process_identity_is_alive(pid, start_time)}"
+                )
         raise AssertionError(
             "daemon cleanup did not complete safely\n"
+            f"failed gate terms: {', '.join(failed)}\n"
+            f"recorded-handle wait: {wait_outcome}\n"
+            f"identity at the gate: {gate_snapshot or '<no recorded identity>'}\n"
+            f"{_daemon_info_state(info_path)}\n"
+            + ("re-probes:\n" + "\n".join(reprobes) + "\n" if reprobes else "")
             + _daemon_cleanup_diagnostics(
                 state_dir,
                 pid=pid,
