@@ -62,8 +62,9 @@ Exit codes:
 
 A PR that is in a merge queue or set to auto-merge is followed to the merge
 itself (#2035): green on its checks is not the end, and the watch exits 0
-only once GitHub reports the PR `MERGED`. A PR already queued at start is
-followed at once. While it waits in the queue, the `merge_group` runs on the
+only once GitHub reports the PR `MERGED`. The gate snapshot already carries
+the queue entry and auto-merge request, so a PR nothing else merges costs no
+extra read. While it waits in the queue, the `merge_group` runs on the
 queue's own commit are judged, not the PR head. A green PR that nothing will
 merge exits 0 as before, so the caller can merge it. `--no-merge-wait` stops
 at green on the PR's own checks and only reports that the merge is pending.
@@ -539,6 +540,9 @@ class PRSnapshot:
     base_ref: str
     head_ref: str = ""
     merge_state: str = "UNKNOWN"  # mergeStateStatus: CLEAN | DIRTY | BEHIND | BLOCKED | ...
+    # In a merge queue or set to auto-merge (#2035): GitHub, not the caller,
+    # will merge it, so green is followed to the merge itself.
+    merge_pending: bool = False
 
     @classmethod
     def fetch(cls, pr: int, repo: str | None) -> PRSnapshot | None:
@@ -1619,6 +1623,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
       id number state mergeable mergeStateStatus headRefOid baseRefName headRefName
+      autoMergeRequest{enabledAt} mergeQueueEntry{state}
       reviews(first:100){
         nodes{databaseId state author{login}} pageInfo{hasNextPage endCursor}
       }
@@ -1771,6 +1776,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
             base_ref=str(pull.get("baseRefName", "main")),
             head_ref=str(pull.get("headRefName") or ""),
             merge_state=str(pull.get("mergeStateStatus") or "UNKNOWN"),
+            merge_pending=bool(pull.get("mergeQueueEntry") or pull.get("autoMergeRequest")),
         ),
         checks=checks,
         human_review_ids=human_ids,
@@ -2892,7 +2898,8 @@ def watch(  # noqa: C901
                 # CI is green and only CodeRabbit is outstanding: the wait
                 # never becomes a timeout verdict (#1332).
                 _exit_green(
-                    pr, repo, snapshot.head_sha, opts, log, *waiting_green, coderabbit="timeout"
+                    pr, repo, snapshot.head_sha, opts, log, *waiting_green,
+                    coderabbit="timeout", merge_pending=snapshot.merge_pending,
                 )
             print(f"TIMEOUT  after {timeout}s")
             if log:
@@ -3219,6 +3226,7 @@ def watch(  # noqa: C901
                     failing,
                     counts,
                     coderabbit=coderabbit_note,
+                    merge_pending=snapshot.merge_pending,
                 )
 
         try:
@@ -3256,12 +3264,13 @@ def _exit_green(
     counts: dict[str, int],
     *,
     coderabbit: str | None = None,
+    merge_pending: bool = False,
 ) -> None:
     for c in advisory_failing:
         print(f"ADVISORY-FAIL  {c.name} (not in required set)")
     suffix = f" (coderabbit={coderabbit})" if coderabbit else ""
     print(f"GREEN  #{pr} all required checks passed{suffix}")
-    if _merge_pending(repo, pr, queued_only=False):
+    if merge_pending and repo:
         if not MERGE_WAIT:
             print(f"NOT-MERGED-YET  #{pr} is queued or set to auto-merge (--no-merge-wait)")
         else:
@@ -3700,14 +3709,6 @@ FOLLOW: tuple[int, float] = (20, 0.0)
 MERGE_WAIT = True
 
 
-def _merge_pending(repo: str | None, pr: int, *, queued_only: bool) -> bool:
-    """Is something other than the caller going to merge this PR?"""
-    q = fetch_queue_state(repo, pr) if repo else None
-    if q is None or q.state != "OPEN":
-        return False
-    return bool(q.entry_state) or (not queued_only and q.auto_merge)
-
-
 def follow_merge(pr: int, repo: str | None, log: WatchLog | None) -> int:
     interval, deadline = FOLLOW
     seen = MergeFollow(started=_utc_now())
@@ -3939,8 +3940,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         FOLLOW = (ns.interval, time.monotonic() + ns.timeout)
         MERGE_WAIT = ns.merge_wait
-        if MERGE_WAIT and _merge_pending(repo, pr_number, queued_only=True):
-            return _close_log(follow_merge(pr_number, repo, log), log)
         code = watch(
             pr_number,
             repo,

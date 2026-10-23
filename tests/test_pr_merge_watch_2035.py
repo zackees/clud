@@ -81,19 +81,25 @@ def test_a_required_merge_group_failure_ejects_at_once_and_names_the_job(
     assert "advisory" not in out
 
 
-def test_a_cancelled_merge_group_job_is_a_queue_rebuild_not_a_verdict(watcher, monkeypatch) -> None:
+def test_a_cancelled_merge_group_job_is_a_queue_rebuild_not_a_verdict(
+    watcher, monkeypatch
+) -> None:
     jobs = [({"name": "CI"}, [{"name": "build", "conclusion": "cancelled"}])]
     states = [_queue(watcher), _queue(watcher, state="MERGED", entry=None)]
     assert _follow(watcher, monkeypatch, states, jobs) == watcher.EXIT_GREEN
 
 
 def test_removal_from_the_queue_names_the_reason(watcher, monkeypatch, capsys) -> None:
-    removed = _queue(watcher, entry=None, reason="FAILED_CHECKS", removed=STARTED + timedelta(seconds=5))
+    removed = _queue(
+        watcher, entry=None, reason="FAILED_CHECKS", removed=STARTED + timedelta(seconds=5)
+    )
     assert _follow(watcher, monkeypatch, [_queue(watcher), removed]) == watcher.EXIT_EJECTED
     assert "FAILED_CHECKS" in capsys.readouterr().out
 
 
-def test_an_old_removal_does_not_eject_a_pr_that_is_still_auto_merging(watcher, monkeypatch) -> None:
+def test_an_old_removal_does_not_eject_a_pr_that_is_still_auto_merging(
+    watcher, monkeypatch
+) -> None:
     old = STARTED - timedelta(days=1)
     states = [
         _queue(watcher, entry=None, auto=True, reason="MANUAL", removed=old),
@@ -120,11 +126,14 @@ def test_a_closed_pr_is_not_merged(watcher, monkeypatch) -> None:
 def test_the_graphql_answer_parses_into_queue_state(watcher) -> None:
     data = {"data": {"repository": {"pullRequest": {
         "state": "OPEN", "baseRefName": "master", "autoMergeRequest": None,
-        "mergeQueueEntry": {"state": "AWAITING_CHECKS", "position": 2, "headCommit": {"oid": "abc"}},
+        "mergeQueueEntry": {
+            "state": "AWAITING_CHECKS", "position": 2, "headCommit": {"oid": "abc"},
+        },
         "timelineItems": {"nodes": [{"reason": "MANUAL", "createdAt": "2026-10-22T12:00:05Z"}]},
     }}}}
     q = watcher.parse_queue_state(data)
-    assert (q.entry_state, q.position, q.queue_sha, q.auto_merge) == ("AWAITING_CHECKS", 2, "abc", False)
+    assert (q.entry_state, q.position, q.queue_sha) == ("AWAITING_CHECKS", 2, "abc")
+    assert q.auto_merge is False
     assert q.removal_reason == "MANUAL"
     assert q.removed_at == STARTED + timedelta(seconds=5)
     assert watcher.parse_queue_state({"errors": []}) is None
@@ -135,7 +144,6 @@ def test_no_merge_wait_stops_at_green_and_reports_the_pending_merge(
 ) -> None:
     assert watcher.parse_args(["1847"]).merge_wait is True
     assert watcher.parse_args(["1847", "--no-merge-wait"]).merge_wait is False
-    monkeypatch.setattr(watcher, "fetch_queue_state", lambda _r, _p: _queue(watcher))
     monkeypatch.setattr(watcher, "follow_merge", lambda *_a: pytest.fail("must not follow"))
     monkeypatch.setattr(watcher, "MERGE_WAIT", False)
     opts = watcher.CancelOptions(
@@ -143,13 +151,13 @@ def test_no_merge_wait_stops_at_green_and_reports_the_pending_merge(
         ignore_permission_errors=True, no_retry=True,
     )
     with pytest.raises(SystemExit) as exit_info:
-        watcher._exit_green(1847, "o/r", "sha", opts, None, [], {})
+        watcher._exit_green(1847, "o/r", "sha", opts, None, [], {}, merge_pending=True)
     assert exit_info.value.code == watcher.EXIT_GREEN
     assert "NOT-MERGED-YET  #1847" in capsys.readouterr().out
 
 
 def test_green_on_a_queued_pr_follows_the_merge(watcher, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(watcher, "fetch_queue_state", lambda _r, _p: _queue(watcher))
+    # The gate snapshot carries the queue entry, so green needs no extra read.
     followed = []
 
     def follow(pr, repo, _log):
@@ -162,6 +170,6 @@ def test_green_on_a_queued_pr_follows_the_merge(watcher, monkeypatch, capsys) ->
         ignore_permission_errors=True, no_retry=True,
     )
     with pytest.raises(SystemExit):
-        watcher._exit_green(1847, "o/r", "sha", opts, None, [], {})
+        watcher._exit_green(1847, "o/r", "sha", opts, None, [], {}, merge_pending=True)
     assert followed == [(1847, "o/r")]
     assert "FOLLOWING  #1847" in capsys.readouterr().out
