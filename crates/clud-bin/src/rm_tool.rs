@@ -46,7 +46,8 @@ pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
 const OUTSIDE_HINT: &str = "; --purge does not relax this check. To quarantine it reversibly \
      instead, run `clud trash <PATH>` (recoverable from ~/.clud/trash until GC). Write scratch \
      data under an allowed root (the session temp dir) or a system temp dir instead, or ask the \
-     user to remove this path";
+     user to remove this path. A trash entry this session created may be erased with \
+     `safe-rm --purge <entry>`";
 
 /// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
@@ -191,6 +192,10 @@ pub struct Roots {
     /// Paths allowed only by an extra root (a subset of `ledger_grants`).
     extra_grants: BTreeMap<PathBuf, String>,
     pub(crate) session_grants: Vec<session_grants::SessionGrant>,
+    /// This session's own trash entries (#2096), canonical.
+    own_trash: Vec<PathBuf>,
+    /// Whether the call purges, which alone may touch [`Self::own_trash`].
+    pub purge_own_trash: bool,
 }
 
 impl Roots {
@@ -251,6 +256,8 @@ impl Roots {
             extra_root_warnings: Vec::new(),
             extra_grants: BTreeMap::new(),
             session_grants: Vec::new(),
+            own_trash: Vec::new(),
+            purge_own_trash: false,
         }
     }
 
@@ -277,6 +284,13 @@ impl Roots {
     #[must_use]
     pub fn with_session_grants(mut self, grants: Vec<session_grants::SessionGrant>) -> Self {
         self.session_grants = grants;
+        self
+    }
+
+    /// Let `--purge` erase `entries`, this session's trash entries (#2096).
+    #[must_use]
+    pub fn with_own_trash(mut self, entries: Vec<PathBuf>) -> Self {
+        self.own_trash = entries;
         self
     }
 
@@ -327,6 +341,9 @@ impl Roots {
 
     /// The deepest root strictly containing `path`, or why there is none.
     fn containing(&mut self, path: &Path) -> Result<PathBuf, String> {
+        if let Some(result) = self.own_trash_for(path) {
+            return result;
+        }
         if let Some(root) = deepest_containing(&self.roots, path) {
             return Ok(root);
         }
@@ -465,6 +482,18 @@ impl Roots {
                     .map_or(path.to_path_buf(), Path::to_path_buf)))
             }
         }
+    }
+
+    /// `path` inside one of this session's trash entries (#2096): allowed
+    /// only for `--purge`, since trashing it again just makes a new entry.
+    fn own_trash_for(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
+        let entry = self.own_trash.iter().find(|e| path.starts_with(e))?.clone();
+        if !self.purge_own_trash {
+            return Some(Err(own_trash::NEEDS_PURGE.into()));
+        }
+        self.ledger_grants
+            .insert(path.to_path_buf(), own_trash::REASON.into());
+        Some(Ok(entry.parent().map_or(entry.clone(), Path::to_path_buf)))
     }
 
     fn session_grant_for(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
@@ -903,6 +932,9 @@ impl Context {
             let grants = session_grants::load(&state, session, &roots.roots);
             roots = roots.with_session_grants(grants);
         }
+        if let Some(session) = session_id.as_deref() {
+            roots = roots.with_own_trash(own_trash::load(&trash_root, session));
+        }
         let role = std::env::var(ROLE_ENV)
             .ok()
             .filter(|r| !r.is_empty())
@@ -1027,6 +1059,7 @@ pub fn run_with(
     for warning in &roots.extra_root_warnings {
         let _ = writeln!(err, "{cmd}: {warning}");
     }
+    roots.purge_own_trash = options.purge;
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut accepted: Vec<Target> = Vec::new();
     for raw in &options.paths {
@@ -1700,6 +1733,9 @@ pub mod extra_roots;
 
 #[path = "rm_tool_home_files.rs"]
 pub mod home_files;
+
+#[path = "rm_tool_own_trash.rs"]
+pub mod own_trash;
 
 #[path = "rm_tool_session_grants.rs"]
 pub(crate) mod session_grants;

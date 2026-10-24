@@ -341,6 +341,13 @@ paths are copied without following symlinks, then removed. The daemon's GC
 registry and fallback sweep retain manifest-bearing entries for 72 hours.
 Manifest-less `clud trash` quarantine entries keep their separate behavior.
 
+A session may erase its own trash (#2096). An entry whose `.clud-rm.json`, or
+the `.clud-trash-owner.json` marker that `clud trash` writes, names the
+caller's session id is allowed for `safe-rm --purge`. Without `--purge` it is
+refused, since trashing it again only makes a new entry. Another session's
+entries stay outside the roots. This lets a "leave no files behind" `/goal`
+finish without a hand-run `rm`.
+
 Every call writes one JSONL record to `~/.clud/state/logs/rm/<date>.jsonl`
 with role, cwd, roots, flags, per-path outcomes, and exit status. A batch may
 trash valid paths while refusing others, returning nonzero. Nested paths within
