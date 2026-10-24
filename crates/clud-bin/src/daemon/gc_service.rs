@@ -23,6 +23,7 @@ use crate::worktrees;
 use super::activity::DaemonActivity;
 use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
+mod act_containers;
 mod extern_repo;
 mod filesystem;
 mod legacy_worktree_root;
@@ -1033,6 +1034,10 @@ fn spawn_repo_worktree_probe(
                     &repo_worktree_reclaim::repos_with_dangling_admin(&rows),
                 );
             }
+            // #1878: act job containers whose clud worktree is gone.
+            if mode == ReclaimMode::Delete {
+                act_containers::sweep(&act_sweep_roots(wt_root.as_deref()));
+            }
             // #1687: measure only on this background thread. The CLI reads
             // the snapshot and never walks a checkout to produce its report.
             if let Err(error) = crate::gc::target_size_cache::refresh(
@@ -1051,6 +1056,16 @@ fn spawn_repo_worktree_probe(
     if spawned.is_err() {
         spare_reasons.repo_probe_finished();
     }
+}
+
+/// The roots whose missing children orphan an `act` container (#1878):
+/// the clud worktree root and its legacy `tmp-wt` name.
+fn act_sweep_roots(wt_root: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = wt_root.into_iter().map(Path::to_path_buf).collect();
+    if let Some(home) = crate::home::user_home() {
+        roots.push(crate::gc::worktree_root::legacy_worktree_root_for(&home));
+    }
+    roots
 }
 
 /// #1962: move what is left under the old `~/.clud/tmp-wt` into

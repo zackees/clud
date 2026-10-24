@@ -361,6 +361,13 @@ the default branch, so ancestry-based checks call them live work forever
   `process table unavailable`, `detached`, `dirty`, `untracked`,
   `open PR #N`, `commits after merge`, `no PR`, `closed PR #N`, `unverifiable`, and under
   `~/.clud/worktrees` only, `grace` (see the #1485 subsection below).
+- **Orphaned `act` containers (#1878).** A local `act` run binds the worktree it
+  tests, and an act killed mid-run leaves its container running after the worktree
+  is gone. In delete mode the probe thread removes every `act-*` container with a
+  bind source strictly under `~/.clud/worktrees` (or the legacy `tmp-wt`) that no
+  longer exists, together with its own `<name>` and `<name>-env` volumes. Shared
+  volumes such as `act-toolcache` are never touched. Incomplete `docker inspect`
+  output removes nothing (`daemon/gc_service/act_containers.rs`).
 - **Dangling admin entries (#1961).** In delete mode the probe thread runs
   `git worktree prune` for each repo whose `git worktree list` still names a
   missing worktree. Before this, prune ran only after a successful reclaim in
