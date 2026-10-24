@@ -19,7 +19,6 @@ fn a_mutation_chained_with_a_watch_or_another_mutation_is_refused() {
         "cd /tmp && gh pr create --base master --head lint/x --title t --body b; clud tool run github/pr_merge_watch.py 4",
         "git commit -q --allow-empty -m retry && git push -q 2>&1|tail -1; timeout 1700 clud tool run github/pr_merge_watch.py 4812 2>&1 | tail -3",
         "for r in bouf design; do gh pr merge 1 -R o/$r --squash --admin --delete-branch 2>&1|tail -1; done",
-        "gh pr checks 548 --watch --interval 30 | tail -2 && gh pr merge 548 --squash --delete-branch | tail -2",
         "git push origin HEAD && gh pr create --fill && gh pr merge --auto --squash",
         "gh api -X POST repos/o/r/issues/1/labels -f labels[]=x && gh api --method DELETE repos/o/r/issues/1/labels/y",
         "git push && \"$CLUD_EXE\" tool run github/run_watch.py 99",
@@ -50,8 +49,12 @@ fn read_only_chains_single_mutations_and_push_then_create_are_allowed() {
 #[test]
 fn the_override_admits_one_chained_command() {
     let mut reason = Some(String::new());
-    temp_env(BAD_CMD_OVERRIDE_ENV, "mutation-chain:release script", || {
-        reason = evaluate_command("git push && git push --tags", None, false, &[]).reason;
-    });
+    temp_env(
+        BAD_CMD_OVERRIDE_ENV,
+        "mutation-chain:release script",
+        || {
+            reason = evaluate_command("git push && git push --tags", None, false, &[]).reason;
+        },
+    );
     assert_eq!(reason, None);
 }

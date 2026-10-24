@@ -113,8 +113,8 @@ pub(super) fn mutation_chain_reason(
         })
         .sum::<usize>();
     let watch = found.iter().any(|(_, kind)| *kind == Kind::Watch);
-    let refused = (mutations >= 1 && watch)
-        || (mutations >= 2 && !push_then_create(&found, command_text));
+    let refused =
+        (mutations >= 1 && watch) || (mutations >= 2 && !push_then_create(&found, command_text));
     if !refused {
         return None;
     }
