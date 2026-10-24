@@ -176,6 +176,18 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           [ "$DYLINT_PASS" = "aarch64-apple-darwin" ] || { echo "not the aarch64-apple-darwin leg"; exit 0; }
+          # #2115: a restored rustup-home can claim this target's rust-std
+          # while its library files are missing. soldr checks the files and
+          # refuses to repair caller-selected state, and rustup still reports
+          # the component "up to date". Delete the broken toolchain so soldr
+          # reinstalls it whole on its next call. A healthy cache is a no-op.
+          for dir in "${RUSTUP_HOME:?}"/toolchains/*/; do
+            [ -L "${dir%/}" ] && continue
+            grep -qx rust-std-aarch64-apple-darwin "${dir}lib/rustlib/components" 2>/dev/null || continue
+            ls "${dir}lib/rustlib/aarch64-apple-darwin/lib/"libcore-*.rlib >/dev/null 2>&1 && continue
+            echo "::warning::reinstalling $(basename "$dir"): its aarch64-apple-darwin rust-std files are missing (#2115)"
+            rm -rf "${dir%/}"
+          done
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target aarch64-apple-darwin
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target aarch64-apple-darwin
       - name: Record pass marker
