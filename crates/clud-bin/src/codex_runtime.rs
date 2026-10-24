@@ -2,7 +2,7 @@
 
 pub const FALLBACK_SOL: &str = "gpt-6-sol";
 pub const FALLBACK_LUNA: &str = "gpt-6-luna";
-pub const MANIFEST_URL: &str = "https://zackees.github.io/clud/models/manifest.json";
+pub const MANIFEST_URL: &str = "https://talos-hq.github.io/clud/models/manifest.json";
 const CACHE_PATH: &str = ".clud/cache/models/manifest.json";
 const LAST_GOOD_PATH: &str = ".clud/cache/models/last-good.json";
 const CACHE_INTERVAL: Duration = Duration::from_secs(15 * 60);

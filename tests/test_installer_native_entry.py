@@ -632,7 +632,7 @@ def test_browser_menu_uses_canonical_url_without_installing(
     process = PseudoTerminalProcess(
         [str(clud_binary()), "--installer"], env=env, capture=True,
     )
-    page = "https://zackees.github.io/clud/install/index.html"
+    page = "https://talos-hq.github.io/clud/install/index.html"
     try:
         process.expect("Install clud", timeout=30)
         process.write("\x1b[B\x1b[B\r")

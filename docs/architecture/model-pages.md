@@ -1,7 +1,7 @@
 # Codex model publication and selection
 
 Issue #1476 separates current Codex model discovery from clud releases. The
-strict, small `https://zackees.github.io/clud/models/manifest.json` document
+strict, small `https://talos-hq.github.io/clud/models/manifest.json` document
 contains the latest verified stable Sol and Luna wire IDs, a Sol/low default,
 source, and check time. It is not the installer `manifest.json` catalog.
 

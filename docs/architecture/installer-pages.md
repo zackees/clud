@@ -1,7 +1,7 @@
 # Installer Pages and release catalog
 
 Issue #1468 uses GitHub Pages as the installer discovery endpoint. The canonical
-catalog URL is `https://zackees.github.io/clud/install/manifest.json`; it is a
+catalog URL is `https://talos-hq.github.io/clud/install/manifest.json`; it is a
 `manifest.json` v1 Catalog, not the repository's internal test-bundle manifest.
 
 `installer/catalog.py` fetches the public GitHub release list and verifies each

@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 
 const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 const SCHEMA: &str = "https://zackees.github.io/manifest.json/v1/manifest.schema.json";
-const ONLINE_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
+const ONLINE_URL: &str = "https://talos-hq.github.io/clud/install/manifest.json";
+// Catalogs published before the move to talos-hq (#2126) still name the old
+// Pages host; accept it until the next publish rewrites the field.
+const LEGACY_ONLINE_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -227,7 +230,10 @@ impl Catalog {
             return Err("unsupported catalog schema version".into());
         }
         require_string(root, "tool", "clud")?;
-        require_string(root, "online_url", ONLINE_URL)?;
+        let online_url = string(field(root, "online_url")?, "online_url")?;
+        if online_url != ONLINE_URL && online_url != LEGACY_ONLINE_URL {
+            return Err("unexpected online_url".into());
+        }
         let channels = object(field(root, "channels")?, "channels")?;
         let latest_stable = string(field(channels, "latest-stable")?, "latest-stable")?.to_owned();
         if !Version::parse(&latest_stable)?.pre.is_empty() {
@@ -726,7 +732,7 @@ mod tests {
         json!({
             "$schema": "https://zackees.github.io/manifest.json/v1/manifest.schema.json",
             "kind": "Catalog", "schema_version": 1, "tool": "clud",
-            "online_url": "https://zackees.github.io/clud/install/manifest.json",
+            "online_url": "https://talos-hq.github.io/clud/install/manifest.json",
             "channels": {"latest-stable": "2.9.0"},
             "releases": [{"version": "2.9.0", "published_at": "2026-09-01T00:00:00Z", "platforms": platforms}]
         })
@@ -765,6 +771,16 @@ mod tests {
             )
             .is_ok());
         assert!(Catalog::parse_candidate(&bytes, "2.11.0").is_err());
+    }
+
+    #[test]
+    fn catalog_from_the_pre_transfer_pages_host_still_parses() {
+        // #2126: catalogs published before the move to talos-hq name the old host.
+        let mut document = catalog(true, false);
+        document["online_url"] = json!(LEGACY_ONLINE_URL);
+        assert!(Catalog::parse(&serde_json::to_vec(&document).unwrap()).is_ok());
+        document["online_url"] = json!("https://example.com/clud/install/manifest.json");
+        assert!(Catalog::parse(&serde_json::to_vec(&document).unwrap()).is_err());
     }
 
     #[test]

@@ -11,9 +11,9 @@ use super::picker::{self, ConfirmChoice, MenuChoice, ReleaseChoice};
 use super::result::Outcome;
 use super::transaction;
 
-const CATALOG_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
+const CATALOG_URL: &str = "https://talos-hq.github.io/clud/install/manifest.json";
 const CANDIDATE_CATALOG_NAME: &str = "installer-candidate-manifest.json";
-pub const INSTALL_PAGE: &str = "https://zackees.github.io/clud/install/index.html";
+pub const INSTALL_PAGE: &str = "https://talos-hq.github.io/clud/install/index.html";
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
