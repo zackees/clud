@@ -2423,6 +2423,166 @@ def fetch_head_commit_message(repo: str, sha: str) -> str | None:
     return message if isinstance(message, str) else None
 
 
+PR_TRIGGER_EVENTS = ("pull_request", "pull_request_target")
+
+
+def _branch_glob(pattern: str) -> re.Pattern[str]:
+    """GitHub's branch filter glob: `**` crosses `/`, `*` does not."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append(".?")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def branch_filter_matches(
+    branches: list[str] | None, ignore: list[str] | None, base: str
+) -> bool:
+    """Does a `pull_request` filter admit a PR into `base`?
+
+    `branches` patterns apply in order, a `!` pattern excluding what earlier
+    ones matched; `branches-ignore` excludes any match."""
+    if ignore is not None:
+        return not any(_branch_glob(p).match(base) for p in ignore)
+    if branches is None:
+        return True
+    admitted = False
+    for pattern in branches:
+        if pattern.startswith("!"):
+            if _branch_glob(pattern[1:]).match(base):
+                admitted = False
+        elif _branch_glob(pattern).match(base):
+            admitted = True
+    return admitted
+
+
+def _yaml_scalar(text: str) -> str:
+    return text.strip().strip("'\"")
+
+
+def _yaml_list(rest: str, lines: list[str], start: int, indent: int) -> list[str]:
+    """An inline `[a, b]` list, or the `- item` lines indented under a key."""
+    rest = rest.split(" #", 1)[0].strip()
+    if rest.startswith("["):
+        return [_yaml_scalar(item) for item in rest.strip("[]").split(",") if item.strip()]
+    if rest:
+        return [_yaml_scalar(rest)]
+    items = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        if stripped.startswith("- "):
+            items.append(_yaml_scalar(stripped[2:]))
+    return items
+
+
+def _block_children(lines: list[str], start: int, indent: int) -> list[tuple[int, str, str]]:
+    """`(index, key, rest)` for the keys one level under the line at `start`."""
+    children = []
+    child_indent = None
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = len(line) - len(line.lstrip())
+        if current <= indent:
+            break
+        if child_indent is None:
+            child_indent = current
+        if current == child_indent and ":" in stripped and not stripped.startswith("- "):
+            key, _, rest = stripped.partition(":")
+            children.append((index, _yaml_scalar(key), rest))
+    return children
+
+
+def workflow_triggers(text: str) -> dict[str, dict[str, list[str] | None]] | None:
+    """`{event: {"branches": [...]|None, "branches-ignore": [...]|None}}`.
+
+    A line scanner for the common `on:` shapes; `None` when the shape is not
+    recognized, which callers treat as "may trigger" so an odd workflow can
+    never produce a false `no_trigger_for_base`."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"""^(['"]?)(on|true)\1\s*:(.*)$""", line)
+        if not match:
+            continue
+        rest = match.group(3).split(" #", 1)[0].strip()
+        if rest:
+            names = _yaml_list(rest, lines, index + 1, 0)
+            return {name: {"branches": None, "branches-ignore": None} for name in names}
+        events: dict[str, dict[str, list[str] | None]] = {}
+        for child, event, _rest in _block_children(lines, index, 0):
+            child_indent = len(lines[child]) - len(lines[child].lstrip())
+            spec: dict[str, list[str] | None] = {"branches": None, "branches-ignore": None}
+            for grand, key, grand_rest in _block_children(lines, child, child_indent):
+                if key in spec:
+                    grand_indent = len(lines[grand]) - len(lines[grand].lstrip())
+                    spec[key] = _yaml_list(grand_rest, lines, grand + 1, grand_indent)
+            events[event] = spec
+        return events or None
+    return None
+
+
+def triggers_for_base(workflows: dict[str, str], base: str) -> dict[str, list[str]]:
+    """Which workflows a PR into `base` triggers, and which can be dispatched."""
+    pr_workflows: list[str] = []
+    dispatchable: list[str] = []
+    for name, text in sorted(workflows.items()):
+        events = workflow_triggers(text)
+        if events is None:
+            pr_workflows.append(name)
+            continue
+        if "workflow_dispatch" in events:
+            dispatchable.append(name)
+        for event in PR_TRIGGER_EVENTS:
+            spec = events.get(event)
+            if spec is not None and branch_filter_matches(
+                spec["branches"], spec["branches-ignore"], base
+            ):
+                pr_workflows.append(name)
+                break
+    return {"pr_workflows": pr_workflows, "dispatchable": dispatchable}
+
+
+def fetch_workflow_texts(repo: str, ref: str) -> dict[str, str] | None:
+    """`{file name: YAML text}` for `.github/workflows` at `ref`; None if unreadable."""
+    res = gh("api", f"repos/{repo}/contents/.github/workflows?ref={ref}")  # ci-lint: allow GHAPI-001 once per head commit: memoized in no_checks_reasons
+    if not res.ok:
+        return None
+    try:
+        entries = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    texts: dict[str, str] = {}
+    for entry in entries:
+        name = str(entry.get("name", "")) if isinstance(entry, dict) else ""
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        data = gh_json("api", f"repos/{repo}/contents/.github/workflows/{name}?ref={ref}")  # ci-lint: allow GHAPI-001 once per head commit: memoized in no_checks_reasons
+        content = data.get("content") if isinstance(data, dict) else None
+        if not isinstance(content, str):
+            return None
+        texts[name] = base64.b64decode(content).decode("utf-8", errors="replace")
+    return texts
+
+
 def immediate_no_checks_reason(repo: str, snapshot: PRSnapshot) -> str | None:
     """Why no check can ever report on this head, known without waiting."""
     # A PR adding the repo's first workflow runs it from its own ref, so the
@@ -2432,6 +2592,11 @@ def immediate_no_checks_reason(repo: str, snapshot: PRSnapshot) -> str | None:
         and fetch_workflow_presence(repo, snapshot.head_sha) is False
     ):
         return "no_workflows"
+    # #1893: workflows exist, but none triggers on a PR into this base (a
+    # `branches:` filter). A re-push cannot help, so say so at once.
+    texts = fetch_workflow_texts(repo, snapshot.head_sha)
+    if texts and not triggers_for_base(texts, snapshot.base_ref)["pr_workflows"]:
+        return "no_trigger_for_base"
     message = fetch_head_commit_message(repo, snapshot.head_sha)
     if message and SKIP_CI_MARKER.search(message):
         return "skip_ci_marker"
@@ -3794,6 +3959,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--triggers-for-base",
+        metavar="BRANCH",
+        default=None,
+        help="print JSON {pr_workflows, dispatchable} for a PR into BRANCH, read "
+        "from the default branch's workflows on --repo, and exit (#1893)",
+    )
+    p.add_argument(
         "pr",
         nargs="?",
         default=None,
@@ -3941,9 +4113,26 @@ def _resolve_cancel_options(ns: argparse.Namespace) -> CancelOptions:
     )
 
 
+def _print_triggers(repo: str | None, base: str) -> int:
+    repo = repo or _resolve_origin_repo()
+    if not repo:
+        print("UNRESOLVED  --triggers-for-base needs --repo OWNER/NAME", file=sys.stderr)
+        return EXIT_USAGE
+    default = gh_json("api", f"repos/{repo}")  # ci-lint: allow GHAPI-001 one-shot query mode, not a watch loop
+    ref = default.get("default_branch") if isinstance(default, dict) else None
+    texts = fetch_workflow_texts(repo, str(ref or "HEAD"))
+    if texts is None:
+        print(f"UNREACHABLE  could not read {repo} workflows", file=sys.stderr)
+        return EXIT_GITHUB_UNREACHABLE
+    print(json.dumps({"base": base, **triggers_for_base(texts, base)}))
+    return EXIT_GREEN
+
+
 def main(argv: list[str] | None = None) -> int:
     global FOLLOW, MERGE_WAIT
     ns = parse_args(argv if argv is not None else sys.argv[1:])
+    if ns.triggers_for_base is not None:
+        return _print_triggers(ns.repo, ns.triggers_for_base)
     opts = _resolve_cancel_options(ns)
     resolved = resolve_pr_selector(ns.pr, ns.repo)
     if isinstance(resolved[0], int):
