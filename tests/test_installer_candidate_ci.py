@@ -140,7 +140,7 @@ def test_fixture_binds_all_six_artifacts_and_prior_release(tmp_path, monkeypatch
         rows.append({**evidence(target), "sha256": metadata["sha256"]})
     prior = {
         "$schema": "https://zackees.github.io/manifest.json/v1/manifest.schema.json",
-        "online_url": "https://zackees.github.io/clud/install/manifest.json",
+        "online_url": "https://talos-hq.github.io/clud/install/manifest.json",
         "kind": "Catalog",
         "releases": [{"version": "2.8.13", "platforms": [{}] * 6}],
     }

@@ -16,8 +16,11 @@ from urllib.request import Request, urlopen
 from zipfile import ZipFile
 
 SCHEMA = "https://zackees.github.io/manifest.json/v1/manifest.schema.json"
-ONLINE_URL = "https://zackees.github.io/clud/install/manifest.json"
-REPO_API = "https://api.github.com/repos/zackees/clud/releases"
+ONLINE_URL = "https://talos-hq.github.io/clud/install/manifest.json"
+# Catalogs published before the move to talos-hq (#2126) still name the old
+# Pages host; accept it until the next publish rewrites the field.
+ACCEPTED_ONLINE_URLS = (ONLINE_URL, "https://zackees.github.io/clud/install/manifest.json")
+REPO_API = "https://api.github.com/repos/talos-hq/clud/releases"
 TARGETS = {
     "win_amd64": ("windows", "x86_64", "clud.exe"),
     "win_arm64": ("windows", "aarch64", "clud.exe"),
@@ -169,7 +172,7 @@ def _verified_catalog_assets(
         or catalog.get("kind") != "Catalog"
         or catalog.get("schema_version") != 1
         or catalog.get("tool") != "clud"
-        or catalog.get("online_url") != ONLINE_URL
+        or catalog.get("online_url") not in ACCEPTED_ONLINE_URLS
     ):
         return {}
     verified = {}
@@ -350,7 +353,7 @@ def candidate_catalog_from_release(
         stable_catalog.get("kind") != "Catalog"
         or stable_catalog.get("schema_version") != 1
         or stable_catalog.get("tool") != "clud"
-        or stable_catalog.get("online_url") != ONLINE_URL
+        or stable_catalog.get("online_url") not in ACCEPTED_ONLINE_URLS
         or set(stable_catalog.get("channels", {})) != {"latest-stable"}
     ):
         raise ValueError("previous stable catalog is invalid")

@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 
 const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 const SCHEMA: &str = "https://zackees.github.io/manifest.json/v1/manifest.schema.json";
-const ONLINE_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
+const ONLINE_URL: &str = "https://talos-hq.github.io/clud/install/manifest.json";
+// Catalogs published before the move to talos-hq (#2126) still name the old
+// Pages host; accept it until the next publish rewrites the field.
+const LEGACY_ONLINE_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -227,7 +230,10 @@ impl Catalog {
             return Err("unsupported catalog schema version".into());
         }
         require_string(root, "tool", "clud")?;
-        require_string(root, "online_url", ONLINE_URL)?;
+        let online_url = string(field(root, "online_url")?, "online_url")?;
+        if online_url != ONLINE_URL && online_url != LEGACY_ONLINE_URL {
+            return Err("unexpected online_url".into());
+        }
         let channels = object(field(root, "channels")?, "channels")?;
         let latest_stable = string(field(channels, "latest-stable")?, "latest-stable")?.to_owned();
         if !Version::parse(&latest_stable)?.pre.is_empty() {
@@ -390,6 +396,20 @@ fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("{name} must be a string"))
 }
 
+/// Owners whose release URLs a catalog row may name: the repository moved
+/// from zackees to talos-hq (#2126), and published rows keep the old owner.
+const RELEASE_OWNERS: [&str; 2] = ["talos-hq", "zackees"];
+
+pub(super) fn is_release_asset_url(url: &str, version: &str, filename: &str) -> bool {
+    RELEASE_OWNERS.iter().any(|owner| {
+        ["", "v"].iter().any(|prefix| {
+            url == format!(
+                "https://github.com/{owner}/clud/releases/download/{prefix}{version}/{filename}"
+            )
+        })
+    })
+}
+
 fn require_string(
     map: &serde_json::Map<String, Value>,
     name: &str,
@@ -464,11 +484,7 @@ fn parse_asset(value: &Value, version: &str) -> Result<ResolvedAsset, String> {
         return Err("asset must have exactly one URL".into());
     }
     let url = string(&urls[0], "asset URL")?;
-    let expected_a =
-        format!("https://github.com/zackees/clud/releases/download/{version}/{filename}");
-    let expected_b =
-        format!("https://github.com/zackees/clud/releases/download/v{version}/{filename}");
-    if url != expected_a && url != expected_b {
+    if !is_release_asset_url(url, version, filename) {
         return Err("asset URL does not match release".into());
     }
     if field(item, "provides")? != &serde_json::json!(["clud"]) {
@@ -726,7 +742,7 @@ mod tests {
         json!({
             "$schema": "https://zackees.github.io/manifest.json/v1/manifest.schema.json",
             "kind": "Catalog", "schema_version": 1, "tool": "clud",
-            "online_url": "https://zackees.github.io/clud/install/manifest.json",
+            "online_url": "https://talos-hq.github.io/clud/install/manifest.json",
             "channels": {"latest-stable": "2.9.0"},
             "releases": [{"version": "2.9.0", "published_at": "2026-09-01T00:00:00Z", "platforms": platforms}]
         })
@@ -765,6 +781,16 @@ mod tests {
             )
             .is_ok());
         assert!(Catalog::parse_candidate(&bytes, "2.11.0").is_err());
+    }
+
+    #[test]
+    fn catalog_from_the_pre_transfer_pages_host_still_parses() {
+        // #2126: catalogs published before the move to talos-hq name the old host.
+        let mut document = catalog(true, false);
+        document["online_url"] = json!(LEGACY_ONLINE_URL);
+        assert!(Catalog::parse(&serde_json::to_vec(&document).unwrap()).is_ok());
+        document["online_url"] = json!("https://example.com/clud/install/manifest.json");
+        assert!(Catalog::parse(&serde_json::to_vec(&document).unwrap()).is_err());
     }
 
     #[test]

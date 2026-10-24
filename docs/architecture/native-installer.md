@@ -74,7 +74,7 @@ raw mode, CRLF output, viewport scrolling, Windows key-release filtering,
 cursor restoration, and Escape/Ctrl-C handling. The release picker uses
 `Catalog::compatible_releases`; its default follows the `latest-stable`
 channel rather than assuming the first row is stable. Browser choice opens
-`https://zackees.github.io/clud/install/index.html` and prints that URL if
+`https://talos-hq.github.io/clud/install/index.html` and prints that URL if
 the opener fails.
 
 Public prerelease acceptance sets `CLUD_INSTALLER_CANDIDATE_TAG` to a numeric

@@ -483,15 +483,7 @@ fn verify_version(path: &Path, expected: &str) -> Result<(), String> {
 }
 
 fn validate_asset_url(asset: &ResolvedAsset) -> Result<(), String> {
-    let first = format!(
-        "https://github.com/zackees/clud/releases/download/{}/{}",
-        asset.version, asset.filename
-    );
-    let second = format!(
-        "https://github.com/zackees/clud/releases/download/v{}/{}",
-        asset.version, asset.filename
-    );
-    if asset.url != first && asset.url != second {
+    if !super::catalog::is_release_asset_url(&asset.url, &asset.version, &asset.filename) {
         return Err("release URL changed after catalog resolution".into());
     }
     Ok(())
@@ -617,10 +609,18 @@ fn validate_redirect(value: &str) -> Result<(), String> {
     {
         return Err("unsafe release redirect".into());
     }
-    if !matches!(
-        parsed.host_str(),
-        Some("release-assets.githubusercontent.com" | "objects.githubusercontent.com")
-    ) {
+    // github.com itself only for the hop from the pre-transfer owner to the
+    // repository's new home (#2126); the asset bytes still come from the CDN.
+    let moved_repository = parsed.host_str() == Some("github.com")
+        && parsed
+            .path()
+            .starts_with("/talos-hq/clud/releases/download/");
+    if !moved_repository
+        && !matches!(
+            parsed.host_str(),
+            Some("release-assets.githubusercontent.com" | "objects.githubusercontent.com")
+        )
+    {
         return Err("release redirect left the approved CDN".into());
     }
     Ok(())
@@ -820,6 +820,13 @@ mod tests {
             assert!(validate_redirect(url).is_err(), "{url}");
         }
         assert!(validate_redirect("https://release-assets.githubusercontent.com/a").is_ok());
+        assert!(validate_redirect(
+            "https://github.com/talos-hq/clud/releases/download/2.8.13/clud-2.8.13.whl"
+        )
+        .is_ok());
+        assert!(
+            validate_redirect("https://github.com/someone-else/clud/releases/download/a").is_err()
+        );
     }
 
     #[test]

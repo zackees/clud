@@ -14,7 +14,7 @@ from typing import Any
 from installer.site import published_paths
 from models.manifest import merge_manifest, should_publish, validate_manifest
 
-PAGES = "https://zackees.github.io/clud"
+PAGES = "https://talos-hq.github.io/clud"
 OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models"
 MODELS_DEV = "https://models.dev/api.json"
 MAX_RESPONSE = 8_000_000
