@@ -217,7 +217,7 @@ def test_repeated_bounded_observations_resume_the_same_ci_until_green(tmp_path: 
         result = process.run(args, env=env, cwd=tmp_path,
                              capture_output=True, text=True, timeout=15)
         assert result.returncode == expected, result.stdout + result.stderr
-    logs = sorted((tmp_path / ".clud/logs/pr-merge-watch").glob("*.jsonl"))
+    logs = sorted((tmp_path / ".clud/logs/pr-merge-watch/zackees__clud").glob("*.jsonl"))
     assert len(logs) == 3
     for log in logs:
         start = json.loads(log.read_text().splitlines()[0])

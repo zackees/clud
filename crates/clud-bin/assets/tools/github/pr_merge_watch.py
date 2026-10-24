@@ -18,8 +18,10 @@ Invoked via `"$CLUD_EXE" tool run github/pr_merge_watch.py …` so UV_CACHE_DIR
 is pinned to ~/.clud/cache/uv per the three-layer enforcement (see
 issue #408).
 
-Immediately announces a durable repo-local JSONL log under
-`.clud/logs/pr-merge-watch/`. The first record is a UTC `START`; later
+Immediately announces a durable JSONL log under
+`~/.clud/logs/pr-merge-watch/<owner>__<repo>/`, never inside the watched
+repository (#2042). Older versions wrote `<repo>/.clud/logs/pr-merge-watch/`;
+that directory holds only these logs and is safe to delete. The first record is a UTC `START`; later
 records use monotonic seconds relative to that start.
 
 Exit codes:
@@ -229,20 +231,23 @@ def _utc_text(value: datetime) -> str:
 
 
 def _watch_root() -> Path:
-    result = RunningProcess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return Path(result.stdout.strip())
-    return Path.cwd()
+    """The per-user clud home that holds watch logs (#2042).
+
+    Never the watched repository: an untracked `.clud/logs/` there breaks
+    every tool that needs a clean working tree.
+    """
+    return Path.home() / ".clud"
+
+
+def _repo_slug(repo: str | None) -> str:
+    """`owner__repo` for the log directory; `origin` when unresolved."""
+    name = repo or _resolve_origin_repo() or "origin"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name.replace("/", "__"))
 
 
 @dataclass
 class WatchLog:
-    """Immediately announced, repo-local JSONL event log."""
+    """Immediately announced JSONL event log under the per-user clud home."""
 
     path: Path
     display_path: str
@@ -255,17 +260,15 @@ class WatchLog:
         started_at = _utc_now()
         started_monotonic = time.monotonic()
         millis = started_at.microsecond // 1000
-        filename = f"{started_at:%Y%m%dT%H%M%S}.{millis:03d}Z-pr-{pr}.jsonl"
-        display_path = f".clud/logs/pr-merge-watch/{filename}"
-        base_root = root or _watch_root()
-        path = base_root / Path(display_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = f"{started_at:%Y%m%dT%H%M%S}.{millis:03d}Z-pr-{pr}"
+        log_dir = (root or _watch_root()) / "logs" / "pr-merge-watch" / _repo_slug(repo)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{stamp}.jsonl"
         suffix = 2
         while path.exists():
-            filename = f"{started_at:%Y%m%dT%H%M%S}.{millis:03d}Z-pr-{pr}-{suffix}.jsonl"
-            display_path = f".clud/logs/pr-merge-watch/{filename}"
-            path = base_root / Path(display_path)
+            path = log_dir / f"{stamp}-{suffix}.jsonl"
             suffix += 1
+        display_path = str(path)
         stream = path.open("w", encoding="utf-8", newline="\n")
         log = cls(path, display_path, started_monotonic, stream)
         log._write(

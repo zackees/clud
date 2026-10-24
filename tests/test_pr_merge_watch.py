@@ -105,8 +105,10 @@ def test_watch_log_announces_path_and_uses_start_then_relative_time(
     )
 
     log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
+    expected = tmp_path / "logs/pr-merge-watch/zackees__clud/20260711T234102.123Z-pr-527.jsonl"
     announced = capsys.readouterr().err.strip()
-    assert announced == "LOG .clud/logs/pr-merge-watch/20260711T234102.123Z-pr-527.jsonl"
+    assert announced == f"LOG {expected}"
+    assert log.path == expected
 
     log.emit(
         "checks",
@@ -123,7 +125,7 @@ def test_watch_log_announces_path_and_uses_start_then_relative_time(
             "event": "START",
             "repo": "zackees/clud",
             "pr": 527,
-            "log_path": ".clud/logs/pr-merge-watch/20260711T234102.123Z-pr-527.jsonl",
+            "log_path": str(expected),
         },
         {
             "v": 1,
@@ -140,12 +142,30 @@ def test_main_announces_log_before_entering_watcher(
     monkeypatch.setattr(watcher, "_watch_root", lambda: tmp_path)
 
     def fake_watch(*_args, **_kwargs) -> int:
-        assert capsys.readouterr().err.startswith("LOG .clud/logs/pr-merge-watch/")
+        prefix = f"LOG {tmp_path / 'logs/pr-merge-watch/zackees__clud'}"
+        assert capsys.readouterr().err.startswith(prefix)
         return watcher.EXIT_GREEN
 
     monkeypatch.setattr(watcher, "watch", fake_watch)
 
     assert watcher.main(["527", "--repo", "zackees/clud"]) == watcher.EXIT_GREEN
+
+
+def test_2042_watch_log_never_lands_in_the_watched_repo(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2042: `<repo>/.clud/logs/` left the watched repo's tree dirty.
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(watcher.Path, "home", classmethod(lambda _cls: home))
+
+    log = watcher.WatchLog.create(527, "o/r")
+    log.close()
+
+    assert not (repo / ".clud").exists()
+    assert log.path.parent == home / ".clud/logs/pr-merge-watch/o__r"
 
 
 def test_check_counts_reconcile_all_buckets(watcher) -> None:
