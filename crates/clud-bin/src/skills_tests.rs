@@ -1120,8 +1120,14 @@ fn bundled_skill_md(name: &str) -> &'static str {
 #[test]
 fn clud_issue_triage_creates_no_worktree() {
     let skill = bundled_skill_md("clud-issue-triage");
-    assert!(!skill.contains("git worktree add"), "triage must not create worktrees");
-    assert!(skill.contains("git show"), "triage must read code at a revision");
+    assert!(
+        !skill.contains("git worktree add"),
+        "triage must not create worktrees"
+    );
+    assert!(
+        skill.contains("git show"),
+        "triage must read code at a revision"
+    );
 }
 
 /// #1971: `clud-git` leads with the allowed conditions and defaults to
@@ -1133,7 +1139,10 @@ fn worktrees_need_a_named_condition() {
         .find("## Do you need a worktree at all?")
         .expect("clud-git must state the worktree policy");
     let playbook = git.find("## Worktree creation playbook").unwrap();
-    assert!(policy < playbook, "the policy must precede the creation playbook");
+    assert!(
+        policy < playbook,
+        "the policy must precede the creation playbook"
+    );
     for required in [
         "Concurrent writers must build at the same time",
         "The user explicitly asks",
