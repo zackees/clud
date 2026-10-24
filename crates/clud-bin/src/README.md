@@ -458,7 +458,8 @@ which test tier a change belongs in — lives in
 - `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook binary (formerly
   `block-bad-cmd`; `clud-block-bad-cmd` is still an argv[0] alias of `clud`, see
   `multicall.rs` and `block_bad_cmd_rollout.rs`). Enforces three things per Bash command:
-  hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`); GitHub PR
+  hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`, only when
+  the cwd is inside a `Cargo.toml`/`rust-toolchain` tree, #2065); GitHub PR
   waiter rules (run-id watches and polling loops; the canonical PR-check
   watch is allowed with the session alias, DD-116), gated behind the
   `git.pr_wait_fail_fast` toggle (on by default, see `settings_tui.rs`; the guard sees
