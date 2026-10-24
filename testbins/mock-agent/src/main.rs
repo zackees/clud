@@ -542,6 +542,7 @@ fn main() {
         "sleep_ms": sleep_ms,
         "env": {
             "IN_CLUD": in_clud,
+            "UV_CACHE_DIR": std::env::var("UV_CACHE_DIR").ok(),
             "CLUD_EXE": clud_exe,
             "RUNNING_PROCESS_ORIGINATOR": originator,
             "ANTHROPIC_BASE_URL_PRESENT": anthropic_base_url_present,

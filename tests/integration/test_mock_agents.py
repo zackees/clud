@@ -894,6 +894,7 @@ class TestCodexBridgeForeground:
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
             "WEZTERM_UNIX_SOCKET",
+            "UV_CACHE_DIR",
         }
         # The mock always reports this key; outside a Kitty pane it is unset.
         assert report["env"]["WEZTERM_UNIX_SOCKET"] is None
@@ -1211,6 +1212,26 @@ class TestCommandPrompts:
 
 class TestEnvTracking:
     """Verify clud injects tracking env vars into the child process."""
+
+    def test_session_child_does_not_inherit_clud_uv_cache(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        # #1964: only bundled tools get ~/.clud/cache/uv; user commands in a
+        # session keep uv's own default cache.
+        env = {k: v for k, v in mock_env.items() if k != "UV_CACHE_DIR"}
+        result = _run(clud_binary, "-p", "hello", env=env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["env"]["UV_CACHE_DIR"] is None
+
+    def test_user_uv_cache_dir_passes_through(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        mine = str(tmp_path / "my-uv-cache")
+        result = _run(clud_binary, "-p", "hello", env={**mock_env, "UV_CACHE_DIR": mine})
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["env"]["UV_CACHE_DIR"] == mine
 
     def test_in_clud_set(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "-p", "hello", env=mock_env)

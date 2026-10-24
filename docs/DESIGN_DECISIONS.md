@@ -7239,3 +7239,22 @@ is the boundary signal direct routes already receive; bridged routes already
 receive the clear hook. The generation keeps the out-of-order guard intact
 instead of weakening it to allow lower counts. Bridged `/resume` has no hook
 and still continues the running totals.
+
+## DD-187: The clud uv cache pin is tool-scoped
+
+**Context:** #408 pinned `UV_CACHE_DIR` in three layers so that bundled tools'
+per-script venvs stay out of the user's `~/.cache/uv`. Layer 3 set it
+process-wide in `main.rs`, so every session child inherited it, and user
+projects' `uv run`/`uv sync` filled `~/.clud/cache/uv` (25–33 GB, DD-145)
+alongside the user's own cache (#1964).
+
+**Decision:** drop the process-wide pin. The `clud tool` dispatch still sets
+`UV_CACHE_DIR` to `tools::clud_uv_cache_dir()` before `clud tool run` (Layer 1)
+spawns a bundled tool, and Layer 2
+(`bundled_assets_invoke_tools_via_clud_subcommand_only`) still forbids bundled
+assets from calling `uv run ~/.clud/tools/…` directly. A session child sees
+the user's own value, or none.
+
+**Consequences:** user `uv` calls share the user's normal cache again. The
+existing `~/.clud/cache/uv` contents shrink through the DD-145 cap and are not
+migrated.
