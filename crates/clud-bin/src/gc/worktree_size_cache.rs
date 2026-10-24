@@ -117,7 +117,8 @@ pub fn tmp_banner_line(root: &Path, bytes: u64, warn_bytes: u64) -> String {
 fn banner_line_for(setting: &str, root: &Path, bytes: u64, warn_bytes: u64) -> String {
     format!(
         "[clud] warning: {} holds at least {}, over {setting} ({}); \
-         review `clud gc list`, or raise {setting} in ~/.clud/settings.json (0 disables)",
+         run `clud gc prune all` to reclaim what is safe now, review the rest with \
+         `clud gc list`, or raise {setting} in ~/.clud/settings.json (0 disables)",
         root.display(),
         gib(bytes),
         gib(warn_bytes)
