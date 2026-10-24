@@ -18,7 +18,7 @@ WORKFLOW = ROOT / "crates/clud-bin/assets/workflows/grind-run.js"
 PROBE = ROOT / "tests/fixtures/grind_workflow_probe.mjs"
 
 
-def probe(tmp_path: Path, **fields: object) -> dict:
+def probe(tmp_path: Path, classify: dict | None = None, **fields: object) -> dict:
     args = {
         "repo": str(tmp_path),
         "main": "main",
@@ -28,7 +28,7 @@ def probe(tmp_path: Path, **fields: object) -> dict:
         **fields,
     }
     config = tmp_path / "probe.json"
-    config.write_text(json.dumps({"args": args}), encoding="utf-8")
+    config.write_text(json.dumps({"args": args, "classify": classify}), encoding="utf-8")
     result = process.run(
         ["node", str(PROBE), str(WORKFLOW), str(config)],
         capture_output=True, text=True, timeout=15,
@@ -224,3 +224,28 @@ def test_repeated_bounded_observations_resume_the_same_ci_until_green(tmp_path: 
         assert start["repo"] == "zackees/clud"
         assert start["pr"] == 123
     assert not (tmp_path / "cancels").exists()
+
+
+# #1830: identical input flipped a lone child between bug and feature.
+def _classify(children: list[dict], groups: list[dict]) -> dict:
+    return {"confident": True, "children": children, "groups": groups,
+            "order": [c["id"] for c in children]}
+
+
+def test_a_lone_child_always_takes_the_bug_track(tmp_path: Path) -> None:
+    reply = _classify([{"id": "12", "track": "feature", "group": "docs", "read": True}],
+                      [{"name": "docs", "independent": True, "children": ["12"]}])
+    result = probe(tmp_path, classify=reply, github_repo="fork/project")["result"]
+    assert result["lines"] == ["#12 bug → main"], result
+    assert result["classification"]["groups"] == []
+
+
+def test_an_unread_feature_takes_the_bug_track_and_a_read_one_stays(tmp_path: Path) -> None:
+    goals = [{"id": n, "title": "t", "brief": "b"} for n in ("12", "13")]
+    reply = _classify(
+        [{"id": "12", "track": "feature", "group": "g", "read": False},
+         {"id": "13", "track": "feature", "group": "g", "read": True}],
+        [{"name": "g", "independent": True, "children": ["12", "13"]}])
+    result = probe(tmp_path, classify=reply, goals=goals, github_repo="fork/project")["result"]
+    assert result["lines"] == ["#12 bug → main", "#13 feature → grind/meta-10-g"], result
+    assert result["classification"]["groups"][0]["children"] == ["13"]
