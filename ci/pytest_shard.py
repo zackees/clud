@@ -36,6 +36,13 @@ import pytest
 
 SHARD_OPTION = "--clud-shard"
 WEIGHTS_PATH = Path(__file__).with_name("unit_shard_weights.json")
+#: Files that need the Linux native-window packages (xvfb, weston, mesa).
+#: They always land on the first shard, the only Python shard whose runner
+#: installs those packages (#2054); the others skip that apt install.
+NATIVE_WINDOW_FILES = (
+    "tests/test_secret_prompt.py",
+    "tests/test_settings_authorization_gui.py",
+)
 #: Weight of one test in a file with no recorded timing (~ suite average).
 DEFAULT_SECONDS_PER_TEST = 0.09
 
@@ -74,8 +81,9 @@ def assign_files(
 ) -> dict[str, int]:
     """Longest-processing-time assignment of files to `shard_count` shards.
 
-    Heaviest file first, each onto the currently lightest shard; ties break on
-    file name so every shard computes the same answer.
+    `NATIVE_WINDOW_FILES` go to shard 0 first; then heaviest file first, each
+    onto the currently lightest shard; ties break on file name so every shard
+    computes the same answer.
     """
     if shard_count < 1:
         raise ValueError("shard_count must be at least 1")
@@ -86,7 +94,13 @@ def assign_files(
 
     loads = [0.0] * shard_count
     assignment: dict[str, int] = {}
+    for name in NATIVE_WINDOW_FILES:
+        if name in counts:
+            assignment[name] = 0
+            loads[0] += weight(name)
     for name in sorted(counts, key=lambda file: (-weight(file), file)):
+        if name in assignment:
+            continue
         lightest = loads.index(min(loads))
         assignment[name] = lightest
         loads[lightest] += weight(name)

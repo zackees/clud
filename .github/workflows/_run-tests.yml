@@ -64,9 +64,10 @@ jobs:
         uses: ./.github/actions/setup-exec
         with:
           bundle-name: ${{ inputs.suite != 'wheel-smoke' && format('bundle-{0}', inputs.target) || '' }}
-          # Only the Python GUI tests use the native-window packages; the Rust
-          # shard skips their 117 MB apt install (#2054).
-          native-window-runtime: ${{ inputs.shard != 'rust' }}
+          # Only the Python GUI tests use the native-window packages, and
+          # ci/pytest_shard.py pins them to the first shard, so the other
+          # shards skip the 117 MB apt install (#2054).
+          native-window-runtime: ${{ inputs.shard == 'all' || inputs.shard == 'py1of3' }}
 
       - name: Download release wheel
         if: inputs.suite == 'wheel-smoke'

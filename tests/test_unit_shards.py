@@ -112,6 +112,28 @@ def test_recorded_weights_beat_test_counts() -> None:
     assert slow == {"tests/test_slow.py"}
 
 
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+def test_native_window_files_always_land_on_the_first_shard(n: int) -> None:
+    # #2054: only the first Python shard installs xvfb/weston/mesa.
+    counts = {f"tests/test_{i}.py": 30 for i in range(12)}
+    counts.update(dict.fromkeys(pytest_shard.NATIVE_WINDOW_FILES, 1))
+    assignment = assign_files(counts, {}, n)
+    assert {assignment[name] for name in pytest_shard.NATIVE_WINDOW_FILES} == {0}
+
+
+def test_native_window_files_exist() -> None:
+    root = Path(__file__).resolve().parent.parent
+    for name in pytest_shard.NATIVE_WINDOW_FILES:
+        assert (root / name).is_file(), f"{name} was renamed; update NATIVE_WINDOW_FILES"
+
+
+def test_only_the_first_python_shard_installs_the_native_window_runtime() -> None:
+    root = Path(__file__).resolve().parent.parent
+    workflow = (root / ".github/workflows/_run-tests.yml").read_text(encoding="utf-8")
+    expected = "native-window-runtime: ${{ inputs.shard == 'all' || inputs.shard == 'py1of3' }}"
+    assert expected in workflow
+
+
 def test_checked_in_weights_split_the_suite_into_balanced_halves() -> None:
     weights = load_weights()
     assert weights, "ci/unit_shard_weights.json is missing or unreadable"
