@@ -292,7 +292,7 @@ this is the contract.
 - **User-made sub-metas** are reused in place: the old body is kept in
   `<details>Previous content</details>`, surplus groups get new sub-metas,
   and leftovers are rewritten as `no children after regrouping`.
-- **Grind-made sub-metas** (marker `<!-- grind:v1 -->`, label `grind:meta`)
+- **Grind-made sub-metas** (marker `<!-- grind:v1 -->`)
   are kept and their children are not touched.
 - **Moves** use `replace_parent`. The 8-level depth / 100-children guard
   fails the run before prework, not midway.
@@ -356,18 +356,18 @@ Issue [#1411](https://github.com/zackees/clud/issues/1411). The
 - **Collected once.** `grind-run` collects the problems from every role and
   dedupes them by `kind` + `summary` + `related_issue`.
 - **Only the router files.** It follows `problem_reporting`:
-  - `issue`: one issue per problem, body carrying `Refs #<meta>`, label
-    `grind:followup`, and the marker
+  - `issue`: one issue per problem, body carrying `Refs #<meta>` and the
+    marker (no label)
     `<!-- grind:followup meta=<T> stage=<stage> feature-pr=<N> -->`. It is
     never attached as a sub-issue of the meta.
   - `comment`: one comment per problem on its `related_issue`, or on the
     meta issue when there is none.
 - **Never blocking.** Follow-ups do not hold up closing the meta issue and
   are not counted by the no-overlap check.
-- **Later pickup.** Intake and cron treat a `grind:followup` issue from the
-  bug stage as eligible at once; one from a feature stage becomes eligible
-  only after that stage's feature PR has merged. The label is removed when
-  the issue is picked up.
+- **Later pickup.** Intake and cron treat a follow-up (its body carries the
+  `grind:followup` marker) from the bug stage as eligible at once; one from
+  a feature stage becomes eligible only after that stage's feature PR has
+  merged.
 - **Filing failures.** A failed filing does not stop the run; the router
   lists each unfiled problem inline in its final report.
 
@@ -499,8 +499,9 @@ feature-stage children of a meta issue; issue safety is in
   merge it into `<main>` only under `feature_merge: auto`, and refuses
   deleting a `grind/*` branch (including `gh api -X DELETE …/git/refs/heads/grind/*`)
   while its feature PR is open. In feature mode the lander may also
-  `gh label create`/add `grind:on-feature`, comment on an issue (the landing
-  marker), edit only the feature PR's body, and `gh run rerun`.
+  comment on an issue (the landing marker), edit only the feature PR's
+  body, and `gh run rerun`. It never creates, applies or removes a label
+  (#1958).
 - **Router caps.** The main session has no agent type, so while the session's run
   facts record a `feature`, the hook applies router caps to any caller that is
   not a grind role: exactly one `git worktree add` (the feature worktree),
@@ -522,31 +523,34 @@ Issue [#1393](https://github.com/zackees/clud/issues/1393).
   closing keyword. Only the feature PR carries `Closes #N` for each landed
   child plus `Closes #<meta>`, so GitHub closes an issue exactly when its fix
   merges into `<main>`. No role runs `gh issue close` on a feature child.
-- **Label and marker.** When a goal merges into the feature branch the lander
-  adds the `grind:on-feature` label and posts one marker comment:
+- **Marker, no label.** When a goal merges into the feature branch the lander
+  posts one marker comment and adds the issue's `Closes #N` line to the
+  feature PR:
   `<!-- grind:v1 feature-pr=#<N> branch=<feature> goal-pr=#<G> run=<run-id> -->`.
-  The label makes pending issues queryable; the last marker names the feature
-  PR. Intake and triage skip labelled issues.
+  Grind leaves no labels in the target repo (#1958): the feature PR's
+  `Closes` lines make pending issues findable and the last marker names the
+  feature PR. Intake and triage skip issues an open feature PR closes.
 - **Reconcile.** `clud grind reconcile` (`grind_reconcile.rs`) runs at the
-  start of every `/grind` run and every `/grind-cron` tick. For each labelled
-  issue it reads the marker, the feature PR, and (for a closed issue) the
+  start of every `/grind` run and every `/grind-cron` tick. For each issue a
+  `grind/meta-*` PR's body closes whose last marker has no later
+  `<!-- grind:reconcile resolved … -->` tag it reads the marker, the feature PR, and (for a closed issue) the
   GraphQL `ClosedEvent.closer`:
 
   | Feature PR | Issue | Action |
   |---|---|---|
-  | merged into `<main>` | open | close citing the feature PR; remove label |
-  | merged into `<main>` | closed | remove label |
-  | closed unmerged | any | reopen if closed; remove label; comment citing `refs/pull/<N>/head` |
+  | merged into `<main>` | open | close citing the feature PR; resolve |
+  | merged into `<main>` | closed | resolve |
+  | closed unmerged | any | reopen if closed; resolve; comment citing `refs/pull/<N>/head` |
   | open, or merged elsewhere | closed by hand, by an unmerged PR, by a PR into a non-default base, or by a commit not on `<main>` | reopen with a comment naming the closer |
   | open, or merged elsewhere | closed by a PR merged into `<main>` or a commit on `<main>` | none |
   | open and stale (14 days idle, conflicting, or branch gone) | any | report stale; comment on the meta issue once per staleness window (a hidden `<!-- grind:reconcile … -->` tag suppresses repeats) |
   | open, not stale | any | report it (draft, ready, or waiting for review) |
 
-  It also reopens an unlabelled sub-issue of a feature meta that was closed
+  It also reopens an untracked sub-issue of a feature meta that was closed
   by hand mid-run, and closes the top meta issue of a meta of metas once
   every child is closed (follow-ups never count). Actions are applied in
-  order and a pass stops at the first failure; the label is removed last,
-  so a failed close never strands an open issue without it.
+  order and a pass stops at the first failure; the `resolved` tag is posted
+  last, so a failed close leaves the issue tracked for the next pass.
 
 - **Reachable commits.** A commit closer counts as landed only when
   `compare/<main>...<oid>` reports `behind` or `identical`, i.e. the commit is
@@ -790,7 +794,7 @@ it covers:
   [#1392](https://github.com/zackees/clud/issues/1392), end to end, each
   from routing to Finish:
   1. a meta issue of unrelated bugs: every PR goes into `<main>` with
-     `Closes #N`, and one problem becomes a `grind:followup` issue that is
+     `Closes #N`, and one problem becomes a follow-up issue that is
      not a sub-issue;
   2. a prompt with prerequisite bugs, a feature and a dirty checkout, under
      `auto`: the checkout is stashed, the bugs land first, `<main>` is

@@ -34,15 +34,15 @@ Start every tick with `clud grind-facts path`: asking for the path marks the
 facts as current, so a loop that outlives the 72-hour staleness cutoff keeps
 its caps. Clear them only when the loop ends. Every tick runs
 `clud grind reconcile` before picking a goal, so an issue whose goal PR
-landed on a feature branch is labelled `grind:on-feature` and never lost.
+landed on a feature branch is tracked by its `grind:v1` marker and never lost.
 
 ## Follow-ups
 
-When a tick picks the next goal, skip `grind:on-feature` issues. A
-`grind:followup` issue is eligible only if its body marker
+When a tick picks the next goal, skip issues an open feature PR's `Closes`
+line links. A follow-up issue is eligible only if its body marker
 `<!-- grind:followup ... stage=bugs ... -->` names the bugs stage, or its
 `feature-pr=<n>` PR is merged (`gh pr view --repo <github-repo> <n> --json state -q .state` prints
-`MERGED`). On pickup, run `gh issue edit --repo <github-repo> <n> --remove-label grind:followup`.
+`MERGED`). Grind never labels an issue (#1958).
 Follow-ups are never sub-issues of the meta issue and do not count for
 no-overlap. Same rule as `/grind-intake` step 5.
 

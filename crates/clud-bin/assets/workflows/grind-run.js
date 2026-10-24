@@ -483,7 +483,6 @@ const featurePlanNote = (g) => !isFeatureGoal(g) ? '' : PARALLEL
 const featurePrNum = () => String(FEATURE.pr || '').replace(/\/+$/, '').replace(/^.*\//, '').replace(/^#/, '')
 const FEATURE_RUN_ID = (args.plan && args.plan.run_id) || (FEATURE ? String(FEATURE.branch).replace(/^grind\/meta-\d+-/, '') : '')
 const featureMetaOf = (g) => (stageOf[String(g.id)] && stageOf[String(g.id)].sub_meta) || (args.plan && args.plan.meta) || args.meta
-const ON_FEATURE = 'grind:on-feature'
 const featureIntegrateNote = (g) => !isFeatureGoal(g) ? '' :
   `\n\nFeature-stage goal (feature branch ${FEATURE.branch}, feature PR ${FEATURE.pr || '(none)'}, feature worktree ${FEATURE.worktree}):\n` +
   `1. Before rebasing the goal onto origin/${FEATURE.branch}: git fetch; if origin/${MAIN} has commits not in origin/${FEATURE.branch}, ` +
@@ -500,13 +499,11 @@ const featureLandNote = (g) => {
   const others = [meta, original].filter(Boolean).map(n => `#${n}`)
   return `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --admin --merge --repo ${GITHUB_REPO}\` (never --delete-branch), never into ${MAIN}.\n` +
     `Once it has merged, record the landing so issue #${g.id} is never lost (#1393):\n` +
-    `1. gh label create ${ON_FEATURE} --force --repo ${GITHUB_REPO}\n` +
-    `2. gh issue edit ${g.id} --add-label ${ON_FEATURE} --repo ${GITHUB_REPO}` + (others.length ? `, and the same for ${others.join(' and ')}` : '') + `.\n` +
-    `3. gh issue comment ${g.id} --repo ${GITHUB_REPO} --body 'Landed on feature branch ${FEATURE.branch} via #<n>; closes when feature PR #${fpr} merges into ${MAIN}. ${marker('<n>')}'` +
+    `1. gh issue comment ${g.id} --repo ${GITHUB_REPO} --body 'Landed on feature branch ${FEATURE.branch} via #<n>; closes when feature PR #${fpr} merges into ${MAIN}. ${marker('<n>')}'` +
     (others.length ? `. For ${others.join(' and ')}: read its comments (gh issue view <m> --json comments --repo ${GITHUB_REPO}) and, only if none has a marker with feature-pr=#${fpr}, post one: ${marker(null)}` : '') + `.\n` +
-    `4. gh pr view ${fpr} --json body --repo ${GITHUB_REPO}, then gh pr edit ${fpr} --repo ${GITHUB_REPO} --body '<body>' with a \`Closes #${g.id}\` line added and the goals table row for #${g.id} updated; keep every other line, including the other Closes lines. ` +
+    `2. gh pr view ${fpr} --json body --repo ${GITHUB_REPO}, then gh pr edit ${fpr} --repo ${GITHUB_REPO} --body '<body>' with a \`Closes #${g.id}\` line added and the goals table row for #${g.id} updated; keep every other line, including the other Closes lines. ` +
     `View it again and repeat the edit if \`Closes #${g.id}\` is missing (another lander may have edited the body at the same time).\n` +
-    `Never gh issue close; the feature PR's Closes lines close the issues when it merges into ${MAIN}.`
+    `Never create or apply a label (#1958). Never gh issue close; the feature PR's Closes lines close the issues when it merges into ${MAIN}.`
 }
 // Stuck-bug rule (#1409): `block_dependents_only` is the only rule the spec
 // defines, so it also applies when the plan omits rules.stuck_bug.

@@ -125,12 +125,7 @@ server and merge.
    `--delete-branch` on any merge while the feature PR is open. Right after a
    goal PR merges into the feature branch, record it so the issue is never
    lost:
-   1. `gh label create --repo <github-repo> grind:on-feature --force` (safe when it exists).
-   2. `gh issue edit --repo <github-repo> <N> --add-label grind:on-feature` on the goal issue,
-      and the same on the meta issue (the feature group's sub-meta in a meta
-      of metas) and on the original issue when intake converted it into the
-      meta. Adding a label twice is harmless.
-   3. `gh issue comment --repo <github-repo> <N> --body '...'` with a readable line (`Landed on
+   1. `gh issue comment --repo <github-repo> <N> --body '...'` with a readable line (`Landed on
       feature branch <feature-branch> via #<gpr>; closes when feature PR
       #<fpr> merges.`) followed by the hidden marker, exactly
       `<!-- grind:v1 feature-pr=#<fpr> branch=<feature-branch> goal-pr=#<gpr> run=<run-id> -->`.
