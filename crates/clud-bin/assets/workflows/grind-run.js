@@ -182,6 +182,7 @@ const CLASSIFY = {
     children: { type: 'array', items: { type: 'object', required: ['id', 'track'], properties: {
       id: { type: 'string' }, track: { type: 'string', enum: ['bug', 'feature'] },
       group: { type: 'string', description: 'feature group name; omitted for bugs or an unplaceable feature' },
+      read: { type: 'boolean', description: "the child's issue body was read (gh issue view), not classified from its title alone" },
       depends_on_bugs: { type: 'array', items: { type: 'string' } } } } },
     groups: { type: 'array', items: { type: 'object', required: ['name', 'independent', 'children'], properties: {
       name: { type: 'string' }, independent: { type: 'boolean' }, children: { type: 'array', items: { type: 'string' } } } } },
@@ -204,6 +205,23 @@ const classificationLines = (c, meta) => (c.children || []).map(ch => {
     ? `#${id} bug → ${MAIN}`
     : `#${id} feature → ${featureBranch(meta, ch.group || 'feature')}`
 })
+// #1830: the planner's track flipped for identical input (a one-child meta
+// read as bug, then feature, minutes apart). A feature is one part of a
+// multi-part change, so a lone child, or one classified without reading its
+// issue, takes the bug track; groups keep only the features left.
+const stabilizeClassification = (c, goals = []) => {
+  const lone = goals.length === 1
+  const children = (c.children || []).map(ch => {
+    if (ch.track !== 'feature' || (!lone && ch.read === true)) return ch
+    const { group, depends_on_bugs, ...rest } = ch
+    return { ...rest, track: 'bug' }
+  })
+  const features = new Set(children.filter(ch => ch.track === 'feature').map(ch => idKey(ch.id)))
+  const groups = (c.groups || [])
+    .map(g => ({ ...g, children: (g.children || []).filter(id => features.has(idKey(id))) }))
+    .filter(g => g.children.length > 0)
+  return { ...c, children, groups }
+}
 // `ids`: every child of the meta issue; one the planner left out is unplaced.
 const thresholdVerdict = (c, ids = []) => {
   const children = c.children || []
@@ -324,7 +342,7 @@ if (args.planOnly) {
   const c = await agent(
     `Follow your built-in /grind-plan procedure in PLAN-ONLY mode (read-only: no Write/Edit, no worktree, no push, no branch).\n\n${REPO_HEADER} Meta issue: #${args.meta}.\nChildren of the meta issue:\n` +
     args.goals.map(g => `${g.id}: ${g.title}\n${g.brief}`).join('\n\n') +
-    `\n\nClassify every child as bug or feature, name the feature groups and whether they are independent, which feature children depend on which bugs, and the dependency order. Classify every child listed above exactly once, using its id as given; set confident to false if any child cannot be placed. Return it through StructuredOutput.`,
+    `\n\nClassify every child as bug or feature, name the feature groups and whether they are independent, which feature children depend on which bugs, and the dependency order. Classify every child listed above exactly once, using its id as given; set confident to false if any child cannot be placed. Set read to true only for a child whose issue you read; a lone child, or an unread one, takes the bug track. Return it through StructuredOutput.`,
     opts('planner', 'classify', 'Classify', CLASSIFY))
   // log() lines never reach the router (the Workflow result arrives as a
   // notification carrying only the return value), so the classification
@@ -335,17 +353,18 @@ if (args.planOnly) {
     log(keep)
     return { planOnly: true, path: 'simple', reason: 'planner died', message: keep, lines: [], problems: allProblems() }
   }
-  const classified = new Set((c.children || []).map(ch => idKey(ch.id)))
-  const lines = [...classificationLines(c, args.meta),
+  const stable = stabilizeClassification(c, args.goals)
+  const classified = new Set((stable.children || []).map(ch => idKey(ch.id)))
+  const lines = [...classificationLines(stable, args.meta),
     ...args.goals.filter(g => !classified.has(idKey(g.id))).map(g => `#${idKey(g.id)} unclassified`)]
   lines.forEach(l => log(l))
-  const { path, reason } = thresholdVerdict(c, args.goals.map(g => g.id))
-  const nGroups = (c.groups || []).length
+  const { path, reason } = thresholdVerdict(stable, args.goals.map(g => g.id))
+  const nGroups = (stable.groups || []).length
   const message = path === 'simple'
     ? `keeping #${args.meta} as is: ${reason} (${nGroups} feature group${nGroups === 1 ? '' : 's'}, ${args.goals.length} children)`
     : `regroup #${args.meta}: ${nGroups} feature groups, ${args.goals.length} children`
   log(message)
-  return { planOnly: true, path, reason, message, lines, classification: c, problems: allProblems() }
+  return { planOnly: true, path, reason, message, lines, classification: stable, problems: allProblems() }
 }
 
 // Prework (#1408): record the plan on the meta issue before any worker runs.

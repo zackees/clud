@@ -82,7 +82,10 @@ When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
 - Classify each child as a **bug** (a self-contained fix to existing
   behaviour, independent of the other children, landing as its own PR into
   the default branch) or a **feature** (one part of a single cohesive
-  change).
+  change). A lone child is always a bug: one change is not a part of one.
+  Set `read` to true for each child whose issue you actually read. The
+  workflow moves a lone child, or a feature with `read` unset, to the bug
+  track, so a title-only guess cannot send a fix down the feature path (#1830).
 - Name the feature groups and say whether each is independent of the others.
 - List which feature children depend on which bugs (`depends_on_bugs`), and
   give a dependency order for all children.

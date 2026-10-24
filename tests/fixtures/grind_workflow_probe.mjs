@@ -18,6 +18,7 @@ const prompts = [];
 const agent = async (prompt, options) => {
   prompts.push({ prompt, role: options.agentType, label: options.label });
   if (options.label === 'classify') {
+    if (config.classify) return config.classify;
     return {
       confident: true,
       children: config.args.goals.map(goal => ({ id: goal.id, track: 'bug' })),
