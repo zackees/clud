@@ -391,20 +391,9 @@ fn init_foreground_process(args: &args::Args) {
     // #372 forensic capture) remains the authoritative Ctrl-C handler.
     crash_report::install_native("foreground");
 
-    // Issue #408 (Layer 3 of three-layer UV_CACHE_DIR enforcement): pin
-    // every `uv` invocation spawned inside clud's process tree to
-    // `~/.clud/cache/uv/`, so per-script venvs for bundled tools never
-    // leak into the user's global `~/.cache/uv/`. The `clud tool run`
-    // subcommand (Layer 1) re-affirms the same value; both layers read
-    // from `tools::clud_uv_cache_dir()` so there is one source of truth.
-    //
-    // SAFETY: at this point we are still single-threaded (crash reporter
-    // installs handlers but does not spawn threads). Setting env vars
-    // before any other code runs is the standard cross-platform pattern
-    // for this case.
-    unsafe {
-        std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
-    }
+    // Issue #1964: no process-wide `UV_CACHE_DIR`. #408's pin belongs to
+    // bundled tools only, which `clud tool` sets below; pinning every
+    // session child sent user projects' `uv` into `~/.clud/cache/uv` too.
 
     verbose_log::init_launch_clock();
 

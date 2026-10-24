@@ -5,10 +5,9 @@
 //! file, and chooses the runner from its contents. Plain Python uses clud's
 //! managed Python under `~/.clud/tools/python`; uv script mode is used only
 //! when the shebang explicitly asks for it. `UV_CACHE_DIR` is pinned to
-//! [`tools::clud_uv_cache_dir`]. The pin is read-or-default: if the parent
-//! process already set `UV_CACHE_DIR` (Layer 3 in `main.rs`), this layer
-//! re-affirms the same value; if it wasn't set, this layer establishes the
-//! default.
+//! [`tools::clud_uv_cache_dir`]: the `clud tool` dispatch in `main.rs` sets it
+//! before this runs, and the read-or-default below falls back to the same
+//! value. Since #1964 nothing pins it for the rest of a clud session.
 //!
 //! Surfaces the inner runner exit code as the subcommand's exit code so
 //! callers can chain on success/failure.
@@ -985,10 +984,8 @@ fn python_executable_names() -> &'static [&'static str] {
 }
 
 /// Returns the `UV_CACHE_DIR` that should be in effect for this invocation.
-/// Respects a parent-set value (Layer 3) and falls back to the bundled-tools
-/// default (Layer 1). Both layers must agree on the path; that's
-/// guaranteed when `main.rs` sets the parent env from
-/// [`clud_uv_cache_dir`].
+/// Respects a parent-set value (the `clud tool` dispatch in `main.rs` sets
+/// it from [`clud_uv_cache_dir`]) and falls back to the same default.
 ///
 /// Takes the env value as a parameter so tests can exercise both branches
 /// without mutating `std::env`, which would race other parallel tests.
