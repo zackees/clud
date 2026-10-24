@@ -190,7 +190,7 @@ For a focused test, run the job that contains it. Do not switch to a direct
 or macOS. For changes to Windows platform implementations or OS contracts, use the
 `ci-windows` PR label for the Windows
 build, unit and integration suites after the local run, and keep Windows PTY
-tests enabled. There is no merge queue; a `ci-windows` run still includes the
+tests enabled. A `ci-windows` run still includes the
 routine Linux x64 lanes but no macOS
 ([What protects `main` today](#what-protects-main-today)).
 
@@ -459,7 +459,7 @@ every routine (`minimal`) Linux x64 lane: Dylint with its Windows and macOS
 cross-target passes, clippy, build and the unit shards (#1652). It skips Linux
 integration, harness and the other targets. `CI OK` passes only when all of
 those lanes pass; `ci-test`/`ci-full` take
-precedence. No merge queue backs this label; see
+precedence. The merge queue runs only the `minimal` lanes; see
 [What protects `main` today](#what-protects-main-today).
 
 `ci-macos` is the same iteration mode for macOS: every routine Linux x64 lane
@@ -478,7 +478,7 @@ every push needs all six targets.
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
 | `windows` | minimal + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
 | `macos` | minimal + both Darwin triples' build, unit and integration | PR labeled `ci-macos` |
-| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch, the nightly `schedule` run (a `merge_group` event would select it, but none is configured) |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch, the nightly `schedule` run |
 
 `ci-test` covers Linux and Windows product build/tests. Both hosted macOS
 architectures run product tests only in `ci-macos`, `ci-full` and release validation;
@@ -511,19 +511,22 @@ source diffs, so agents and reviewers apply this selection rule.
 
 ### What protects `main` today
 
-Verified 2026-09-30 (#1651): `gh api repos/zackees/clud/rulesets` returns
-`[]`, `main` has no branch protection, and no `merge_group` run has ever
-happened. So:
+Since 2026-10-24 (#2048, #2125) the repository lives at `talos-hq/clud`,
+where `main` has a merge queue (ruleset 25798020, squash, `ALLGREEN`, up to
+5 entries per group) and branch protection requires `CI OK`. Repository
+admins can bypass the queue. So:
 
-- PR CI tests the PR head SHA (`github.event.pull_request.head.sha`), not
-  the merge commit. A PR that is behind `main` merges an untested tree.
-- The label picks the lanes. Every mode, `ci-windows` included, requires
+- PR CI tests the PR head SHA; the queue then tests the merged tree in a
+  `merge_group` run before it lands.
+- The label picks the PR's lanes. Every mode, `ci-windows` included, requires
   the routine Linux x64 lanes on the head SHA before `CI OK` is green
   (#1652); macOS runs only under `ci-full`.
-- The `push` run on `main` is the only test the merged tree gets, and it
-  runs the `minimal` tier. It reports after the merge; it does not block it.
-- The `merge_group:` trigger in `ci.yml` is inert. It stays so that a queue,
-  once enabled, runs the `full` tier.
+- A `merge_group` run selects the `minimal` tier, the same lanes as a `main`
+  push (#2125). Full native coverage stays on the nightly run, `ci-full`
+  labels and release validation; a full queue tier would make every merge
+  wait on all six targets.
+- The `push` run on `main` still runs `minimal` and still saves the caches
+  PRs read.
 - A nightly `schedule` run (`41 6 * * *`, #1849) runs the `full` tier on
   `main`'s head, so a native-only regression surfaces within a day instead
   of waiting for an unrelated `ci-full` PR. It never skips or reuses a lane:
@@ -557,17 +560,12 @@ Windows build/test, which is longer, so the label's feedback time does not
 change. The #1310 goal of fast Windows iteration still holds; the label now
 spends ~10 Linux minutes per push to keep `CI OK` honest.
 
-#### Decision needed (owner)
+#### Merge queue (#2048, decided)
 
-Enabling a merge queue is a repository-settings change, not a workflow
-change: add a ruleset on `main` with "Require merge queue" and `CI OK` as
-the required status check. `ci.yml` already resolves `merge_group` to the
-`full` tier. Cost: every merge waits for the full six-target matrix, and
-direct pushes / admin merges must go through the queue or bypass it
-explicitly. Recommendation: enable it; it is the only thing that tests the
-merged tree rather than the head SHA
-([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected),
-[DD-133](../DESIGN_DECISIONS.md#dd-133-ci-windows-runs-the-routine-linux-lanes-on-the-same-run)).
+Enabled on 2026-10-24 after the move to the `talos-hq` organization: GitHub
+offers merge queues only on organization-owned repositories. The queue is
+the only thing that tests the merged tree rather than the head SHA
+([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected)).
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old

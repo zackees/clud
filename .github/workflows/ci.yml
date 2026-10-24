@@ -25,8 +25,8 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
-  # Inert today: no merge queue is configured for main (#1651), so no
-  # merge_group run has ever happened. Kept so a future queue gets full mode.
+  # The main merge queue (#2048): a group runs the routine lanes a main push
+  # runs (#2125).
   merge_group:
   # Nightly native run on main (#1849): routine CI is Linux-only, so a
   # Windows/macOS regression could otherwise sit on main until an unrelated
@@ -364,7 +364,7 @@ jobs:
   # 6.87 runner-minutes in the measured minimal run (#35845956093), taking it
   # above the 12.5% routine/full budget; ci-test and full retain that suite.
   # ci-test also adds Windows x64; ci-full and SHA-pinned dispatches add the
-  # other architectures (a merge_group event would too, but none is configured).
+  # other architectures.
 
   # Clippy used to run inside build-linux-x64, serially ahead of the compile,
   # so every PR waited ~41 s on it between Static and the unit suite even
@@ -460,7 +460,7 @@ jobs:
       suite: integration
 
   # #1323: real Claude Code on the scripted mock agent backend. Full mode
-  # only (ci-full, or a merge_group event if a queue is ever enabled): it installs Claude Code from npm.
+  # only (ci-full): it installs Claude Code from npm.
   test-linux-x64-harness:
     name: Test linux-x64 (harness)
     needs: [static, build-linux-x64]

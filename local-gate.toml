@@ -60,7 +60,7 @@ tools = ["bosn", "docker", "uv", "python"]
 # Shared execution proof; clud declares mappings, never parses runner receipts.
 # Requires the qualified act2 capability release and corresponding Bosn pins.
 [gate.replay]
-repository = "zackees/clud"
+repository = "talos-hq/clud"
 workflow = "ci.yml"
 mode = "minimal"
 report-source = "stdout"

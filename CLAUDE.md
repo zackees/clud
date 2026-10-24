@@ -348,9 +348,9 @@ targets, including both hosted macOS architectures, and Dylint; existing
 `ci:full` labels remain equivalent. `ci-windows` runs the routine Linux x64
 lanes plus the Windows x64 build and suites for fast Windows iteration;
 `ci-macos` does the same with both macOS triples instead. `CI OK` gates on
-all of them (#1652). There is **no merge queue** (the
-`merge_group` trigger is inert): PR CI tests the head SHA, and `main`'s push
-run is the only test of the merged tree. Manual full CI pins every job to a verified
+all of them (#1652). `main` has a **merge queue** (#2048): PR CI tests the head SHA, and the
+queue's `merge_group` run tests the merged tree with the routine `minimal`
+lanes (#2125). Manual full CI pins every job to a verified
 candidate SHA. See
 [`ci.md`](docs/architecture/ci.md#current-ci-selection).
 
