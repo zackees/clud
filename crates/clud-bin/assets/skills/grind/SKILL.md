@@ -200,6 +200,17 @@ action right after the round, before prework:
 
 A clean tree records `preflight.action: "none"`.
 
+**Feature-base CI triggers (#1893).** When the plan has a feature stage,
+check that a goal PR into the feature branch triggers CI at all:
+`"$CLUD_EXE" tool run github/pr_merge_watch.py -- --repo <github-repo> --triggers-for-base grind/meta-<M>-<run-id>`.
+It prints `{pr_workflows, dispatchable}`. An empty `pr_workflows` (every
+`pull_request` workflow filters that base out) goes in the plan comment and
+adds one question to the round, before any work: dispatch CI per goal head
+(`gh workflow run <wf> --ref <goal-branch>` for a `dispatchable` workflow,
+watched with `github/run_watch.py`), widen the workflow's `branches:` filter
+as a bug-stage goal, or validate locally only. Record the answer as
+`preflight.ci_fallback`; the lander applies it to `no_trigger_for_base`.
+
 ## 2. One question round
 
 At most 2 AskUserQuestion calls in total, and nothing is asked twice.

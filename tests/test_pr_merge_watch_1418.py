@@ -84,6 +84,7 @@ def env(watcher, tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "_resolve_origin_repo", lambda: "zackees/clud")
     monkeypatch.setattr(watcher.PRSnapshot, "fetch", lambda *a: snap(watcher))
     monkeypatch.setattr(watcher, "fetch_workflow_presence", lambda *a: True)
+    monkeypatch.setattr(watcher, "fetch_workflow_texts", lambda *a: None)
     monkeypatch.setattr(watcher, "fetch_head_commit_message", lambda *a: "feat: x")
     cancels: list[tuple] = []
     monkeypatch.setattr(

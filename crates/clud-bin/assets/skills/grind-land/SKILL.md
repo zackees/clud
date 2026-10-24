@@ -87,6 +87,13 @@ server and merge.
        `[actions skip]`, `skip-checks: true`): never merge. Return
        `status=needs_fix` asking the integrator to reword the message
        without the marker and push again.
+     - The final reason is `no_trigger_for_base` (#1893: workflows exist
+       but none triggers on a PR into this base, e.g. a `branches:` filter
+       on `pull_request`): a push cannot help, so never return
+       `status=needs_fix`. Apply the run's recorded fallback from the plan
+       (dispatch CI with `gh workflow run <wf> --ref <head-branch>` and
+       watch that run with `"$CLUD_EXE" tool run github/run_watch.py`), or
+       return `status=gave_up` naming the gap.
      - Not empty and the rollup stayed empty: never merge. Return
        `status=needs_fix` (push again to trigger CI) on the first `8`, and
        `status=gave_up` on a second.
