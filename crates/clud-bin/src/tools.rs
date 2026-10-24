@@ -123,6 +123,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "github/run_watch.py",
+        body: include_str!("../assets/tools/github/run_watch.py"),
+        // Waits on one Actions run with no PR (#1941); GitHub owns the run,
+        // so killing the watcher loses no work — `Resumable`.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: Duration::from_secs(60 * 60),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "github/is_meta_issue.py",
         body: include_str!("../assets/tools/github/is_meta_issue.py"),
         // Read-only GitHub query (#1404): classifies an issue as meta or
@@ -519,6 +529,18 @@ mod tests {
             "BUNDLED_TOOLS must include github/pr_merge_watch.py; \
              got {names:?}",
         );
+    }
+
+    /// Issue #1941: non-PR Actions runs have a sanctioned waiter.
+    #[test]
+    fn bundled_includes_run_watch() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/run_watch.py")
+            .expect("BUNDLED_TOOLS must include github/run_watch.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert_eq!(tool.kill_semantics, KillSemantics::Resumable);
     }
 
     /// Issue #1404: the is_meta_issue.py tool ships in the bundle.
