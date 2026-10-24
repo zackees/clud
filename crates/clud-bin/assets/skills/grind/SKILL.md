@@ -59,7 +59,7 @@ not emulate the workflow by hand.
 
 ## 0b. Reconcile
 
-Grind is client-side: it never runs `gh label create` and never applies,
+Grind is client-side: it never creates a label and never applies,
 removes or searches by a `grind:*` label in the target repo (#1958). Its
 GitHub state is the feature PR's `Closes` lines and hidden HTML markers
 (`grind:v1`, `grind:followup`, `grind:reconcile`) in bodies and comments.
