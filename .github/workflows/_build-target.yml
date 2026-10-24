@@ -138,24 +138,39 @@ jobs:
       # the whole job when main already passed that exact input set.
       - name: Compute pass key
         id: pass-key
-        if: ${{ inputs.clippy && !inputs.compile && !inputs.bundle && inputs.wheel-artifact == '' && inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
         shell: bash
+        env:
+          LINT_ONLY: ${{ inputs.clippy && !inputs.compile && !inputs.bundle && inputs.wheel-artifact == '' && inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
+        # Every job computes a key so the lookup below always executes, which
+        # the local-gate replay proof requires (zackees/ci.yml#415). A job that
+        # is not lint-only gets a per-run key that never hits and never saves.
         run: |
+          if [ "$LINT_ONLY" != "true" ]; then
+            echo "key=pass-v1-none-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
           digest=$(git ls-files -s | awk -F'\t' '$2 !~ /^(docs|bench)\// && $2 !~ /^[^/]*\.md$/ && ($2 !~ /^tests\// || $2 ~ /^tests\/fixtures\//)' | sha256sum | cut -c1-16)
           echo "key=pass-v1-clippy-${{ inputs.target }}-${{ inputs.doctest && 'doc' || 'nodoc' }}-${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Look up pass marker
         id: pass
-        if: ${{ steps.pass-key.outputs.key != '' }}
         uses: actions/cache/restore@v4
         with:
           path: .pass-marker
           key: ${{ steps.pass-key.outputs.key }}
           lookup-only: true
 
+      # Runs unconditionally and branches inside: the local-gate replay proof
+      # needs every declared step executed (zackees/ci.yml#415).
       - name: Skip unchanged inputs
-        if: ${{ steps.pass.outputs.cache-hit == 'true' }}
-        run: echo "::notice::Clippy inputs unchanged since a passing main run; skipping."
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.pass.outputs.cache-hit }}
+        run: |
+          [ "$CACHE_HIT" = "true" ] || { echo "no pass marker; running the job"; exit 0; }
+          echo "::notice::Clippy inputs unchanged since a passing main run; skipping."
 
       - name: Set up build
         if: ${{ steps.pass.outputs.cache-hit != 'true' }}
@@ -245,14 +260,17 @@ jobs:
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Record pass marker
-        if: ${{ success() && steps.pass-key.outputs.key != '' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ success() && steps.pass.outputs.cache-hit != 'true' }}
         shell: bash
+        env:
+          RECORD: ${{ steps.pass-key.outputs.eligible == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
+          [ "$RECORD" = "true" ] || { echo "only a keyed main push records a pass marker"; exit 0; }
           mkdir -p .pass-marker
           touch .pass-marker/ok
 
       - name: Save pass marker
-        if: ${{ success() && steps.pass-key.outputs.key != '' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ success() && steps.pass-key.outputs.eligible == 'true' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v4
         with:
           path: .pass-marker
