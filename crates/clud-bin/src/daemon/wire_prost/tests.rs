@@ -128,6 +128,7 @@ fn sample_proc_snapshot() -> ProcTreeSnapshot {
         cpu_ewma_pct: 3.2,
         rss_bytes: 128 * 1024 * 1024,
         age_secs: 30,
+        start_time: 0,
         command: "codex exec".to_string(),
         depth: 1,
         tier: ProcTier::Hot,

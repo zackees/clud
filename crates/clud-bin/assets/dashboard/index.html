@@ -517,9 +517,14 @@
       const node = (r, isRoot = false) => {
         const kids = byParent.get(r.pid) || []; const tier = r.tier || 'cold';
         const cwd = r.cwd || '-';
-        return `<details class="process-node ${esc(tier)}" open><summary class="process-title"><span class="badge kind">${esc(isRoot ? 'CLUD' : 'child')}</span><span>${esc(r.command || 'process')}</span><span class="badge ${r.live ? 'live' : 'gone'}">${r.live ? 'live' : 'exited'}</span></summary><div class="process-meta">pid ${esc(r.pid)} · ppid ${esc(r.ppid ?? '-')} · cwd ${esc(cwd)} · ${esc(Number(r.cpu_pct || 0).toFixed(1))}% CPU · ${esc(Math.round((r.rss_bytes || 0) / 1048576))} MiB · age ${esc(r.age_secs || 0)}s</div>${kids.length ? `<div class="process-children">${kids.map(child => node(child)).join('')}</div>` : ''}</details>`;
+        return `<details class="process-node ${esc(tier)}" open><summary class="process-title"><span class="badge kind">${esc(isRoot ? 'CLUD' : 'child')}</span><span>${esc(r.command || 'process')}</span><span class="badge ${r.live ? 'live' : 'gone'}">${r.live ? 'live' : 'exited'}</span>${r.live && r.start_time ? `<button class="button danger reap" data-pid="${esc(r.pid)}" data-start="${esc(r.start_time)}" title="Kill this process and its descendants">reap subtree</button>` : ''}</summary><div class="process-meta">pid ${esc(r.pid)} · ppid ${esc(r.ppid ?? '-')} · cwd ${esc(cwd)} · ${esc(Number(r.cpu_pct || 0).toFixed(1))}% CPU · ${esc(Math.round((r.rss_bytes || 0) / 1048576))} MiB · age ${esc(r.age_secs || 0)}s</div>${kids.length ? `<div class="process-children">${kids.map(child => node(child)).join('')}</div>` : ''}</details>`;
       };
       body.innerHTML = roots.map(root => node(root, true)).join('');
+      body.querySelectorAll('button.reap').forEach(btn => btn.addEventListener('click', ev => {
+        ev.preventDefault();
+        const pid = Number(btn.dataset.pid);
+        doReap({ pid, start_time: Number(btn.dataset.start) }, `Kill pid ${pid} and every descendant?`);
+      }));
     }
 
     function renderTools(data) {
@@ -663,6 +668,25 @@
         });
       } catch (err) {
         body.innerHTML = `<p class="empty">failed to load: ${esc(err)}</p>`;
+      }
+    }
+
+    async function doReap(body, prompt) {
+      if (!confirm(prompt)) return;
+      try {
+        const resp = await fetch('/proc/reap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(`reap failed: ${data.error || resp.statusText}`);
+          return;
+        }
+        await refresh();
+      } catch (err) {
+        alert(`reap failed: ${err}`);
       }
     }
 

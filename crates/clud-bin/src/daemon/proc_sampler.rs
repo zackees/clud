@@ -370,6 +370,7 @@ impl ProcSampler {
                 cpu_ewma_pct,
                 rss_bytes,
                 age_secs: process.run_time(),
+                start_time: process.start_time(),
                 command,
                 depth: depth_from_originator(pid_u32, assignment.originator_pid, &parent_by_pid),
                 tier: tier_for(cpu_pct, cpu_ewma_pct, rss_bytes),

@@ -416,6 +416,10 @@ pub(super) struct ProcRow {
     pub(super) cpu_ewma_pct: f32,
     pub(super) rss_bytes: u64,
     pub(super) age_secs: u64,
+    /// Seconds since the UNIX epoch; with `pid`, the identity the dashboard's
+    /// reap action must echo back (#340). `0` from a pre-#340 sampler.
+    #[serde(default)]
+    pub(super) start_time: u64,
     pub(super) command: String,
     pub(super) depth: u32,
     pub(super) tier: ProcTier,
@@ -932,6 +936,7 @@ mod tests {
             cpu_ewma_pct: 8.0,
             rss_bytes: 1024,
             age_secs: 5,
+            start_time: 0,
             command: "backend".to_string(),
             depth: 1,
             tier: ProcTier::Hot,
