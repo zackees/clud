@@ -1740,6 +1740,26 @@ def test_1710_cancel_never_takes_a_same_second_sibling_of_the_failing_run(
     assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [36970308306]
 
 
+# FastLED/fbuild#1707 (#2059): the superseded run read `completed/failure`
+# before GitHub settled its conclusion on `cancelled`. Its aggregator failures
+# were judged real and the cancel scope took the older, live sibling.
+
+
+def test_2059_superseded_run_read_as_failure_waits_on_the_live_sibling(
+    watcher, monkeypatch
+) -> None:
+    case = load_case("superseded", "P5")
+    verdict = judge(watcher, case)
+    assert verdict.state == "pending"
+    assert verdict.failing_run_ids == {}
+
+
+def test_2059_failure_with_a_cancelled_job_and_no_sibling_still_fails(watcher) -> None:
+    verdict = judge(watcher, load_case("superseded", "P6"))
+    assert verdict.state == "fail"
+    assert verdict.failing_run_ids == {CI_YML: 36970308306}
+
+
 # ---- a tier-skipped required check in a run that finished green ----
 #
 # zackees/bosn#360 was green and ready but never merged: its `ci-test` tier
