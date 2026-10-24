@@ -256,6 +256,35 @@ def test_mergeable_unknown_is_transient_only_for_a_bounded_number_of_polls(
     assert last(env, "EXIT")["reason"] == "mergeable_unknown"
 
 
+def test_a_queued_pr_with_mergeable_unknown_is_not_a_false_conflict(
+    watcher, env, monkeypatch, capsys
+) -> None:
+    """#1973: GitHub reports UNKNOWN for every queued PR; follow the queue."""
+
+    def queued_gate(n):
+        snapshot = gate(watcher, [green_row(watcher)], mergeable="UNKNOWN", merge_state="UNKNOWN")
+        snapshot.pr.merge_pending = True
+        return snapshot
+
+    followed = []
+
+    def follow(pr, repo, _log):
+        followed.append(pr)
+        raise SystemExit(watcher.EXIT_GREEN)
+
+    monkeypatch.setattr(watcher, "follow_merge", follow)
+    env["set_gates"](queued_gate)
+    assert run(watcher, env) == watcher.EXIT_GREEN
+    assert followed == [527]
+    assert capsys.readouterr().err.splitlines()[0] == "PR merge queue detected"
+
+
+def test_a_pr_outside_a_queue_does_not_announce_one(watcher, env, capsys) -> None:
+    env["set_gates"](lambda n: gate(watcher, [green_row(watcher)]))
+    assert run(watcher, env) == watcher.EXIT_GREEN
+    assert "PR merge queue detected" not in capsys.readouterr().err
+
+
 # ---- API failures ----
 
 
