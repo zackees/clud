@@ -170,4 +170,8 @@ fn deny_message_tells_the_model_to_stop_and_names_the_override() {
     assert!(message.contains("Stop repeating"));
     assert!(message.contains("fresh"));
     assert!(message.contains(ALLOW_REPEAT_TOKEN));
+    // #1894: the guard must not teach a sleep-paced poll.
+    assert!(!message.contains("sleep"), "{message}");
+    assert!(message.contains("run_in_background"), "{message}");
+    assert!(message.contains("pr_merge_watch"), "{message}");
 }
