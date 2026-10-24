@@ -23,9 +23,10 @@ def test_intake_does_not_hand_close_the_meta_issue() -> None:
     assert "the parent is closed by `/grind`" not in text
 
 
-def test_bare_intake_skips_grind_labelled_issues() -> None:
+def test_bare_intake_skips_issues_on_a_feature_branch() -> None:
     text = _read("grind-intake")
-    assert "grind:on-feature" in text
+    assert "grind:on-feature" not in text
+    assert "feature PR's `Closes` line" in text
     assert "grind:followup" in text
 
 
@@ -37,9 +38,10 @@ def test_integrate_goal_prs_use_refs() -> None:
     assert "Refs #" in _read("grind-integrate")
 
 
-def test_land_labels_and_marks_feature_issues() -> None:
+def test_land_marks_feature_issues_without_a_label() -> None:
     text = _read("grind-land")
-    assert "grind:on-feature" in text
+    assert "grind:on-feature" not in text
+    assert "gh label create" not in text
     assert "<!-- grind:v1 feature-pr=" in text
 
 
@@ -48,8 +50,10 @@ def test_router_and_cron_run_reconcile() -> None:
     assert "clud grind reconcile" in _read("grind-cron")
 
 
-def test_triage_knows_the_on_feature_label() -> None:
-    assert "grind:on-feature" in _read("clud-issue-triage")
+def test_triage_knows_feature_branch_issues_by_marker() -> None:
+    text = _read("clud-issue-triage")
+    assert "grind:on-feature" not in text
+    assert "<!-- grind:v1 feature-pr=#N" in text
 
 
 def test_git_playbook_protects_grind_branches() -> None:

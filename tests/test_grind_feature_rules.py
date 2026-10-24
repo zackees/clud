@@ -46,12 +46,13 @@ def test_only_the_lander_adds_a_goals_closes_line_after_it_lands() -> None:
     assert "Only you add a goal's `Closes` line" in _skill("grind-land")
 
 
-def test_lander_records_label_and_marker_on_landing() -> None:
+def test_lander_records_a_marker_and_never_a_label_on_landing() -> None:
+    # #1958: grind leaves no labels in the target repo.
     source = _workflow()
-    assert "const ON_FEATURE = 'grind:on-feature'" in source
+    assert "grind:on-feature" not in source
     land = _function(source, "featureLandNote")
-    assert "gh label create ${ON_FEATURE} --force" in land
-    assert "--add-label ${ON_FEATURE}" in land
+    assert "gh label create" not in land
+    assert "--add-label" not in land
     assert "<!-- grind:v1 feature-pr=#${fpr} branch=${FEATURE.branch}" in land
     assert "run=${FEATURE_RUN_ID" in land
 

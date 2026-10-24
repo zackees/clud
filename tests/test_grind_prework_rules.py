@@ -96,7 +96,8 @@ def test_router_owns_the_status_comment_and_problem_filing() -> None:
     assert "<!-- grind:v1 status run=<run-id> -->" in text
     assert "gh api -X PATCH repos/<o>/<r>/issues/comments/<id>" in text
     assert "Refs #<meta>" in text
-    assert "--label grind:followup" in text
+    assert "--label grind:followup" not in text
+    assert "gh label create" not in text
     assert "NEVER attach a follow-up as a sub-issue" in text
     assert "Problems not filed" in text
     assert "stopped: 'prework'" in text
@@ -120,4 +121,4 @@ def test_followups_wait_for_their_feature_pr() -> None:
         assert "feature-pr=" in text, name
         assert "MERGED" in text, name
     for name in ("grind-intake", "grind-cron"):
-        assert "--remove-label grind:followup" in _skill(name), name
+        assert "--remove-label" not in _skill(name), name

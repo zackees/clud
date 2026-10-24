@@ -1,21 +1,24 @@
 //! `clud grind reconcile` — never lose an issue in feature-branch mode (#1393 §3).
 //!
-//! Issues a feature-branch grind run fixed carry the `grind:on-feature` label and
-//! a `<!-- grind:v1 ... -->` marker comment naming the feature PR. GitHub only
+//! Issues a feature-branch grind run fixed carry a `<!-- grind:v1 ... -->`
+//! marker comment naming the feature PR, and that PR's body has their
+//! `Closes #N` line. Grind applies no labels in the target repo (#1958). GitHub only
 //! auto-closes an issue when its fix lands on the default branch, so an issue
 //! can be closed by the wrong thing (a PR merged into a non-default branch, a
 //! commit that never reached the default branch, a person) or left dangling
-//! (feature PR closed unmerged). `reconcile` walks every labelled issue and
-//! repairs it, reopens a sub-issue of a labelled meta issue that was closed by
+//! (feature PR closed unmerged). `reconcile` walks every issue a grind feature
+//! PR's body names, repairs each one whose marker is still pending, reopens a
+//! sub-issue of such a meta issue that was closed by
 //! hand mid-run, closes the top meta issue of a meta of metas once every
 //! sub-issue has a legitimate closer (the one close an agent may make, #1392
 //! §5), and reports every open feature PR so a waiting one is never silent.
 //!
-//! It reads GitHub state only (labels, markers, `ClosedEvent.closer`, the
-//! compare API), never `run.json` or any other local file, and it is
-//! idempotent: its own comments carry a `<!-- grind:reconcile ... -->` tag so a
-//! second pass posts nothing new, and the label is removed last, so a pass that
-//! fails midway is retried in full by the next one.
+//! It reads GitHub state only (feature PR bodies, markers,
+//! `ClosedEvent.closer`, the compare API), never `run.json` or any other local
+//! file, and it is idempotent: its own comments carry a
+//! `<!-- grind:reconcile ... -->` tag so a second pass posts nothing new, and
+//! the `resolved` tag that ends tracking is posted last, so a pass that fails
+//! midway is retried in full by the next one.
 //!
 //! The module is split in two:
 //! * a **pure decision layer** (`parse_marker`, `closer_from_graphql`,
@@ -34,11 +37,8 @@ use serde_json::Value;
 use crate::subprocess::ManagedSubprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
-/// The label a feature-branch run puts on every issue it fixed.
-pub const ON_FEATURE_LABEL: &str = "grind:on-feature";
-
-/// The label grind puts on the sub-meta issues it creates (#1392 §5).
-pub const SUB_META_LABEL: &str = "grind:meta";
+/// Head-branch prefix of every grind feature PR.
+pub const FEATURE_BRANCH_PREFIX: &str = "grind/meta-";
 
 /// A feature PR untouched for this long is reported as stale, and the stale
 /// comment on its meta issue is posted at most once per this window.
@@ -123,6 +123,39 @@ pub struct CommentFacts {
     pub created_at: Option<i64>,
 }
 
+/// Is the issue's latest marker already answered by a later `resolved` tag?
+pub fn marker_resolved(comments: &[CommentFacts], feature_pr: u64) -> bool {
+    let tag = reconcile_tag("resolved", feature_pr);
+    let last_marker = comments
+        .iter()
+        .rposition(|c| parse_marker(&c.body).is_some());
+    let last_resolved = comments.iter().rposition(|c| c.body.contains(&tag));
+    matches!((last_marker, last_resolved), (Some(m), Some(r)) if r > m)
+}
+
+/// Issue numbers a feature PR body closes (`Closes #N`, `Fixes #N`,
+/// `Resolves #N`, any case), in order of first appearance.
+pub fn closing_refs(body: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    let lower = body.to_ascii_lowercase();
+    for keyword in ["closes", "fixes", "resolves"] {
+        let mut rest = lower.as_str();
+        while let Some(at) = rest.find(keyword) {
+            let after = rest[at + keyword.len()..].trim_start_matches([' ', ':']);
+            if let Some(num) = after.strip_prefix('#') {
+                let digits: String = num.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(n) = digits.parse::<u64>() {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+            }
+            rest = &rest[at + keyword.len()..];
+        }
+    }
+    out
+}
+
 /// When reconcile last posted a `kind` comment about `feature_pr`, from the
 /// comments list. A tagged comment without a timestamp counts as `now`.
 pub fn last_tagged(
@@ -181,7 +214,7 @@ pub struct IssueFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Reopen { reason: String },
-    RemoveLabel,
+    Resolve,
     Close { cite: String },
     Comment { body: String },
     ReportStale { why: String },
@@ -191,8 +224,8 @@ pub enum Action {
 /// open issue whose feature PR is open and healthy yields no actions, and so
 /// does every issue once the actions for its state have been applied.
 ///
-/// `RemoveLabel` is always the last action: the label is what makes the next
-/// pass look at the issue again, so it goes only after everything else
+/// `Resolve` is always the last action: until its tag is posted the next pass
+/// looks at the issue again, so it goes only after everything else
 /// succeeded.
 pub fn decide(facts: &IssueFacts, default_branch: &str) -> Vec<Action> {
     let n = facts.feature_pr;
@@ -204,7 +237,7 @@ pub fn decide(facts: &IssueFacts, default_branch: &str) -> Vec<Action> {
                     cite: format!("Fixed by feature PR #{n}, merged into `{default_branch}`."),
                 });
             }
-            out.push(Action::RemoveLabel);
+            out.push(Action::Resolve);
             out
         }
         FeaturePrState::ClosedUnmerged => {
@@ -223,7 +256,7 @@ pub fn decide(facts: &IssueFacts, default_branch: &str) -> Vec<Action> {
                     ),
                 });
             }
-            out.push(Action::RemoveLabel);
+            out.push(Action::Resolve);
             out
         }
         // Merged into a non-default branch, or still open: not landed.
@@ -255,7 +288,7 @@ pub fn decide(facts: &IssueFacts, default_branch: &str) -> Vec<Action> {
                 out.push(Action::ReportStale { why });
             }
             if unlabel {
-                out.push(Action::RemoveLabel);
+                out.push(Action::Resolve);
             }
             out
         }
@@ -695,17 +728,21 @@ fn fetch_feature(cwd: &Path, pr: u64, marker_branch: &str, now: i64) -> Result<F
     })
 }
 
-fn apply(cwd: &Path, number: u64, action: &Action) -> Result<(), String> {
+fn apply(cwd: &Path, number: u64, feature_pr: u64, action: &Action) -> Result<(), String> {
     let owned = number.to_string();
     let n: &str = owned.as_str();
+    let resolved = format!(
+        "Tracking for feature PR #{feature_pr} is complete.\n\n{}",
+        reconcile_tag("resolved", feature_pr)
+    );
     let (args, line): (Vec<&str>, String) = match action {
         Action::Reopen { reason } => (
             vec!["issue", "reopen", n],
             format!("#{number}: reopen ({reason})"),
         ),
-        Action::RemoveLabel => (
-            vec!["issue", "edit", n, "--remove-label", ON_FEATURE_LABEL],
-            format!("#{number}: remove label {ON_FEATURE_LABEL}"),
+        Action::Resolve => (
+            vec!["issue", "comment", n, "--body", resolved.as_str()],
+            format!("#{number}: resolved (feature PR #{feature_pr})"),
         ),
         Action::Close { cite } => (
             vec!["issue", "close", n, "--comment", cite.as_str()],
@@ -725,11 +762,11 @@ fn apply(cwd: &Path, number: u64, action: &Action) -> Result<(), String> {
     Ok(())
 }
 
-/// Apply `actions` in order, stopping at the first failure so the label (always
-/// last) survives for the next pass to retry. Returns whether all succeeded.
-fn apply_all(cwd: &Path, number: u64, actions: &[Action]) -> bool {
+/// Apply `actions` in order, stopping at the first failure so `Resolve` (always
+/// last) is not posted and the next pass retries. Returns whether all succeeded.
+fn apply_all(cwd: &Path, number: u64, feature_pr: u64, actions: &[Action]) -> bool {
     for action in actions {
-        if let Err(e) = apply(cwd, number, action) {
+        if let Err(e) = apply(cwd, number, feature_pr, action) {
             eprintln!("{e}");
             return false;
         }
@@ -764,7 +801,7 @@ fn reconcile_issue(
     cwd: &Path,
     pass: &mut Pass,
     issue: &Value,
-    labelled: &BTreeSet<u64>,
+    tracked: &BTreeSet<u64>,
     default_branch: &str,
     now: i64,
 ) -> Result<(), String> {
@@ -775,9 +812,11 @@ fn reconcile_issue(
     let labels = label_names(issue);
     let comments = fetch_comments(cwd, number)?;
     let Some(marker) = last_marker(comments.iter().map(|c| c.body.as_str())) else {
-        eprintln!("#{number}: labelled {ON_FEATURE_LABEL} but has no grind marker; skipping");
         return Ok(());
     };
+    if marker_resolved(&comments, marker.feature_pr) {
+        return Ok(());
+    }
     let feature = pass.feature(cwd, &marker, now)?;
     let closer = if open {
         Closer::None
@@ -796,7 +835,7 @@ fn reconcile_issue(
     let is_meta = !subs.is_empty()
         || labels
             .iter()
-            .any(|l| l.eq_ignore_ascii_case("meta") || l == SUB_META_LABEL);
+            .any(|l| l.eq_ignore_ascii_case("meta"));
     let facts = IssueFacts {
         number,
         open,
@@ -814,7 +853,7 @@ fn reconcile_issue(
             pass.stale.insert(marker.feature_pr, why.clone());
         }
     }
-    if !apply_all(cwd, number, &actions) {
+    if !apply_all(cwd, number, marker.feature_pr, &actions) {
         pass.failed = true;
     }
     if let FeaturePrState::Open { .. } = feature.state {
@@ -822,10 +861,10 @@ fn reconcile_issue(
             .entry(marker.feature_pr)
             .or_default()
             .insert(number);
-        // A child closed by hand before its goal landed carries no label yet.
+        // A child closed by hand before its goal landed has no marker yet.
         for child in subs
             .iter()
-            .filter(|s| !s.open && !labelled.contains(&s.number))
+            .filter(|s| !s.open && !tracked.contains(&s.number))
         {
             let closer = fetch_closer(cwd, child.number, default_branch)?;
             let acts = decide_unlabelled_child(
@@ -835,7 +874,7 @@ fn reconcile_issue(
                 feature.created_at,
                 default_branch,
             );
-            if !apply_all(cwd, child.number, &acts) {
+            if !apply_all(cwd, child.number, marker.feature_pr, &acts) {
                 pass.failed = true;
             }
         }
@@ -849,30 +888,7 @@ fn reconcile_issue(
 /// Close each open top meta issue (the parent of a meta issue) whose every
 /// sub-issue has a legitimate closer.
 fn reconcile_top_metas(cwd: &Path, pass: &mut Pass, default_branch: &str) -> Result<(), String> {
-    let sub_metas = gh_json(
-        cwd,
-        &[
-            "issue",
-            "list",
-            "--label",
-            SUB_META_LABEL,
-            "--state",
-            "all",
-            "--limit",
-            "1000",
-            "--json",
-            "number",
-        ],
-    )
-    .unwrap_or(Value::Null);
-    let mut candidates: BTreeSet<u64> = pass.metas.clone();
-    candidates.extend(
-        sub_metas
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|i| i.get("number").and_then(Value::as_u64)),
-    );
+    let candidates: BTreeSet<u64> = pass.metas.clone();
     if candidates.is_empty() {
         return Ok(());
     }
@@ -905,7 +921,7 @@ fn reconcile_top_metas(cwd: &Path, pass: &mut Pass, default_branch: &str) -> Res
                 "Closed by `clud grind reconcile`: every sub-issue is closed by a merge into \
                  `{default_branch}`."
             );
-            if !apply_all(cwd, top, &[Action::Close { cite }]) {
+            if !apply_all(cwd, top, 0, &[Action::Close { cite }]) {
                 pass.failed = true;
             }
         }
@@ -913,7 +929,34 @@ fn reconcile_top_metas(cwd: &Path, pass: &mut Pass, default_branch: &str) -> Res
     Ok(())
 }
 
-/// Reconcile every `grind:on-feature` issue in the repo at `cwd`.
+/// Every issue a grind feature PR's body closes, with its state (#1958).
+fn tracked_issues(cwd: &Path) -> Result<Vec<Value>, String> {
+    let search = format!("head:{FEATURE_BRANCH_PREFIX}");
+    let prs = gh_json(
+        cwd,
+        &[
+            "pr", "list", "--state", "all", "--search", &search, "--limit", "200", "--json",
+            "body,headRefName",
+        ],
+    )?;
+    let mut numbers = BTreeSet::new();
+    for pr in prs.as_array().into_iter().flatten() {
+        let head = pr.get("headRefName").and_then(Value::as_str).unwrap_or_default();
+        if !head.starts_with(FEATURE_BRANCH_PREFIX) {
+            continue;
+        }
+        let body = pr.get("body").and_then(Value::as_str).unwrap_or_default();
+        numbers.extend(closing_refs(body));
+    }
+    let mut issues = Vec::new();
+    for number in numbers {
+        let n = number.to_string();
+        issues.push(gh_json(cwd, &["issue", "view", &n, "--json", "number,state,labels"])?);
+    }
+    Ok(issues)
+}
+
+/// Reconcile every issue a grind feature PR tracks in the repo at `cwd`.
 /// Returns exit code 0 on success, 1 if any issue failed to reconcile.
 pub fn run(cwd: &Path) -> Result<i32, String> {
     let repo = gh_json(cwd, &["repo", "view", "--json", "defaultBranchRef"])?;
@@ -922,31 +965,15 @@ pub fn run(cwd: &Path) -> Result<i32, String> {
         .and_then(Value::as_str)
         .ok_or("could not resolve the default branch")?
         .to_string();
-    let issues = gh_json(
-        cwd,
-        &[
-            "issue",
-            "list",
-            "--label",
-            ON_FEATURE_LABEL,
-            "--state",
-            "all",
-            "--limit",
-            "1000",
-            "--json",
-            "number,state,labels",
-        ],
-    )?;
+    let issues = tracked_issues(cwd)?;
     let now = now_secs();
-    let labelled: BTreeSet<u64> = issues
-        .as_array()
-        .into_iter()
-        .flatten()
+    let tracked: BTreeSet<u64> = issues
+        .iter()
         .filter_map(|i| i.get("number").and_then(Value::as_u64))
         .collect();
     let mut pass = Pass::default();
-    for issue in issues.as_array().into_iter().flatten() {
-        if let Err(e) = reconcile_issue(cwd, &mut pass, issue, &labelled, &default_branch, now) {
+    for issue in &issues {
+        if let Err(e) = reconcile_issue(cwd, &mut pass, issue, &tracked, &default_branch, now) {
             eprintln!("{e}");
             pass.failed = true;
         }
@@ -1033,7 +1060,7 @@ mod tests {
                     f.closer = Closer::None;
                 }
                 Action::Close { .. } => f.open = false,
-                Action::RemoveLabel => *labelled = false,
+                Action::Resolve => *labelled = false,
                 Action::Comment { body } => {
                     if body.contains(&reconcile_tag("unmerged", f.feature_pr)) {
                         f.recovery_noted = true;
@@ -1055,7 +1082,7 @@ mod tests {
             json!({"__typename":"PullRequest","merged":true,"baseRefName":"main"}),
         ));
         let acts = decide(&facts(false, closer, healthy()), "main");
-        assert_eq!(acts, vec![Action::RemoveLabel]);
+        assert_eq!(acts, vec![Action::Resolve]);
     }
 
     // C2
@@ -1066,7 +1093,7 @@ mod tests {
         ));
         let acts = decide(&facts(false, closer, healthy()), "main");
         assert!(reopens(&acts), "{acts:?}");
-        assert!(!acts.contains(&Action::RemoveLabel));
+        assert!(!acts.contains(&Action::Resolve));
     }
 
     // C3
@@ -1090,7 +1117,7 @@ mod tests {
             &facts(false, Closer::Commit { on_default: true }, healthy()),
             "main",
         );
-        assert_eq!(acts, vec![Action::RemoveLabel]);
+        assert_eq!(acts, vec![Action::Resolve]);
     }
 
     // C5
@@ -1124,7 +1151,7 @@ mod tests {
         )));
         assert_eq!(
             decide(&facts(false, closer, healthy()), "master"),
-            vec![Action::RemoveLabel]
+            vec![Action::Resolve]
         );
         let unmerged = Closer::PullRequest {
             merged: false,
@@ -1144,7 +1171,7 @@ mod tests {
         for open in [false, true] {
             let acts = decide(&facts(open, Closer::None, feature.clone()), "main");
             assert_eq!(matches!(acts[0], Action::Reopen { .. }), !open, "{acts:?}");
-            assert_eq!(acts.last(), Some(&Action::RemoveLabel), "{acts:?}");
+            assert_eq!(acts.last(), Some(&Action::Resolve), "{acts:?}");
             assert!(acts.iter().any(|a| matches!(
                 a,
                 Action::Comment { body } if body.contains("refs/pull/812/head")
@@ -1161,7 +1188,7 @@ mod tests {
         let feature = feature_from_pr_json(&pr, NOW, false);
         let acts = decide(&facts(true, Closer::None, feature.clone()), "main");
         assert!(matches!(&acts[0], Action::Close { cite } if cite.contains("#812")));
-        assert_eq!(acts.last(), Some(&Action::RemoveLabel));
+        assert_eq!(acts.last(), Some(&Action::Resolve));
         // Already closed by the merge: only the label goes.
         let closer = Closer::PullRequest {
             merged: true,
@@ -1169,7 +1196,7 @@ mod tests {
         };
         assert_eq!(
             decide(&facts(false, closer, feature), "main"),
-            vec![Action::RemoveLabel]
+            vec![Action::Resolve]
         );
     }
 
@@ -1180,7 +1207,7 @@ mod tests {
         };
         let acts = decide(&facts(false, Closer::None, feature), "main");
         assert!(reopens(&acts), "{acts:?}");
-        assert!(!acts.contains(&Action::RemoveLabel));
+        assert!(!acts.contains(&Action::Resolve));
         assert!(acts
             .iter()
             .any(|a| matches!(a, Action::ReportStale { why } if why.contains("develop"))));
@@ -1312,6 +1339,24 @@ mod tests {
             };
             assert_eq!(changes(&second), 0, "{f:?}: {first:?} then {second:?}");
         }
+    }
+
+    #[test]
+    fn closing_refs_reads_every_closing_keyword_once() {
+        let body = "Closes #100\nCloses #102\nfixes: #7, Resolves #102\nRefs #9";
+        assert_eq!(closing_refs(body), vec![100, 102, 7]);
+    }
+
+    #[test]
+    fn a_marker_is_resolved_only_by_a_later_resolved_tag() {
+        let c = |body: &str| CommentFacts { body: body.to_string(), created_at: None };
+        let marker = "<!-- grind:v1 feature-pr=#9 branch=grind/meta-1-r goal-pr=#5 run=r -->";
+        let resolved = reconcile_tag("resolved", 9);
+        assert!(!marker_resolved(&[c(marker)], 9));
+        assert!(marker_resolved(&[c(marker), c(&resolved)], 9));
+        // A later landing re-opens tracking.
+        assert!(!marker_resolved(&[c(marker), c(&resolved), c(marker)], 9));
+        assert!(!marker_resolved(&[c(marker), c(&reconcile_tag("resolved", 8))], 9));
     }
 
     #[test]

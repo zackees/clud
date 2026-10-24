@@ -82,16 +82,16 @@ Do not infer it from `gh repo view` or a fork's default upstream selection.
    issue (`Tracks` list of the children) and attach them. Goals are the
    children. One cohesive change is still one child under a meta.
 5. **Nothing.** List the repo's open issues (`gh issue list --repo <github-repo>`), excluding
-   ones with an open linked PR and ones labelled `grind:on-feature`
-   (`gh issue list --repo <github-repo> --search '-label:grind:on-feature'`), ask the user which
+   ones with an open linked PR (an issue whose fix sits on a grind feature
+   branch is linked by the feature PR's `Closes` line), ask the user which
    to take, then route the chosen set via 2 (one issue) or 3 (several).
-   A `grind:followup` issue is eligible only when either:
+   A follow-up (its body carries `<!-- grind:followup ... -->`) is eligible
+   only when either:
    - its body marker `<!-- grind:followup ... stage=bugs ... -->` names the
      bugs stage, or
    - the marker's `feature-pr=<n>` PR is merged
      (`gh pr view --repo <github-repo> <n> --json state -q .state` prints `MERGED`).
-   Otherwise leave it out. When a follow-up is picked up, remove its label
-   (`gh issue edit --repo <github-repo> <n> --remove-label grind:followup`). Follow-ups are never
+   Otherwise leave it out. Grind never labels an issue (#1958). Follow-ups are never
    sub-issues of the meta issue and do not count for the no-overlap check.
 
 `/grind` never closes the meta issue (or any issue) itself. Issues close

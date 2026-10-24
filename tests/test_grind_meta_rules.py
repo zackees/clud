@@ -29,7 +29,7 @@ def test_router_keeps_old_body_in_details() -> None:
 def test_router_keeps_grind_made_sub_metas() -> None:
     text = _read("grind")
     assert "<!-- grind:v1 -->" in text
-    assert "grind:meta" in text
+    assert "label `grind:meta`" not in text
 
 
 def test_router_records_undo() -> None:

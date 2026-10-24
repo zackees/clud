@@ -980,10 +980,9 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
 }
 
 /// Feature mode only: after a goal PR merges into the feature branch, the
-/// lander records it so the issue is never lost (#1393 §2): it creates the
-/// `grind:on-feature` label, adds it to the issue, posts the `grind:v1`
-/// marker comment, and adds the goal's `Closes #N` line to the feature PR's
-/// body. `None` when `words` is none of those commands (the lander's other
+/// lander records it so the issue is never lost (#1393 §2): it posts the
+/// `grind:v1` marker comment and adds the goal's `Closes #N` line to the
+/// feature PR's body. It never creates or applies a label (#1958). `None` when `words` is none of those commands (the lander's other
 /// rules then apply); `Some(None)` allows, `Some(Some(reason))` denies.
 fn lander_records_landing(role: &str, words: &[String], run: &RunFacts) -> Option<Option<String>> {
     let feature = run.feature.as_ref()?;
@@ -992,35 +991,15 @@ fn lander_records_landing(role: &str, words: &[String], run: &RunFacts) -> Optio
     }
     let unquote = |w: &String| w.trim_matches(&['\'', '"'][..]).to_string();
     let sub: Vec<String> = words[1..].iter().map(unquote).collect();
-    fn is_label(w: &str) -> bool {
-        w == ON_FEATURE_LABEL
-    }
     let verdict = match sub
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["label", "create", name, ..] => (!is_label(name))
-            .then(|| format!("{role} may create only the `{ON_FEATURE_LABEL}` label")),
-        ["issue", "edit", _, rest @ ..] => {
-            let mut ok = !rest.is_empty();
-            let mut i = 0;
-            while let Some(word) = rest.get(i) {
-                i += 1;
-                ok &= match *word {
-                    "--add-label" => rest.get(i).is_some_and(|v| is_label(v)),
-                    "-R" | "--repo" => true,
-                    w => w.strip_prefix("--add-label=").is_some_and(is_label),
-                };
-                if matches!(*word, "--add-label" | "-R" | "--repo") {
-                    i += 1;
-                }
-            }
-            (!ok).then(|| {
-                format!("{role} may only add the `{ON_FEATURE_LABEL}` label with `gh issue edit`")
-            })
-        }
+        ["label", ..] | ["issue", "edit", ..] => Some(format!(
+            "{role} never creates, applies or removes a label in the target repo (#1958)"
+        )),
         ["issue", "comment", ..] => match comment_target(&words[3..]) {
             Err(flag) => Some(format!("{role} may not pass `{flag}` to gh issue comment")),
             Ok(Some(_)) => None,
@@ -1049,10 +1028,6 @@ fn lander_records_landing(role: &str, words: &[String], run: &RunFacts) -> Optio
     };
     Some(verdict)
 }
-
-/// The label a feature-branch run puts on every issue with a fix on the
-/// feature branch (#1393); `clud grind reconcile` reads it.
-const ON_FEATURE_LABEL: &str = "grind:on-feature";
 
 /// Feature-branch-mode caps for callers that are not `grind-*` roles: the
 /// main-session `/grind` router, which the hook cannot tell apart from any
@@ -2391,9 +2366,6 @@ mod tests {
     fn lander_records_a_landed_goal_in_feature_mode_only() {
         let facts = feature_run(FeatureMerge::DecideLater);
         for command in [
-            "gh label create grind:on-feature --force",
-            "gh issue edit 102 --add-label grind:on-feature",
-            "gh issue edit 100 --add-label=grind:on-feature -R o/r",
             "gh issue comment 102 --body 'Landed on grind/meta-100-r1 via #5. \
              <!-- grind:v1 feature-pr=#9 branch=grind/meta-100-r1 goal-pr=#5 run=r1 -->'",
             "gh pr edit 9 --body 'Closes #100 Closes #102'",
@@ -2403,6 +2375,8 @@ mod tests {
             assert!(!allowed(LANDER, command, &run(true, false)), "{command}");
         }
         for command in [
+            "gh label create grind:on-feature --force",
+            "gh issue edit 102 --add-label grind:on-feature",
             "gh label create wontfix",
             "gh issue edit 102 --add-label wontfix",
             "gh issue edit 102 --remove-label grind:on-feature",

@@ -59,11 +59,16 @@ not emulate the workflow by hand.
 
 ## 0b. Reconcile
 
+Grind is client-side: it never runs `gh label create` and never applies,
+removes or searches by a `grind:*` label in the target repo (#1958). Its
+GitHub state is the feature PR's `Closes` lines and hidden HTML markers
+(`grind:v1`, `grind:followup`, `grind:reconcile`) in bodies and comments.
+
 At the start of every `/grind`, before intake, run `clud grind reconcile`
 from the repository root and report what it prints: each issue it reopened,
-closed or unlabelled, every open feature PR with its state (draft, ready,
+closed or resolved, every open feature PR with its state (draft, ready,
 waiting for review) and the issues waiting on it, and each stale feature PR.
-It reads only GitHub (the `grind:on-feature` label and `grind:v1` markers),
+It reads only GitHub (feature PR `Closes` lines and `grind:v1` markers),
 never the run facts. A failure is reported, not fatal. Optionally, mention once that a GitHub Action could run the same
 reconcile on a schedule; setting one up is out of scope for this run.
 
@@ -315,7 +320,7 @@ question round and before prework:
   itself is the feature meta.
 - The existing sub-metas are the sub-issues of `T` that have sub-issues of
   their own. One is grind-made when its body carries the marker
-  `<!-- grind:v1 -->` or it has the label `grind:meta`; a user-made one that
+  `<!-- grind:v1 -->`; a user-made one that
   an earlier run rewrote carries the marker, so it counts as grind-made too.
   Grind-made sub-metas are kept as groups as they are: no rewrite, and their
   children are never re-parented.
@@ -324,7 +329,7 @@ question round and before prework:
   with `<!-- grind:v1 -->` and ends with
   `<details><summary>Previous content</summary>\n\n<old body>\n\n</details>`.
   Only groups beyond the reused count get new issues: `gh issue create --repo <github-repo>` with
-  the marker body and label `grind:meta`, then
+  the marker body (no label), then
   `gh api -X POST repos/<o>/<r>/issues/<T>/sub_issues -F sub_issue_id=<id>`.
   `sub_issue_id` is always the issue's REST `id`
   (`gh api repos/<o>/<r>/issues/<n> --jq .id`), never its number.
@@ -479,8 +484,8 @@ branch contains every bug fix that merged:
    converted an original issue), followed by a goals table (goal, goal PR,
    status). For a meta of metas, `<meta>` is the feature group's sub-meta;
    the top meta is never in a `Closes` line. The lander adds each goal's
-   `Closes #N` line, updates the table and labels the issue
-   `grind:on-feature` as the goal lands.
+   `Closes #N` line, updates the table and posts the issue's `grind:v1`
+   marker comment as the goal lands.
 5. Record `{"feature": {"branch": "…", "worktree": "…", "pr": "…"},
    "feature_merge": "…"}` in `<facts>`, and pass `feature` and
    `feature_merge` to the feature-stage `grind-run` call (section 4,
@@ -512,7 +517,7 @@ two), whether or not every goal merged:
      landed, feature PR) and keep the PR draft.
    - `auto`: report the feature PR as merged, or as "waiting for review".
      Once it merged, run `clud grind reconcile` again so every issue it
-     closed loses the `grind:on-feature` label.
+     closed gets its `resolved` tag.
 
    Then make the status comment final: PATCH the run's
    `<!-- grind:v1 status run=<run-id> -->` comment (section 4) so each
@@ -524,12 +529,11 @@ two), whether or not every goal merged:
    top-level `problems`, and the plan-only pass's `problems` from 1b), and
    dedupe by kind + summary + related_issue. Then,
    by the plan's `problem_reporting`:
-   - `issue`: create the label first if missing
-     (`gh label create --repo <github-repo> grind:followup --force`). For each problem, search for
-     an existing follow-up with the same title
-     (`gh issue list --repo <github-repo> --state all --label grind:followup --search '<summary> in:title'`)
+   - `issue`: for each problem, search for an existing follow-up with the
+     same title
+     (`gh issue list --repo <github-repo> --state all --search '"grind:followup" <summary> in:title,body'`)
      and skip duplicates; otherwise run
-     `gh issue create --repo <github-repo> --title '<kind>: <summary>' --label grind:followup --body-file <f>`,
+     `gh issue create --repo <github-repo> --title '<kind>: <summary>' --body-file <f>`,
      where the body holds the evidence, `Refs #<meta>`, and the marker
      `<!-- grind:followup meta=<meta> stage=<bugs|feature> feature-pr=<n or none> -->`
      (`stage=bugs` when the problem's goal was a bug-stage goal or the run
