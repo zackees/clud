@@ -18,7 +18,7 @@ This prints all of it at once: the branch, its upstream with ahead/behind,
 worktrees. It never fetches, so the upstream counts are as of the last fetch.
 
 Run through clud's `tool run` subcommand:
-  clud tool run git/state.py
+  "$CLUD_EXE" tool run git/state.py
 
 Exit codes:
   0  printed
