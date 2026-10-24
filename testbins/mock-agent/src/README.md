@@ -23,7 +23,10 @@ before exiting with the test-requested code.
 - `platform/` — the host boundary (#1953), the only place that selects a host:
   `stdin_mode.rs` (raw-mode stdin: `termios` on Unix, VT console input on
   Windows) and `tool_shell_probe.rs` (Windows PowerShell leak probe; Unix
-  reports it unsupported), one copy per tree in `unix/` and `windows/`.
+  reports it unsupported) and `signals.rs` (restores default SIGINT/SIGQUIT
+  at startup, so an ignored disposition inherited from a backgrounded test
+  run cannot stall the PTY interrupt tests, #1828; no-op on Windows), one
+  copy per tree in `unix/` and `windows/`.
 
 ## Behavior
 

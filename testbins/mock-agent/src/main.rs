@@ -35,6 +35,7 @@ mod serve;
 )]
 fn main() {
     trace("start");
+    platform::signals::restore_default_interrupt();
     let args: Vec<String> = std::env::args().collect();
     // Windows shim tests copy this executable to the next PATH entry. It is
     // a recording handoff only: even a missed catastrophe guard cannot delete.
