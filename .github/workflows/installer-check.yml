@@ -64,7 +64,7 @@ jobs:
   candidate-catalog:
     name: Bind all six candidate assets into one catalog
     needs: candidate-build
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: always() && !cancelled() && needs.candidate-build.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +91,7 @@ jobs:
   candidate-host:
     name: Run exact PR candidate on ${{ matrix.runner }}
     needs: candidate-catalog
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: always() && !cancelled() && needs.candidate-catalog.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -209,7 +209,7 @@ jobs:
   candidate-nixos:
     name: Real NixOS VM ${{ matrix.target }} nix-ld=${{ matrix.nix_ld }}
     needs: candidate-catalog
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: always() && !cancelled() && needs.candidate-catalog.result == 'success'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -279,7 +279,7 @@ jobs:
   candidate-distros:
     name: Same musl bytes on ${{ matrix.distro }} ${{ matrix.arch }}
     needs: candidate-catalog
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: always() && !cancelled() && needs.candidate-catalog.result == 'success'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -379,7 +379,7 @@ jobs:
     # empty HOME and drives the real dsh against a mock OpenRouter endpoint.
     name: Managed DeepSeek Harness on ${{ matrix.runner }} (system Node ${{ matrix.node }})
     needs: candidate-build
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: always() && !cancelled() && needs.candidate-build.result == 'success'
     strategy:
       fail-fast: false
       matrix:
