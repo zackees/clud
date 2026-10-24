@@ -480,7 +480,10 @@ mod tests {
             .expect("BUNDLED_TOOLS must include git/state.py");
         assert!(tool.body.contains("managed-by: clud"));
         assert!(!tool.body.contains("import subprocess"));
-        assert!(!tool.body.contains("\"fetch\""), "state.py must never fetch");
+        assert!(
+            !tool.body.contains("\"fetch\""),
+            "state.py must never fetch"
+        );
     }
 
     #[test]

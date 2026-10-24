@@ -1819,10 +1819,16 @@ mod tests {
     fn every_role_may_read_the_git_state_tool() {
         let facts = run(true, false);
         for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
-            assert!(allowed(role, "clud tool run git/state.py", &facts), "{role}");
+            assert!(
+                allowed(role, "clud tool run git/state.py", &facts),
+                "{role}"
+            );
         }
         for role in [PLANNER, LANDER] {
-            assert!(!allowed(role, "clud tool run git/other.py", &facts), "{role}");
+            assert!(
+                !allowed(role, "clud tool run git/other.py", &facts),
+                "{role}"
+            );
         }
     }
 
