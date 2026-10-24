@@ -109,6 +109,9 @@ def _classify(
         child: dict[str, Any] = {"id": str(n), "track": track, "depends_on_bugs": []}
         if group is not None:
             child["group"] = group
+        if track == "feature":
+            # #1830: an unread feature is moved to the bug track.
+            child["read"] = True
         children.append(child)
     return {
         "children": children,
