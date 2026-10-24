@@ -49,7 +49,31 @@ jobs:
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
+      # Pass marker (#2078, prototype of zackees/soldr#3890): skip the leg
+      # before any setup when this exact input tree already passed it. The
+      # key hashes the git blob IDs of every tracked file Dylint can read
+      # (the Rust-lane excludes from local-gate.toml) plus the leg, so the
+      # pinned nightly/Dylint versions in this file are part of it. The
+      # marker is an empty cache entry: the key is the only metadata.
+      # Known gap until soldr#3890: soldr itself floats on `v0`/latest and is
+      # not in the key.
+      - name: Compute pass key
+        id: pass-key
+        run: |
+          digest=$(git ls-files -s | awk -F'\t' '$2 !~ /^(docs|bench)\// && $2 !~ /^[^/]*\.md$/ && ($2 !~ /^tests\// || $2 ~ /^tests\/fixtures\//)' | sha256sum | cut -c1-16)
+          echo "key=pass-v1-dylint-${{ matrix.pass }}-${digest}" >> "$GITHUB_OUTPUT"
+      - name: Look up pass marker
+        id: pass
+        uses: actions/cache/restore@v4
+        with:
+          path: .pass-marker
+          key: ${{ steps.pass-key.outputs.key }}
+          lookup-only: true
+      - name: Skip unchanged inputs
+        if: steps.pass.outputs.cache-hit == 'true'
+        run: echo "::notice::Dylint ${{ matrix.pass }} already passed for ${{ steps.pass-key.outputs.key }}; skipping"
       - name: Set up soldr
+        if: steps.pass.outputs.cache-hit != 'true'
         uses: zackees/setup-soldr@v0
         with:
           cache: true
@@ -75,6 +99,7 @@ jobs:
       # the UI tests) fails. Drop such incomplete extractions so cargo
       # re-unpacks them from the `.crate` archive. Same repair as fbuild.
       - name: Repair registry sources missing packaged files
+        if: steps.pass.outputs.cache-hit != 'true'
         run: |
           for src in "$HOME"/.cargo/registry/src/*/dylint_internal-*; do
             [ -d "$src" ] || continue
@@ -84,17 +109,18 @@ jobs:
             fi
           done
       - name: Prepare verified Dylint prebuilts
+        if: steps.pass.outputs.cache-hit != 'true'
         run: |
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare 2>&1 | tee "$RUNNER_TEMP/dylint-prepare.log"
           sed -n 's/^soldr: dylint prepare: tool bin dir //p' "$RUNNER_TEMP/dylint-prepare.log" >> "$GITHUB_PATH"
       - name: Check dylint formatting
-        if: matrix.pass == 'host'
+        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
         run: |
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
           soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
       - name: Test dylint crate
-        if: matrix.pass == 'host'
+        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
           # enforce_platform_boundary's UI test (`ui/boundary.rs`) launches
@@ -114,14 +140,14 @@ jobs:
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 CARGO_TARGET_DIR="$PWD/target/dylint-tests" \
             soldr cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
       - name: Run dylint over workspace
-        if: matrix.pass == 'host'
+        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
       # Late lints only see code that compiles for the checked target, so the
       # host pass never reaches `cfg(windows)` / `cfg(target_os = "macos")`
       # code. These check-only passes cover it from Linux with the same
       # prebuilt driver; soldr installs the nightly's target `rust-std`.
       - name: Run dylint for x86_64-pc-windows-msvc
-        if: matrix.pass == 'x86_64-pc-windows-msvc'
+        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'x86_64-pc-windows-msvc'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:
@@ -130,7 +156,7 @@ jobs:
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target x86_64-pc-windows-msvc
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target x86_64-pc-windows-msvc
       - name: Run dylint for aarch64-apple-darwin
-        if: matrix.pass == 'aarch64-apple-darwin'
+        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'aarch64-apple-darwin'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:
@@ -138,3 +164,18 @@ jobs:
         run: |
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target aarch64-apple-darwin
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target aarch64-apple-darwin
+      - name: Record pass marker
+        if: >-
+          success() && steps.pass.outputs.cache-hit != 'true'
+          && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p .pass-marker
+          touch .pass-marker/ok
+      - name: Save pass marker
+        if: >-
+          success() && steps.pass.outputs.cache-hit != 'true'
+          && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .pass-marker
+          key: ${{ steps.pass-key.outputs.key }}
