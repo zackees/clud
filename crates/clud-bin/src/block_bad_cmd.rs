@@ -545,6 +545,16 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             return 2;
         }
     }
+    // #1988: classify the call; an advisory note rides on the final allow.
+    let verify_note = if event == PRE_TOOL_USE_EVENT {
+        block_bad_cmd_verify_ratio::note(
+            &payload.tool_name,
+            &payload.command,
+            payload.session_id.as_deref(),
+        )
+    } else {
+        None
+    };
 
     // #812: refuse a subagent creating another agent, before the descendant is
     // allocated or reaches the bridge. Checked ahead of the command rules
@@ -945,6 +955,11 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 0;
     }
 
+    if let Some(note) = verify_note {
+        append_log("allowed with verify-ratio note");
+        println!("{}", block_bad_cmd_verify_ratio::context_json(&note));
+        return 0;
+    }
     append_log("allowed");
     0
 }
@@ -3752,6 +3767,9 @@ mod block_bad_cmd_stale_upstream;
 
 #[path = "block_bad_cmd_repeat.rs"]
 mod block_bad_cmd_repeat;
+
+#[path = "block_bad_cmd_verify_ratio.rs"]
+mod block_bad_cmd_verify_ratio;
 
 #[path = "block_bad_cmd_loop_stop.rs"]
 mod block_bad_cmd_loop_stop;

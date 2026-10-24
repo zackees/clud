@@ -170,7 +170,7 @@ fn now_secs() -> u64 {
 
 /// Delete streak files older than [`MAX_AGE`], then keep the newest
 /// [`MAX_FILES`]. Runs only when a session's file is first created.
-fn prune(dir: &Path, now: SystemTime) {
+pub(super) fn prune(dir: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -199,7 +199,7 @@ fn prune(dir: &Path, now: SystemTime) {
 /// call, and an fsync per call cost ~110 ms of p99 on CI disks (#1674). A
 /// streak lost to a crash only undercounts, which this fail-open guard
 /// tolerates. Owner-only mode on Unix; the file holds only a hash and counts.
-fn write_fast(path: &Path, bytes: &[u8], create_dir: bool) -> std::io::Result<()> {
+pub(super) fn write_fast(path: &Path, bytes: &[u8], create_dir: bool) -> std::io::Result<()> {
     use std::io::Write;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if create_dir {
