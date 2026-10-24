@@ -394,6 +394,23 @@ retry stays denied.
   environment wins, then `hooks.repeat_call_limit` in `~/.clud/settings.json`;
   `0` turns the guard off (the rollback switch). Evidence and tradeoff:
   [DD-140](../DESIGN_DECISIONS.md#dd-140-the-repeated-call-guard-denies-call-201-of-an-identical-streak-and-fails-open).
+
+### Verification-to-edit ratio note (#1988)
+
+`block_bad_cmd_verify_ratio.rs` classifies each PreToolUse call as an edit
+(`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`apply_patch`, or a shell
+`sed -i`, `git apply`, ...), a verification (clippy, dylint, cargo
+build/check/test, pytest, ruff, `./lint`, `bosn ci run`, `clud ci`, ...) or
+neither, and keeps the last 30 classified calls per session under the state
+dir's `verify-ratio/`. When at least 10 of them are verifications and they
+exceed `ratio x max(edits, 1)`, the allowed call carries one PreToolUse
+`additionalContext` note telling the agent to scope its checks; it makes no
+permission decision and never denies. After a note it stays quiet for 30
+classified calls. `CLUD_VERIFY_EDIT_RATIO=<n>` wins, then
+`hooks.verify_edit_ratio` in `~/.clud/settings.json`, default `3`; `0` turns
+it off. It fails open like the repeat guard. Bash wall-time shares and a
+`clud session stats` view are not measured here: PreToolUse sees no
+durations.
 - **Override:** a command carrying `CLUD_ALLOW_REPEAT=1` skips the guard for
   that call and writes `REPEAT-GUARD-OVERRIDE` with the tool name to the hook
   log (`~/.clud/tools/hooks/block-bad-cmd.log`). `CLUD_ALLOW_ALL_CMDS=1`, in
