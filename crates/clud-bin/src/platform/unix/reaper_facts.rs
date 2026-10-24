@@ -20,13 +20,22 @@ pub fn fill(candidates: &[u32], snapshot: &mut FactsSnapshot) {
     mark_unavailable(snapshot);
 
     // The cheap gate, and the one that exists on every Unix: a daemon that
-    // called `setsid()` has left our session, which is the POSIX statement
-    // of "I intend to outlive whatever started me".
+    // called `setsid()` leads its own session, the POSIX statement of "I
+    // intend to outlive whatever started me". #1870: merely sitting in
+    // another session is not that, see `session_spares`.
     let own_session = unsafe { libc::getsid(0) };
     if own_session >= 0 {
         for &pid in candidates {
             let session = unsafe { libc::getsid(pid as libc::pid_t) };
-            if session >= 0 && session != own_session {
+            if session < 0 {
+                continue;
+            }
+            if crate::reaper_facts::session_spares(
+                pid,
+                session as u32,
+                own_session as u32,
+                leader_alive(session),
+            ) {
                 snapshot.session_leaders.insert(pid);
             }
         }
@@ -34,6 +43,15 @@ pub fn fill(candidates: &[u32], snapshot: &mut FactsSnapshot) {
 
     #[cfg(target_os = "linux")]
     linux::fill(candidates, snapshot);
+}
+
+/// Whether the leader of `session` still exists. `EPERM` means it exists
+/// under another user.
+fn leader_alive(session: libc::pid_t) -> bool {
+    if unsafe { libc::kill(session, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(target_os = "linux")]

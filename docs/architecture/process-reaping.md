@@ -157,7 +157,7 @@ worktree pins it. See
 |---|---|---|---|---|
 | 1 | **Job-object membership** | `IsProcessInJob` — false ⇒ broke away | — | anything using `spawn_daemon_breaking_away_from_job`; cheapest and strongest, we already own the job handle |
 | 2 | **Session / service context** | `ProcessIdToSessionId` == 0 ⇒ service | — | **dockerd** / Docker Desktop |
-| 3 | **Session leader** | — | `getsid(pid) != getsid(0)` ⇒ `setsid()` | double-fork daemons, language servers |
+| 3 | **Session leader** | — | another session than the reaper's that the process leads (`getsid(pid) == pid`) or whose leader is alive (#1870) | double-fork daemons, language servers |
 | 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
 | 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
 | 6 | **Listening endpoint** | `GetExtendedTcpTable` over `AF_INET` **and** `AF_INET6` | `/proc/net/tcp{,6}` + `/proc/net/unix`, matched to `/proc/<pid>/fd` | **sccache**, **FBuildWorker**, language servers |
