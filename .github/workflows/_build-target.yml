@@ -153,9 +153,15 @@ jobs:
           key: ${{ steps.pass-key.outputs.key }}
           lookup-only: true
 
+      # Runs unconditionally and branches inside: the local-gate replay proof
+      # needs every declared step executed (zackees/ci.yml#415).
       - name: Skip unchanged inputs
-        if: ${{ steps.pass.outputs.cache-hit == 'true' }}
-        run: echo "::notice::Clippy inputs unchanged since a passing main run; skipping."
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.pass.outputs.cache-hit }}
+        run: |
+          [ "$CACHE_HIT" = "true" ] || { echo "no pass marker; running the job"; exit 0; }
+          echo "::notice::Clippy inputs unchanged since a passing main run; skipping."
 
       - name: Set up build
         if: ${{ steps.pass.outputs.cache-hit != 'true' }}
@@ -245,9 +251,12 @@ jobs:
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Record pass marker
-        if: ${{ success() && steps.pass-key.outputs.key != '' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ success() && steps.pass.outputs.cache-hit != 'true' }}
         shell: bash
+        env:
+          RECORD: ${{ steps.pass-key.outputs.key != '' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
+          [ "$RECORD" = "true" ] || { echo "only a keyed main push records a pass marker"; exit 0; }
           mkdir -p .pass-marker
           touch .pass-marker/ok
 
