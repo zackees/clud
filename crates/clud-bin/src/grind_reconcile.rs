@@ -832,10 +832,7 @@ fn reconcile_issue(
     } else {
         Vec::new()
     };
-    let is_meta = !subs.is_empty()
-        || labels
-            .iter()
-            .any(|l| l.eq_ignore_ascii_case("meta"));
+    let is_meta = !subs.is_empty() || labels.iter().any(|l| l.eq_ignore_ascii_case("meta"));
     let facts = IssueFacts {
         number,
         open,
@@ -935,13 +932,24 @@ fn tracked_issues(cwd: &Path) -> Result<Vec<Value>, String> {
     let prs = gh_json(
         cwd,
         &[
-            "pr", "list", "--state", "all", "--search", &search, "--limit", "200", "--json",
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--search",
+            &search,
+            "--limit",
+            "200",
+            "--json",
             "body,headRefName",
         ],
     )?;
     let mut numbers = BTreeSet::new();
     for pr in prs.as_array().into_iter().flatten() {
-        let head = pr.get("headRefName").and_then(Value::as_str).unwrap_or_default();
+        let head = pr
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !head.starts_with(FEATURE_BRANCH_PREFIX) {
             continue;
         }
@@ -951,7 +959,10 @@ fn tracked_issues(cwd: &Path) -> Result<Vec<Value>, String> {
     let mut issues = Vec::new();
     for number in numbers {
         let n = number.to_string();
-        issues.push(gh_json(cwd, &["issue", "view", &n, "--json", "number,state,labels"])?);
+        issues.push(gh_json(
+            cwd,
+            &["issue", "view", &n, "--json", "number,state,labels"],
+        )?);
     }
     Ok(issues)
 }
@@ -1349,14 +1360,20 @@ mod tests {
 
     #[test]
     fn a_marker_is_resolved_only_by_a_later_resolved_tag() {
-        let c = |body: &str| CommentFacts { body: body.to_string(), created_at: None };
+        let c = |body: &str| CommentFacts {
+            body: body.to_string(),
+            created_at: None,
+        };
         let marker = "<!-- grind:v1 feature-pr=#9 branch=grind/meta-1-r goal-pr=#5 run=r -->";
         let resolved = reconcile_tag("resolved", 9);
         assert!(!marker_resolved(&[c(marker)], 9));
         assert!(marker_resolved(&[c(marker), c(&resolved)], 9));
         // A later landing re-opens tracking.
         assert!(!marker_resolved(&[c(marker), c(&resolved), c(marker)], 9));
-        assert!(!marker_resolved(&[c(marker), c(&reconcile_tag("resolved", 8))], 9));
+        assert!(!marker_resolved(
+            &[c(marker), c(&reconcile_tag("resolved", 8))],
+            9
+        ));
     }
 
     #[test]
