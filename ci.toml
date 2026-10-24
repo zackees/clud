@@ -79,6 +79,11 @@ venv-exec  = { prefix = "venv-exec-",  max = "120MB", lockfile = true, per = "pl
 # Pass markers (#2078): empty entries keyed by a lane's input digest; the
 # key is the only metadata. One per lane per passing tree, LRU-trimmed.
 pass-v1    = { prefix = "pass-v1-",    max = "1MB",   per = "platform", evict = "lru" }
+# setup-soldr's verdict ledger (zackees/soldr#3894, #2083): ~230 B pass
+# records and per-job key manifests. setup-soldr's own janitor trims them
+# (256 verdicts, 2 manifests per job scope); declared so CACHE-001 keeps them.
+soldr-verdict          = { prefix = "soldr-verdict-v1-",          max = "1MB", per = "none", evict = "lru" }
+soldr-verdict-manifest = { prefix = "soldr-verdict-manifest-v1-", max = "1MB", per = "none", evict = "lru" }
 # GUI runtime packages for the Linux unit shards (#2073), keyed per runner image.
 gui-debs   = { prefix = "gui-debs-",   max = "200MB", per = "platform", evict = "lru" }
 
