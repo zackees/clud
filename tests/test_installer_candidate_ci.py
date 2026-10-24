@@ -368,3 +368,29 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
     Path(os.environ["CLUD_CANDIDATE_EVIDENCE"]).write_text(
         json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize(
+    ("job", "parent"),
+    [
+        ("candidate-catalog", "candidate-build"),
+        ("candidate-host", "candidate-catalog"),
+        ("candidate-nixos", "candidate-catalog"),
+        ("candidate-distros", "candidate-catalog"),
+        ("candidate-dsh", "candidate-build"),
+    ],
+)
+def test_candidate_chain_follows_its_parent_result_not_an_inherited_skip(
+    job: str, parent: str
+) -> None:
+    """#1806: only `candidate-build` is label-gated. Without `always()` a
+    dependent inherits a skipped `needs:` whatever its own `if:` says, so each
+    link runs exactly when its parent succeeded."""
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    body = workflow.split(f"\n  {job}:\n", 1)[1].split("\n  candidate-", 1)[0]
+    assert f"    needs: {parent}\n" in body
+    assert (
+        f"    if: always() && !cancelled() && needs.{parent}.result == 'success'\n" in body
+    )
