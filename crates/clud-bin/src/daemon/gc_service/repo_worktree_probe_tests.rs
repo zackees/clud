@@ -30,9 +30,16 @@ fn open_pr_wins_over_a_merged_one_with_the_same_head() {
 
 #[test]
 fn other_branches_prs_are_ignored() {
-    let prs = [pr(1, "MERGED", "other", "a"), pr(2, "CLOSED", "feat", "b")];
+    let prs = [pr(1, "MERGED", "other", "a"), pr(3, "OPEN", "other", "c")];
     let fact = pr_fact_for_branch("feat", Some(&prs), &mut |_| Some(true));
     assert_eq!(fact, PrFact::NoPr);
+}
+
+#[test]
+fn only_closed_prs_are_named_not_read_as_no_pr() {
+    let prs = [pr(2, "CLOSED", "feat", "b"), pr(5, "CLOSED", "feat", "c")];
+    let fact = pr_fact_for_branch("feat", Some(&prs), &mut |_| Some(true));
+    assert_eq!(fact, PrFact::Closed { number: 5 });
 }
 
 #[test]

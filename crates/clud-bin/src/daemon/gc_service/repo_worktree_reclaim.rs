@@ -200,6 +200,23 @@ pub(crate) fn own_git_helpers(
     }
 }
 
+/// #1961: the repos whose `git worktree list` still names a missing
+/// worktree. Each needs `git worktree prune`, which drops only metadata for
+/// paths that are already gone. Reservations carry no repo and are skipped.
+pub(crate) fn repos_with_dangling_admin(
+    rows: &[super::repo_worktree_probe::RepoWorktreeRow],
+) -> Vec<String> {
+    let mut repos: Vec<String> = rows
+        .iter()
+        .filter(|r| !r.reservation && !r.repo_root.is_empty())
+        .filter(|r| r.verdict.state == RepoWorktreeState::Dangling)
+        .map(|r| r.repo_root.clone())
+        .collect();
+    repos.sort();
+    repos.dedup();
+    repos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +249,29 @@ mod tests {
             reservation: true,
             ..row(state, reason, None, None)
         }
+    }
+
+    #[test]
+    fn only_repos_with_dangling_worktrees_are_pruned_once_each() {
+        let other = RepoWorktreeRow {
+            repo_root: "/other".to_string(),
+            ..row(Dangling, "path missing", None, None)
+        };
+        let rows = [
+            row(Dangling, "path missing", None, None),
+            row(Dangling, "path missing", None, None),
+            row(Reclaimable, "merged via PR #1", None, None),
+            other,
+            RepoWorktreeRow {
+                repo_root: "/pinned-only".to_string(),
+                ..row(Pinned, "dirty", None, None)
+            },
+            reserved(Dangling, "path missing"),
+        ];
+        assert_eq!(
+            repos_with_dangling_admin(&rows),
+            vec!["/other".to_string(), "/repo".to_string()]
+        );
     }
 
     // ---- #1486: reservation re-check. Spare + reason first. ----

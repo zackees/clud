@@ -1025,6 +1025,13 @@ fn spawn_repo_worktree_probe(
                 &procs,
                 wt_root.as_deref(),
             );
+            // #1961: dangling admin entries never got pruned, since prune
+            // only ran after a reclaim. Delete mode only; metadata only.
+            if mode == ReclaimMode::Delete {
+                repo_worktree_reclaim_exec::prune_dangling_admin(
+                    &repo_worktree_reclaim::repos_with_dangling_admin(&rows),
+                );
+            }
             // #1687: measure only on this background thread. The CLI reads
             // the snapshot and never walks a checkout to produce its report.
             if let Err(error) = crate::gc::target_size_cache::refresh(
