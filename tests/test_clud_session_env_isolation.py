@@ -80,3 +80,49 @@ def test_rm_identity_tests_pass_under_exported_session_vars() -> None:
         timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# #1817: a clud session prepends its shim directories to PATH; its `rm` shim
+# then answered the installers and shims under test.
+SESSION_PATH_DIRS = [
+    str(Path("home", ".clud", "state", "rm-shim")),
+    str(Path("home", ".clud", "state", "shims")),
+]
+
+
+def test_session_shim_dirs_are_scrubbed_from_path() -> None:
+    keep = str(Path("usr", "bin"))
+    env = {"PATH": os.pathsep.join([*SESSION_PATH_DIRS, keep])}
+    assert ci_env.scrub_clud_session_path(env) == SESSION_PATH_DIRS
+    assert env == {"PATH": keep}
+    assert not ci_env.is_clud_session_path_dir(str(Path("home", ".clud", "bin")))
+
+
+def test_session_shim_dirs_do_not_reach_tests() -> None:
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        assert not ci_env.is_clud_session_path_dir(entry), f"{entry} leaked onto PATH"
+
+
+def test_suite_runs_without_an_inherited_rm_shim(tmp_path: Path) -> None:
+    """Re-run the PATH check with a session's shim directories exported."""
+    shim_dir = tmp_path / ".clud" / "state" / "rm-shim"
+    shim_dir.mkdir(parents=True)
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(shim_dir), env.get("PATH", "")])
+    result = process.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_clud_session_env_isolation.py::test_session_shim_dirs_do_not_reach_tests",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

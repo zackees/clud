@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from ci import aliases, tracked_files
-from ci.env import scrub_clud_session_env
+from ci.env import scrub_clud_session_env, scrub_clud_session_path
 from ci.pytest_tmp_retention import (  # noqa: F401  (pytest hooks, #1686)
     pytest_sessionfinish,
     pytest_terminal_summary,
@@ -21,6 +21,9 @@ from ci.pytest_tmp_retention import (  # noqa: F401  (pytest hooks, #1686)
 # under test, they flip the behavior those tests assert (#1423). Tests set
 # only the CLUD_* variables they need; everything else starts clean.
 scrub_clud_session_env(os.environ)
+# Its shim directories on PATH would answer `rm`/`python` for the installers
+# and shims under test (#1817).
+scrub_clud_session_path(os.environ)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
