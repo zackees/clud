@@ -301,10 +301,38 @@ def scrub_clud_session_env(env: dict[str, str] | os._Environ[str]) -> list[str]:
     return removed
 
 
+# The directories a clud session prepends to PATH: its `rm` shim, which routes
+# deletions to the trash, and its `python`/tool shims (#1817).
+_CLUD_SESSION_PATH_DIRS = ((".clud", "state", "rm-shim"), (".clud", "state", "shims"))
+
+
+def is_clud_session_path_dir(entry: str) -> bool:
+    """True for a PATH entry that is one of a clud session's shim directories."""
+    parts = tuple(part.lower() for part in Path(entry).parts)
+    return any(parts[-len(tail) :] == tail for tail in _CLUD_SESSION_PATH_DIRS)
+
+
+def scrub_clud_session_path(env: dict[str, str] | os._Environ[str]) -> list[str]:
+    """Drop a clud session's shim directories from PATH in place (#1817).
+
+    Inherited by the suite, the session's `rm` shim answers the installers and
+    shims under test instead of the real `rm`. Returns the removed entries.
+    """
+    path = env.get("PATH")
+    if not path:
+        return []
+    entries = path.split(os.pathsep)
+    removed = [entry for entry in entries if entry and is_clud_session_path_dir(entry)]
+    if removed:
+        env["PATH"] = os.pathsep.join(e for e in entries if e not in removed)
+    return removed
+
+
 def suite_env() -> dict[str, str]:
-    """`clean_env()` minus inherited clud session variables (#1423)."""
+    """`clean_env()` minus inherited clud session variables (#1423) and shims (#1817)."""
     env = clean_env()
     scrub_clud_session_env(env)
+    scrub_clud_session_path(env)
     return env
 
 
