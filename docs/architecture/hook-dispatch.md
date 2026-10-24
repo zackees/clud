@@ -82,6 +82,21 @@ The native hook contracts and scheduler lifecycle are documented in the
 [Claude hooks reference](https://code.claude.com/docs/en/hooks) and
 [scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks).
 
+## Repeated Stop-hook continuations
+
+A `/goal` condition the sandbox cannot satisfy keeps the harness's Stop
+evaluator re-prompting (#1597). That loop belongs to Claude Code: `/goal` is a
+prompt-based Stop hook, and the docs give no precedence between it and another
+Stop hook's output, so clud does not try to end the turn. The harness has its
+own breakers: an "impossible" verdict, a no-progress stop, and a cap of 8
+consecutive blocks.
+
+clud only detects the loop. When `stop_hook_active` is true and
+`last_assistant_message` is identical on 2 consecutive Stop events,
+`stop_repeat.rs` prints one `systemMessage` that tells the user how to break
+it. A different answer or a user-driven stop resets the count. `SessionEnd`
+drops the per-session state file under `~/.clud/state/stop-repeat/`.
+
 ## Declaring hooks
 
 `<repo>/.clud/hooks.json`:

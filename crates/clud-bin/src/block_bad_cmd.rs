@@ -412,6 +412,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 
     let stdin = read_stdin_bounded();
     crate::loop_plan_mode::observe(event, &stdin.text);
+    // #1597: tell the user once when Stop-hook continuations repeat.
+    crate::stop_repeat::observe(event, &stdin.text);
     for message in &stdin.log_messages {
         append_log(message);
     }
