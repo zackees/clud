@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::gc::{extract_pid_from_lock_reason, Registry, TrackedEntry};
+use crate::gc::{
+    extract_pid_from_lock_reason, Registry, TrackedEntry, EXTERN_REPO_KIND, SIBLING_CLONE_KIND,
+    WORKTREE_KIND,
+};
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::worktrees;
 
@@ -87,6 +90,36 @@ pub(super) fn remove_entry_and_delete_row(
 ) -> Result<(), String> {
     remove_entry_filesystem(entry, "explicit DeleteById; live-session guard passed")?;
     registry.delete(entry.id).map_err(|e| e.to_string())
+}
+
+/// Drop source-checkout rows (`worktree`, `extern-repo`, `sibling-clone`)
+/// whose directory is already gone (#2095). Their purge path re-checks the
+/// directory, finds nothing and spares them as "dangling: path missing", so
+/// without this the row is listed and skipped on every tick, forever. Only
+/// the row goes: there is nothing on disk left to delete.
+pub(super) fn forget_dangling_source_rows(registry: &Registry) -> Result<usize, String> {
+    let mut forgotten = 0usize;
+    for kind in [WORKTREE_KIND, EXTERN_REPO_KIND, SIBLING_CLONE_KIND] {
+        for entry in registry.list(Some(kind)).map_err(|err| err.to_string())? {
+            if std::fs::symlink_metadata(&entry.path)
+                .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+            {
+                registry.delete(entry.id).map_err(|err| err.to_string())?;
+                eprintln!("[gc] forgot {kind} row for missing {}", entry.path);
+                forgotten += 1;
+            }
+        }
+    }
+    Ok(forgotten)
+}
+
+/// [`forget_dangling_source_rows`] for the tick, which only logs.
+pub(super) fn forget_dangling_source_rows_logged(registry: &Registry) {
+    match forget_dangling_source_rows(registry) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[clud] gc tick: forgot {n} dangling row(s)"),
+        Err(err) => eprintln!("[clud] gc tick: dangling-row sweep failed: {err}"),
+    }
 }
 
 /// Remove registered trash rows. A `clud trash` quarantine entry goes as

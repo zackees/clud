@@ -248,6 +248,12 @@ is **an error**, not a fallback — there is no read-only path in v1
   `gc list` additionally does a `try_exists()` stat per row for the `dangling` state, and a
   verdict can be up to one tick stale (1 h by default — hence `evaluated_unix`).
 
+  **Dangling rows are forgotten each tick (#2095).** A `worktree`, `extern-repo` or
+  `sibling-clone` row whose directory is gone used to be spared forever as "dangling: path
+  missing", because its purge path re-checks the directory and finds nothing. The tick now
+  drops these rows (`forget_dangling_source_rows`). Only the row goes, since nothing is left on
+  disk. The size banner names `clud gc prune all` as the one command that reclaims what is safe.
+
   **The verdict is re-checked at delete time.** Decoupling put up to a tick between "this is
   clean and pushed" and `remove_dir_all`, and a developer can invalidate it in that window
   just by editing. So `reverify_before_delete` re-runs the verdict on the **purge-pool

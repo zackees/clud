@@ -791,6 +791,7 @@ where
         repo_worktrees,
     );
 
+    filesystem::forget_dangling_source_rows_logged(registry);
     match reap_trash_entries(registry) {
         Ok((removed, failed)) => {
             if removed > 0 || failed > 0 {

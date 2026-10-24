@@ -1569,3 +1569,42 @@ fn trash_reaper_removes_read_only_trees() {
     assert_eq!((removed, failed), (1, 0));
     assert!(!entry.exists());
 }
+
+#[test]
+fn dangling_source_rows_are_forgotten_and_present_ones_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(&dir.path().join("dangling.redb")).unwrap();
+    let present = dir.path().join("repo-wt-live");
+    std::fs::create_dir_all(&present).unwrap();
+    let missing = dir.path().join("repo-wt-gone");
+    for (kind, path) in [
+        (WORKTREE_KIND, &missing),
+        (WORKTREE_KIND, &present),
+        (EXTERN_REPO_KIND, &missing),
+        ("trash", &missing),
+    ] {
+        registry
+            .insert_if_new(&InsertInput {
+                kind: kind.to_string(),
+                path: path.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                now_unix: 100,
+            })
+            .unwrap();
+    }
+
+    assert_eq!(
+        filesystem::forget_dangling_source_rows(&registry).unwrap(),
+        2
+    );
+
+    let worktrees = registry.list(Some(WORKTREE_KIND)).unwrap();
+    assert_eq!(worktrees.len(), 1);
+    assert_eq!(Path::new(&worktrees[0].path), present.as_path());
+    assert!(registry.list(Some(EXTERN_REPO_KIND)).unwrap().is_empty());
+    // Trash rows keep their own reaper.
+    assert_eq!(registry.list(Some("trash")).unwrap().len(), 1);
+    assert!(present.is_dir());
+}
