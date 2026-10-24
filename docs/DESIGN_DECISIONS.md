@@ -7258,3 +7258,27 @@ the user's own value, or none.
 **Consequences:** user `uv` calls share the user's normal cache again. The
 existing `~/.clud/cache/uv` contents shrink through the DD-145 cap and are not
 migrated.
+
+## DD-188: Job Objects keep `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; escapees are reaped by identity
+
+**Context:** #340 asked whether the unconditional `JOB_OBJECT_LIMIT_BREAKAWAY_OK`
+that running-process sets on clud's Job Objects lets processes escape
+teardown. Breakaway is opt-in per spawn: a child leaves the Job only when its
+creator passes `CREATE_BREAKAWAY_FROM_JOB`. Build-cache daemons (sccache,
+zccache, soldr) and clud's own daemon spawn do this on purpose, so they
+outlive the session that started them.
+
+**Decision:** keep the flag. Clearing it would make every intentional
+detached daemon die with its first session, or fail to spawn. Escapees are
+handled by the other mechanisms instead: the env-tag orphan sweep
+(`CLUD:<pid>` originator, see [process-reaping.md](architecture/process-reaping.md))
+reaps tagged processes whose originator is gone, the no-daemon Ctrl+C path
+tree-kills before closing the PTY, and the `clud ui` Processes tab's
+**reap subtree** action (`POST /proc/reap`) lets a user end a sampled tree by
+`(pid, start_time)`. The flag is set by running-process, not configured by
+clud.
+
+**Consequences:** a process that breaks away *and* strips the originator tag
+is invisible to automatic cleanup. That is the declared-daemon contract, not
+a leak. The dashboard action only accepts identities from the daemon's own
+sample and prunes declared daemons, so it cannot reach arbitrary PIDs.

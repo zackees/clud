@@ -328,6 +328,16 @@ the same on-exit report claimed one leaked `__worker` nineteen times over.
 
 ---
 
+## Manual reap from the dashboard (#340)
+
+The `clud ui` Processes tab shows a **reap subtree** button on each live row.
+It posts `{pid, start_time}` to `POST /proc/reap`
+(`daemon/http_proc_reap.rs`). The daemon accepts it only when that exact
+identity is a live row of its own cached sample, never the daemon itself, and
+then runs `process_tree::kill_tree_filtered_automatic`, which re-checks every
+identity at kill time and prunes declared daemons. Why Job Objects still allow
+breakaway: [DD-188](../DESIGN_DECISIONS.md#dd-188-job-objects-keep-job_object_limit_breakaway_ok-escapees-are-reaped-by-identity).
+
 ## Observability
 
 Reaping is destructive and used to be silent, which is how #651 could be closed

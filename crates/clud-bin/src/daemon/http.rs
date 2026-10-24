@@ -6,6 +6,8 @@
 //! - `GET /` / `GET /index.html` — the embedded single-page dashboard.
 //! - `GET /state.json` — one consolidated JSON document with daemon meta,
 //!   live sessions, GC tracked entries, repo visits, and aggregate stats.
+//! - `POST /proc/reap` — body `{pid, start_time}`; kills a sampled process
+//!   subtree from the Processes tab (#340).
 //! - `POST /gc/purge` — body `{id?, kind?}`; delegates to the existing
 //!   `GcOp::Purge` IPC op and returns `{removed, skipped}`.
 //!
@@ -747,6 +749,9 @@ fn run_dashboard_loop(
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
             }
+            (Method::Post, "/proc/reap") => {
+                http_proc_reap::handle_reap(request, &state_dir);
+            }
             (Method::Post, "/telemetry/log") => {
                 handle_telemetry_log(request, &stores.telemetry);
             }
@@ -1172,6 +1177,8 @@ mod http_dashboard_state;
 use http_dashboard_state::{build_dashboard_state, send_gc_op};
 #[path = "http_info.rs"]
 mod http_info;
+#[path = "http_proc_reap.rs"]
+mod http_proc_reap;
 pub use http_info::{read_api_info, read_dashboard_info, read_dashboard_port};
 
 /// Public view of `daemon.json` used by the `clud ui` CLI.

@@ -333,6 +333,7 @@ mod tests {
             cpu_ewma_pct: cpu,
             rss_bytes: rss,
             age_secs: pid as u64,
+            start_time: 0,
             command: format!("cmd-{pid}"),
             depth,
             tier: ProcTier::Cold,
