@@ -74,6 +74,7 @@ restoration and count-only status. See
 
 ## Top-Level Modules
 
+`stop_repeat.rs` tells the user once when consecutive Stop-hook continuations end with the same message (#1597, [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#repeated-stop-hook-continuations)); detection only, never blocks.
 `loop_plan_mode.rs` tracks native `/loop` and scheduler activity through
 daemon session flags and prevents automatic `EnterPlanMode` while it is
 active (#1844). See [hook-dispatch.md](../../../docs/architecture/hook-dispatch.md#loop-scoped-plan-mode).

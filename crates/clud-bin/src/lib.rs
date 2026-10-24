@@ -130,6 +130,7 @@ pub mod skills;
 pub mod soldr_activate;
 pub mod stage_trace;
 pub mod startup;
+pub mod stop_repeat;
 pub mod stream_json;
 pub mod subprocess;
 #[cfg(test)]
