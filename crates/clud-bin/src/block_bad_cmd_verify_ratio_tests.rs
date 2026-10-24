@@ -43,7 +43,7 @@ fn run(ledger: &mut Ledger, classes: &str, ratio: u32) -> Vec<Counts> {
 fn verification_crowding_out_edits_trips_one_note_then_stays_quiet() {
     let mut ledger = Ledger::default();
     // #1988's session: one edit, then the whole gate, over and over.
-    let notes = run(&mut ledger, "evvvvevvvvevvvv", DEFAULT_RATIO);
+    let notes = run(&mut ledger, "evvvvevvvvevv", DEFAULT_RATIO);
     assert_eq!(
         notes,
         vec![Counts {
