@@ -2074,7 +2074,11 @@ fn script_level_reason(
         native_gate: context.pr_wait_fail_fast_enabled,
         shim_active,
     };
-    hand_written_wait_reason(script, command_text, scan, evaluation)
+    if let Some(reason) = hand_written_wait_reason(script, command_text, scan, evaluation) {
+        return Some(reason);
+    }
+    // #1979: one GitHub mutation per command, never with a watch.
+    mutation_chain_reason(script, command_text, evaluation)
 }
 
 /// Rules that read one command.
@@ -3760,6 +3764,14 @@ use block_bad_cmd_wait_loop::{
 
 #[path = "block_bad_cmd_wait_scan.rs"]
 mod block_bad_cmd_wait_scan;
+
+#[path = "block_bad_cmd_mutation_chain.rs"]
+mod block_bad_cmd_mutation_chain;
+use block_bad_cmd_mutation_chain::mutation_chain_reason;
+
+#[cfg(test)]
+#[path = "block_bad_cmd_mutation_chain_tests.rs"]
+mod block_bad_cmd_mutation_chain_tests;
 
 #[cfg(test)]
 #[path = "block_bad_cmd_wait_scan_tests.rs"]
