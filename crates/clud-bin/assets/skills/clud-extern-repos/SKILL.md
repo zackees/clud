@@ -33,6 +33,8 @@ You do not need to add an ignore entry for it, and you should not: it is outside
 
 Checkouts still under the older `<repo>/.extern-repos/` location keep working and are still tracked, but put new ones beside the repo.
 
+Sister checkouts are allowed working locations (#1696). A clud session's `safe-rm` roots include `../<repo>-extern/` and every sibling git checkout, plus that checkout's linked worktrees, so you can clean up files you created there with `safe-rm`. Never bypass it with `git worktree remove --force`.
+
 A dependent checkout is a **complete project**, so parent-repo tooling that
 discovers projects by walking up from `$PWD` will find it and bind to it. That
 is not hypothetical: in #972 a Stop hook installed in the parent repo resolved

@@ -16,7 +16,12 @@ the same implementation.
 ## Location policy
 
 `CLUD_RM_ROOTS` is a path list supplied to the child session: the launch
-checkout (or launch directory) and clud's session scratch directory. Outside a
+checkout (or launch directory), clud's session scratch directory, and, when
+the launch directory is in a checkout, its **sister checkouts** (#1696): every
+sibling directory that is a main git checkout, and `../<repo>-extern` (named
+after the main checkout, as `clud-extern-repos` derives it). Sister repos are
+allowed working locations; a worktree a session creates from a sibling repo is
+covered through that repo's linked-worktree rule below. Outside a
 session, `safe-rm` uses the current checkout or current directory. A checkout
 root also covers its linked worktrees, and a linked worktree directory of an
 allowed checkout may itself be removed, including one git already dropped from
@@ -49,7 +54,8 @@ device and inode to reject replacement. Only that session can load it. The
 checkout root itself remains protected. Child paths must be
 owned by the caller on Unix, and a symlink leading outside the granted checkout
 is judged at its real destination and refused. A grant reason appears in the
-deletion audit. An unrelated or ungranted sibling stays outside the roots.
+deletion audit. A sibling that is neither a git checkout nor the extern
+directory, and is not granted, stays outside the roots.
 
 ### System temp directories (#1622)
 

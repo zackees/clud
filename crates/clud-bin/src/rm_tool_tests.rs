@@ -381,6 +381,53 @@ fn session_roots_are_the_checkout_and_the_session_temp_dir() {
     assert_eq!(roots[0], w.root);
 }
 
+#[test]
+fn session_roots_include_sister_checkouts_and_the_extern_dir() {
+    // #1696: sister repos are first-class working locations.
+    let w = world();
+    let parent = w.root.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(w.root.join(".git")).unwrap();
+    std::fs::create_dir_all(parent.join("soldr/.git")).unwrap();
+    std::fs::create_dir_all(parent.join("repo-extern/soldr-166")).unwrap();
+    std::fs::create_dir_all(parent.join("plain-dir")).unwrap();
+    std::fs::write(parent.join("linked-wt"), b"").unwrap();
+    let value = session_roots_value(&w.root).unwrap();
+    let roots: Vec<PathBuf> = std::env::split_paths(&value).collect();
+    assert_eq!(roots[0], w.root);
+    assert!(roots.contains(&parent.join("soldr")), "{roots:?}");
+    assert!(roots.contains(&parent.join("repo-extern")), "{roots:?}");
+    assert!(!roots.contains(&parent.join("plain-dir")), "{roots:?}");
+    assert!(!roots.contains(&w.home), "{roots:?}");
+    assert!(!roots.contains(&parent), "{roots:?}");
+}
+
+#[test]
+fn a_linked_worktree_session_uses_its_main_checkouts_extern_dir() {
+    let w = world();
+    let parent = w.root.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(w.root.join(".git/worktrees/wt-1")).unwrap();
+    std::fs::create_dir_all(parent.join("repo-extern")).unwrap();
+    let wt = parent.join("repo-wt-1");
+    std::fs::create_dir_all(&wt).unwrap();
+    let gitdir = w.root.join(".git/worktrees/wt-1");
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    let value = session_roots_value(&wt).unwrap();
+    let roots: Vec<PathBuf> = std::env::split_paths(&value).collect();
+    assert_eq!(roots[0], wt);
+    assert!(roots.contains(&parent.join("repo-extern")), "{roots:?}");
+    assert!(roots.contains(&w.root), "{roots:?}");
+}
+
+#[test]
+fn sister_checkouts_need_a_repo_session() {
+    let w = world();
+    let parent = w.root.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(parent.join("soldr/.git")).unwrap();
+    let value = session_roots_value(&w.root).unwrap();
+    let roots: Vec<PathBuf> = std::env::split_paths(&value).collect();
+    assert!(!roots.contains(&parent.join("soldr")), "{roots:?}");
+}
+
 /// A repo at `w.root` with one commit, and a sibling worktree `wt-x` outside
 /// the roots, holding a read-only build tree (#1573).
 fn world_with_worktree() -> (World, PathBuf) {
