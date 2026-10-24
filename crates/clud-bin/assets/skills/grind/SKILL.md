@@ -91,6 +91,21 @@ Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
 do", or a `gh` error; then stop there: skip every later section (Finish
 included), write no run facts, and create nothing.
 
+**Goals in several repositories (#1422).** When the goals resolve to issues
+in more than one repository, group them by repository, in order. Each group
+gets its own checkout (a sister checkout per `/clud-extern-repos`, created
+only with the consent rules that skill states), `github_repo` and default
+branch. Ask the Scripts and CI questions once per repository; Mode, Models
+and Problem reporting stay shared. Record one `repos` entry per group
+(section 3), and in section 4 start one `grind-run` per repository **in the
+same message**, so they run concurrently, each with that repository's
+`repo`, `github_repo`, `main`, `scripts`, `ci` and goals. Never put two
+repositories' goals in one `grind-run`: it holds one `repo`, one `main` and
+one integrator, and its caps come from one repository's facts. A goal that
+depends on another repository's goal waits for that workflow's result before
+its own workflow starts; say so in the plan. Finish reports and cleans up
+each repository separately.
+
 ## 1b. Plan before asking (classification)
 
 **The run facts.** clud's command hook reads this run's facts from one file
@@ -369,6 +384,11 @@ Write `<facts>` (the path `clud grind-facts path` printed):
  "tracks": {"12": "bug", "13": "feature"}, "meta": 100,
  "undo": [], "waiting_on_pr": null}
 ```
+
+For goals in several repositories, write
+`{"repos": [{"repo": "<abs checkout>", ...the object above for that repo}, ...]}`
+instead. The hook picks the entry whose `repo` contains the calling agent's
+working directory, and applies the strictest caps when none or two match.
 
 `undo` is the section 2b change record (empty without a regroup).
 `waiting_on_pr` is the open feature PR that made the run bugs-only under the

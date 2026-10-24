@@ -266,11 +266,12 @@ impl RunFacts {
     }
 
     /// The facts of the run that `session_id` belongs to (#1337), read from
-    /// `~/.clud/tmp/grind/<session_id>.json`. With none (no id, no file, a
-    /// stale or unreadable one) the defaults apply, which are the strictest
-    /// caps, and the second value says why for the hook log.
-    pub(super) fn for_session(session_id: Option<&str>) -> (Self, Option<String>) {
-        Self::from_lookup(&crate::grind_facts::lookup(session_id))
+    /// `~/.clud/tmp/grind/<session_id>.json` and narrowed to the repository
+    /// `cwd` is in (#1422). With none (no id, no file, a stale or unreadable
+    /// one, or no single matching repository) the defaults apply, which are
+    /// the strictest caps, and the second value says why for the hook log.
+    pub(super) fn for_session(session_id: Option<&str>, cwd: &Path) -> (Self, Option<String>) {
+        Self::from_lookup(&crate::grind_facts::lookup_for(session_id, cwd))
     }
 
     pub(super) fn from_lookup(lookup: &crate::grind_facts::Lookup) -> (Self, Option<String>) {
