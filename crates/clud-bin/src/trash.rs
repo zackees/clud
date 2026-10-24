@@ -95,6 +95,10 @@ pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
     for path in paths {
         match trash_one_path(path, &trash_root, cross_volume) {
             Ok(record) => {
+                // #2096: the session may later erase what it trashed.
+                if let Some(session) = crate::rm_tool::session_id_from_env() {
+                    crate::rm_tool::own_trash::write_owner(&record.quarantine_dir, &session);
+                }
                 let input = insert_input_for_record(&record, now_unix());
                 match crate::daemon::gc_client_insert(&state_dir, &input) {
                     Ok(()) => {
