@@ -152,6 +152,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "git/state.py",
+        body: include_str!("../assets/tools/git/state.py"),
+        // Read-only git query (#1339): branch, upstream, status, commits,
+        // stashes and worktrees in one call. Killing it loses no work.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/review_range.py",
         body: include_str!("../assets/tools/git/review_range.py"),
         // Read-only git/gh query (#1301): pins the diff range a review reads.
@@ -459,6 +469,18 @@ mod tests {
             .find(|t| t.rel_path == "git/ci_targets.py")
             .expect("ci_targets.py must stay bundled: grind discovers cross-check targets");
         assert!(tool.body.contains("managed-by: clud"));
+    }
+
+    /// Issue #1339: grind roles read a checkout's git state in one call.
+    #[test]
+    fn bundled_includes_git_state() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "git/state.py")
+            .expect("BUNDLED_TOOLS must include git/state.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(!tool.body.contains("\"fetch\""), "state.py must never fetch");
     }
 
     #[test]

@@ -499,6 +499,14 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
     if let Some(reason) = remote_ci_reason(role, words) {
         return Some(reason);
     }
+    // #1339: the read-only one-call git state is open to every role.
+    if is_clud(&words[0])
+        && words.get(1).is_some_and(|w| w == "tool")
+        && words.get(2).is_some_and(|w| w == "run")
+        && words.get(3).is_some_and(|w| w == "git/state.py")
+    {
+        return None;
+    }
     match role {
         PLANNER => {
             if inspect_ok(&program, words) || is_gh_read(words) {
@@ -1805,6 +1813,17 @@ mod tests {
         assert!(!allowed(INTEGRATOR, "bosn init", &facts));
         assert!(!allowed(INTEGRATOR, "docker run --rm img", &facts));
         assert!(!allowed(INTEGRATOR, "git worktree add /x", &facts));
+    }
+
+    #[test]
+    fn every_role_may_read_the_git_state_tool() {
+        let facts = run(true, false);
+        for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+            assert!(allowed(role, "clud tool run git/state.py", &facts), "{role}");
+        }
+        for role in [PLANNER, LANDER] {
+            assert!(!allowed(role, "clud tool run git/other.py", &facts), "{role}");
+        }
     }
 
     #[test]
