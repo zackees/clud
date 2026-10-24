@@ -396,6 +396,20 @@ fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("{name} must be a string"))
 }
 
+/// Owners whose release URLs a catalog row may name: the repository moved
+/// from zackees to talos-hq (#2126), and published rows keep the old owner.
+const RELEASE_OWNERS: [&str; 2] = ["talos-hq", "zackees"];
+
+pub(super) fn is_release_asset_url(url: &str, version: &str, filename: &str) -> bool {
+    RELEASE_OWNERS.iter().any(|owner| {
+        ["", "v"].iter().any(|prefix| {
+            url == format!(
+                "https://github.com/{owner}/clud/releases/download/{prefix}{version}/{filename}"
+            )
+        })
+    })
+}
+
 fn require_string(
     map: &serde_json::Map<String, Value>,
     name: &str,
@@ -470,11 +484,7 @@ fn parse_asset(value: &Value, version: &str) -> Result<ResolvedAsset, String> {
         return Err("asset must have exactly one URL".into());
     }
     let url = string(&urls[0], "asset URL")?;
-    let expected_a =
-        format!("https://github.com/zackees/clud/releases/download/{version}/{filename}");
-    let expected_b =
-        format!("https://github.com/zackees/clud/releases/download/v{version}/{filename}");
-    if url != expected_a && url != expected_b {
+    if !is_release_asset_url(url, version, filename) {
         return Err("asset URL does not match release".into());
     }
     if field(item, "provides")? != &serde_json::json!(["clud"]) {

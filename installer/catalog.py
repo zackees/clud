@@ -20,7 +20,7 @@ ONLINE_URL = "https://talos-hq.github.io/clud/install/manifest.json"
 # Catalogs published before the move to talos-hq (#2126) still name the old
 # Pages host; accept it until the next publish rewrites the field.
 ACCEPTED_ONLINE_URLS = (ONLINE_URL, "https://zackees.github.io/clud/install/manifest.json")
-REPO_API = "https://api.github.com/repos/zackees/clud/releases"
+REPO_API = "https://api.github.com/repos/talos-hq/clud/releases"
 TARGETS = {
     "win_amd64": ("windows", "x86_64", "clud.exe"),
     "win_arm64": ("windows", "aarch64", "clud.exe"),
