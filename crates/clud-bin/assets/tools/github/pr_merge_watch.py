@@ -2882,6 +2882,7 @@ def watch(  # noqa: C901
     # check-run data to judge it by (#1742).
     unjudged_polls = 0
     unknown_polls = 0
+    queue_announced = False
 
     review_state = ReviewState()
     coderabbit_probe_complete = False
@@ -2967,6 +2968,10 @@ def watch(  # noqa: C901
             continue
         api_failures = 0
         snapshot = gate.pr
+        if snapshot.merge_pending and not queue_announced:
+            # #1973: the first stderr line names queue mode.
+            print("PR merge queue detected", file=sys.stderr)
+            queue_announced = True
         if snapshot.head_sha != seen_head:
             print(
                 f"NOTE  head moved {seen_head[:7]} -> {snapshot.head_sha[:7]}",
@@ -3169,7 +3174,15 @@ def watch(  # noqa: C901
         # CodeRabbit is active does green make one more request: the head
         # commit's `CodeRabbit` status (#1332).
         checks_green = verdict.state == "pass" if verdict is not None else not pending
-        unknown_polls = unknown_polls + 1 if checks_green and snapshot.mergeable == "UNKNOWN" else 0
+        # #1973: GitHub reports `mergeable: UNKNOWN` for every queued PR, so
+        # the bounded-UNKNOWN conflict rule does not apply to one; the queue
+        # decides, and `_exit_green` follows it to the merge or ejection.
+        queued = snapshot.merge_pending
+        unknown_polls = (
+            unknown_polls + 1
+            if checks_green and snapshot.mergeable == "UNKNOWN" and not queued
+            else 0
+        )
         if unknown_polls >= MERGEABLE_UNKNOWN_MAX_POLLS:
             print(
                 f"CONFLICT  #{pr} checks green but mergeable stayed UNKNOWN for "
@@ -3179,7 +3192,7 @@ def watch(  # noqa: C901
         if not checks_green:
             green_since = None
             last_wait_state = None
-        if checks_green and snapshot.mergeable == "MERGEABLE":
+        if checks_green and (snapshot.mergeable == "MERGEABLE" or queued):
             coderabbit_note: str | None = "absent"
             if (review_state.coderabbit_enabled or coderabbit_in_rollup) and (
                 coderabbit_suppressed is None
