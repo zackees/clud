@@ -92,7 +92,9 @@ commit only, grouped by (workflow file, check name) -- never the display
     ordered by `created_at`, then run number, never by run id: concurrency
     cancels whichever of two same-second runs entered its group first (#1710);
   - a failure in a cancelled run, or in a run a cancellation has reached, is
-    replaced the same way: a superseded run's jobs are never the PR's result;
+    replaced the same way: a superseded run's jobs are never the PR's result,
+    and while a live sibling run exists such a failure is pending even if
+    its run already reads `failure` (#2059);
   - `success`, `neutral` and `skipped` pass, but green needs at least one
     required check that actually ran on the head SHA, a protected check that
     skipped reads as pending unless the run that skipped it completed with
@@ -912,6 +914,14 @@ def judge_check_runs(  # noqa: C901
                 )
             ):
                 state = resolve_replaced(key, run_id) or state
+            # A run's own conclusion can read `failure` before it settles on
+            # `cancelled` (#2059): while a sibling of its workflow is still
+            # live, a failure in a run a cancellation reached waits on it.
+            elif run_id in runs_with_cancelled_check and any(
+                not _is_cancelled(s) and _lower(s.get("status")) != "completed"
+                for s in siblings(key, run_id)
+            ):
+                state = "pending"
         judgments.append(
             CheckJudgment(
                 name=name,
