@@ -93,7 +93,13 @@ pub(crate) fn pr_fact_for_branch(
         .filter(|p| p.state.eq_ignore_ascii_case("MERGED"))
         .collect();
     if merged.is_empty() {
-        return PrFact::NoPr;
+        // #1961: a closed, unmerged PR is named rather than read as "no PR".
+        return mine
+            .iter()
+            .filter(|p| p.state.eq_ignore_ascii_case("CLOSED"))
+            .map(|p| p.number)
+            .max()
+            .map_or(PrFact::NoPr, |number| PrFact::Closed { number });
     }
     merged.sort_by_key(|p| std::cmp::Reverse(p.number));
     let mut first_unknown = None;
@@ -446,8 +452,22 @@ fn facts_for<'p>(
         .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
         .unwrap_or_default();
     facts.pr = pr_fact_for_branch(branch, prs(), &mut |head| tip_covered_by(path, &tip, head));
-    if matches!(facts.pr, PrFact::NoPr | PrFact::Unavailable) {
+    // #1961: the patch match also decides a merged PR whose head does not
+    // cover the tip (rebased before its squash merge).
+    if !matches!(
+        facts.pr,
+        PrFact::Open { .. }
+            | PrFact::Merged {
+                tip_covered: Some(true),
+                ..
+            }
+    ) {
         facts.patch_landed = patch_landed(path, &tip);
+    }
+    if matches!(
+        facts.pr,
+        PrFact::NoPr | PrFact::Unavailable | PrFact::Closed { .. }
+    ) {
         facts.commits_ahead = ahead_of_default(path, &tip).map(|(_, _, n)| n);
     }
     (facts, Some(tip))

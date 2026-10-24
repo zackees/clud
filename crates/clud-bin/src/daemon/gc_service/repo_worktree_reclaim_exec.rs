@@ -331,6 +331,17 @@ fn finish_reclaim_refs(
     ReclaimOutcome::Removed { notes }
 }
 
+/// #1961: `git worktree prune` each repo in `repos`. Metadata only: git
+/// skips locked entries and those whose directory still exists.
+pub(crate) fn prune_dangling_admin(repos: &[String]) {
+    for repo in repos {
+        match git(Path::new(repo), &["worktree", "prune"], GIT_QUERY_TIMEOUT) {
+            Ok(_) => eprintln!("[clud] gc: pruned dangling worktree entries in {repo}"),
+            Err(err) => eprintln!("[clud] gc: worktree prune failed in {repo}: {err}"),
+        }
+    }
+}
+
 /// Issue #1486: reclaim an unused `worktrees` reservation. Re-probes it from
 /// scratch (fresh process table, fresh emptiness, fresh age), requires the
 /// unchanged `reserved-unused` verdict ([`reverify_reservation`]), then

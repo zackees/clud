@@ -350,14 +350,22 @@ the default branch, so ancestry-based checks call them live work forever
   is a pure function over `RepoWorktreeFacts`; its doc table is the
   precedence. Reclaimable only on positive evidence: a merged PR (one
   `gh pr list --state all` per repo per tick) whose `headRefOid` is the local
-  tip or has it as an ancestor, or, with no PR or no `gh`, the branch's
-  cumulative `-U0` diff appearing verbatim as one default-branch commit.
+  tip or has it as an ancestor, or, with no PR, a closed PR, no `gh`, or a
+  merged PR whose head does not cover the tip (rebased before its squash
+  merge, #1961), the branch's cumulative `-U0` diff appearing verbatim as one
+  default-branch commit. A commit made after the merge changes that diff, so
+  a match still proves everything local landed.
   Spared, with a reason: `no verdict yet`, `main checkout`,
   `locked by live pid` (a lock with no parseable pid counts as live),
   `process inside` (a live session cwd or any process cwd),
   `process table unavailable`, `detached`, `dirty`, `untracked`,
-  `open PR #N`, `commits after merge`, `no PR`, `unverifiable`, and under
+  `open PR #N`, `commits after merge`, `no PR`, `closed PR #N`, `unverifiable`, and under
   `~/.clud/worktrees` only, `grace` (see the #1485 subsection below).
+- **Dangling admin entries (#1961).** In delete mode the probe thread runs
+  `git worktree prune` for each repo whose `git worktree list` still names a
+  missing worktree. Before this, prune ran only after a successful reclaim in
+  the same repo, so these entries stayed forever. Prune is metadata only, and
+  git skips locked entries.
 - **Surfacing.** `clud gc list [--json]` appends `kind: repo-worktree` rows
   (`id: 0`, since no redb row backs them) with `state`, `reason`,
   `reclaimable` and `evaluated_unix`. A path the registry already tracks keeps

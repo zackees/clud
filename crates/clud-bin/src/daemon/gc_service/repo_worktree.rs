@@ -27,6 +27,9 @@ pub(crate) enum PrFact {
     Unavailable,
     /// The lookup ran and no PR has this branch as its head.
     NoPr,
+    /// #1961: only closed, unmerged PRs had this head. Nothing landed
+    /// through them, so it reads like `NoPr` but names the PR.
+    Closed { number: u64 },
     /// At least one open PR has this branch as its head. Wins over any
     /// merged PR with the same head name (branch names get reused).
     Open { number: u64 },
@@ -136,10 +139,12 @@ impl RepoWorktreeVerdict {
 /// | untracked files                            | pinned      | `untracked`                |
 /// | open PR #N                                 | pinned      | `open PR #N`               |
 /// | merged PR #N, tip covered                  | reclaimable | `merged via PR #N`         |
+/// | merged PR #N, not covered, patch landed (#1961) | reclaimable | `merged via PR #N (patch match)` |
 /// | merged PR #N, tip not covered              | pinned      | `commits after merge`      |
 /// | merged PR #N, coverage unknown             | pinned      | `unverifiable`             |
 /// | no PR / lookup unavailable, patch landed   | reclaimable | `landed by patch match`    |
 /// | no PR, no patch match                      | pinned      | `no PR`                    |
+/// | closed PR #N, no patch match (#1961)       | pinned      | `closed PR #N`             |
 /// | under worktrees, 0 ahead, age >= 24 h (#1485) | reclaimable | `abandoned-empty`          |
 /// | under worktrees, 0 ahead, younger/age unknown | pinned      | `grace`                    |
 /// | lookup unavailable, no patch match         | pinned      | `unverifiable`             |
@@ -188,6 +193,12 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
             number,
             tip_covered: Some(true),
         } => RepoWorktreeVerdict::reclaimable(format!("merged via PR #{number}")),
+        // #1961: a PR rebased before its squash merge leaves the local tip
+        // uncovered by `headRefOid`; the squash commit's patch still proves
+        // the work landed.
+        PrFact::Merged { number, .. } if patch_landed => {
+            RepoWorktreeVerdict::reclaimable(format!("merged via PR #{number} (patch match)"))
+        }
         PrFact::Merged {
             tip_covered: Some(false),
             ..
@@ -195,10 +206,10 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
         PrFact::Merged {
             tip_covered: None, ..
         } => RepoWorktreeVerdict::pinned("unverifiable"),
-        PrFact::NoPr | PrFact::Unavailable if patch_landed => {
+        PrFact::NoPr | PrFact::Unavailable | PrFact::Closed { .. } if patch_landed => {
             RepoWorktreeVerdict::reclaimable("landed by patch match")
         }
-        PrFact::NoPr | PrFact::Unavailable
+        PrFact::NoPr | PrFact::Unavailable | PrFact::Closed { .. }
             if facts.under_worktree_root && facts.commits_ahead == Some(0) =>
         {
             match facts.age_secs {
@@ -209,6 +220,7 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
             }
         }
         PrFact::NoPr => RepoWorktreeVerdict::pinned("no PR"),
+        PrFact::Closed { number } => RepoWorktreeVerdict::pinned(format!("closed PR #{number}")),
         PrFact::Unavailable => RepoWorktreeVerdict::pinned("unverifiable"),
     }
 }
@@ -506,13 +518,55 @@ mod tests {
                     number: 1551,
                     tip_covered: Some(false),
                 },
-                // Even a patch match must not override "the tip holds
-                // commits the merged PR never saw".
-                patch_landed: Some(true),
+                patch_landed: Some(false),
                 ..merged()
             },
             Pinned,
             "commits after merge",
+        );
+    }
+
+    /// #1961: a PR rebased on GitHub before its squash merge leaves the
+    /// local tip uncovered by `headRefOid`. The patch match compares the
+    /// whole `merge-base..tip` diff, so a commit made after the merge would
+    /// make it false; a match proves everything local landed.
+    #[test]
+    fn merged_pr_rebased_before_merge_is_reclaimed_by_patch_match() {
+        for tip_covered in [Some(false), None] {
+            assert_verdict(
+                RepoWorktreeFacts {
+                    pr: PrFact::Merged {
+                        number: 1576,
+                        tip_covered,
+                    },
+                    patch_landed: Some(true),
+                    ..merged()
+                },
+                Reclaimable,
+                "merged via PR #1576 (patch match)",
+            );
+        }
+    }
+
+    #[test]
+    fn closed_unmerged_pr_is_named_and_spared() {
+        assert_verdict(
+            RepoWorktreeFacts {
+                pr: PrFact::Closed { number: 42 },
+                patch_landed: Some(false),
+                ..merged()
+            },
+            Pinned,
+            "closed PR #42",
+        );
+        assert_verdict(
+            RepoWorktreeFacts {
+                pr: PrFact::Closed { number: 42 },
+                patch_landed: Some(true),
+                ..merged()
+            },
+            Reclaimable,
+            "landed by patch match",
         );
     }
 
