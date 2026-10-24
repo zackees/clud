@@ -133,7 +133,32 @@ jobs:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
 
+      # #2078: a lint-only call (Clippy + doc-tests) is a pure function of the
+      # tracked Rust inputs. Key an empty marker on their blob OIDs and skip
+      # the whole job when main already passed that exact input set.
+      - name: Compute pass key
+        id: pass-key
+        if: ${{ inputs.clippy && !inputs.compile && !inputs.bundle && inputs.wheel-artifact == '' && inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
+        shell: bash
+        run: |
+          digest=$(git ls-files -s | awk -F'\t' '$2 !~ /^(docs|bench)\// && $2 !~ /^[^/]*\.md$/ && ($2 !~ /^tests\// || $2 ~ /^tests\/fixtures\//)' | sha256sum | cut -c1-16)
+          echo "key=pass-v1-clippy-${{ inputs.target }}-${{ inputs.doctest && 'doc' || 'nodoc' }}-${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Look up pass marker
+        id: pass
+        if: ${{ steps.pass-key.outputs.key != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .pass-marker
+          key: ${{ steps.pass-key.outputs.key }}
+          lookup-only: true
+
+      - name: Skip unchanged inputs
+        if: ${{ steps.pass.outputs.cache-hit == 'true' }}
+        run: echo "::notice::Clippy inputs unchanged since a passing main run; skipping."
+
       - name: Set up build
+        if: ${{ steps.pass.outputs.cache-hit != 'true' }}
         uses: ./.github/actions/setup-build
         with:
           target: ${{ inputs.target }}
@@ -154,7 +179,7 @@ jobs:
       # full PEP 517 maturin build of a HOST wheel before the TARGET build even
       # starts. See lint:8-24 for the pre-existing workaround this follows.
       - name: Clippy
-        if: ${{ inputs.clippy }}
+        if: ${{ inputs.clippy && steps.pass.outputs.cache-hit != 'true' }}
         run: '"$VENV_PY" -m ci.xbuild clippy --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build binaries and test harnesses
@@ -216,8 +241,22 @@ jobs:
       # finishes over a minute before it, so this moves ~7 s off the PR's
       # critical path at no wall-clock cost.
       - name: Doc tests
-        if: ${{ inputs.doctest && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
+        if: ${{ steps.pass.outputs.cache-hit != 'true' && inputs.doctest && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
+
+      - name: Record pass marker
+        if: ${{ success() && steps.pass-key.outputs.key != '' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          mkdir -p .pass-marker
+          touch .pass-marker/ok
+
+      - name: Save pass marker
+        if: ${{ success() && steps.pass-key.outputs.key != '' && steps.pass.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .pass-marker
+          key: ${{ steps.pass-key.outputs.key }}
 
       # This ZIP is the pinned portable build of zackees/wezterm at
       # 9b39ad5eb8552b20932323fe2afefdb0fa9ad68d. The fetcher checks both
