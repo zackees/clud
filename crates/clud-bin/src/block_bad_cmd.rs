@@ -4706,6 +4706,7 @@ mod tests {
             "for pr in 101 102; do gh pr checks \"$pr\"; done",
             "foreach ($pr in 101,102) { gh pr checks $pr }",
             "clud tool run github/pr_merge_watch.py 528",
+            "clud tool run github/run_watch.py -- 38310141872 --repo o/r",
             "rg 'gh pr checks 528 --watch' docs/",
             "printf 'wait unless explicitly disabled\\n'",
             "Write-Output 'gh run watch 123456'",
@@ -4781,6 +4782,8 @@ mod tests {
         let denied = pr_wait_reason_for("gh run watch 123456", dialect, true)
             .expect("run-id watch should remain denied");
         assert!(denied.contains("canonical"), "{denied}");
+        // #1941: the refusal names the non-PR run waiter.
+        assert!(denied.contains("github/run_watch.py"), "{denied}");
         assert!(pr_wait_reason_for("gh pr checks --watch", dialect, false).is_some());
     }
 

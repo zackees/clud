@@ -309,6 +309,14 @@ deadline below the execution tool's command cap:
 clud tool run github/pr_merge_watch.py -- <PR> --repo OWNER/NAME --timeout 540
 ```
 
+An Actions run with no PR (`workflow_dispatch`, `schedule`, `push`) has its own
+waiter, `github/run_watch.py` (#1941). It takes the run id, fails fast on the first failed
+job (`--cancel` also cancels the run), and exits 124 on a resumable timeout:
+
+```sh
+clud tool run github/run_watch.py -- <RUN_ID> --repo OWNER/NAME --timeout 540
+```
+
 Classify **declared execution capabilities**, independently of the tool name
 in the hook payload. A normalized `Bash` call can originate from Codex; it
 does not establish that Claude background-task flags exist.
