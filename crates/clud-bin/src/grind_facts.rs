@@ -186,12 +186,10 @@ pub fn lookup_in_for(dir: &Path, session_id: Option<&str>, cwd: &Path, now: Syst
 
 fn narrow(found: Lookup, cwd: &Path) -> Lookup {
     match found {
-        Lookup::Found(facts) if facts.get("repos").is_some() => {
-            match select_repo(facts, cwd) {
-                Ok(entry) => Lookup::Found(entry),
-                Err(error) => Lookup::Invalid(cwd.to_path_buf(), error),
-            }
-        }
+        Lookup::Found(facts) if facts.get("repos").is_some() => match select_repo(facts, cwd) {
+            Ok(entry) => Lookup::Found(entry),
+            Err(error) => Lookup::Invalid(cwd.to_path_buf(), error),
+        },
         other => other,
     }
 }
@@ -468,13 +466,19 @@ fn repo_entry_mut<'a>(
     checkout: &Path,
 ) -> Result<&'a mut serde_json::Map<String, Value>, String> {
     if facts.get("repos").is_none() {
-        return facts.as_object_mut().ok_or_else(|| "facts are not a JSON object".to_string());
+        return facts
+            .as_object_mut()
+            .ok_or_else(|| "facts are not a JSON object".to_string());
     }
     let chosen = select_repo(facts.clone(), checkout)?;
     let root = chosen.get("repo").cloned();
     facts["repos"]
         .as_array_mut()
-        .and_then(|repos| repos.iter_mut().find(|entry| entry.get("repo") == root.as_ref()))
+        .and_then(|repos| {
+            repos
+                .iter_mut()
+                .find(|entry| entry.get("repo") == root.as_ref())
+        })
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "the selected `repos` entry vanished".to_string())
 }
@@ -550,7 +554,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), A, TWO_REPOS);
         let now = SystemTime::now();
-        let soldr = lookup_in_for(dir.path(), Some(A), Path::new("/w/soldr/.clud/grind/worktrees/t1"), now);
+        let soldr = lookup_in_for(
+            dir.path(),
+            Some(A),
+            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            now,
+        );
         assert_eq!(soldr.facts().unwrap()["ci"], true);
         let setup = lookup_in_for(dir.path(), Some(A), Path::new("/w/setup-soldr"), now);
         assert_eq!(setup.facts().unwrap()["ci"], false);
@@ -564,7 +573,10 @@ pub(crate) mod tests {
         let now = SystemTime::now();
         let outside = lookup_in_for(dir.path(), Some(A), Path::new("/w/other"), now);
         assert!(outside.facts().is_none());
-        assert!(outside.warning().unwrap().contains("inside no `repos` entry"));
+        assert!(outside
+            .warning()
+            .unwrap()
+            .contains("inside no `repos` entry"));
         let twice = r#"{"repos": [{"repo": "/w/x"}, {"repo": "/w/x"}]}"#;
         write(dir.path(), B, twice);
         let tied = lookup_in_for(dir.path(), Some(B), Path::new("/w/x/src"), now);
@@ -576,16 +588,27 @@ pub(crate) mod tests {
         let nested = serde_json::json!({"repos": [
             {"repo": "/w", "ci": false}, {"repo": "/w/inner", "ci": true}
         ]});
-        assert_eq!(select_repo(nested, Path::new("/w/inner/a")).unwrap()["ci"], true);
+        assert_eq!(
+            select_repo(nested, Path::new("/w/inner/a")).unwrap()["ci"],
+            true
+        );
         let single = serde_json::json!({"ci": true});
-        assert_eq!(select_repo(single.clone(), Path::new("/anywhere")).unwrap(), single);
+        assert_eq!(
+            select_repo(single.clone(), Path::new("/anywhere")).unwrap(),
+            single
+        );
     }
 
     #[test]
     fn tasks_land_in_the_repo_entry_containing_their_checkout() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(dir.path(), A, TWO_REPOS);
-        record_task(&path, Path::new("/w/soldr/.clud/grind/worktrees/t1"), &["a.rs".into()]).unwrap();
+        record_task(
+            &path,
+            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            &["a.rs".into()],
+        )
+        .unwrap();
         let facts: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(facts["repos"][1]["tasks"][0]["files"][0], "a.rs");
         assert!(facts["repos"][0].get("tasks").is_none());
