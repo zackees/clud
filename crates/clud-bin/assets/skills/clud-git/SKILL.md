@@ -15,6 +15,16 @@ Single source of truth for the worktree / branch / process-audit / quarantine pl
 
 The launcher exports `CLUD_EXE` as its own absolute path. Examples below use Bash quoting; in PowerShell use `& $env:CLUD_EXE`, and in cmd use `"%CLUD_EXE%"`. Outside a clud-launched session, set `CLUD_EXE` to the intended binary first.
 
+## Do you need a worktree at all?
+
+Default: **no**. Work in the current checkout, on a branch: `git fetch origin && git switch -c <branch> origin/main` when the tree is clean. A fresh worktree starts with a cold Cargo `target/`: on clud, 46–72 s and 889 MB for a `check` alone, more for a test build (#1685, `docs/architecture/skill-system.md`). Read-only work (triage, review, investigation) reads at a revision with `git show <rev>:<path>`, `git grep <pattern> <rev>` and `gh`, and never needs a checkout.
+
+Create a worktree only under one of these conditions, and name the condition when you do (#1971):
+
+1. **Concurrent writers must build at the same time**, such as `/grind` parallel mode with each goal on its own branch. For Rust repos, prefer sequential mode and state the cost.
+2. **The user explicitly asks** for an isolated checkout.
+3. **The main checkout holds someone else's in-progress work** (another session's branch, or a dirty tree you may not stash), and the task must build or test.
+
 The three hard rules below are non-negotiable — this skill exists to centralize them, not to relax them.
 
 ## Three hard rules
@@ -24,6 +34,8 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 3. **Never blind-loop `rm -rf`.** A `rm -rf` retry loop hides the actual problem (a process holding a file open) instead of fixing it. Audit, stop the specific offender, OR quarantine via `"$CLUD_EXE" trash`.
 
 ## Worktree creation playbook
+
+Only for one of the allowed conditions above; otherwise branch in place.
 
 1. **Sync main.** `git fetch origin main` so the new worktree starts from current main, not stale local state.
 2. **Stale worktree prune.** `git worktree prune` to clear git's view of any worktrees deleted on disk without proper removal.
@@ -87,6 +99,7 @@ When called from `/clud-fix-quick`, `/clud-issue-triage`, or any other skill:
 
 ## Hard rules summary
 
+0. **No worktree without a named allowed condition**; branch in place by default.
 1. **Create worktrees only under `~/.clud/worktrees/`.**
 2. **Process audit before destructive removal.**
 3. **`"$CLUD_EXE" trash` is the documented Windows fallback, not `rm -rf` retry loops.**
