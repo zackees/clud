@@ -40,6 +40,11 @@ jobs:
       matrix:
         pass: [host, x86_64-pc-windows-msvc, aarch64-apple-darwin]
     timeout-minutes: 30
+    env:
+      # Steps branch on this inside their scripts rather than a step-level
+      # `if:`: the local-gate replay proof needs every declared step to
+      # execute in every leg (zackees/ci.yml#415).
+      DYLINT_PASS: ${{ matrix.pass }}
     defaults:
       run:
         shell: bash
@@ -70,8 +75,11 @@ jobs:
           key: ${{ steps.pass-key.outputs.key }}
           lookup-only: true
       - name: Skip unchanged inputs
-        if: steps.pass.outputs.cache-hit == 'true'
-        run: echo "::notice::Dylint ${{ matrix.pass }} already passed for ${{ steps.pass-key.outputs.key }}; skipping"
+        env:
+          CACHE_HIT: ${{ steps.pass.outputs.cache-hit }}
+        run: |
+          [ "$CACHE_HIT" = "true" ] || { echo "no pass marker; running the leg"; exit 0; }
+          echo "::notice::Dylint ${{ matrix.pass }} already passed for ${{ steps.pass-key.outputs.key }}; skipping"
       - name: Set up soldr
         if: steps.pass.outputs.cache-hit != 'true'
         uses: zackees/setup-soldr@v0
@@ -114,14 +122,16 @@ jobs:
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare 2>&1 | tee "$RUNNER_TEMP/dylint-prepare.log"
           sed -n 's/^soldr: dylint prepare: tool bin dir //p' "$RUNNER_TEMP/dylint-prepare.log" >> "$GITHUB_PATH"
       - name: Check dylint formatting
-        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
+        if: steps.pass.outputs.cache-hit != 'true'
         run: |
+          [ "$DYLINT_PASS" = "host" ] || { echo "not the host leg"; exit 0; }
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
           soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
       - name: Test dylint crate
-        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
+        if: steps.pass.outputs.cache-hit != 'true'
         run: |
+          [ "$DYLINT_PASS" = "host" ] || { echo "not the host leg"; exit 0; }
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
           # enforce_platform_boundary's UI test (`ui/boundary.rs`) launches
           # nested Cargo through dylint_testing, outside soldr's Dylint front
@@ -140,35 +150,40 @@ jobs:
           RUSTUP_TOOLCHAIN=nightly-2026-05-28 CARGO_TARGET_DIR="$PWD/target/dylint-tests" \
             soldr cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
       - name: Run dylint over workspace
-        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'host'
-        run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
+        if: steps.pass.outputs.cache-hit != 'true'
+        run: |
+          [ "$DYLINT_PASS" = "host" ] || { echo "not the host leg"; exit 0; }
+          env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
       # Late lints only see code that compiles for the checked target, so the
       # host pass never reaches `cfg(windows)` / `cfg(target_os = "macos")`
       # code. These check-only passes cover it from Linux with the same
       # prebuilt driver; soldr installs the nightly's target `rust-std`.
       - name: Run dylint for x86_64-pc-windows-msvc
-        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'x86_64-pc-windows-msvc'
+        if: steps.pass.outputs.cache-hit != 'true'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:
           RUSTFLAGS: -D warnings
         run: |
+          [ "$DYLINT_PASS" = "x86_64-pc-windows-msvc" ] || { echo "not the x86_64-pc-windows-msvc leg"; exit 0; }
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target x86_64-pc-windows-msvc
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target x86_64-pc-windows-msvc
       - name: Run dylint for aarch64-apple-darwin
-        if: steps.pass.outputs.cache-hit != 'true' && matrix.pass == 'aarch64-apple-darwin'
+        if: steps.pass.outputs.cache-hit != 'true'
         # Scoped to the check-only cross passes: a warning only this target
         # sees (an import unused off-Linux, #1837) must fail here (#1849).
         env:
           RUSTFLAGS: -D warnings
         run: |
+          [ "$DYLINT_PASS" = "aarch64-apple-darwin" ] || { echo "not the aarch64-apple-darwin leg"; exit 0; }
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target aarch64-apple-darwin
           env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target aarch64-apple-darwin
       - name: Record pass marker
-        if: >-
-          success() && steps.pass.outputs.cache-hit != 'true'
-          && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: success() && steps.pass.outputs.cache-hit != 'true'
+        env:
+          RECORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
+          [ "$RECORD" = "true" ] || { echo "only main pushes record a pass marker"; exit 0; }
           mkdir -p .pass-marker
           touch .pass-marker/ok
       - name: Save pass marker
