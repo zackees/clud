@@ -1,6 +1,6 @@
 schema = 3
 profile = "library"
-linter  = "zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb"   # the exact ci-lint commit precheck runs
+linter  = "zackees/ci.yml@7ee3f12d2336e575162dede569678709c0b05cb6"   # the exact ci-lint commit precheck runs
 
 # ── Platforms ─────────────────────────────────────────────────────────────
 # Derived from .github/workflows/ci.yml's own `runs-on:` labels and the
@@ -78,12 +78,13 @@ venv-build = { prefix = "venv-build-", max = "80MB",  lockfile = true, per = "pl
 venv-exec  = { prefix = "venv-exec-",  max = "120MB", lockfile = true, per = "platform", evict = "lru" }
 # Pass markers (#2078): empty entries keyed by a lane's input digest; the
 # key is the only metadata. One per lane per passing tree, LRU-trimmed.
-pass-v1    = { prefix = "pass-v1-",    max = "1MB",   per = "platform", evict = "lru" }
+pass-v1    = { prefix = "pass-v1-",    max = "1MB",   min = "0B", per = "platform", evict = "lru" }
 # setup-soldr's verdict ledger (zackees/soldr#3894, #2083): ~230 B pass
 # records and per-job key manifests. setup-soldr's own janitor trims them
-# (256 verdicts, 2 manifests per job scope); declared so CACHE-001 keeps them.
-soldr-verdict          = { prefix = "soldr-verdict-v1-",          max = "1MB", per = "none", evict = "lru" }
-soldr-verdict-manifest = { prefix = "soldr-verdict-manifest-v1-", max = "1MB", per = "none", evict = "lru" }
+# (256 verdicts, 2 manifests per job scope); declared so CACHE-001 keeps them,
+# and `min = "0B"` so CACHE-005 does not sweep them as poisoned (ci.yml#417).
+soldr-verdict          = { prefix = "soldr-verdict-v1-",          max = "1MB", min = "0B", per = "none", evict = "lru" }
+soldr-verdict-manifest = { prefix = "soldr-verdict-manifest-v1-", max = "1MB", min = "0B", per = "none", evict = "lru" }
 # GUI runtime packages for the Linux unit shards (#2073), keyed per runner image.
 gui-debs   = { prefix = "gui-debs-",   max = "200MB", per = "platform", evict = "lru" }
 
