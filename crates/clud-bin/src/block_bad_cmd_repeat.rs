@@ -277,8 +277,9 @@ pub(super) fn deny_message(tool_name: &str, count: u32, limit: u32) -> String {
     format!(
         "[clud repeat-guard] this exact {tool_name} call has now been issued {count} times in a \
          row (limit {limit}). Stop repeating it: re-read the last result and make a fresh \
-         decision. If you are polling on purpose, wait between polls (e.g. `sleep 30`) or change \
-         the call. To allow one repeat deliberately, prefix the command with \
+         decision. Do not poll: to wait on something, run it once with `run_in_background` and \
+         act on its completion notice, or for a PR's CI run \
+         `clud tool run github/pr_merge_watch.py <PR>` (#1894). Otherwise change the call. To allow one repeat deliberately, prefix the command with \
          `{ALLOW_REPEAT_TOKEN}` (audited in the hook log)."
     )
 }

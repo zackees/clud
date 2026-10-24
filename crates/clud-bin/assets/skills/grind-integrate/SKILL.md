@@ -116,7 +116,11 @@ You hold the run's build lock, so nothing else builds while you do.
    `Closes #N` line to it only after the goal PR merges into the feature
    branch, so a goal that never lands is never closed by the feature merge.
    Return `pushed=true` and the PR URL. The lander watches CI; do not wait
-   for it here.
+   for it here. **Remote-only verification:** when a verify command can only
+   run in remote CI (a native lane), push, then run
+   `clud tool run github/pr_merge_watch.py <PR> --timeout 540` with
+   `run_in_background` and judge by its exit code; on exit 1 read the failing
+   job's log from its report. Never `sleep N; gh run view` (#1894).
 
 **Fix round.** When the prompt carries a failure from the lander: read it,
 reproduce locally when possible, fix, rerun the verify commands (and the run

@@ -4628,6 +4628,22 @@ mod tests {
     /// zackees/clud#1880 gap rows: the shapes the transcript analysis found
     /// passing this guard (categories A, C, D, E, F), verbatim.
     #[test]
+    fn issue_1894_integrator_sleep_poll_is_refused_and_a_log_read_is_not() {
+        // obs-rust/obs-studio#13 item 8: one-shot sleeps across tool calls.
+        let reason = evaluate_command(
+            "sleep 540; gh run view 37858635061 -R o/r --json jobs",
+            None,
+            false,
+            &[],
+        )
+        .reason
+        .expect("a sleep chained to a run read is a poll");
+        assert!(reason.contains("pr_merge_watch"), "{reason}");
+        let log_read = evaluate_command("gh run view 37858635061 --log-failed", None, false, &[]);
+        assert!(log_read.reason.is_none(), "{:?}", log_read.reason);
+    }
+
+    #[test]
     fn blocks_issue_1880_polling_gap_rows() {
         for command in [
             // A: bounded `seq` loop around `gh pr checks`.
