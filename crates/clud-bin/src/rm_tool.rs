@@ -9,7 +9,9 @@
 //!
 //! Every path must resolve inside one of the caller's **roots**: the
 //! `CLUD_RM_ROOTS` path list clud sets for a session, or, outside a session,
-//! the current git checkout (the cwd outside a repo). A root that is a git
+//! the current git checkout (the cwd outside a repo). A session's list also
+//! holds its sister checkouts: sibling git checkouts and `../<repo>-extern`
+//! (#1696). A root that is a git
 //! checkout also covers that repository's linked worktrees, so a `/grind`
 //! integrator can clean its sibling worktree. A separate clone of an allowed
 //! repo qualifies too when nothing in it would be lost (see
@@ -1528,9 +1530,12 @@ pub fn append_audit(dir: &Path, now: SystemTime, record: &serde_json::Value) {
 /// checkout (the cwd outside a repo) and clud's session temp directory,
 /// which holds every agent scratchpad. `None` when neither resolves.
 pub fn session_roots_value(cwd: &Path) -> Option<String> {
-    let base =
-        crate::block_bad_cmd::nearest_repo_root_public(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let repo = crate::block_bad_cmd::nearest_repo_root_public(cwd);
+    let base = repo.clone().unwrap_or_else(|| cwd.to_path_buf());
     let mut roots: Vec<PathBuf> = vec![base];
+    if let Some(repo) = repo {
+        roots.extend(sister_roots(&repo));
+    }
     if let Some(tmp) = crate::gc::session_tmp::session_tmp_dir() {
         roots.push(tmp);
     }
@@ -1550,6 +1555,44 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
     std::env::join_paths(roots)
         .ok()
         .map(|v| v.to_string_lossy().into_owned())
+}
+
+/// Sister checkouts beside `repo` (#1696): every sibling directory that is a
+/// git checkout (`.git` is a directory, so a main worktree; its linked
+/// worktrees are covered through it), and `../<repo>-extern`, the sister
+/// checkout directory of the `clud-extern-repos` skill. Sorted.
+fn sister_roots(repo: &Path) -> Vec<PathBuf> {
+    // A linked worktree's sisters are its main checkout's (`.git` is a file
+    // naming `<main>/.git/worktrees/<id>`), so `myrepo-wt-1` finds
+    // `myrepo-extern`, as the skill derives it.
+    let main = std::fs::read_to_string(repo.join(".git"))
+        .ok()
+        .and_then(|text| {
+            text.trim()
+                .strip_prefix("gitdir:")
+                .map(|g| PathBuf::from(g.trim()))
+        })
+        .and_then(|gitdir| gitdir.ancestors().nth(3).map(Path::to_path_buf))
+        .filter(|main| main.is_absolute() && main.join(".git").is_dir());
+    let main = main.as_deref().unwrap_or(repo);
+    let (Some(parent), Some(name)) = (main.parent(), main.file_name()) else {
+        return Vec::new();
+    };
+    let mut extern_name = name.to_os_string();
+    extern_name.push("-extern");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut sisters: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.as_path() != repo && path.is_dir())
+        .filter(|path| {
+            path.file_name() == Some(extern_name.as_os_str()) || path.join(".git").is_dir()
+        })
+        .collect();
+    sisters.sort();
+    sisters
 }
 
 /// The system temp directories named by the platform and `env` (#1622), as
