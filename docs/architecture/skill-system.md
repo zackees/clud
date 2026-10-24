@@ -144,6 +144,16 @@ prints nothing. `real_bundle_install_is_idempotent` and
   bundler, and would delete newer skills whenever an older binary ran.
   Retirement is a decision, not an inference.
 
+## Worktree policy (#1971)
+
+Bundled skills default to the current checkout, on a branch. A skill may
+create a worktree only for concurrent writers that must build at once (such
+as `/grind` parallel mode), an explicit user request, or a main checkout that
+holds someone else's work when the task must build or test; it names the
+condition. Read-only skills such as `/clud-issue-triage` read at a revision
+with `git show` / `git grep` instead. `/clud-git` owns the condition list; the
+cost behind it is measured below.
+
 ## Worktree Cargo targets (#1685)
 
 `/clud-git` offers an opt-in shared `CARGO_TARGET_DIR` for sequential Rust

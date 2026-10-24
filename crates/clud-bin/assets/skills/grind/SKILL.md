@@ -256,6 +256,10 @@ after it, by the main session or anyone else.
   clones; best for C++/Rust or other heavy repos where a cold worktree build
   is expensive. (iii) *Cron*: one issue per `/loop` tick, each tick a
   sequential run.
+  For a Rust repo, offer *Sequential* first as "(Recommended)" and state
+  parallel mode's cost in its option text: every worktree starts a cold
+  Cargo target, about 46–72 s and 0.9 GB per worktree for a `check` alone
+  (#1685, #1971).
   In parallel mode, keep Cargo targets private while integrators can build or
   test different branches concurrently. An operator may opt in to a shared
   `CARGO_TARGET_DIR` only when builds and tests are serialized, following

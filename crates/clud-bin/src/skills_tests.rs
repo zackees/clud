@@ -1106,3 +1106,54 @@ fn grind_skill_renders_scripts_through_clud_grind_scripts() {
         "grind-integrate must run lint before test before every push"
     );
 }
+
+fn bundled_skill_md(name: &str) -> &'static str {
+    BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == name)
+        .unwrap_or_else(|| panic!("{name} must be bundled"))
+        .skill_md
+}
+
+/// #1971: triage only reads, so it reads at a revision instead of creating a
+/// worktree per issue (each one a cold Cargo target on a Rust repo).
+#[test]
+fn clud_issue_triage_creates_no_worktree() {
+    let skill = bundled_skill_md("clud-issue-triage");
+    assert!(
+        !skill.contains("git worktree add"),
+        "triage must not create worktrees"
+    );
+    assert!(
+        skill.contains("git show"),
+        "triage must read code at a revision"
+    );
+}
+
+/// #1971: `clud-git` leads with the allowed conditions and defaults to
+/// branching in place; `/grind` recommends sequential mode for Rust.
+#[test]
+fn worktrees_need_a_named_condition() {
+    let git = bundled_skill_md("clud-git");
+    let policy = git
+        .find("## Do you need a worktree at all?")
+        .expect("clud-git must state the worktree policy");
+    let playbook = git.find("## Worktree creation playbook").unwrap();
+    assert!(
+        policy < playbook,
+        "the policy must precede the creation playbook"
+    );
+    for required in [
+        "Concurrent writers must build at the same time",
+        "The user explicitly asks",
+        "someone else's in-progress work",
+        "git switch -c <branch> origin/main",
+    ] {
+        assert!(git.contains(required), "clud-git missing: {required}");
+    }
+    let grind = bundled_skill_md("grind");
+    assert!(
+        grind.contains("For a Rust repo, offer *Sequential* first"),
+        "grind must recommend sequential mode for Rust"
+    );
+}
