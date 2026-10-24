@@ -114,6 +114,10 @@ pub struct StatusUsage {
     pub uncached_input_tokens: u64,
     pub output_tokens: u64,
     pub cache_health: String,
+    /// Bumped when `/clear` resets the bridge totals (#2045); counts only
+    /// increase within one generation.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 pub fn now_ms() -> u64 {
@@ -125,6 +129,12 @@ pub fn now_ms() -> u64 {
 
 /// Keeps a session's state file in step with its toasts. Removes the file on
 /// drop so a finished session never leaves a toast behind.
+#[derive(Debug, Default)]
+struct UsageSlot {
+    generation: u64,
+    usage: Option<StatusUsage>,
+}
+
 #[derive(Debug)]
 pub struct StatusStateWriter {
     path: PathBuf,
@@ -132,7 +142,7 @@ pub struct StatusStateWriter {
     launch_nonce: String,
     provider_label: String,
     board: Mutex<ToastBoard>,
-    usage: Mutex<Option<StatusUsage>>,
+    usage: Mutex<UsageSlot>,
     redaction: Mutex<Option<crate::secret_redaction::reversible::Counts>>,
     efforts: Mutex<Vec<EffortEvent>>,
 }
@@ -162,7 +172,7 @@ impl StatusStateWriter {
             launch_nonce: nonce,
             provider_label: provider.to_string(),
             board: Mutex::new(ToastBoard::default()),
-            usage: Mutex::new(None),
+            usage: Mutex::new(UsageSlot::default()),
             redaction: Mutex::new(None),
             efforts: Mutex::new(Vec::new()),
         };
@@ -178,7 +188,11 @@ impl StatusStateWriter {
     /// PTY compositor reads this shared value directly; only the Claude
     /// status-line callback needs the serialized state file.
     pub fn usage_snapshot(&self) -> Option<StatusUsage> {
-        self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .usage
+            .clone()
     }
 
     pub fn effective_usage_snapshot(&self) -> Option<StatusUsage> {
@@ -204,19 +218,43 @@ impl StatusStateWriter {
     /// model/provider labels, never transcript, identity, or credential data.
     pub fn publish_usage(&self, usage: StatusUsage) {
         {
-            let mut current = self.usage.lock().unwrap_or_else(|e| e.into_inner());
-            // Bridge completion workers can finish out of order. The
-            // launch-wide ledger assigns a strictly increasing request count,
-            // so never let a delayed snapshot make the visible totals go
-            // backwards after a later writer has already published.
-            if current
-                .as_ref()
-                .is_some_and(|previous| previous.request_count > usage.request_count)
+            let mut slot = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+            // Bridge completion workers can finish out of order. Within one
+            // generation the ledger assigns a strictly increasing request
+            // count, so never let a delayed snapshot make the visible totals
+            // go backwards, or resurrect a generation `/clear` retired.
+            if usage.generation < slot.generation
+                || slot.usage.as_ref().is_some_and(|previous| {
+                    previous.generation == usage.generation
+                        && previous.request_count > usage.request_count
+                })
             {
                 return;
             }
-            *current = Some(usage);
+            slot.generation = usage.generation;
+            slot.usage = Some(usage);
         }
+        self.rewrite();
+    }
+
+    /// Drop the bridge-owned snapshot when `/clear` starts a new
+    /// conversation (#2045). Snapshots from older generations are refused
+    /// afterwards.
+    pub fn reset_usage(&self, generation: u64) {
+        {
+            let mut slot = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+            if generation <= slot.generation {
+                return;
+            }
+            *slot = UsageSlot {
+                generation,
+                usage: None,
+            };
+        }
+        self.rewrite();
+    }
+
+    fn rewrite(&self) {
         let now = Instant::now();
         let visible = {
             let mut board = self.board.lock().unwrap_or_else(|e| e.into_inner());
@@ -288,7 +326,12 @@ impl StatusStateWriter {
                     )
                 }),
             }),
-            usage: self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            usage: self
+                .usage
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .usage
+                .clone(),
             redaction: self
                 .redaction
                 .lock()

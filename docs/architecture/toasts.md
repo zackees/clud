@@ -45,7 +45,7 @@ The Kitty tier reserves its separate top-right image placement for a `cpu`
 event only while that event exists. Other toasts appear below it. Exact
 provider-terminal token usage stays in Claude's status line, while the title
 fallback retains model/cache health when no status line is drawn. The
-launch-wide usage snapshot remains available for those surfaces; it is never
+conversation's usage snapshot remains available for those surfaces; it is never
 rendered as a persistent Kitty strip.
 
 Tier selection is `toast/tier.rs::decide`:
@@ -175,7 +175,7 @@ released on the next idle poll.
 - A non-expiring toast whose `updated_ms` is older than 90 s is ignored, so a
   crashed session cannot leave a stuck alert.
 - When clud has observed a bridged provider terminal response, its exact
-  launch-wide ledger wins. Otherwise the callback incrementally scans the
+  ledger wins. Otherwise the callback incrementally scans the
   Claude transcript named by `transcript_path` and sibling `subagents/*.jsonl`.
   It counts each provider-reported `message.usage` once by hashed `message.id`,
   even when the transcript repeats a response or a sidechain appears in both
@@ -187,7 +187,13 @@ released on the next idle poll.
   completed model, with no per-call fallback. A malformed complete record or
   conflicting cross-file response makes exact accounting unprovable, so the
   callback withholds the cumulative triple and renders only the model. A
-  partial trailing record waits for its newline. Native Codex
+  partial trailing record waits for its newline. Both ledgers cover one
+  conversation: a new main `transcript_path` starts a fresh cursor file and
+  deletes the snapshot, and the bridge's `SessionStart`/`clear` hook zeroes
+  its totals and bumps a usage generation the writer uses to refuse delayed
+  pre-clear snapshots
+  ([DD-186](../DESIGN_DECISIONS.md#dd-186-status-line-usage-is-scoped-to-one-conversation)).
+  Native Codex
   without the Claude status-line callback requires bridge-observed usage.
 - **Effort segment (#1464).** After the user's line and the usage line,
   `clud statusline` prints `effort: <level>`, bold orange for `high`,

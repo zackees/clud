@@ -120,6 +120,7 @@ fn provider_usage_is_persistent_distinct_and_stale_safe() {
         uncached_input_tokens: 67_890,
         output_tokens: 12,
         cache_health: "healthy".into(),
+        generation: 0,
     });
     let usage = read_live_usage(writer.path(), now_ms()).expect("live usage");
     assert_eq!(usage.cached_input_tokens, 12_345);
@@ -151,6 +152,7 @@ fn dead_owner_cannot_keep_bridge_usage_visible() {
         uncached_input_tokens: 3,
         output_tokens: 2,
         cache_health: "unavailable".into(),
+        generation: 0,
     });
     let mut state: StatusState =
         serde_json::from_slice(&std::fs::read(writer.path()).unwrap()).unwrap();
@@ -210,6 +212,7 @@ fn exact_bridge_usage_wins_over_documented_claude_last_call() {
         uncached_input_tokens: 9,
         output_tokens: 10,
         cache_health: "healthy".into(),
+        generation: 0,
     });
     let args = RunArgs {
         session_pid: 18,
@@ -386,6 +389,76 @@ fn replacement_transcript_adds_only_new_message_ids() {
 }
 
 #[test]
+fn clear_starts_a_fresh_direct_ledger_for_the_new_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 198);
+    let path = fixture_transcript(dir.path(), true);
+    let args = RunArgs {
+        session_pid: 198,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let mut out = Vec::new();
+    render_into(&mut out, &args, &transcript_stdin(&path), now_ms());
+    assert!(String::from_utf8_lossy(&out).contains("read 800 cached / 62 uncached - write 16"));
+    // `/clear` hands the callback a new transcript that has no response yet
+    // (#2045): neither the callback nor the HUD may show the old totals.
+    let cleared = dir.path().join("cleared.jsonl");
+    out.clear();
+    render_into(&mut out, &args, &transcript_stdin(&cleared), now_ms());
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert!(!text.contains("read "), "{text}");
+    assert!(text.contains("deepseek-flash-latest"), "{text}");
+    assert_eq!(writer.effective_usage_snapshot(), None);
+    let next = json!({"message": {"id": "msg-after-clear", "model": "new-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 5
+    }}});
+    std::fs::write(&cleared, format!("{next}\n")).unwrap();
+    out.clear();
+    render_into(&mut out, &args, &transcript_stdin(&cleared), now_ms());
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("read 4 cached / 5 uncached - write 5"),
+        "{text}"
+    );
+    let usage = writer.effective_usage_snapshot().unwrap();
+    assert_eq!(usage.request_count, 1);
+    assert_eq!(usage.model, "new-model");
+}
+
+#[test]
+fn a_usage_reset_drops_the_snapshot_and_retires_older_generations() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 17);
+    let snapshot = |generation, request_count| StatusUsage {
+        provider: "deepseek".into(),
+        model: "deepseek-v4.1-flash".into(),
+        request_count,
+        cached_input_tokens: 0,
+        uncached_input_tokens: request_count * 100,
+        output_tokens: request_count,
+        cache_health: "unavailable".into(),
+        generation,
+    };
+    writer.publish_usage(snapshot(0, 5));
+    writer.reset_usage(1);
+    assert_eq!(writer.usage_snapshot(), None);
+    assert_eq!(read_live_usage(writer.path(), now_ms()), None);
+    // A worker that finished before the clear cannot bring the old totals back.
+    writer.publish_usage(snapshot(0, 6));
+    assert_eq!(writer.usage_snapshot(), None);
+    writer.publish_usage(snapshot(1, 1));
+    assert_eq!(
+        read_live_usage(writer.path(), now_ms()),
+        Some(snapshot(1, 1))
+    );
+    // A stale or repeated reset is ignored.
+    writer.reset_usage(1);
+    assert_eq!(writer.usage_snapshot(), Some(snapshot(1, 1)));
+}
+
+#[test]
 fn direct_ledger_survives_a_quiet_parent_past_toast_staleness() {
     let dir = tempfile::tempdir().unwrap();
     let writer = writer_in(dir.path(), 196);
@@ -479,6 +552,7 @@ fn a_delayed_older_usage_snapshot_cannot_replace_newer_totals() {
         uncached_input_tokens,
         output_tokens: request_count,
         cache_health: "healthy".into(),
+        generation: 0,
     };
     writer.publish_usage(snapshot(2, 200));
     // This simulates an older worker acquiring the status writer after the
@@ -807,6 +881,7 @@ fn render_prints_usage_between_the_user_line_and_toast() {
         uncached_input_tokens: 6,
         output_tokens: 7,
         cache_health: "cold".into(),
+        generation: 0,
     });
     writer.publish(ToastEvent::Show(Toast::new(
         "cpu",

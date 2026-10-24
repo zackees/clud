@@ -21,6 +21,9 @@ static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Snapshot {
     launch_nonce: String,
+    // SHA-256 of the main transcript path: one conversation (#2045).
+    #[serde(default)]
+    conversation: String,
     updated_ms: u64,
     usage: StatusUsage,
 }
@@ -35,6 +38,10 @@ struct Cursor {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Ledger {
     launch_nonce: String,
+    // `/clear` starts a new main transcript; a different digest starts a
+    // fresh ledger so totals never carry across conversations (#2045).
+    #[serde(default)]
+    conversation: String,
     files: BTreeMap<String, Cursor>,
     // SHA-256(message.id) -> provider tuple and opaque source-file key.
     seen: BTreeMap<String, SeenRecord>,
@@ -86,12 +93,16 @@ pub(super) fn cleanup(state_path: &Path) {
 }
 
 pub(super) fn read_live(state_path: &Path, launch_nonce: &str, now_ms: u64) -> Option<StatusUsage> {
+    read_snapshot(state_path, launch_nonce, now_ms).map(|snapshot| snapshot.usage)
+}
+
+fn read_snapshot(state_path: &Path, launch_nonce: &str, now_ms: u64) -> Option<Snapshot> {
     let bytes = fs::read(snapshot_path(state_path)).ok()?;
     let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
     let stale_ms = u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX);
     (snapshot.launch_nonce == launch_nonce
         && now_ms.saturating_sub(snapshot.updated_ms) <= stale_ms)
-        .then_some(snapshot.usage)
+        .then_some(snapshot)
 }
 
 pub(super) fn update(
@@ -102,7 +113,10 @@ pub(super) fn update(
     fallback_model: &str,
     now_ms: u64,
 ) -> Option<StatusUsage> {
-    let old_snapshot = read_live(state_path, launch_nonce, now_ms);
+    let conversation = digest(transcript.to_string_lossy().as_bytes());
+    let old_snapshot = read_snapshot(state_path, launch_nonce, now_ms)
+        .filter(|snapshot| snapshot.conversation == conversation)
+        .map(|snapshot| snapshot.usage);
     let parent = state_path.parent()?;
     fs::create_dir_all(parent).ok()?;
     let lock = OpenOptions::new()
@@ -118,10 +132,18 @@ pub(super) fn update(
     let mut ledger: Ledger = fs::read(cursor_path(state_path))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(|state: &Ledger| state.launch_nonce == launch_nonce)
-        .unwrap_or_else(|| Ledger {
-            launch_nonce: launch_nonce.to_string(),
-            ..Ledger::default()
+        .filter(|state: &Ledger| {
+            state.launch_nonce == launch_nonce && state.conversation == conversation
+        })
+        .unwrap_or_else(|| {
+            // The HUD reads the snapshot without knowing the transcript, so
+            // the previous conversation's totals must not outlive it.
+            let _ = fs::remove_file(snapshot_path(state_path));
+            Ledger {
+                launch_nonce: launch_nonce.to_string(),
+                conversation: conversation.clone(),
+                ..Ledger::default()
+            }
         });
     let paths = transcript_paths(transcript);
     if paths.is_empty() {
@@ -166,6 +188,7 @@ pub(super) fn update(
     };
     let snapshot = Snapshot {
         launch_nonce: launch_nonce.to_string(),
+        conversation,
         updated_ms: now_ms,
         usage: usage.clone(),
     };
@@ -366,6 +389,7 @@ fn record_usage(
         uncached_input_tokens: 0,
         output_tokens: 0,
         cache_health: "unavailable".into(),
+        generation: 0,
     });
     if is_new {
         totals.request_count = totals.request_count.saturating_add(1);

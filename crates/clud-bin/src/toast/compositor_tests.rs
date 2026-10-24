@@ -394,6 +394,7 @@ fn non_kitty_usage_fallback_keeps_model_and_cache_health_in_the_title() {
         uncached_input_tokens: 2,
         output_tokens: 3,
         cache_health: "degraded".into(),
+        generation: 0,
     });
     let (mut c, _) = compositor_with_usage(ToastTier::Fallback, Fallback::Title, writer);
     let out = c.on_tick(now);
@@ -413,6 +414,7 @@ fn usage_title_fallback_is_bounded_and_control_free() {
         uncached_input_tokens: 0,
         output_tokens: 0,
         cache_health: "healthy".into(),
+        generation: 0,
     });
     let (mut c, _) = compositor_with_usage(ToastTier::Fallback, Fallback::Title, writer);
     let out = String::from_utf8_lossy(&c.on_tick(now)).into_owned();
@@ -510,6 +512,7 @@ fn token_usage_alone_never_creates_a_kitty_overlay() {
         uncached_input_tokens: 1_410_000_000,
         output_tokens: 2_630_000,
         cache_health: "healthy".into(),
+        generation: 0,
     });
     let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
     assert!(c.on_tick(now).is_empty());
@@ -528,6 +531,7 @@ fn title_fallback_keeps_model_and_cache_health_when_cpu_hud_cannot_fit() {
         uncached_input_tokens: 20,
         output_tokens: 3,
         cache_health: "healthy".into(),
+        generation: 0,
     });
     let (mut c, hub) = compositor_with_usage(ToastTier::Kitty, Fallback::Title, writer);
     let idle = c.on_resize(ROWS, 15, now);

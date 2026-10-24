@@ -22,7 +22,7 @@ Callers:
 
 - `cpu_banner.rs` publishes through a `ToastSink` (`toast_events`).
 - `runner.rs` (subprocess) and `runner_execution.rs` (PTY) build the sink,
-  hub, launch-wide usage writer for status/title fallback, and compositor options.
+  hub, per-conversation usage writer for status/title fallback, and compositor options.
 - `session.rs` / `session_output.rs` run the compositor and the mouse filter.
 - `foreground_runtime.rs::start_with_statusline` composes Claude's `statusLine`.
 - `main.rs` dispatches `clud statusline` before any launch work.

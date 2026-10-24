@@ -103,6 +103,8 @@ type SharedCacheHealth = Arc<Mutex<CacheHealthTracker>>;
 struct StatusUsageState {
     writer: Option<Arc<crate::toast::statusline::StatusStateWriter>>,
     totals: UsageTotals,
+    /// Bumped by `/clear`; the status line shows one conversation (#2045).
+    generation: u64,
 }
 
 type SharedStatusUsage = Arc<Mutex<StatusUsageState>>;
@@ -1131,6 +1133,7 @@ fn route_request(
                     connection.conversations,
                     key,
                     connection.cache_health,
+                    &config.status_usage,
                 );
             }
         }
@@ -1710,8 +1713,10 @@ fn serve_context_clear(
     conversations: &ConversationStore,
     conversation_key: ConversationKey,
     cache_health: &SharedCacheHealth,
+    status_usage: &SharedStatusUsage,
 ) {
     conversations.clear_session(&conversation_key.session_prefix);
+    reset_status_usage(status_usage);
     let result = Ok::<(), crate::codex_history::HistoryError>(());
     match result {
         Ok(()) => {
@@ -3861,10 +3866,6 @@ fn lock_cache_health(health: &SharedCacheHealth) -> std::sync::MutexGuard<'_, Ca
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Publish exact terminal usage for an Anthropic-compatible upstream without
-/// feeding a provider-specific cache-health state machine. The wire bytes have
-/// already been forwarded unchanged; this is an independent, launch-wide
-/// display ledger.
 /// Feed the request's `output_config.effort` to the status line (#1464).
 /// The gateway is the only layer that sees subagents' actual effort.
 fn record_request_effort(status_usage: &SharedStatusUsage, json: &serde_json::Value, agent: bool) {
@@ -3884,6 +3885,25 @@ fn record_request_effort(status_usage: &SharedStatusUsage, json: &serde_json::Va
     }
 }
 
+/// `/clear` starts a new conversation, so the status line drops the previous
+/// one's totals instead of carrying them for the rest of the launch (#2045).
+fn reset_status_usage(status_usage: &SharedStatusUsage) {
+    let reset = {
+        let mut status = status_usage.lock().unwrap_or_else(|e| e.into_inner());
+        status.totals = UsageTotals::default();
+        status.generation = status.generation.saturating_add(1);
+        let generation = status.generation;
+        status.writer.clone().map(|writer| (writer, generation))
+    };
+    if let Some((writer, generation)) = reset {
+        writer.reset_usage(generation);
+    }
+}
+
+/// Publish exact terminal usage for an Anthropic-compatible upstream without
+/// feeding a provider-specific cache-health state machine. The wire bytes have
+/// already been forwarded unchanged; this is an independent display ledger
+/// for the current conversation.
 fn publish_status_usage(
     status_usage: &SharedStatusUsage,
     provider: AnthropicUsageProvider,
@@ -3926,6 +3946,7 @@ fn publish_status_usage(
                         .saturating_sub(totals.cached_input_tokens),
                     output_tokens: totals.output_tokens,
                     cache_health: cache_health.to_string(),
+                    generation: status.generation,
                 },
             )
         })
@@ -3980,6 +4001,7 @@ fn record_cache_usage(
                         .saturating_sub(totals.cached_input_tokens),
                     output_tokens: totals.output_tokens,
                     cache_health: cache_health_name(after).to_string(),
+                    generation: status.generation,
                 },
             )
         })
@@ -5288,6 +5310,9 @@ Connection: close
             );
             assert_eq!(status(&response), 200, "{response}");
         }
+        let usage = wait_for_status_usage(&writer, 3);
+        assert_eq!(usage.request_count, 3);
+        assert_eq!(usage.uncached_input_tokens, 300_000);
         let cleared = request(
             bridge.socket_addr(),
             &authorized(
@@ -5298,6 +5323,8 @@ Connection: close
             ),
         );
         assert_eq!(status(&cleared), 204, "{cleared}");
+        // `/clear` drops the previous conversation's totals at once (#2045).
+        assert_eq!(writer.usage_snapshot(), None);
         let response = request(
             bridge.socket_addr(),
             &authorized_with_headers(
@@ -5309,34 +5336,41 @@ Connection: close
             ),
         );
         assert_eq!(status(&response), 200, "{response}");
-        // The client can finish reading the HTTP response a few instructions
-        // before the worker records its terminal telemetry. Wait only for the
-        // local state write, never for a provider or a new request.
+        let usage = wait_for_status_usage(&writer, 1);
+        assert_eq!(usage.provider, "codex");
+        assert_eq!(usage.model, "gpt-6-sol");
+        assert_eq!(usage.generation, 1);
+        assert_eq!(usage.request_count, 1);
+        assert_eq!(usage.cached_input_tokens, 0);
+        assert_eq!(usage.uncached_input_tokens, 100_000);
+        assert_eq!(usage.output_tokens, 1);
+        // The first post-clear turn is cold.
+        assert_eq!(usage.cache_health, "cold");
+    }
+
+    /// The client can finish reading the HTTP response a few instructions
+    /// before the worker records its terminal telemetry. Wait only for the
+    /// local state write, never for a provider or a new request.
+    fn wait_for_status_usage(
+        writer: &crate::toast::statusline::StatusStateWriter,
+        request_count: u64,
+    ) -> crate::toast::statusline::StatusUsage {
         let deadline = Instant::now() + Duration::from_secs(1);
-        let usage = loop {
+        loop {
             if let Some(usage) = crate::toast::statusline::read_live_usage(
                 writer.path(),
                 crate::toast::statusline::now_ms(),
             ) {
-                if usage.request_count == 4 {
-                    break usage;
+                if usage.request_count == request_count {
+                    return usage;
                 }
             }
             assert!(
                 Instant::now() < deadline,
-                "second usage update was not published"
+                "usage update {request_count} was not published"
             );
             thread::sleep(Duration::from_millis(5));
-        };
-        assert_eq!(usage.provider, "codex");
-        assert_eq!(usage.model, "gpt-6-sol");
-        assert_eq!(usage.request_count, 4);
-        assert_eq!(usage.cached_input_tokens, 0);
-        assert_eq!(usage.uncached_input_tokens, 400_000);
-        assert_eq!(usage.output_tokens, 4);
-        // The last post-clear turn is cold, while the counters retain every
-        // main and agent terminal report from this bridge lifetime.
-        assert_eq!(usage.cache_health, "cold");
+        }
     }
 
     #[test]
