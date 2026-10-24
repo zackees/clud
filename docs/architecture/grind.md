@@ -233,6 +233,17 @@ every tick), gets the strictest caps
 (`crates/clud-bin/src/grind_facts.rs`,
 [DD-103](../DESIGN_DECISIONS.md#dd-103-grind-run-facts-are-keyed-by-session-id-and-live-under-cludtmpgrind)).
 
+**Goals in several repositories (#1422).** The router starts one
+`grind-run` per repository, concurrently, all under its one session id. The
+facts file then holds `{"repos": [{"repo": "<abs checkout>", ...}, ...]}`,
+and the hook selects the entry whose `repo` contains the calling agent's
+working directory (the deepest when roots nest); `clud grind-facts task`
+files a task under the entry containing its checkout. A directory in no
+entry, or in two of equal depth, gets the strictest caps, never another
+repository's `scripts`, CI or feature. One workflow per repository, rather
+than one workflow over several, because `grind-run` holds one `repo`, one
+`main`, one integrator semaphore and one repository's caps.
+
 ### Input routing
 
 Issue [#1404](https://github.com/zackees/clud/issues/1404); the steps live

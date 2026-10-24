@@ -18,6 +18,14 @@
 //! Finish step removes the file with `clud grind-facts clear`. The planner
 //! records each worker task's checkout and files with `clud grind-facts task`
 //! (#1340), which the hook turns into that worker's deletion roots.
+//!
+//! A run whose goals span repositories (#1422) starts one `grind-run`
+//! workflow per repository, all under the router's one session id. Its file
+//! then holds `{"repos": [{"repo": "<abs root>", ...facts}, ...]}`, and
+//! [`lookup_for`] selects the one entry whose `repo` contains the calling
+//! agent's working directory (the deepest one when roots nest). A directory
+//! inside no entry, or inside two entries of equal depth, gets no facts: the
+//! strictest caps apply rather than another repository's.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -129,6 +137,66 @@ pub fn lookup_in(dir: &Path, session_id: Option<&str>, now: SystemTime) -> Looku
         Ok(_) => Lookup::Invalid(path, "not a JSON object".into()),
         Err(error) => Lookup::Invalid(path, error.to_string()),
     }
+}
+
+/// The facts entry for `cwd` in a multi-repository file (#1422); a
+/// single-repository file (no `repos` key) is returned unchanged.
+pub fn select_repo(facts: Value, cwd: &Path) -> Result<Value, String> {
+    let Some(repos) = facts.get("repos") else {
+        return Ok(facts);
+    };
+    let repos = repos.as_array().ok_or("`repos` is not an array")?;
+    let mut best: Option<(usize, &Value)> = None;
+    let mut tied = false;
+    for entry in repos {
+        let Some(root) = entry.get("repo").and_then(Value::as_str) else {
+            return Err("a `repos` entry has no string `repo`".into());
+        };
+        let root = Path::new(root);
+        if !root.is_absolute() || !cwd.starts_with(root) {
+            continue;
+        }
+        let depth = root.components().count();
+        match best {
+            Some((best_depth, _)) if best_depth > depth => {}
+            Some((best_depth, _)) if best_depth == depth => tied = true,
+            _ => {
+                best = Some((depth, entry));
+                tied = false;
+            }
+        }
+    }
+    match best {
+        Some((_, entry)) if !tied => Ok(entry.clone()),
+        Some(_) => Err(format!(
+            "{} is inside two `repos` entries; refusing to pick one",
+            cwd.display()
+        )),
+        None => Err(format!(
+            "{} is inside no `repos` entry of this multi-repository run",
+            cwd.display()
+        )),
+    }
+}
+
+/// [`lookup_in`], then [`select_repo`] for the caller's `cwd`.
+pub fn lookup_in_for(dir: &Path, session_id: Option<&str>, cwd: &Path, now: SystemTime) -> Lookup {
+    narrow(lookup_in(dir, session_id, now), cwd)
+}
+
+fn narrow(found: Lookup, cwd: &Path) -> Lookup {
+    match found {
+        Lookup::Found(facts) if facts.get("repos").is_some() => match select_repo(facts, cwd) {
+            Ok(entry) => Lookup::Found(entry),
+            Err(error) => Lookup::Invalid(cwd.to_path_buf(), error),
+        },
+        other => other,
+    }
+}
+
+/// [`lookup`] narrowed to the repository `cwd` belongs to (#1422).
+pub fn lookup_for(session_id: Option<&str>, cwd: &Path) -> Lookup {
+    narrow(lookup(session_id), cwd)
 }
 
 /// [`lookup_in`] against the real `~/.clud/tmp/grind`, now.
@@ -371,7 +439,7 @@ pub(crate) fn record_task(path: &Path, checkout: &Path, files: &[String]) -> Res
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
             Err(error) => return Err(format!("read facts: {error}")),
         };
-        let object = facts.as_object_mut().ok_or("facts are not a JSON object")?;
+        let object = repo_entry_mut(&mut facts, checkout)?;
         let tasks = object
             .entry("tasks")
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -389,6 +457,30 @@ pub(crate) fn record_task(path: &Path, checkout: &Path, files: &[String]) -> Res
     // while the previous writer still owns the old one.
     drop(lock_file);
     result
+}
+
+/// The object a task in `checkout` belongs to: the whole facts, or in a
+/// multi-repository file the `repos` entry containing `checkout` (#1422).
+fn repo_entry_mut<'a>(
+    facts: &'a mut Value,
+    checkout: &Path,
+) -> Result<&'a mut serde_json::Map<String, Value>, String> {
+    if facts.get("repos").is_none() {
+        return facts
+            .as_object_mut()
+            .ok_or_else(|| "facts are not a JSON object".to_string());
+    }
+    let chosen = select_repo(facts.clone(), checkout)?;
+    let root = chosen.get("repo").cloned();
+    facts["repos"]
+        .as_array_mut()
+        .and_then(|repos| {
+            repos
+                .iter_mut()
+                .find(|entry| entry.get("repo") == root.as_ref())
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "the selected `repos` entry vanished".to_string())
 }
 
 /// An OS lock makes an abandoned file harmless: no timed stale-file deletion
@@ -450,6 +542,77 @@ pub(crate) mod tests {
         let path = facts_path_in(dir, id).unwrap();
         std::fs::write(&path, text).unwrap();
         path
+    }
+
+    const TWO_REPOS: &str = r#"{"repos": [
+        {"repo": "/w/setup-soldr", "ci": false, "scripts": {"test": "npm test"}},
+        {"repo": "/w/soldr", "ci": true, "scripts": {"lint": "./lint"}}
+    ]}"#;
+
+    #[test]
+    fn a_multi_repo_run_gives_each_repo_its_own_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), A, TWO_REPOS);
+        let now = SystemTime::now();
+        let soldr = lookup_in_for(
+            dir.path(),
+            Some(A),
+            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            now,
+        );
+        assert_eq!(soldr.facts().unwrap()["ci"], true);
+        let setup = lookup_in_for(dir.path(), Some(A), Path::new("/w/setup-soldr"), now);
+        assert_eq!(setup.facts().unwrap()["ci"], false);
+        assert_eq!(setup.facts().unwrap()["scripts"]["test"], "npm test");
+    }
+
+    #[test]
+    fn a_directory_in_no_repo_or_two_equal_repos_gets_no_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), A, TWO_REPOS);
+        let now = SystemTime::now();
+        let outside = lookup_in_for(dir.path(), Some(A), Path::new("/w/other"), now);
+        assert!(outside.facts().is_none());
+        assert!(outside
+            .warning()
+            .unwrap()
+            .contains("inside no `repos` entry"));
+        let twice = r#"{"repos": [{"repo": "/w/x"}, {"repo": "/w/x"}]}"#;
+        write(dir.path(), B, twice);
+        let tied = lookup_in_for(dir.path(), Some(B), Path::new("/w/x/src"), now);
+        assert!(tied.warning().unwrap().contains("two `repos` entries"));
+    }
+
+    #[test]
+    fn nested_roots_pick_the_deepest_and_single_repo_files_are_unchanged() {
+        let nested = serde_json::json!({"repos": [
+            {"repo": "/w", "ci": false}, {"repo": "/w/inner", "ci": true}
+        ]});
+        assert_eq!(
+            select_repo(nested, Path::new("/w/inner/a")).unwrap()["ci"],
+            true
+        );
+        let single = serde_json::json!({"ci": true});
+        assert_eq!(
+            select_repo(single.clone(), Path::new("/anywhere")).unwrap(),
+            single
+        );
+    }
+
+    #[test]
+    fn tasks_land_in_the_repo_entry_containing_their_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), A, TWO_REPOS);
+        record_task(
+            &path,
+            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            &["a.rs".into()],
+        )
+        .unwrap();
+        let facts: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(facts["repos"][1]["tasks"][0]["files"][0], "a.rs");
+        assert!(facts["repos"][0].get("tasks").is_none());
+        assert!(record_task(&path, Path::new("/elsewhere"), &[]).is_err());
     }
 
     #[test]

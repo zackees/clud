@@ -3821,8 +3821,10 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     else {
         return grind_router_reason(payload);
     };
-    let (run, warning) =
-        block_bad_cmd_grind_caps::RunFacts::for_session(payload.session_id.as_deref());
+    let (run, warning) = block_bad_cmd_grind_caps::RunFacts::for_session(
+        payload.session_id.as_deref(),
+        &payload.cwd,
+    );
     if let Some(warning) = warning {
         append_log(&format!("{role}: {warning}"));
     }
@@ -3850,7 +3852,10 @@ fn grind_router_reason(payload: &HookPayloadView) -> Option<String> {
     {
         return None;
     }
-    let (run, _) = block_bad_cmd_grind_caps::RunFacts::for_session(payload.session_id.as_deref());
+    let (run, _) = block_bad_cmd_grind_caps::RunFacts::for_session(
+        payload.session_id.as_deref(),
+        &payload.cwd,
+    );
     block_bad_cmd_grind_caps::router_reason(&payload.command, &run)
         .map(|reason| format!("Blocked by the /grind feature-mode caps: {reason}."))
 }

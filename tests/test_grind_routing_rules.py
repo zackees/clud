@@ -68,3 +68,12 @@ def test_intake_reads_task_list_ref_states() -> None:
 def test_router_refuses_single_issues_with_do() -> None:
     text = _read("grind")
     assert "run `/do N`" in text
+
+
+def test_goals_in_several_repositories_fan_out_one_workflow_per_repo() -> None:
+    """#1422: one grind-run per repository, launched together, never mixed."""
+    text = " ".join(_read("grind").split())
+    assert "**Goals in several repositories (#1422).**" in text
+    assert "start one `grind-run` per repository **in the same message**" in text
+    assert "Never put two repositories' goals in one `grind-run`" in text
+    assert '{"repos": [{"repo": "<abs checkout>"' in text
