@@ -56,16 +56,18 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
       # Pass marker (#2078, prototype of zackees/soldr#3890): skip the leg
       # before any setup when this exact input tree already passed it. The
-      # key hashes the git blob IDs of every tracked file Dylint can read
-      # (the Rust-lane excludes from local-gate.toml) plus the leg, so the
-      # pinned nightly/Dylint versions in this file are part of it. The
+      # key hashes the git blob IDs of every tracked file Dylint can read plus
+      # the leg: the Rust-lane excludes from local-gate.toml, and also ci/,
+      # .github/ and the CI config tomls except this file, so the pinned
+      # nightly/Dylint versions are part of it while a CI-only change reuses
+      # the marker (tests/test_pass_keys.py). The
       # marker is an empty cache entry: the key is the only metadata.
       # Known gap until soldr#3890: soldr itself floats on `v0`/latest and is
       # not in the key.
       - name: Compute pass key
         id: pass-key
         run: |
-          digest=$(git ls-files -s | awk -F'\t' '$2 !~ /^(docs|bench)\// && $2 !~ /^[^/]*\.md$/ && ($2 !~ /^tests\// || $2 ~ /^tests\/fixtures\//)' | sha256sum | cut -c1-16)
+          digest=$(git ls-files -s | awk -F'\t' -v keep='.github/workflows/_dylint.yml' 'BEGIN { n = split(keep, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 } $2 in want || $2 ~ /^tests\/fixtures\// || ($2 !~ /^(docs|bench|tests|ci|\.github)\// && $2 !~ /^[^/]*\.md$/ && $2 !~ /^(ci|local-gate|bosn)\.toml$/)' | sha256sum | cut -c1-16)
           echo "key=pass-v1-dylint-${{ matrix.pass }}-${digest}" >> "$GITHUB_OUTPUT"
       - name: Look up pass marker
         id: pass
