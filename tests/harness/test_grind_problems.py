@@ -44,7 +44,7 @@ MARK = {
 }
 META = "100"
 GOAL = "101"
-LABEL = "grind:followup"
+MARKER = "grind:followup"
 OK = {"is_error": False}
 DENIED = {"is_error": True, "content_contains": "/grind role caps"}
 NOTIFIED = "</task-notification>"
@@ -138,7 +138,7 @@ def _goal_roles(
         work["problems"] = worker_problems
     worker_steps = [write, _after(OK, _structured(work))]
     if worker_tries_create:
-        create = _bash(f"gh issue create --title 'flaky-test: self-filed' --label {LABEL} --body x")
+        create = _bash("gh issue create --title 'flaky-test: self-filed' --body x")
         worker_steps = [create, _after(DENIED, write), _after(OK, _structured(work))]
     integ: dict[str, Any] = {"pushed": True, "pr_url": url, "summary": "p"}
     if integrator_problems:
@@ -210,11 +210,11 @@ def _followup_body(p: dict[str, Any]) -> str:
 
 
 def _file_issue(p: dict[str, Any]) -> str:
-    search = shlex.quote(f"{p['summary']} in:title")
+    search = shlex.quote(f'"{MARKER}" {p["summary"]} in:title,body')
     title = shlex.quote(f"{p['kind']}: {p['summary']}")
     return (
-        f"gh issue list --state all --label {LABEL} --search {search} && "
-        f"gh issue create --title {title} --label {LABEL} --body {shlex.quote(_followup_body(p))}"
+        f"gh issue list --state all --search {search} && "
+        f"gh issue create --title {title} --body {shlex.quote(_followup_body(p))}"
     )
 
 
@@ -260,7 +260,7 @@ def _notified(result: RunResult, *problems: dict[str, Any]) -> str:
 
 def _followups(h: Harness) -> dict[str, dict[str, Any]]:
     issues = h.read_gh_state()["issues"]
-    return {n: i for n, i in issues.items() if LABEL in i.get("labels", [])}
+    return {n: i for n, i in issues.items() if f"<!-- {MARKER}" in i.get("body", "")}
 
 
 def _bash_by(result: RunResult, agent_type: str) -> list[str]:
@@ -416,12 +416,11 @@ def test_x6_reconcile_closes_the_meta_despite_an_open_followup(harness: Harness)
     # touched by it.
     feature_pr, branch, run_id = 150, f"grind/meta-{META}-1f3a", "1f3a"
     marker = f"<!-- grind:v1 feature-pr=#{feature_pr} branch={branch} run={run_id} -->"
-    meta = _issue("meta: auth rework", "Tracked as sub-issues.", labels=["grind:on-feature"])
+    meta = _issue("meta: auth rework", "Tracked as sub-issues.")
     followup = _issue(
         "flaky-test: feature-stage follow-up",
         f"x Refs #{META} <!-- grind:followup meta={META} stage=feature "
         f"feature-pr={feature_pr} -->",
-        labels=[LABEL],
     )
     state = _world({int(META): meta, 201: followup})
     state["issues"][META]["comments"].append({"id": 2000, "body": marker})
@@ -432,7 +431,7 @@ def test_x6_reconcile_closes_the_meta_despite_an_open_followup(harness: Harness)
             "state": "MERGED",
             "title": f"grind: meta {META}",
             "base": "main",
-            "body": f"Refs #{META}",
+            "body": f"Closes #{META}",
         }
     ]
     harness.write_gh_state(state)
@@ -448,9 +447,9 @@ def test_x6_reconcile_closes_the_meta_despite_an_open_followup(harness: Harness)
     assert ran.returncode == 0, out[-3000:]
     issues = harness.read_gh_state()["issues"]
     assert issues[META]["state"] == "closed", (issues[META], out[-3000:])
-    assert "grind:on-feature" not in issues[META]["labels"], issues[META]
+    assert issues[META]["labels"] == [], issues[META]
     assert issues["201"]["state"] == "open", issues["201"]
-    assert issues["201"]["labels"] == [LABEL], issues["201"]
+    assert issues["201"]["labels"] == [], issues["201"]
     assert issues["201"]["comments"] == [], issues["201"]
     assert issues[META]["sub_issues"] == []
 
@@ -459,12 +458,10 @@ def _followup_world(h: Harness, pr_state: str) -> None:
     feature = _issue(
         "flaky-test: feature-stage follow-up",
         f"x Refs #{META} <!-- grind:followup meta={META} stage=feature feature-pr=150 -->",
-        labels=[LABEL],
     )
     bug = _issue(
         "doc-gap: bug-stage follow-up",
         f"y Refs #{META} <!-- grind:followup meta={META} stage=bugs feature-pr=none -->",
-        labels=[LABEL],
     )
     state = _world({int(META): _issue("meta: backlog", "done"), 201: feature, 202: bug})
     state["prs"] = [
@@ -482,23 +479,22 @@ def _followup_world(h: Harness, pr_state: str) -> None:
 def _intake(pr_state: str, pick: str) -> list[dict[str, Any]]:
     """Intake with no argument: check each follow-up's gate, pick the eligible one."""
     return [
-        _bash(f"gh issue list --state open --label {LABEL}"),
+        _bash(f"gh issue list --state open --search '\"{MARKER}\" in:body'"),
         _after(
-            {"is_error": False, "content_contains": LABEL},
+            {"is_error": False, "content_contains": MARKER},
             _bash("gh pr view 150 --json state -q .state"),
         ),
         _after(
             {"is_error": False, "content_contains": pr_state},
-            _bash(f"gh issue edit {pick} --remove-label {LABEL}"),
+            {"text": f"PICKED #{pick}"},
         ),
-        _after(OK, {"text": f"PICKED #{pick}"}),
     ]
 
 
 def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None:
     for name in ("grind-intake", "grind-cron", "clud-issue-triage"):
         text = (harness.config / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
-        assert LABEL in text, (name, text[-2000:])
+        assert MARKER in text, (name, text[-2000:])
         assert "stage=bugs" in text, (name, text[-2000:])
         assert "feature-pr=" in text, (name, text[-2000:])
         assert "MERGED" in text, (name, text[-2000:])
@@ -511,9 +507,7 @@ def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None
     )
     assert first.returncode == 0, first.stdout[-3000:]
     _no_notes(first)
-    issues = harness.read_gh_state()["issues"]
-    assert LABEL not in issues["202"]["labels"]
-    assert LABEL in issues["201"]["labels"]
+    assert "PICKED #202" in first.stdout, first.stdout[-3000:]
 
     # Once the feature PR merged, the feature-stage follow-up (#201) is picked.
     state = harness.read_gh_state()
@@ -526,8 +520,12 @@ def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None
     )
     assert second.returncode == 0, second.stdout[-3000:]
     _no_notes(second)
-    issues = harness.read_gh_state()["issues"]
-    assert LABEL not in issues["201"]["labels"]
+    assert "PICKED #201" in second.stdout, second.stdout[-3000:]
+    state = harness.read_gh_state()
+    issues = state["issues"]
+    # Intake gates on the marker alone: it never labels or edits a follow-up (#1958).
+    assert all(i["labels"] == [] for i in issues.values()), issues
+    assert not [c for c in state.get("calls", []) if c[:2] == ["issue", "edit"]]
     # Neither follow-up ever became a sub-issue of the meta.
     assert issues[META]["sub_issues"] == []
 

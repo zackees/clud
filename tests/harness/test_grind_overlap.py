@@ -220,7 +220,9 @@ def _goal_roles(h: Harness, goal: str) -> list[dict[str, Any]]:
 def _feature_lander() -> dict[str, Any]:
     """Lands the feature PR itself under `feature_merge: auto`."""
     steps = [
-        _bash(f"gh pr ready {FEATURE_PR} && gh pr merge {FEATURE_PR} --merge"),
+        # One GitHub mutation per command (#1979).
+        _bash(f"gh pr ready {FEATURE_PR}"),
+        _after(OK, _bash(f"gh pr merge {FEATURE_PR} --merge")),
         _after(OK, _structured({"status": "merged", "summary": "feature merged"})),
     ]
     return _role("lander:feature", "lander", f"Feature PR: {FEATURE_PR}", steps)

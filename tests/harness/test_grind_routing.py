@@ -136,6 +136,11 @@ def _attach(parent: str, child: str) -> str:
     return f"gh api -X POST repos/o/r/issues/{parent}/sub_issues -F sub_issue_id={child}"
 
 
+def _attach_steps(parent: str, children: tuple[str, ...]) -> list[dict[str, Any]]:
+    """One write per command: the hook refuses chained GitHub mutations (#1979)."""
+    return [_after(OK, _bash(_attach(parent, c))) for c in children]
+
+
 def _verify(parent: str, children: tuple[str, ...]) -> str:
     """Both directions, as `/clud-issue`'s hierarchy mode verifies them."""
     return " && ".join(
@@ -171,7 +176,7 @@ def test_r1_prompt_with_three_deliverables_becomes_a_meta_with_three_children(
         _after(OK, _bash("gh issue create --title 'document' --body 'document the flag'")),
         # The meta issue comes only after every child exists (R11).
         _after(OK, _bash("gh issue create --title 'meta: verbose' --body 'Tracks #1, #2, #3'")),
-        _after(OK, _bash(" && ".join(_attach("4", c) for c in children))),
+        *_attach_steps("4", children),
         _after(OK, _bash(_verify("4", children))),
         _after(_saw('"number": 4'), {"text": "META_READY #4"}),
     ]
@@ -194,7 +199,7 @@ def test_r2_issue_list_gets_one_meta_and_nothing_else(harness: Harness) -> None:
     children = ("7", "8", "9")
     steps = [
         _bash("gh issue create --title 'meta: 7 8 9' --body 'Tracks #7, #8, #9'"),
-        _after(OK, _bash(" && ".join(_attach("10", c) for c in children))),
+        *_attach_steps("10", children),
         _after(OK, _bash(_verify("10", children))),
         _after(_saw('"number": 10'), {"text": "META_READY #10"}),
     ]
@@ -250,7 +255,7 @@ def test_r5_multi_part_issue_converted_on_consent(harness: Harness) -> None:
             OK,
             _bash("gh issue create --title 'meta: verbose mode' --body 'Tracks #1: #2, #3, #4'"),
         ),
-        _after(OK, _bash(" && ".join(_attach("5", c) for c in children))),
+        *_attach_steps("5", children),
         _after(OK, _bash(_verify("5", children))),
         _after(_saw('"number": 5'), _bash(f"gh issue comment 1 --body '{split}'")),
         _after(OK, {"text": "CONVERTED #5"}),

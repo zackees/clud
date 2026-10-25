@@ -663,8 +663,13 @@ class Harness:
                 child.expect(finished, timeout=timeout)
                 child.write("/exit\r")
                 if confirm_background_exit:
-                    child.expect("Background", timeout=15)
-                    child.write("\r")  # Confirm Exit and stop tasks, the default.
+                    # Claude Code asks only while a background task is still
+                    # live; a session whose tasks already finished exits at once.
+                    try:
+                        child.expect("Background", timeout=15)
+                        child.write("\r")  # Confirm Exit and stop tasks, the default.
+                    except EOFError:
+                        pass
                 code = child.wait(timeout=15)
                 output = child.output_text
             except Exception as error:
