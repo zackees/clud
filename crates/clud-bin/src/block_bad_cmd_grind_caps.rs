@@ -539,6 +539,34 @@ fn remote_ci_reason(role: &str, words: &[String]) -> Option<String> {
     }
 }
 
+/// #1339 item 8: the lander and integrator wait on CI only through
+/// `pr_merge_watch`, which judges the newest run per workflow and has a
+/// deadline; `gh run watch` and `gh pr checks --watch` have neither.
+fn native_watch_reason(role: &str, words: &[String]) -> Option<String> {
+    if !matches!(role, LANDER | INTEGRATOR) || program_name(&words[0]) != "gh" {
+        return None;
+    }
+    let stripped = strip_gh_repo_flag(words);
+    let args = &stripped[1..];
+    let sub = (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    );
+    let watch_flag = args
+        .iter()
+        .any(|w| w == "--watch" || w.starts_with("--watch="));
+    let watcher = match sub {
+        (Some("run"), Some("watch")) => "gh run watch",
+        (Some("pr"), Some("checks")) if watch_flag => "gh pr checks --watch",
+        (Some("run"), Some("view")) if watch_flag => "gh run view --watch",
+        _ => return None,
+    };
+    Some(format!(
+        "{role} may not run `{watcher}`: wait on CI with \
+         `\"$CLUD_EXE\" tool run github/pr_merge_watch.py <PR>` (run_in_background) instead (#1339)"
+    ))
+}
+
 /// Whether a command is a shell loop that runs the repo's lint or test script
 /// (`for i in 1 2 3; do bash test; done`, `until ./test; do :; done`), which
 /// reruns a deterministic failure instead of reading it (#1425). The flat
@@ -615,7 +643,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
                 .to_string(),
         );
     }
-    if let Some(reason) = remote_ci_reason(role, words) {
+    if let Some(reason) =
+        remote_ci_reason(role, words).or_else(|| native_watch_reason(role, words))
+    {
         return Some(reason);
     }
     // #1339: the read-only one-call git state is open to every role.
@@ -2043,6 +2073,31 @@ mod tests {
         let act = "act -W .github/workflows/ci.yml -j test --pull=false";
         assert!(!allowed(INTEGRATOR, act, &run(true, false)));
         assert!(allowed(INTEGRATOR, act, &run(true, true)));
+    }
+
+    /// #1339 item 8: `pr_merge_watch` is the only CI waiter.
+    #[test]
+    fn lander_and_integrator_refuse_native_ci_watchers() {
+        let facts = run(true, false);
+        for role in [LANDER, INTEGRATOR] {
+            for command in [
+                "gh run watch 99",
+                "gh pr checks 5 --watch",
+                "gh pr checks --watch=true 5",
+                "gh -R o/r pr checks 5 --watch",
+                "gh run view 99 --watch",
+            ] {
+                let reason = shell_reason(role, command, &facts);
+                assert!(
+                    reason
+                        .as_deref()
+                        .is_some_and(|r| r.contains("pr_merge_watch")),
+                    "{role}: {command}: {reason:?}"
+                );
+            }
+        }
+        assert!(allowed(LANDER, "gh pr checks 5", &facts));
+        assert!(allowed(LANDER, "gh run view 99 --log-failed", &facts));
     }
 
     #[test]
