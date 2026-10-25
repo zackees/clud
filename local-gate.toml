@@ -3,7 +3,7 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@bce9cf2d3b0801de82928e3ef33d2e87c433ceb1 ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@a340b7febb075f0fcfb68676f52a27d61e4f79b9 ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound

@@ -222,8 +222,8 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@bce9cf2d3b0801de82928e3ef33d2e87c433ceb1 ci-lint local-gate run
-uvx --from git+https://github.com/zackees/ci.yml@bce9cf2d3b0801de82928e3ef33d2e87c433ceb1 ci-lint local-gate push --sha <stamped-head>
+uvx --from git+https://github.com/zackees/ci.yml@a340b7febb075f0fcfb68676f52a27d61e4f79b9 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@a340b7febb075f0fcfb68676f52a27d61e4f79b9 ci-lint local-gate push --sha <stamped-head>
 ```
 
 The gate refuses an uncommitted tree. On a cold commit it invokes
@@ -532,6 +532,10 @@ admins can bypass the queue. So:
   merges cannot stack parallel `main` runs (#2048, as obs-rust/obs-studio's
   push build). The queue already tested each merged tree; nightly and
   SHA-pinned dispatch runs on `main` keep their own `run_id` groups.
+  Its `Default-branch reuse` step passes `--queue-evidence`: when the merged
+  tree differs from the PR head's (the queue merged a PR that was behind
+  `main`), the green `merge_group` run on that exact commit proves it, so
+  the push skips the lanes the queue just ran.
 - A queue ref names its base commit (`gh-readonly-queue/main/pr-<N>-<sha>`),
   so when `main` moves GitHub starts a new run per queued PR that no
   concurrency group pairs with the old one. The `cancel-superseded` job
