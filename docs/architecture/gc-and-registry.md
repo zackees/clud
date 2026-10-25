@@ -254,6 +254,12 @@ is **an error**, not a fallback — there is no read-only path in v1
   drops these rows (`forget_dangling_source_rows`). Only the row goes, since nothing is left on
   disk. The size banner names `clud gc prune all` as the one command that reclaims what is safe.
 
+  **A locked registry is retried, not given up on (#2095).** When `data.redb` is held by
+  another process at daemon start (typically a superseded daemon that never exited), the
+  worker answers GC ops with an error and retries the open every 30 s
+  (`spawn_deferred_registry_worker`). Before this, the daemon ran without GC for its whole
+  lifetime, so nothing was ever reclaimed and the size banners repeated on every exit.
+
   **The verdict is re-checked at delete time.** Decoupling put up to a tick between "this is
   clean and pushed" and `remove_dir_all`, and a developer can invalidate it in that window
   just by editing. So `reverify_before_delete` re-runs the verdict on the **purge-pool

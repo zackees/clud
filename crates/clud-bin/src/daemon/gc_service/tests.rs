@@ -8,6 +8,8 @@ use std::sync::Mutex;
 mod parallel;
 #[path = "tests/policy.rs"]
 mod policy;
+#[path = "tests/registry_retry.rs"]
+mod registry_retry;
 use policy::{restore_env_var, spawn_test_worker};
 
 // Serializes the tests in this module that share process-global state
