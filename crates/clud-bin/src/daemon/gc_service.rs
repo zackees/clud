@@ -352,6 +352,7 @@ fn spawn_registry_worker_with_live_cwds(
     )
 }
 
+#[cfg(test)]
 fn spawn_registry_worker_with_live_cwds_and_cadence(
     registry: Registry,
     live_cwds_provider: LiveCwdsProvider,
