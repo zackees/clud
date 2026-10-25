@@ -15,30 +15,13 @@ provisions the sysroot in .github/actions/setup-build and exports the
 target-scoped Cargo/cc-rs/linker env, then `soldr build --target <triple>`
 links against it.
 
-Only the link-producing `build` verb goes through `soldr build`. clippy, `cargo
-test --no-run` and maturin stay on the plain cargo front door: `soldr prepare`
-already exported the env they need, and `soldr <verb>` for an unknown verb falls
-into soldr's tool-fetch mode (it would try to resolve "test" on crates.io).
-
-Working around `vendor/whisper-rs-sys/build.rs`
-----------------------------------------------
-That build script uses `cfg!(target_os = ...)`, which evaluates against the
-**host**, not the target. Two of those checks break cross-compiles, and both are
-fixed from the environment rather than by patching vendored source:
-
-  build.rs:212-215  `cfg!(target_os = "windows")` gates `/utf-8` and
-                    `cargo:rustc-link-lib=advapi32`. Cross to windows-msvc
-                    silently drops advapi32 -> undefined symbols at link.
-                    Fix: inject the link flag via target-scoped RUSTFLAGS,
-                    preserving soldr's Xwin SDK /LIBPATH flags.
-  build.rs:342      `cfg!(target_os = "macos")` gates linking `ggml-blas`.
-                    CMake still *builds* it (Apple BLAS defaults ON,
-                    ggml/CMakeLists.txt:92-95) but the flag is never emitted.
-                    Fix: GGML_BLAS=OFF. The hardcoded Accelerate link directive
-                    still requires the SDK that `soldr prepare` provisions.
-
-`build.rs:298-306` forwards any `WHISPER_*` / `GGML_*` / `CMAKE_*` env var
-straight into `cmake -D`, which is what makes both fixes possible from CI.
+The link-producing `build` verb goes through `soldr build`; clippy, `cargo test
+--no-run` and doc tests go through `soldr cargo <verb> --target <triple>`, the
+target hooks setup-soldr advertises for every canonical triple (setup-soldr#443,
+#648). Neither path reconstructs compiler, SDK or linker state: `soldr prepare`
+exported it, and the only clud-specific addition is MSVC's `advapi32.lib` link
+argument (see `target_env`). Wheels still run maturin from the dev venv
+(`ci.env.maturin_argv`); moving them onto the PEP 517 hook is #2139.
 
 Design: docs/architecture/ci.md
 """
@@ -105,20 +88,11 @@ from ci import cargo_messages, process  # noqa: E402 - must follow the guard abo
 
 ROOT = Path(__file__).resolve().parent.parent
 
-CMAKE_PROCESSOR = {"aarch64": "aarch64", "x86_64": "x86_64"}
 PACKAGE_MANAGER = "cargo"
-
-
-def _arch(target: str) -> str:
-    return target.split("-", 1)[0]
 
 
 def _is_windows(target: str) -> bool:
     return "windows" in target
-
-
-def _is_darwin(target: str) -> bool:
-    return "apple" in target
 
 
 def _run_argv(argv: list[str]) -> list[str]:
@@ -133,122 +107,50 @@ def _run_argv(argv: list[str]) -> list[str]:
     return ["bash", "-c", 'ulimit -v 13000000; exec "$@"', "clud-xbuild", *argv]
 
 
-def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:  # noqa: C901
+def target_env(target: str, env: dict[str, str]) -> dict[str, str]:
+    """The prepared env plus clud's one addition: MSVC links `advapi32.lib`.
+
+    Setting generic RUSTFLAGS would override the target-scoped /LIBPATH
+    arguments `soldr prepare` exports, leaving lld-link unable to find even
+    kernel32.lib. Append to the existing target-specific value instead, and
+    migrate any pre-existing generic flags: leaving RUSTFLAGS set would make
+    Cargo ignore the target-specific value.
+    """
     env = env.copy()
-    # Cross targets default to the checked-in bindings when their SDK headers
-    # are unavailable. Windows soldr overrides this below once it finds the
-    # target-scoped Xwin header flags exported by `soldr prepare`.
-    if strategy != "native":
-        env["WHISPER_DONT_GENERATE_BINDINGS"] = "1"
-        env["GGML_NATIVE"] = "OFF"  # no -march=native for a foreign CPU
-        env["CMAKE_SYSTEM_PROCESSOR"] = CMAKE_PROCESSOR.get(_arch(target), _arch(target))
-
-    if _is_darwin(target):
-        # See module docstring, build.rs:342.
-        env["GGML_BLAS"] = "OFF"
-        env["GGML_METAL"] = "OFF"
-        # SDKROOT is exported by `soldr prepare --target <apple-triple>
-        # --github-env "$GITHUB_ENV"` in .github/actions/setup-build; CMake
-        # needs the same path under its own variable name.
-        sdk = env.get("SDKROOT", "")
-        if sdk:
-            env["CMAKE_OSX_SYSROOT"] = sdk
-        env["CMAKE_SYSTEM_NAME"] = "Darwin"
-        env["CMAKE_INSTALL_NAME_TOOL"] = "llvm-install-name-tool"
-    elif _is_windows(target) and strategy == "soldr":
-        env["CMAKE_SYSTEM_NAME"] = "Windows"
-        env["CC"] = "clang-cl"
-        env["CXX"] = "clang-cl"
-        target_suffix = target.replace("-", "_")
-        bindgen_key = f"BINDGEN_EXTRA_CLANG_ARGS_{target_suffix}"
-        bindgen_args = env.get(f"BINDGEN_EXTRA_CLANG_ARGS_{target}") or env.get(bindgen_key)
-        if not bindgen_args:
-            target_cflags = env.get(f"CFLAGS_{target_suffix}", "")
-            include_args = [
-                f"-I{arg.removeprefix('/imsvc')}"
-                for arg in shlex.split(target_cflags)
-                if arg.startswith("/imsvc") and arg != "/imsvc"
-            ]
-            if include_args:
-                bindgen_args = shlex.join(include_args)
-                env[bindgen_key] = bindgen_args
-        if bindgen_args:
-            env.pop("WHISPER_DONT_GENERATE_BINDINGS", None)
-        # clang-cl disables C++ exceptions unless an /EH mode is selected,
-        # while ggml's gguf.cpp uses try/catch. Keep this in CXXFLAGS so the
-        # cc/cmake crates merge it with soldr's target-specific SDK includes.
-        cxx_flags = env.get("CXXFLAGS", "")
-        env["CXXFLAGS"] = f"{cxx_flags} /EHsc".strip()
-        # CMake's executable compiler probe needs Windows rc/mt tools that are
-        # not part of this Linux-hosted toolchain. Whisper builds static libs,
-        # so a static-library probe validates the compiler without those tools.
-        env["CMAKE_TRY_COMPILE_TARGET_TYPE"] = "STATIC_LIBRARY"
-    elif "linux" in target:
-        # Blessed soldr Linux prep (and the legacy zigbuild path) cross to a
-        # Linux target from a Linux host; CMake still needs the target OS named.
-        # soldr's catalogue toolchain supplies the pinned glibc-2.17 sysroot and
-        # compiler, so no host headers/libraries leak into the artifact.
-        env["CMAKE_SYSTEM_NAME"] = "Linux"
-
-    if _is_windows(target):
-        # See module docstring, build.rs:212-215.
-        # Setting generic RUSTFLAGS here would override the target-scoped
-        # /LIBPATH arguments exported by `soldr prepare`, leaving lld-link
-        # unable to find even kernel32.lib. Append our missing library to the
-        # existing target-specific value instead. Migrate any pre-existing
-        # generic flags too: leaving RUSTFLAGS set would make Cargo ignore the
-        # target-specific value we need to preserve.
-        rustflags_key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
-        generic_rustflags = env.pop("RUSTFLAGS", "")
-        target_rustflags = env.get(rustflags_key, "")
-        if "CARGO_ENCODED_RUSTFLAGS" in env:
-            # soldr >= 0.8.30 exports the prepared MSVC link configuration --
-            # `-Clinker-flavor=lld-link` plus the SDK /LIBPATH arguments --
-            # through CARGO_ENCODED_RUSTFLAGS rather than the target-scoped
-            # variable. 0.8.28 used the target-scoped one.
-            #
-            # This used to raise. That was right when the SDK paths lived
-            # *only* in the target-scoped variable: CARGO_ENCODED_RUSTFLAGS
-            # outranks both RUSTFLAGS and target.<triple>.rustflags, so its
-            # mere presence meant those paths were about to be dropped and
-            # lld-link would fail to find even kernel32.lib. Now that soldr
-            # puts them in the winning variable, refusing to proceed rejects
-            # the correct configuration.
-            #
-            # Merging instead of failing is also strictly safer than either
-            # branch alone: if a future toolchain sets the encoded variable
-            # *without* the SDK paths, folding the target-scoped value in
-            # preserves them rather than erroring out.
-            encoded = [part for part in env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if part]
-            encoded += shlex.split(target_rustflags)
-            encoded += shlex.split(generic_rustflags)
-            encoded.append("-Clink-arg=advapi32.lib")
-            env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(encoded)
-            # Drop the now-shadowed variable so nothing reads a stale value.
-            env.pop(rustflags_key, None)
-        else:
-            env[rustflags_key] = " ".join(
-                filter(
-                    None,
-                    (target_rustflags, generic_rustflags, "-C link-arg=advapi32.lib"),
-                )
-            )
+    if not _is_windows(target):
+        return env
+    rustflags_key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
+    generic_rustflags = env.pop("RUSTFLAGS", "")
+    target_rustflags = env.get(rustflags_key, "")
+    if "CARGO_ENCODED_RUSTFLAGS" in env:
+        # soldr >= 0.8.30 exports the prepared MSVC link configuration --
+        # `-Clinker-flavor=lld-link` plus the SDK /LIBPATH arguments -- through
+        # CARGO_ENCODED_RUSTFLAGS, which outranks both RUSTFLAGS and
+        # target.<triple>.rustflags. Fold the target-scoped value in rather
+        # than dropping it, so a toolchain that sets the encoded variable
+        # without the SDK paths still keeps them.
+        encoded = [part for part in env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if part]
+        encoded += shlex.split(target_rustflags)
+        encoded += shlex.split(generic_rustflags)
+        encoded.append("-Clink-arg=advapi32.lib")
+        env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(encoded)
+        # Drop the now-shadowed variable so nothing reads a stale value.
+        env.pop(rustflags_key, None)
+    else:
+        env[rustflags_key] = " ".join(
+            filter(None, (target_rustflags, generic_rustflags, "-C link-arg=advapi32.lib"))
+        )
     return env
 
 
 def build_env(target: str, strategy: str) -> dict[str, str]:
     from ci.env import build_env as base_env
 
-    env = whisper_env(target, strategy, base_env())
+    env = target_env(target, base_env())
     env["CARGO_BUILD_TARGET"] = target
     # Fresh-checkout CI has no prior incremental state to reuse; incremental
     # only costs compile time and target/ size here.
     env.setdefault("CARGO_INCREMENTAL", "0")
-    if strategy == "zigbuild":
-        # cargo-zigbuild delegates linking to zig; soldr's fast-linker shim
-        # would otherwise force host clang/mold, which cannot see zig's
-        # cross sysroot. Same reasoning as ci/build_wheel.py:24-31.
-        env["SOLDR_LINKER"] = "default"
     return env
 
 
@@ -272,10 +174,10 @@ def is_soldr_owned(target: str) -> bool:
 def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     """Return the cargo argv for this strategy.
 
-    clippy is deliberately NOT routed through the blessed `soldr build` surface:
-    it does not link, so it needs the target sysroot only for `cfg` resolution,
-    which plain `cargo clippy --target` already provides on the env `soldr
-    prepare` exported.
+    Under `soldr`, `build` is `soldr build` and every other verb is setup-
+    soldr's target hook `soldr cargo <verb> --target <triple>` (#648), so no
+    cross operation falls through to a bare `cargo`. `native` (local
+    development only) stays on plain cargo.
     """
     verb = subcommand[0]
     if strategy == "zigbuild" and is_soldr_owned(target):
@@ -293,6 +195,8 @@ def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
         # The blessed cross surface. Everything else under this strategy rides
         # on the env `soldr prepare` exported -- see the module docstring.
         return ["soldr", "build", *subcommand[1:], "--target", target]
+    if strategy == "soldr":
+        return ["soldr", "cargo", *subcommand, "--target", target]
     return ["cargo", *subcommand, "--target", target]
 
 
@@ -331,8 +235,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
     """Build the workspace binaries and, optionally, the test harnesses.
 
     Both happen in one job against one `target/` directory, so the dependency
-    graph -- including the whisper.cpp static libs, which dominate the build -- is
-    compiled exactly once. The old layout spread these across three machines.
+    graph is compiled exactly once. The old layout spread these across three
+    machines.
     """
     env = build_env(args.target, args.strategy)
     profile_args = ["--release"] if args.profile == "release" else []

@@ -51,9 +51,11 @@ def test_soldr_strategy_routes_linking_builds_through_blessed_surface() -> None:
     ]
 
 
-def test_soldr_strategy_keeps_non_build_verbs_on_prepared_cargo_env() -> None:
+def test_soldr_strategy_routes_non_build_verbs_through_the_target_hook() -> None:
+    """setup-soldr's target hooks (#648): `soldr cargo <verb> --target`."""
     target = "aarch64-apple-darwin"
     assert xbuild.cargo_argv(["test", "--workspace", "--no-run"], target, "soldr") == [
+        "soldr",
         "cargo",
         "test",
         "--workspace",
@@ -290,45 +292,38 @@ def test_cargo_target_dir_preserves_absolute_and_default_paths(monkeypatch, tmp_
     )
 
 
-def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:
-    """Non-linking verbs ride the plain cargo front door on the env `soldr
-    prepare` exported -- same as Apple/MSVC under the soldr strategy."""
-    target = "aarch64-unknown-linux-gnu"
-    argv = xbuild.cargo_argv(["test", "--workspace", "--no-run"], target, "soldr")
-    assert argv == ["cargo", "test", "--workspace", "--no-run", "--target", target]
+def test_no_soldr_cross_verb_falls_through_to_bare_cargo() -> None:
+    """Every verb clud runs under the soldr strategy uses soldr's surface (#648)."""
+    for target in ("aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "x86_64-apple-darwin"):
+        for verb in (["clippy", "--workspace"], ["test", "--no-run"], ["test", "--doc"]):
+            argv = xbuild.cargo_argv(verb, target, "soldr")
+            assert argv[:3] == ["soldr", "cargo", verb[0]], argv
+            assert argv[-2:] == ["--target", target]
 
 
-def test_darwin_soldr_env_forwards_the_prepared_sdk_to_cmake() -> None:
-    env = xbuild.whisper_env(
-        "aarch64-apple-darwin",
-        "soldr",
-        {"SDKROOT": "/opt/soldr/MacOSX.sdk"},
-    )
-    assert env["SDKROOT"] == "/opt/soldr/MacOSX.sdk"
-    assert env["CMAKE_OSX_SYSROOT"] == "/opt/soldr/MacOSX.sdk"
-    assert env["CMAKE_SYSTEM_NAME"] == "Darwin"
-    assert env["CMAKE_INSTALL_NAME_TOOL"] == "llvm-install-name-tool"
-    assert env["GGML_BLAS"] == "OFF"
-    assert env["GGML_METAL"] == "OFF"
+def test_native_strategy_stays_on_plain_cargo() -> None:
+    argv = xbuild.cargo_argv(["clippy"], "x86_64-unknown-linux-gnu", "native")
+    assert argv == ["cargo", "clippy", "--target", "x86_64-unknown-linux-gnu"]
 
 
-def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
+def test_non_windows_targets_get_the_prepared_env_unchanged() -> None:
+    prepared = {"SDKROOT": "/opt/soldr/MacOSX.sdk", "RUSTFLAGS": "-C debuginfo=0"}
+    for target in ("aarch64-apple-darwin", "aarch64-unknown-linux-gnu"):
+        assert xbuild.target_env(target, prepared) == prepared
+
+
+def test_windows_env_keeps_the_advapi_contract() -> None:
     rustflags_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
-    env = xbuild.whisper_env(
+    env = xbuild.target_env(
         "x86_64-pc-windows-msvc",
-        "soldr",
         {
             "RUSTFLAGS": "-C debuginfo=0 -C opt-level=3",
             rustflags_key: ("-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64 -C opt-level=1"),
         },
     )
-    assert env["CMAKE_SYSTEM_NAME"] == "Windows"
-    assert env["CC"] == "clang-cl"
-    assert env["CXX"] == "clang-cl"
-    assert env["CMAKE_TRY_COMPILE_TARGET_TYPE"] == "STATIC_LIBRARY"
-    assert "RC" not in env
-    assert "CMAKE_RC_COMPILER" not in env
-    assert "CMAKE_MT" not in env
+    # No compiler or CMake state is reconstructed: soldr prepare owns it.
+    assert not {"CC", "CXX", "CXXFLAGS"} & set(env)
+    assert not any(key.startswith(("CMAKE_", "WHISPER_", "GGML_", "BINDGEN_")) for key in env)
     assert "RUSTFLAGS" not in env
     assert env[rustflags_key] == (
         "-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64 "
@@ -354,9 +349,8 @@ def test_windows_soldr_env_preserves_encoded_sdk_paths_from_soldr_0_8_30() -> No
             "-Clink-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64",
         ]
     )
-    env = xbuild.whisper_env(
+    env = xbuild.target_env(
         "x86_64-pc-windows-msvc",
-        "soldr",
         {"CARGO_ENCODED_RUSTFLAGS": encoded},
     )
     parts = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
@@ -374,9 +368,8 @@ def test_windows_soldr_env_folds_shadowed_rustflags_into_encoded() -> None:
     paths would otherwise silently lose them.
     """
     rustflags_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
-    env = xbuild.whisper_env(
+    env = xbuild.target_env(
         "x86_64-pc-windows-msvc",
-        "soldr",
         {
             "CARGO_ENCODED_RUSTFLAGS": "-Clinker-flavor=lld-link",
             "RUSTFLAGS": "-C debuginfo=0",
@@ -390,53 +383,6 @@ def test_windows_soldr_env_folds_shadowed_rustflags_into_encoded() -> None:
     # Both shadowed sources are removed so nothing reads a stale value.
     assert "RUSTFLAGS" not in env
     assert rustflags_key not in env
-
-
-def test_windows_soldr_bindgen_uses_target_sdk_headers_when_available() -> None:
-    cflags_key = "CFLAGS_x86_64_pc_windows_msvc"
-    bindgen_key = "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc"
-    windows = xbuild.whisper_env(
-        "x86_64-pc-windows-msvc",
-        "soldr",
-        {
-            cflags_key: (
-                "/imsvc/opt/xwin/crt/include "
-                "/imsvc/opt/xwin/sdk/include/ucrt "
-                "/imsvc/opt/xwin/sdk/include/cppwinrt"
-            )
-        },
-    )
-    assert "WHISPER_DONT_GENERATE_BINDINGS" not in windows
-    assert windows[bindgen_key] == (
-        "-I/opt/xwin/crt/include -I/opt/xwin/sdk/include/ucrt -I/opt/xwin/sdk/include/cppwinrt"
-    )
-
-    no_sdk = xbuild.whisper_env("x86_64-pc-windows-msvc", "soldr", {})
-    assert no_sdk["WHISPER_DONT_GENERATE_BINDINGS"] == "1"
-    assert bindgen_key not in no_sdk
-
-    darwin = xbuild.whisper_env("aarch64-apple-darwin", "soldr", {})
-    assert darwin["WHISPER_DONT_GENERATE_BINDINGS"] == "1"
-    assert bindgen_key not in darwin
-
-
-def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
-    windows = xbuild.whisper_env(
-        "x86_64-pc-windows-msvc",
-        "soldr",
-        {"CXXFLAGS": "-g0"},
-    )
-    assert windows["CXXFLAGS"] == "-g0 /EHsc"
-    assert "CMAKE_CXX_FLAGS" not in windows
-
-    other_strategies = (
-        ("x86_64-pc-windows-msvc", "native"),
-        ("aarch64-apple-darwin", "soldr"),
-        ("aarch64-unknown-linux-gnu", "soldr"),
-    )
-    for target, strategy in other_strategies:
-        env = xbuild.whisper_env(target, strategy, {"CXXFLAGS": "-g0"})
-        assert env["CXXFLAGS"] == "-g0"
 
 
 def test_debuginfo_is_staged_outside_dist_so_it_cannot_reach_pypi(
