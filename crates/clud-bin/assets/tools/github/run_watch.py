@@ -18,7 +18,9 @@ in the background and wait for its exit; it prints one line per job when the
 run settles.
 
 Fails fast: the first job that concludes failure, cancelled or timed_out ends
-the watch. `--cancel` then also cancels the rest of the run.
+the watch, naming each failed job, its failed step(s) and the tail of its
+failed-step log. `--cancel` then also cancels the rest of the run.
+`--interval` is clamped to at least 30 seconds to spare the API rate limit.
 
 Run through clud's `tool run` subcommand:
   "$CLUD_EXE" tool run github/run_watch.py -- 38310141872 --repo OWNER/REPO
@@ -48,6 +50,8 @@ EXIT_FAILED = 1
 EXIT_GH = 3
 EXIT_USAGE = 64
 EXIT_TIMEOUT = 124
+MIN_INTERVAL = 30.0
+LOG_TAIL_LINES = 40
 
 
 def gh(*args: str) -> tuple[int, str, str]:
@@ -89,6 +93,41 @@ def render_jobs(jobs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def failed_steps(job: dict) -> list[str]:
+    """Pure: names of the steps in `job` that concluded badly."""
+    return [
+        step.get("name", "?")
+        for step in job.get("steps") or []
+        if (step.get("conclusion") or "") in FAILED
+    ]
+
+
+def log_tail(log: str, lines: int = LOG_TAIL_LINES) -> str:
+    """Pure: the last `lines` non-empty lines of a `--log-failed` dump."""
+    kept = [line for line in log.splitlines() if line.strip()]
+    return "\n".join(kept[-lines:])
+
+
+def report_failed_job(job: dict, repo: str | None) -> None:
+    """Print a failed job's failed steps and the tail of its failed-step log."""
+    steps = failed_steps(job)
+    print(f"FAILED job: {job.get('name', '?')}")
+    print(f"  failed step(s): {', '.join(steps) if steps else '(none reported)'}")
+    job_id = job.get("databaseId")
+    if not job_id:
+        return
+    args = ["run", "view", "--job", str(job_id), "--log-failed"]
+    if repo:
+        args += ["--repo", repo]
+    code, out, err = gh(*args)
+    tail = log_tail(out) if code == 0 else ""
+    if tail:
+        print(f"  --- last {LOG_TAIL_LINES} lines of the failed-step log ---")
+        print(tail)
+    else:
+        print(f"  (failed-step log unavailable: {err.strip() or f'gh exit {code}'})")
+
+
 class _UsageParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:  # type: ignore[override]
         self.print_usage(sys.stderr)
@@ -103,7 +142,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--timeout", type=float, default=3300.0)
     p.add_argument("--interval", type=float, default=30.0)
     p.add_argument("--cancel", action="store_true", help="cancel the run on the first failed job")
-    return p.parse_args(argv)
+    ns = p.parse_args(argv)
+    ns.interval = max(MIN_INTERVAL, ns.interval)
+    return ns
 
 
 def fetch(run_id: int, repo: str | None) -> dict | None:
@@ -142,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
                     return EXIT_OK
                 names = ", ".join(job.get("name", "?") for job in failed) or "the run"
                 print(f"RED    run {ns.run_id}: {names} failed")
+                for job in failed:
+                    report_failed_job(job, ns.repo)
                 if ns.cancel and run.get("status") != "completed":
                     cancel = ["run", "cancel", str(ns.run_id)]
                     if ns.repo:
