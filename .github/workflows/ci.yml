@@ -167,7 +167,7 @@ jobs:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           repository: zackees/ci.yml
-          ref: a340b7febb075f0fcfb68676f52a27d61e4f79b9
+          ref: e84ffcd0b49662bcc44f3ba99b25346b4b8cf959
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
@@ -343,7 +343,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: zackees/ci.yml
-          ref: a340b7febb075f0fcfb68676f52a27d61e4f79b9
+          ref: e84ffcd0b49662bcc44f3ba99b25346b4b8cf959
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
@@ -737,7 +737,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$RESULTS" >needs.json
           printf '%s\n' "${REUSE_EVIDENCE:-null}" >reuse-check.json
-          uvx --from git+https://github.com/zackees/ci.yml@a340b7febb075f0fcfb68676f52a27d61e4f79b9 ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --attested-workflow ci.yml --event "$GITHUB_EVENT_PATH"
+          uvx --from git+https://github.com/zackees/ci.yml@e84ffcd0b49662bcc44f3ba99b25346b4b8cf959 ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --attested-workflow ci.yml --event "$GITHUB_EVENT_PATH"
 
   # ---------------------------------------------------------- nightly-report --
   # Turns the nightly run's verdict into one tracking issue (#1849): opened
