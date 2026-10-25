@@ -147,6 +147,16 @@ report a nonblocking diagnostic to the agent must return valid JSON with
 `.clud/hooks.json` gives clud control of execution, subject to the Tier B
 contract below.
 
+For hooks clud runs (`.clud/hooks.json`, Tier B), clud does deliver the
+failure: a hook that cannot start, times out or exits non-2 still lets the
+call through, and `clud_hooks_run` records a notice naming the command and
+quoting the first and last stderr lines (uv's headline and its actual cause).
+`block_bad_cmd_hook_notice` collapses identical notices into one counted
+line, keeps only the messages this session has not been shown (a ledger
+under the state dir's `hook-notices/`; a state error shows them rather than
+hiding them), and adds the rest to the call's final output as
+`additionalContext`, beside any decision that output already carries.
+
 **Migrating means moving, not copying.** A command left in
 `.claude/settings.json` *and* declared here runs twice, and the copy the
 harness fires is the unrooted one — the exact failure the declaration was

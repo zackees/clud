@@ -209,6 +209,48 @@ fn a_nonzero_exit_that_is_not_two_does_not_block() {
 }
 
 #[test]
+fn a_non_blocking_failure_becomes_a_notice_quoting_the_root_cause() {
+    // #1739: uv prints a generic headline first and the cause last; the
+    // harness shows only the first line, and never to the agent.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let body = "import sys\n\
+        print('x No solution found when resolving dependencies', file=sys.stderr)\n\
+        print('  middle detail', file=sys.stderr)\n\
+        print('there is no version of fbuild==2.5.31', file=sys.stderr)\n\
+        sys.exit(1)\n";
+    let command = python_hook(root, "uv_like.py", body);
+
+    let outcome = run(&[entry(command.clone(), 60)], root, "{}");
+
+    assert_eq!(outcome.deny_reason, None);
+    let [notice] = outcome.notices.as_slice() else {
+        panic!("one notice expected: {:?}", outcome.notices);
+    };
+    assert!(notice.contains(&format!("{command:?}")), "{notice}");
+    assert!(notice.contains("exited 1"), "{notice}");
+    assert!(notice.contains("No solution found"), "{notice}");
+    assert!(
+        notice.contains("there is no version of fbuild==2.5.31"),
+        "{notice}"
+    );
+    assert!(!notice.contains("middle detail"), "{notice}");
+}
+
+#[test]
+fn passing_and_blocking_hooks_leave_no_notice() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let ok = python_hook(root, "ok.py", "import sys\nsys.exit(0)\n");
+    let stop = python_hook(root, "stop.py", "import sys\nsys.exit(2)\n");
+
+    let outcome = run(&[entry(ok, 60), entry(stop, 60)], root, "{}");
+
+    assert!(outcome.deny_reason.is_some());
+    assert!(outcome.notices.is_empty(), "{:?}", outcome.notices);
+}
+
+#[test]
 fn a_hook_that_cannot_start_is_survivable() {
     let tmp = TempDir::new().unwrap();
 
@@ -272,5 +314,13 @@ fn a_hook_that_overruns_its_timeout_fails_open() {
             .any(|message| message.contains("clud_hook_timeout")),
         "{:?}",
         outcome.log_messages
+    );
+    assert!(
+        outcome
+            .notices
+            .iter()
+            .any(|notice| notice.contains("timed out after 2s")),
+        "{:?}",
+        outcome.notices
     );
 }
