@@ -11,6 +11,10 @@ from tests.harness.harness import Harness
 MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
+@pytest.mark.xfail(
+    reason="#2152: the interactive surface records no tool hooks on Claude Code 2.1.306",
+    strict=False,
+)
 @pytest.mark.timeout(180)
 def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> None:
     script = {
