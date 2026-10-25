@@ -54,6 +54,10 @@ pub struct HookRunOutcome {
     pub deny_stdout: Option<String>,
     /// Diagnostics for the hook log; never fatal.
     pub log_messages: Vec<String>,
+    /// One line per hook that failed without blocking (could not start,
+    /// timed out, exited non-2), for the agent's context (#1739): the
+    /// harness never shows it the stderr of a hook that let the call through.
+    pub notices: Vec<String>,
 }
 
 /// Run every `entry` in order, rooted at `repo_root`, feeding each the hook
@@ -68,6 +72,7 @@ pub fn run_hooks(entries: &[&HookEntry], repo_root: &Path, payload: &str) -> Hoo
         match run_one(entry, repo_root, payload) {
             Ok(result) => {
                 outcome.log_messages.extend(result.log_messages);
+                outcome.notices.extend(result.notice);
                 if result.blocked {
                     outcome.deny_reason = Some(result.reason);
                     outcome.deny_stdout = result.stdout;
@@ -86,6 +91,9 @@ pub fn run_hooks(entries: &[&HookEntry], repo_root: &Path, payload: &str) -> Hoo
                     entry.command
                 );
                 outcome.log_messages.push(message);
+                outcome
+                    .notices
+                    .push(failure_notice(entry, &format!("could not run ({error})"), ""));
             }
         }
     }
@@ -97,6 +105,7 @@ struct OneResult {
     reason: String,
     stdout: Option<String>,
     log_messages: Vec<String>,
+    notice: Option<String>,
 }
 
 /// Whether writing the payload failed only because the hook had already gone.
@@ -164,6 +173,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
         Ok(code) => code,
         Err(error) => {
             let _ = process.kill();
+            let what = format!("timed out after {}s", entry.timeout_secs);
             return Ok(OneResult {
                 blocked: false,
                 reason: String::new(),
@@ -172,6 +182,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
                     "clud_hook_timeout command={:?} after={}s error={error}",
                     entry.command, entry.timeout_secs
                 )],
+                notice: Some(failure_notice(entry, &what, &stderr)),
             });
         }
     };
@@ -186,6 +197,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
             reason: String::new(),
             stdout: None,
             log_messages,
+            notice: None,
         });
     }
     if exit_code != BLOCKING_EXIT_CODE {
@@ -201,6 +213,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
             reason: String::new(),
             stdout: None,
             log_messages,
+            notice: Some(failure_notice(entry, &format!("exited {exit_code}"), &stderr)),
         });
     }
 
@@ -211,6 +224,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
         reason,
         stdout: (!stdout.trim().is_empty()).then(|| stdout.clone()),
         log_messages,
+        notice: None,
     })
 }
 
@@ -229,6 +243,33 @@ fn blocking_reason(entry: &HookEntry, stderr: &str, stdout: &str) -> String {
     }
     format!(
         "Blocked by the project hook {:?} (declared in .clud/hooks.json), which exited {BLOCKING_EXIT_CODE} without explaining why.",
+        entry.command
+    )
+}
+
+/// Longest stderr line a notice quotes, so one runaway line cannot flood the
+/// agent's context.
+const NOTICE_LINE_CHARS: usize = 300;
+
+/// The agent-facing line for a hook that failed without blocking (#1739).
+///
+/// Quotes the first and the last non-empty stderr lines: tools such as uv put
+/// a generic headline first and the actual cause (`there is no version of
+/// pkg==1.2.3`) last, and the harness's own rendering keeps only the first.
+fn failure_notice(entry: &HookEntry, what: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let clip = |line: &str| line.chars().take(NOTICE_LINE_CHARS).collect::<String>();
+    let detail = match lines.as_slice() {
+        [] => String::new(),
+        [only] => format!(": {}", clip(only)),
+        [first, .., last] => format!(": {} ... {}", clip(first), clip(last)),
+    };
+    format!(
+        "project hook {:?} {what} and did not block the call{detail}",
         entry.command
     )
 }

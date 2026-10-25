@@ -386,6 +386,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
                 if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
                     return code;
                 }
+                print_hook_notice(event, &payload);
             }
         }
         return 0;
@@ -503,6 +504,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
                 return code;
             }
+            print_hook_notice(event, &payload);
         }
         if event == PRE_TOOL_USE_EVENT {
             capture_git_paths_without_policy(&payload);
@@ -876,7 +878,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             return block_bad_cmd_gate::gate_deny("gate check requires object-shaped tool_input");
         };
         updated["command"] = Value::String(command);
-        println!("{}", allow_with_updated_input_json(updated));
+        let output = with_hook_notice(allow_with_updated_input_json(updated), event, &payload);
+        println!("{output}");
         return 0;
     }
 
@@ -933,7 +936,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             );
             ask_with_updated_input_json(updated_input)
         };
-        println!("{decision}");
+        println!("{}", with_hook_notice(decision, event, &payload));
     }
 
     // zackees/clud#532: the command is actually going to run, so any git
@@ -958,7 +961,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             );
         };
         *command = Value::String(rewritten);
-        println!("{}", allow_with_updated_input_json(updated));
+        let output = with_hook_notice(allow_with_updated_input_json(updated), event, &payload);
+        println!("{output}");
         return 0;
     }
 
@@ -969,16 +973,19 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         && block_bad_cmd_rm_redirect::rm_tool_only(&payload.command)
     {
         append_log("allowed: safe-rm only");
-        println!(
-            "{}",
-            allow_json("safe-rm: trash by default, limited to this profile's roots")
-        );
+        let output = allow_json("safe-rm: trash by default, limited to this profile's roots");
+        println!("{}", with_hook_notice(output, event, &payload));
         return 0;
     }
 
     if let Some(note) = verify_note {
         append_log("allowed with verify-ratio note");
-        println!("{}", block_bad_cmd_verify_ratio::context_json(&note));
+        let output = block_bad_cmd_verify_ratio::context_json(&note);
+        println!("{}", with_hook_notice(output, event, &payload));
+        return 0;
+    }
+    if print_hook_notice(event, &payload) {
+        append_log("allowed with project-hook failure notice");
         return 0;
     }
     append_log("allowed");
@@ -1506,6 +1513,7 @@ fn declared_hook_denial(
         }
         let outcome = crate::clud_hooks_run::run_hooks(&entries, &target.path, raw_payload);
         run_log.extend(outcome.log_messages);
+        block_bad_cmd_hook_notice::stash(outcome.notices);
         if let Some(reason) = outcome.deny_reason {
             let mut log_messages = skip_log;
             log_messages.extend(run_log);
@@ -3794,6 +3802,28 @@ mod block_bad_cmd_repeat;
 
 #[path = "block_bad_cmd_verify_ratio.rs"]
 mod block_bad_cmd_verify_ratio;
+
+#[path = "block_bad_cmd_hook_notice.rs"]
+mod block_bad_cmd_hook_notice;
+
+/// Print this call's pending project-hook failure notice as the call's only
+/// output (#1739); whether there was one.
+fn print_hook_notice(event: &str, payload: &HookPayloadView) -> bool {
+    let Some(notice) = block_bad_cmd_hook_notice::take(payload.session_id.as_deref()) else {
+        return false;
+    };
+    println!("{}", block_bad_cmd_hook_notice::merge(Value::Null, event, &notice));
+    true
+}
+
+/// `output` carrying this call's pending project-hook failure notice, if any
+/// (#1739).
+fn with_hook_notice(output: Value, event: &str, payload: &HookPayloadView) -> Value {
+    match block_bad_cmd_hook_notice::take(payload.session_id.as_deref()) {
+        Some(notice) => block_bad_cmd_hook_notice::merge(output, event, &notice),
+        None => output,
+    }
+}
 
 #[path = "block_bad_cmd_loop_stop.rs"]
 mod block_bad_cmd_loop_stop;
