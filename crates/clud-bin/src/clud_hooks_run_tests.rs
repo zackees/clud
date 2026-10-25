@@ -230,7 +230,10 @@ fn a_non_blocking_failure_becomes_a_notice_quoting_the_root_cause() {
     assert!(notice.contains(&format!("{command:?}")), "{notice}");
     assert!(notice.contains("exited 1"), "{notice}");
     assert!(notice.contains("No solution found"), "{notice}");
-    assert!(notice.contains("there is no version of fbuild==2.5.31"), "{notice}");
+    assert!(
+        notice.contains("there is no version of fbuild==2.5.31"),
+        "{notice}"
+    );
     assert!(!notice.contains("middle detail"), "{notice}");
 }
 

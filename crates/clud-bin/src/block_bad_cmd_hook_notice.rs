@@ -60,9 +60,10 @@ fn digest(text: &str) -> String {
 }
 
 fn session_file(state_dir: &Path, session_id: &str) -> PathBuf {
-    state_dir
-        .join(DIR_NAME)
-        .join(format!("{}.json", digest(&format!("session\0{session_id}"))))
+    state_dir.join(DIR_NAME).join(format!(
+        "{}.json",
+        digest(&format!("session\0{session_id}"))
+    ))
 }
 
 /// The messages in `messages` this session has not been shown, recording

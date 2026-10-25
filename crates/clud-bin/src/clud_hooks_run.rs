@@ -91,9 +91,11 @@ pub fn run_hooks(entries: &[&HookEntry], repo_root: &Path, payload: &str) -> Hoo
                     entry.command
                 );
                 outcome.log_messages.push(message);
-                outcome
-                    .notices
-                    .push(failure_notice(entry, &format!("could not run ({error})"), ""));
+                outcome.notices.push(failure_notice(
+                    entry,
+                    &format!("could not run ({error})"),
+                    "",
+                ));
             }
         }
     }
@@ -213,7 +215,11 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
             reason: String::new(),
             stdout: None,
             log_messages,
-            notice: Some(failure_notice(entry, &format!("exited {exit_code}"), &stderr)),
+            notice: Some(failure_notice(
+                entry,
+                &format!("exited {exit_code}"),
+                &stderr,
+            )),
         });
     }
 

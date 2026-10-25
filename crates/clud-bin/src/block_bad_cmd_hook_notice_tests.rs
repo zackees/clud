@@ -19,7 +19,11 @@ fn a_session_sees_each_distinct_message_once() {
     let second = unseen_at(state.path(), "s1", lines(&["a failed", "c failed"]));
     assert_eq!(second, lines(&["c failed"]));
     let other = unseen_at(state.path(), "s2", lines(&["a failed"]));
-    assert_eq!(other, lines(&["a failed"]), "sessions do not share a ledger");
+    assert_eq!(
+        other,
+        lines(&["a failed"]),
+        "sessions do not share a ledger"
+    );
 }
 
 #[test]
@@ -30,7 +34,11 @@ fn unreadable_state_shows_the_notice_rather_than_hiding_it() {
     let shown = unseen_at(&blocker, "s1", lines(&["a failed"]));
     assert_eq!(shown, lines(&["a failed"]));
     let again = unseen_at(&blocker, "s1", lines(&["a failed"]));
-    assert_eq!(again, lines(&["a failed"]), "nothing was recorded, so it shows again");
+    assert_eq!(
+        again,
+        lines(&["a failed"]),
+        "nothing was recorded, so it shows again"
+    );
 }
 
 #[test]
@@ -52,7 +60,10 @@ fn merge_adds_context_beside_an_existing_decision() {
 fn merge_into_nothing_builds_a_context_document_for_the_event() {
     let merged = merge(Value::Null, "PostToolUse", "hook note");
     assert_eq!(merged["hookSpecificOutput"]["hookEventName"], "PostToolUse");
-    assert_eq!(merged["hookSpecificOutput"]["additionalContext"], "hook note");
+    assert_eq!(
+        merged["hookSpecificOutput"]["additionalContext"],
+        "hook note"
+    );
 }
 
 #[test]

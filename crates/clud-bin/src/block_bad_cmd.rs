@@ -3812,7 +3812,10 @@ fn print_hook_notice(event: &str, payload: &HookPayloadView) -> bool {
     let Some(notice) = block_bad_cmd_hook_notice::take(payload.session_id.as_deref()) else {
         return false;
     };
-    println!("{}", block_bad_cmd_hook_notice::merge(Value::Null, event, &notice));
+    println!(
+        "{}",
+        block_bad_cmd_hook_notice::merge(Value::Null, event, &notice)
+    );
     true
 }
 
