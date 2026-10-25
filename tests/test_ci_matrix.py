@@ -121,7 +121,7 @@ def test_minimal_and_extended_modes_are_strict_subsets():
         ("pull_request", "", "ci-test,ci-full", "full"),
         ("pull_request", "", "ci:full", "full"),
         ("push", "", "", "minimal"),
-        ("merge_group", "", "", "full"),
+        ("merge_group", "", "", "minimal"),
         ("schedule", "", "", "full"),
     ],
 )

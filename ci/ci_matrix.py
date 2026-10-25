@@ -99,9 +99,11 @@ def resolve_tier(  # noqa: C901
             raise ValueError("full dispatch requires verified source/workflow provenance")
         return "full"
     # The nightly native run on main (#1849): every lane, no labels to read.
-    if event_name in ("merge_group", "schedule"):
+    if event_name == "schedule":
         return "full"
-    if event_name == "push":
+    # A merge-queue group gets the lanes a main push gets (#2125): native
+    # coverage stays on the nightly run, ci-full labels and releases.
+    if event_name in ("push", "merge_group"):
         return "minimal"
     if event_name != "pull_request":
         raise ValueError(f"unsupported CI event: {event_name}")
