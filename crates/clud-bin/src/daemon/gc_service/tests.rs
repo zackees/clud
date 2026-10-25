@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 #[path = "tests/parallel.rs"]
 mod parallel;
+#[path = "tests/registry_retry.rs"]
+mod registry_retry;
 #[path = "tests/policy.rs"]
 mod policy;
 use policy::{restore_env_var, spawn_test_worker};

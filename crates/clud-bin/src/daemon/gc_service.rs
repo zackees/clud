@@ -243,18 +243,90 @@ pub(super) fn spawn_registry_worker_for_state(
     periodic_maintenance_enabled: bool,
     activity: Option<DaemonActivity>,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
-    let registry = Registry::open_default().map_err(std::io::Error::other)?;
     let tick_cadence = periodic_maintenance_enabled
         .then(gc_tick_cadence_from_env)
         .flatten();
     let reconcile_dir = state_dir.clone();
-    spawn_registry_worker_with_live_cwds_and_cadence(
-        registry,
-        Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
+    let config = RegistryWorkerConfig {
         tick_cadence,
-        Some(reconcile_dir),
+        live_cwds_provider: Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
+        session_state_dir: Some(reconcile_dir),
         activity,
-    )
+    };
+    match Registry::open_default() {
+        Ok(registry) => spawn_registry_worker_with_config(registry, config),
+        // Issue #2095: another process (typically a superseded daemon) holds
+        // the redb lock. Giving up here left this daemon without GC for its
+        // whole lifetime, so nothing was ever reclaimed. Keep retrying.
+        Err(err) => {
+            eprintln!(
+                "[clud] note: gc registry unavailable ({err}); retrying every {}s",
+                REGISTRY_OPEN_RETRY.as_secs()
+            );
+            spawn_deferred_registry_worker(Registry::open_default, config, REGISTRY_OPEN_RETRY)
+        }
+    }
+}
+
+/// How often a daemon whose registry open failed tries again (#2095).
+const REGISTRY_OPEN_RETRY: Duration = Duration::from_secs(30);
+
+/// Issue #2095: start the worker without a registry. GC ops are answered
+/// with an error until `open` succeeds, then the normal loop takes over the
+/// same channel.
+fn spawn_deferred_registry_worker<F>(
+    open: F,
+    config: RegistryWorkerConfig,
+    retry: Duration,
+) -> std::io::Result<mpsc::Sender<RegistryMsg>>
+where
+    F: FnMut() -> Result<Registry, crate::gc::GcError> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<RegistryMsg>();
+    let completion_tx = tx.clone();
+    thread::Builder::new()
+        .name("clud-gc-registry-worker".to_string())
+        .spawn(move || {
+            let Some(registry) = wait_for_registry(&rx, open, retry) else {
+                return;
+            };
+            eprintln!("[clud] note: gc registry opened after retry");
+            let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
+            run_worker_loop(registry, rx, completion_tx, pool_tx, config);
+        })?;
+    Ok(tx)
+}
+
+/// Retry `open` every `retry`, answering each GC op in between with an
+/// error. `None` once every sender is gone.
+fn wait_for_registry<F>(
+    rx: &mpsc::Receiver<RegistryMsg>,
+    mut open: F,
+    retry: Duration,
+) -> Option<Registry>
+where
+    F: FnMut() -> Result<Registry, crate::gc::GcError>,
+{
+    loop {
+        let message = match open() {
+            Ok(registry) => return Some(registry),
+            Err(err) => format!("gc registry unavailable ({err}); the daemon is retrying"),
+        };
+        let deadline = Instant::now() + retry;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(RegistryMsg::Op(request)) => {
+                    let _ = request.reply_tx.send(GcReply::Error {
+                        message: message.clone(),
+                    });
+                }
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
 }
 
 /// Spawns the registry worker on a pre-constructed `Registry`. Tests use this to bind a worker to an isolated `redb`
@@ -287,25 +359,27 @@ fn spawn_registry_worker_with_live_cwds_and_cadence(
     session_state_dir: Option<PathBuf>,
     activity: Option<DaemonActivity>,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
+    spawn_registry_worker_with_config(
+        registry,
+        RegistryWorkerConfig {
+            tick_cadence,
+            live_cwds_provider,
+            session_state_dir,
+            activity,
+        },
+    )
+}
+
+fn spawn_registry_worker_with_config(
+    registry: Registry,
+    config: RegistryWorkerConfig,
+) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let (tx, rx) = mpsc::channel::<RegistryMsg>();
     let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
     let completion_tx = tx.clone();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
-        .spawn(move || {
-            run_worker_loop(
-                registry,
-                rx,
-                completion_tx,
-                pool_tx,
-                RegistryWorkerConfig {
-                    tick_cadence,
-                    live_cwds_provider,
-                    session_state_dir,
-                    activity,
-                },
-            )
-        })?;
+        .spawn(move || run_worker_loop(registry, rx, completion_tx, pool_tx, config))?;
     Ok(tx)
 }
 
