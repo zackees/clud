@@ -129,7 +129,7 @@ snapshots. They do not claim a real Claude Workflow or model integration.
 
 ## The DAG
 
-`/grind` is a router over bundled skills, one bundled workflow, and five
+`/grind` is a router over bundled skills, one bundled workflow, and eight
 capped agent types:
 
 ```
@@ -152,12 +152,97 @@ The sections below follow that order: [routing](#input-routing), the
 | Asset | Source | Installed to |
 |---|---|---|
 | Skills `grind`, `grind-intake`, `grind-prework`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
-| Agents `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
+| Agents `grind-orchestrator`, `grind-gate`, `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
 | Workflow `grind-run` | `crates/clud-bin/assets/workflows/grind-run.js` (`claude_files.rs`) | `~/.claude/workflows/` |
 
 Each workflow agent runs as its `grind-<role>` type and is told to invoke
 its leaf skill, so the procedure lives once, in the skill, and each leaf is
 also usable directly (for example `/grind-land` on an existing PR).
+
+The read-only `grind-orchestrator` role is the router-callable exception to
+the internal-role delegation rule. It inspects all repositories and proposes
+the run graph; it cannot write, fetch, build or create checkouts, even in
+parallel mode. Its shell cap rejects output redirections and command-local
+environment overrides in addition to mutating commands. The router calls it
+once after intake and presents the graph for approval before classification.
+The approved graph travels as `orchestration`, separately from classification
+stages. Its selected goals run in topological order, and approved merge
+dependencies settle before downstream planning, even when a per-goal planner
+omits them. Each dependent role receives its approved blockers' settled
+outcomes, including their reported PR URL and optional release artifacts
+(`version`, `tag`, `release_url`). Reported artifacts do not satisfy a
+publication gate. Failed upstream goals block their dependents; independent
+goals can continue.
+
+Cross-stage resumption and separately rooted repository sessions remain under
+development in #1338 and #1422. The current graph path returns an explicit
+blocked result for missing-stage dependencies or a sister repository needing
+its own session. Unavailable publication evidence defers that branch, as
+described below; neither condition counts as a successful merge or authorizes
+execution in the wrong root.
+
+The internal `grind-gate` role defaults to Haiku and denies shell execution without a binding. Its hook can
+bind an exact read-only native Bash check from run facts' approved `orchestration` graph to
+a native workflow task labeled `gate:<downstream-id>:<blocker-index>`. Lookup
+uses the hook's parent-session transcript path and agent ID, streams the
+session-local workflow directories with constant memory, and rejects ambiguous metadata,
+symlinks, oversized metadata, wrong roots/roles/repositories and plan-only
+facts. The label cannot select a command outside that approved blocker.
+Lookup time grows with retained workflow directories, without a fixed limit
+on how many workflow runs a recurring session may accumulate.
+This relies on harness-owned metadata and router-owned run facts; it is not a
+sandbox against arbitrary processes that can modify those control files.
+The pre-tool hook claims one check attempt per native gate agent. It wraps the
+approved read-only Bash expression with a per-attempt completion receipt that
+preserves its shell status. This is necessary because Bash may interpret a
+nonzero predicate status as a successful tool call and omit that status from
+its hook response. Native success/failure hooks require the matching zero-status
+receipt before recording success in the locked session-local sidecar.
+Explicit background requests are denied; timeout/background responses,
+interrupted checks and absent or unrecognized receipts fail closed. A `StructuredOutput`
+report of `ready: true` requires a successful outcome matching the current
+approved check, label and root. Missing or pending evidence cannot release
+work. A retry needs a new native gate agent. These records share the harness
+session directory's lifecycle and trust boundary; they contain the binding
+and outcome, without command stdout/stderr.
+The workflow starts this role after the approved upstream goal lands and
+before downstream planning. A successful native check releases that blocker;
+an unavailable or unsuccessful observation defers the dependent and its
+transitive dependents, preserving the original gate and immediate blocker.
+Independent work continues; an upstream implementation failure remains a
+failure rather than a deferred publication branch. Each observation uses a
+fresh native agent, with bounded native timer backoff between observations;
+independent goals continue while a gate waits. The result includes a small
+`grind-publication-resume/v1` manifest for precisely the deferred goals.
+Per-goal observation epochs change gate prompts only on deferred branches.
+The workflow replays whole earlier observation rounds unchanged before starting
+the next round for deferred goals: native cache lookup stops globally after
+the first new agent call, including calls on other parallel branches. This
+ordering applies in sequential mode too. At most 64 resume generations are
+accepted; an exhausted history stops explicitly and retains the deferred work.
+Full-graph verification is ongoing. The router retains the
+original approved arguments and actual native launch references in run facts
+for same-session `/loop` resumption. Native resumption and scheduled handoff
+are undergoing harness verification; cross-repository execution remains under
+development.
+
+Graph resumption requires Claude Code 2.1.306 or newer: the old 2.1.282 runtime
+used a shared rolling cache chain whose keys changed when parallel cached
+calls completed in a different order. The PreToolUse hook checks the latest
+matching session-version record in a bounded tail of the harness transcript.
+Missing metadata receives a bounded 310 ms native flush window because hook
+groups can run before asynchronous transcript persistence finishes. A known
+old version is refused immediately; absent metadata never grants admission.
+An older, missing or unrecognized version refuses graph launch or resumption.
+Native PostToolUse launch receipts also bind each cache to its originating
+supported runtime, session, run ID and script path. A resume must also match the
+completed native workflow snapshot: preserve every original argument and use
+exactly its returned next epoch map. Missing snapshots, exhausted manifests or
+model-invented epoch advances fail closed. A runtime upgrade does not
+migrate an old cache; missing or incompatible provenance refuses resumption.
+Keep the deferred manifest and launch references, report the unsupported
+capability, and do not run Finish or restart completed goals. The check
+uses the same harness-owned transcript trust boundary as native gate identity.
 
 ### Grind skills require explicit invocation
 
@@ -170,14 +255,16 @@ hand; a model must never pick them up from an ordinary prompt.
   directly. The router reads `grind-intake` and `grind-cron` as files next to
   its own directory instead of invoking them.
 - **The agent types** ignore that frontmatter, so they're still listed to the
-  model. clud's PreToolUse hook refuses any `Agent` call whose
-  `subagent_type` is `grind-*`. The workflow's `agent()` spawns don't go
+  model. clud's PreToolUse hook refuses direct `Agent` calls to the internal
+  execution roles. `grind-orchestrator` is the read-only router exception.
+  The workflow's `agent()` spawns don't go
   through the `Agent` tool, so the workflow is unaffected.
   `CLUD_ALLOW_GRIND_AGENTS=1` lifts the block for testing a role by hand.
-- **Each agent carries its procedure.** A hidden skill can't be loaded with
+- **Each execution agent carries its procedure.** A hidden skill can't be loaded with
   the `Skill` tool or `skills:` preload, so `claude_files.rs` writes each
   agent file with its leaf skill's body appended. The skill remains the
-  single source.
+  single source. The standalone orchestrator instructions live in its agent
+  definition; it has no duplicate leaf skill.
 
 ### Router questions
 
@@ -748,6 +835,8 @@ The rationale is in
 
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
+| `grind-orchestrator` | Read, Grep, Glob, Bash | AST-validated read-only inspection; no fetch, edits, builds or checkouts |
+| `grind-gate` | Bash | exactly one assigned read-only Bash check, bound to native agent identity and approved run facts; readiness requires its successful native outcome |
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit); `clud grind-facts task` to record each task's files |
 | `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the run facts' meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh`; `safe-rm` on literal paths inside its task's directories ([rm-tools.md](rm-tools.md#location-policy)) |
@@ -762,8 +851,9 @@ subagent's `agent_type` in the payload, and
 decompose (command substitution, subshells) are refused for capped roles, as
 are `find -exec`/`-delete`, `tail -f`, and git global options other than
 `-C`. The integrator's bans also look inside wrappers such as `bash -c`.
-A goal may depend only on goals listed before it, so dependency waits cannot
-cycle. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
+A legacy planner dependency may name only goals listed before it. An approved
+run graph is validated for cycles and ordered before scheduling; the planner
+cannot drop its merge dependencies. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
 included.
 Other agents and the primary session are unaffected. The tests next to it
 own the exact allowlists. On top of the table, every `grind-*` role is

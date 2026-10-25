@@ -103,6 +103,11 @@ It serves `POST /v1/messages` (SSE when `"stream": true`, JSON otherwise),
 `POST …/count_tokens` and `GET /v1/models`. Point Claude Code at it with
 `ANTHROPIC_BASE_URL`.
 
+Request logs retain tool names plus `orchestration_tools`, containing only
+the real `Workflow` and `Agent` input schemas when offered. Repository-context
+probes use these schemas to distinguish supported inputs from ignored or
+rejected guesses; unrelated tool schemas are not copied into that field.
+
 Script format:
 
 ```json
@@ -131,6 +136,10 @@ Script format:
   reply is `default_text`.
 - **Step kinds:** `tool_use {name, input}`, `structured {…}` (a
   `StructuredOutput` call), `text`, and `error {status}` (an HTTP error reply).
+- A `tool_use` may set `input_file` instead of fixed `input`: each response
+  reads a regular JSON object file, bounded to 1 MiB. Native-harness fixtures
+  use this to copy actual runtime-generated Workflow references into later
+  calls. Missing, invalid or oversized files fail the script visibly.
 - **`delay_ms`** on any step holds the reply open, so concurrent agents
   visibly overlap in the log's `t_start` / `t_end` (epoch milliseconds).
 - **`expect`** checks the `tool_result`s sent back for the previous step

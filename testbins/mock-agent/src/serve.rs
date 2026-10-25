@@ -178,6 +178,22 @@ fn system_text(request: &Value) -> String {
     }
 }
 
+fn orchestration_tool_schemas(request: &Value) -> Vec<Value> {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| {
+            matches!(
+                tool.get("name").and_then(Value::as_str),
+                Some("Workflow" | "Agent")
+            )
+        })
+        .map(|tool| json!({"name": tool["name"], "input_schema": tool["input_schema"]}))
+        .collect()
+}
+
 /// Tool results sent since the last assistant turn.
 fn recent_tool_results(messages: &[Value]) -> Vec<Value> {
     let mut results = Vec::new();
@@ -337,7 +353,50 @@ fn plan(script: &Value, request: &Value) -> (String, usize, Value, Option<String
             Some(failure),
         );
     }
-    (name, turn, step, None)
+    match resolve_tool_input(step) {
+        Ok(step) => (name, turn, step, None),
+        Err(error) => (
+            name,
+            turn,
+            json!({"text": format!("MOCK_EXPECT_FAILED: {error}")}),
+            Some(error),
+        ),
+    }
+}
+
+const MAX_TOOL_INPUT_BYTES: u64 = 1024 * 1024;
+
+fn read_tool_input(reader: impl Read) -> Result<Value, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_TOOL_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("tool input file: {error}"))?;
+    if bytes.len() as u64 > MAX_TOOL_INPUT_BYTES {
+        return Err("tool input file exceeds 1 MiB".into());
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("tool input JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("tool input file must contain a JSON object".into());
+    }
+    Ok(value)
+}
+
+fn resolve_tool_input(mut step: Value) -> Result<Value, String> {
+    let Some(path) = step.pointer("/tool_use/input_file").and_then(Value::as_str) else {
+        return Ok(step);
+    };
+    let file = std::fs::File::open(path).map_err(|error| format!("tool input file: {error}"))?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("tool input file is not a regular file".into());
+    }
+    step["tool_use"]["input"] = read_tool_input(file)?;
+    Ok(step)
 }
 
 #[expect(
@@ -378,6 +437,7 @@ fn respond_messages(
                 "t_start": t_start, "t_end": now_ms(),
                 "stream": request.get("stream"), "tools": tools,
                 "provider": request.get("provider"),
+                "orchestration_tools": orchestration_tool_schemas(request),
                 "tool_results": recent_tool_results(&messages),
                 "system": system_text(request),
                 "messages": messages,
@@ -478,6 +538,48 @@ fn respond_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_tool_input_is_a_bounded_json_object() {
+        let value =
+            read_tool_input(&br#"{"resumeFromRunId":"wf_actual","args":{"gateEpoch":1}}"#[..])
+                .unwrap();
+        assert_eq!(value["resumeFromRunId"], "wf_actual");
+        for bytes in [&b"[]"[..], &b"not json"[..]] {
+            assert!(read_tool_input(bytes).is_err());
+        }
+        assert!(read_tool_input(std::io::repeat(b' ').take(MAX_TOOL_INPUT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn a_missing_dynamic_input_fails_the_script_instead_of_emitting_empty_arguments() {
+        let script = json!({"roles": [{"name": "main", "steps": [{"tool_use": {
+            "name": "Workflow", "input_file": format!("missing-workflow-input-{}.json", now_ms())
+        }}]}]});
+        let (_, _, step, note) = plan(&script, &request("", json!([]), &["Workflow"]));
+        assert!(note.unwrap().contains("tool input file"));
+        assert!(step.get("tool_use").is_none());
+    }
+
+    #[test]
+    fn orchestration_schema_log_keeps_only_the_two_native_interfaces() {
+        let request = json!({"tools": [
+            {"name": "Workflow", "input_schema": {"properties": {"name": {"type": "string"}}}},
+            {"name": "Bash", "input_schema": {"private": "unrelated"}},
+            {"name": "Agent", "input_schema": {"properties": {"cwd": {"type": "string"}}}}
+        ]});
+        let schemas = orchestration_tool_schemas(&request);
+        assert_eq!(schemas.len(), 2);
+        assert_eq!(schemas[0]["name"], "Workflow");
+        assert_eq!(
+            schemas[1]["input_schema"]["properties"]["cwd"]["type"],
+            "string"
+        );
+        assert!(!serde_json::to_string(&schemas)
+            .unwrap()
+            .contains("unrelated"));
+        assert!(orchestration_tool_schemas(&json!({})).is_empty());
+    }
 
     fn request(system: &str, messages: Value, tools: &[&str]) -> Value {
         json!({

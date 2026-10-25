@@ -102,7 +102,7 @@ jobs:
       # request shapes the mock backend speaks stay fixed.
       - name: Install pinned Claude Code
         if: inputs.suite == 'harness'
-        run: npm install -g @anthropic-ai/claude-code@2.1.282
+        run: npm install -g @anthropic-ai/claude-code@2.1.306
 
       - name: Install pinned GitLab CLI for secret acceptance
         if: inputs.suite == 'unit'

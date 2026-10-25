@@ -33,6 +33,12 @@ works unchanged:
   "oid": str}``) and ``parent`` (int or None).
 - per PR: ``base``, ``draft``, ``body``, ``merge_method``, ``admin``,
   ``requires_review`` (alias ``reviews_required``) and ``approved``.
+- ``repositories`` maps owner/name to independent worlds with their own
+  issues, PRs and default branch. Explicit repo flags, issue/PR URLs and REST
+  endpoints select one; an unknown repo fails instead of reading the primary.
+  Root ``calls`` records every original invocation, including failed selection.
+- ``release_after_views`` maps a tag to ``{after: N, release: {...}}`` to
+  publish it after N missing observations, without sleeping in a fixture.
 
 Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``pr list|create|edit|ready|merge|view|checks``, ``repo view`` (name and
@@ -105,13 +111,25 @@ _API_VALUE_FLAGS = {
 }
 
 
+class _RepositoryState(dict):
+    """A repo view whose saves retain the entire locked multi-repo world."""
+
+    def __init__(self, root: dict, name: str):
+        super().__init__(root["repositories"][name])
+        self.root = root
+        self["repo"] = name
+        self.setdefault("fail", root.get("fail", False))
+        root["repositories"][name] = self
+
+
 def _load() -> tuple[Path, dict]:
     path = Path(os.environ["FAKE_GH_STATE"])
     return path, json.loads(path.read_text(encoding="utf-8"))
 
 
 def _save(path: Path, state: dict) -> None:
-    path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    root = state.root if isinstance(state, _RepositoryState) else state
+    path.write_text(json.dumps(root, indent=1), encoding="utf-8")
 
 
 @contextmanager
@@ -615,6 +633,8 @@ def _api(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     owner, _, name = _repo(state).partition("/")
     endpoint = _api_endpoint(argv).replace("{owner}", owner).replace("{repo}", name)
     parts = endpoint.split("?", 1)[0].strip("/").split("/")
+    if len(parts) >= 4 and parts[0] == "repos" and parts[3] == "releases":
+        return _release_api(state, argv, parts, method)
     is_issues = len(parts) >= 5 and parts[0] == "repos" and parts[3] == "issues"
 
     # repos/o/r/issues/comments/{id}
@@ -1073,6 +1093,82 @@ def _pr(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     return 0
 
 
+def _release_json(state: dict, tag: str, value: dict) -> dict:
+    return {
+        "tagName": tag, "name": tag, "isDraft": False,
+        "url": f"https://github.com/{_repo(state)}/releases/tag/{tag}",
+        "publishedAt": None, **value,
+    }
+
+
+def _release_tag(argv: list[str]) -> str | None:
+    args = iter(argv[2:])
+    for arg in args:
+        if arg in {"--repo", "-R", "--json", "--jq", "-q", "--title", "--notes", "--target"}:
+            next(args, None)
+        elif arg == "--":
+            return next(args, None)
+        elif not arg.startswith("-"):
+            return arg
+    return None
+
+
+def _release_observation(path: Path, state: dict, argv: list[str], tag: str) -> None:
+    transition = state.get("release_after_views", {}).get(tag)
+    if argv[1] != "view" or tag in state["releases"] or not isinstance(transition, dict):
+        return
+    after = transition.get("after")
+    if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+        return
+    views = sum(call[:2] == ["release", "view"] and _release_tag(call) == tag
+                for call in state.get("calls", []))
+    if views > after:
+        state["releases"][tag] = _release_json(state, tag, transition.get("release", {}))
+        _save(path, state)
+
+
+def _release(path: Path, state: dict, argv: list[str]) -> int:
+    tag = _release_tag(argv)
+    if tag is None:
+        print("fake gh: a literal release tag is required", file=sys.stderr)
+        return 1
+    releases = state.setdefault("releases", {})
+    _release_observation(path, state, argv, tag)
+    if argv[1] == "create":
+        if tag in releases:
+            print("release already exists", file=sys.stderr)
+            return 1
+        draft = "--draft" in argv
+        releases[tag] = _release_json(state, tag, {
+            "name": _flag(argv, "--title") or tag, "isDraft": draft,
+            "publishedAt": None if draft else _now(),
+        })
+        _save(path, state)
+        print(releases[tag]["url"])
+        return 0
+    if argv[1] == "view" and tag in releases:
+        return _emit(argv, _release_json(state, tag, releases[tag]))
+    print(f"release not found or unsupported operation: {tag}", file=sys.stderr)
+    return 1
+
+
+def _release_api(state: dict, argv: list[str], parts: list[str], method: str) -> int:
+    releases = state.get("releases", {})
+    if method != "GET":
+        return _not_found()
+    tags = list(releases) if len(parts) == 4 else parts[5:6]
+    if len(parts) != 4 and (
+        len(parts) != 6 or parts[4] != "tags" or not tags or tags[0] not in releases
+    ):
+        return _not_found()
+    values = []
+    for tag in tags:
+        release = _release_json(state, tag, releases[tag])
+        values.append({"tag_name": tag, "draft": release["isDraft"],
+                       "published_at": release["publishedAt"], "html_url": release["url"]})
+    return _emit(argv, values if len(parts) == 4 else values[0])
+
+
 def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
     state.setdefault("calls", []).append(argv)
     _save(path, state)
@@ -1093,6 +1189,8 @@ def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
         return _issue(path, state, argv)
     if argv[:1] == ["pr"]:
         return _pr(path, state, argv)
+    if argv[:1] == ["release"]:
+        return _release(path, state, argv)
     if argv[:2] == ["repo", "view"]:
         return _emit(
             argv,
@@ -1107,10 +1205,55 @@ def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
     return 0
 
 
+def _without_repo_prefix(argv: list[str]) -> list[str]:
+    if argv[:1] in (["-R"], ["--repo"]):
+        return argv[2:]
+    if argv and (argv[0].startswith("--repo=") or argv[0].startswith("-R")):
+        return argv[1:]
+    return argv
+
+
+def _requested_repository(state: dict, argv: list[str]) -> str:
+    explicit = _flag(argv, "--repo") or _flag(argv, "-R")
+    if explicit:
+        return explicit
+    joined = next((arg[2:] for arg in argv if arg.startswith("-R") and len(arg) > 2), None)
+    if joined:
+        return joined
+    args = _without_repo_prefix(argv)
+    if args[:1] == ["api"]:
+        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", _api_endpoint(args))
+        if match and "{" not in match[1]:
+            return match[1]
+    target = args[2] if len(args) > 2 else ""
+    if args[:2] == ["repo", "view"] and re.fullmatch(r"[^/\s]+/[^/\s]+", target):
+        return target
+    match = re.match(r"https://github\.com/([^/]+/[^/]+)/(?:issues|pull)/", target)
+    return match[1] if match else _repo(state)
+
+
+def _repository_state(state: dict, argv: list[str]) -> _RepositoryState:
+    requested = _requested_repository(state, argv)
+    names = state["repositories"]
+    name = next((name for name in names if name.lower() == requested.lower()), None)
+    if name is None:
+        raise ValueError(f"unknown fixture repository {requested}")
+    return _RepositoryState(state, name)
+
+
 def main(argv: list[str]) -> int:
     path = Path(os.environ["FAKE_GH_STATE"])
     with _locked(path):
         _, state = _load()
+        if isinstance(state.get("repositories"), dict):
+            state.setdefault("calls", []).append(argv)
+            try:
+                selected = _repository_state(state, argv)
+            except ValueError as error:
+                _save(path, state)
+                print(str(error), file=sys.stderr)
+                return 1
+            return _dispatch(path, selected, _without_repo_prefix(argv))
         return _dispatch(path, state, argv)
 
 

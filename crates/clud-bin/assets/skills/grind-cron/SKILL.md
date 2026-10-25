@@ -48,3 +48,36 @@ no-overlap. Same rule as `/grind-intake` step 5.
 
 Each tick is a full sequential run, so each code change still goes through
 RED -> GREEN in `/grind-integrate`.
+
+## Publication resumption
+
+For an approved run with a publication-resume manifest, use one native `/loop`
+in this same session. Each tick starts with `clud grind-facts path`, reads
+`orchestration_resume`, and calls the native Workflow with its saved actual
+`scriptPath` and `resumeFromRunId: <saved runId>`. Pass the complete original
+approved arguments, changing only `gateEpochs` to the manifest's map.
+Graph resumption requires Claude Code >= 2.1.306 with branch-local native
+caches. If the hook refuses an older or unidentified runtime, retain
+`orchestration_resume` and its original launch references, report the missing
+capability, and stop this loop without Finish. Resumption also requires the
+native receipt proving the original run used supported caches: upgrading the
+harness does not migrate an old run. Never bypass a missing/incompatible
+origin receipt or replay completed goals.
+Completed native agent calls retain their cache keys; only deferred gate
+observations receive new epochs. Do not create a replacement workflow script,
+assert completed-goal results, re-run intake, or poll from a shell.
+
+Wait for the native task notification. If it returns another resume manifest,
+replace the saved manifest and native launch references with those from this
+call, retaining the original approved arguments. Report remaining goals and
+their actual evidence. A hard failure is reported as a failure, never relabelled
+as publication waiting. When no resume manifest remains, end this loop, remove
+`orchestration_resume`, and continue the original router's next stage or Finish.
+If native `/loop` or native Workflow resumption is unavailable, report that
+specific missing capability and retain the manifest for explicit resumption;
+do not invent a notification mechanism or external relaunch loop.
+
+If a publication-resume manifest has `exhausted: true`, stop the native loop,
+retain `orchestration_resume`, its launch references and the manifest, and
+report the replay-history limit. Do not call Finish, advance its epochs or
+restart completed work. The deferred goals remain unfinished.
