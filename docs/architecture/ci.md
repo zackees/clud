@@ -527,6 +527,16 @@ admins can bypass the queue. So:
   wait on all six targets.
 - The `push` run on `main` still runs `minimal` and still saves the caches
   PRs read.
+  Its concurrency group is fixed (`main-push`, never cancelled): one run is
+  active and only the newest pending push waits behind it, so a burst of
+  merges cannot stack parallel `main` runs (#2048, as obs-rust/obs-studio's
+  push build). The queue already tested each merged tree; nightly and
+  SHA-pinned dispatch runs on `main` keep their own `run_id` groups.
+- A queue ref names its base commit (`gh-readonly-queue/main/pr-<N>-<sha>`),
+  so when `main` moves GitHub starts a new run per queued PR that no
+  concurrency group pairs with the old one. The `cancel-superseded` job
+  (`ci/cancel_superseded.py`) cancels every older in-flight queue run for the
+  same PR.
 - A nightly `schedule` run (`41 6 * * *`, #1849) runs the `full` tier on
   `main`'s head, so a native-only regression surfaces within a day instead
   of waiting for an unrelated `ci-full` PR. It never skips or reuses a lane:

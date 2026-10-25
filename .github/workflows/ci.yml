@@ -44,8 +44,13 @@ on:
 # Deliberately NO `profile` input anywhere in this file. Release builds are
 # reachable only from auto-release.yml; _build-target.yml enforces that.
 
+# A main push keeps one active run and only the newest pending one (#2048,
+# as obs-rust/obs-studio's push build): the merge queue already tested each
+# merged tree, so a burst of merges must not stack parallel main runs. The
+# nightly and SHA-pinned dispatch runs on main stay independent (run_id), and
+# every other ref cancels its superseded run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' && 'main-push' || github.run_id) || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
@@ -55,6 +60,31 @@ permissions:
   actions: write
 
 jobs:
+  # A queue ref carries the base commit (gh-readonly-queue/main/pr-<N>-<sha>),
+  # so the concurrency group above never pairs a PR's rebuilt queue run with
+  # the one main's movement replaced; this cancels the older one (#2048).
+  cancel-superseded:
+    name: Cancel superseded queue runs
+    if: ${{ !cancelled() && github.event_name == 'merge_group' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ci
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cancel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m ci.cancel_superseded
+
   # ---------------------------------------------------------------- static --
   # The mode job every other job needs. It installs nothing beyond the
   # runner's cached Python (zackees/ci.yml GEN-018): it pins the source SHA,
