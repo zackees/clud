@@ -597,10 +597,7 @@ pub(crate) mod tests {
         let nested = serde_json::json!({"repos": [
             {"repo": w(""), "ci": false}, {"repo": w("inner"), "ci": true}
         ]});
-        assert_eq!(
-            select_repo(nested, &w("inner/a")).unwrap()["ci"],
-            true
-        );
+        assert_eq!(select_repo(nested, &w("inner/a")).unwrap()["ci"], true);
         let single = serde_json::json!({"ci": true});
         assert_eq!(
             select_repo(single.clone(), Path::new("/anywhere")).unwrap(),
