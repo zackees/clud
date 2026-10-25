@@ -643,8 +643,7 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
                 .to_string(),
         );
     }
-    if let Some(reason) =
-        remote_ci_reason(role, words).or_else(|| native_watch_reason(role, words))
+    if let Some(reason) = remote_ci_reason(role, words).or_else(|| native_watch_reason(role, words))
     {
         return Some(reason);
     }
