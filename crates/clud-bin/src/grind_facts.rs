@@ -544,24 +544,33 @@ pub(crate) mod tests {
         path
     }
 
-    const TWO_REPOS: &str = r#"{"repos": [
-        {"repo": "/w/setup-soldr", "ci": false, "scripts": {"test": "npm test"}},
-        {"repo": "/w/soldr", "ci": true, "scripts": {"lint": "./lint"}}
-    ]}"#;
+    /// An absolute fixture path on every host: a bare `/w/...` has no drive
+    /// on Windows, so `select_repo` would rightly skip it as relative.
+    fn w(rel: &str) -> PathBuf {
+        std::env::temp_dir().join("w").join(rel)
+    }
+
+    fn two_repos() -> String {
+        serde_json::json!({"repos": [
+            {"repo": w("setup-soldr"), "ci": false, "scripts": {"test": "npm test"}},
+            {"repo": w("soldr"), "ci": true, "scripts": {"lint": "./lint"}}
+        ]})
+        .to_string()
+    }
 
     #[test]
     fn a_multi_repo_run_gives_each_repo_its_own_facts() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), A, TWO_REPOS);
+        write(dir.path(), A, &two_repos());
         let now = SystemTime::now();
         let soldr = lookup_in_for(
             dir.path(),
             Some(A),
-            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            &w("soldr/.clud/grind/worktrees/t1"),
             now,
         );
         assert_eq!(soldr.facts().unwrap()["ci"], true);
-        let setup = lookup_in_for(dir.path(), Some(A), Path::new("/w/setup-soldr"), now);
+        let setup = lookup_in_for(dir.path(), Some(A), &w("setup-soldr"), now);
         assert_eq!(setup.facts().unwrap()["ci"], false);
         assert_eq!(setup.facts().unwrap()["scripts"]["test"], "npm test");
     }
@@ -569,27 +578,27 @@ pub(crate) mod tests {
     #[test]
     fn a_directory_in_no_repo_or_two_equal_repos_gets_no_facts() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), A, TWO_REPOS);
+        write(dir.path(), A, &two_repos());
         let now = SystemTime::now();
-        let outside = lookup_in_for(dir.path(), Some(A), Path::new("/w/other"), now);
+        let outside = lookup_in_for(dir.path(), Some(A), &w("other"), now);
         assert!(outside.facts().is_none());
         assert!(outside
             .warning()
             .unwrap()
             .contains("inside no `repos` entry"));
-        let twice = r#"{"repos": [{"repo": "/w/x"}, {"repo": "/w/x"}]}"#;
-        write(dir.path(), B, twice);
-        let tied = lookup_in_for(dir.path(), Some(B), Path::new("/w/x/src"), now);
+        let twice = serde_json::json!({"repos": [{"repo": w("x")}, {"repo": w("x")}]});
+        write(dir.path(), B, &twice.to_string());
+        let tied = lookup_in_for(dir.path(), Some(B), &w("x/src"), now);
         assert!(tied.warning().unwrap().contains("two `repos` entries"));
     }
 
     #[test]
     fn nested_roots_pick_the_deepest_and_single_repo_files_are_unchanged() {
         let nested = serde_json::json!({"repos": [
-            {"repo": "/w", "ci": false}, {"repo": "/w/inner", "ci": true}
+            {"repo": w(""), "ci": false}, {"repo": w("inner"), "ci": true}
         ]});
         assert_eq!(
-            select_repo(nested, Path::new("/w/inner/a")).unwrap()["ci"],
+            select_repo(nested, &w("inner/a")).unwrap()["ci"],
             true
         );
         let single = serde_json::json!({"ci": true});
@@ -602,17 +611,17 @@ pub(crate) mod tests {
     #[test]
     fn tasks_land_in_the_repo_entry_containing_their_checkout() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), A, TWO_REPOS);
+        let path = write(dir.path(), A, &two_repos());
         record_task(
             &path,
-            Path::new("/w/soldr/.clud/grind/worktrees/t1"),
+            &w("soldr/.clud/grind/worktrees/t1"),
             &["a.rs".into()],
         )
         .unwrap();
         let facts: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(facts["repos"][1]["tasks"][0]["files"][0], "a.rs");
         assert!(facts["repos"][0].get("tasks").is_none());
-        assert!(record_task(&path, Path::new("/elsewhere"), &[]).is_err());
+        assert!(record_task(&path, &std::env::temp_dir().join("elsewhere"), &[]).is_err());
     }
 
     #[test]
