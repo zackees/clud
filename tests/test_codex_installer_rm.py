@@ -155,7 +155,8 @@ def test_pinned_codex_installer_in_clud_child_environment(
         assert not list(releases.glob(".staging.*"))
         assert not list(standalone.glob(".current.*"))
         assert not list(bin_dir.glob(".codex.*"))
-        assert not list(temporary.iterdir()), "installer left an mktemp directory"
+        left = list(temporary.iterdir())
+        assert not left, f"installer left an mktemp directory {left}; stderr:\n{result.stderr}"
     finally:
         if route == "daemon":
             binary = Path(os.environ.get("CLUD_TEST_BINARY", "/build/target/debug/clud"))
