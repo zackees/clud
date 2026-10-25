@@ -540,10 +540,18 @@ fn incremental_callback_resumes_from_its_cursor_for_thousands_of_records() {
         files.values().next().unwrap()["offset"].as_u64().unwrap()
     };
     render_into(&mut Vec::new(), &args, &stdin, now_ms());
-    assert_eq!(cursor(), len, "the first callback consumes the whole transcript");
+    assert_eq!(
+        cursor(),
+        len,
+        "the first callback consumes the whole transcript"
+    );
     let mut out = Vec::new();
     render_into(&mut out, &args, &stdin, now_ms());
-    assert_eq!(cursor(), len, "the next callback resumes at the end, not from zero");
+    assert_eq!(
+        cursor(),
+        len,
+        "the next callback resumes at the end, not from zero"
+    );
     assert!(String::from_utf8(out)
         .unwrap()
         .contains("read 6K cached / 3K uncached - write 9K"));

@@ -506,7 +506,15 @@ fn run_repeat_once(
             }
         }
     }
+    // Exit is not end of output: the last lines can reach the capture queue
+    // after the exit code on a loaded machine. `wait` runs running-process's
+    // bounded capture drain, so the queue is complete once it returns (#2159).
     let _ = process.wait(Some(Duration::from_secs(2)));
+    for event in process.drain_combined() {
+        let mut chunk = event.line;
+        chunk.push(b'\n');
+        shared.push_output(chunk);
+    }
     true
 }
 
@@ -576,6 +584,14 @@ fn start_subprocess_session(
             // polls with a 100ms timeout and rechecks `returncode()` on
             // each Timeout, so this join terminates within ~100ms.
             let _ = read_handle.join();
+            // The reader stops at exit, but lines can reach the queue after
+            // the exit code; `wait` ran the bounded capture drain, so they
+            // are all queued now (#2159).
+            for event in process.drain_combined() {
+                let mut chunk = event.line;
+                chunk.push(b'\n');
+                shared.push_output(chunk);
+            }
             shared.broadcast_exit(code);
         });
     }

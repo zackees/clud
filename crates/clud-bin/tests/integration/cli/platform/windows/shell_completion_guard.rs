@@ -103,6 +103,11 @@ fn login_shell_output(bash: &Path, script: &str, extra_env: &[(String, String)])
         }
     }
     let _ = process.wait(Some(Duration::from_secs(30)));
+    // `wait` ran the bounded capture drain; keep lines that trailed the exit (#2159).
+    for event in process.drain_combined() {
+        out.push_str(&String::from_utf8_lossy(&event.line));
+        out.push('\n');
+    }
     out.trim().to_string()
 }
 

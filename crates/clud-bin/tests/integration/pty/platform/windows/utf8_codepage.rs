@@ -90,6 +90,11 @@ fn cmd_wrapper_round_trips_utf8_bytes() {
     let exit = process
         .wait(Some(Duration::from_secs(10)))
         .expect("wait cmd shim");
+    // `wait` ran the bounded capture drain; keep lines that trailed the exit (#2159).
+    for event in process.drain_combined() {
+        buf.extend_from_slice(&event.line);
+        buf.push(b'\n');
+    }
     assert_eq!(exit, 0, "cmd shim exited non-zero: {exit}");
 
     // `type` may emit a trailing CRLF that ReadStatus::Line replaces with

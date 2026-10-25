@@ -880,7 +880,16 @@ fn run_chain_spec(command: CommandSpec, stdin: &[u8]) -> Option<Vec<u8>> {
             ReadStatus::Eof => break,
         }
     }
+    // Exit is not end of output: the last lines can reach the capture queue
+    // after the exit code on a loaded machine. `wait` runs running-process's
+    // bounded capture drain, so the queue is complete once it returns (#2159).
     let _ = process.wait(Some(Duration::from_secs(2)));
+    for event in process.drain_combined() {
+        if event.stream == StreamKind::Stdout {
+            buf.extend_from_slice(&event.line);
+            buf.push(b'\n');
+        }
+    }
     Some(buf)
 }
 
