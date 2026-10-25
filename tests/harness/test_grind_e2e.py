@@ -486,21 +486,27 @@ def _feature_roles(
     if problems:
         work["problems"] = problems
     git = f"git -C {checkout}"
-    steps = [f"{git} fetch -q origin"]
+    # One GitHub/remote mutation per command (#1979): only `git push && gh pr
+    # create` may share one, so merging main in is its own step.
+    integrate: list[dict[str, Any]] = []
     if merge_main:
-        steps += [
-            f"{git} merge -q --no-ff origin/main -m 'merge main into {feature}'",
-            f"{git} push -q origin HEAD:{feature}",
-        ]
-    steps += [
+        integrate.append(
+            _bash(
+                f"{git} fetch -q origin && "
+                f"{git} merge -q --no-ff origin/main -m 'merge main into {feature}' && "
+                f"{git} push -q origin HEAD:{feature}"
+            )
+        )
+    steps = [
+        f"{git} fetch -q origin",
         f"{git} switch -q -c {branch} origin/{feature}",
         f"{git} add {goal}.txt",
         f"{git} commit -q -m 'feat: #{goal}'",
         f"{git} push -q -u origin {branch}",
         f"gh pr create --title 'feat #{goal}' --head {branch} --base {feature} "
         f"--body 'Refs #{goal}'",
-        f"gh pr edit {feature_pr} --body '{closes}'",
     ]
+    integrate.append(_bash(" && ".join(steps)))
     url = f"https://github.com/o/r/pull/{pr}"
     return [
         _role(f"planner:{goal}", "planner", at, [_structured(plan)]),
@@ -520,19 +526,25 @@ def _feature_roles(
             f"integrator:{goal}",
             "integrator",
             at,
-            [
-                _bash(" && ".join(steps)),
-                _after(OK, _structured({"pushed": True, "pr_url": url, "summary": "p"})),
-            ],
+            _chain(
+                [
+                    *integrate,
+                    _structured({"pushed": True, "pr_url": url, "summary": "p"}),
+                ]
+            ),
         ),
         _role(
             f"lander:{goal}",
             "lander",
             [at, "Fix rounds used: 0 of"],
-            [
-                _bash(f"gh pr merge {pr} --merge"),
-                _after(OK, _structured({"status": "merged", "summary": "green"})),
-            ],
+            # The lander, not the integrator, owns the feature PR body (#1393 §2).
+            _chain(
+                [
+                    _bash(f"gh pr merge {pr} --merge"),
+                    _bash(f"gh pr edit {feature_pr} --body '{closes}'"),
+                    _structured({"status": "merged", "summary": "green"}),
+                ]
+            ),
         ),
     ]
 
@@ -653,7 +665,8 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     )
     main_steps = _chain(
         [
-            _bash(" && ".join(route)),
+            # One GitHub mutation per command (#1979).
+            *[_bash(command) for command in route],
             _ask(
                 (
                     "Your checkout has uncommitted changes. What should grind do?",

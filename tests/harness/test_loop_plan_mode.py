@@ -11,6 +11,10 @@ from tests.harness.harness import Harness
 MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
+@pytest.mark.xfail(
+    reason="#2152: the interactive surface records no tool hooks on Claude Code 2.1.306",
+    strict=False,
+)
 @pytest.mark.timeout(180)
 def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> None:
     script = {
@@ -58,7 +62,8 @@ def test_scheduled_session_refuses_plan_mode_and_continues(harness: Harness) -> 
     failed = [request for request in result.requests if "MOCK_EXPECT_FAILED" in str(request)]
     scheduling = [hook for hook in result.hooks if hook.get("event") == "PostToolUse"]
     assert not failed, str(scheduling)[-4000:]
-    assert any(hook.get("tool_name") == "EnterPlanMode" for hook in result.hooks)
+    seen = [(hook.get("event"), hook.get("tool_name")) for hook in result.hooks]
+    assert any(hook.get("tool_name") == "EnterPlanMode" for hook in result.hooks), seen
     assert any("loop-plan-mode" in json.dumps(request) for request in result.requests)
     assert (harness.repo / "loop-continued.txt").read_text() == "continued"
     assert "CONTINUED_AFTER_PLAN_DENIAL" in result.stdout

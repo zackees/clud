@@ -7,7 +7,7 @@ Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml`
 
 The sole push/PR workflow is `.github/workflows/ci.yml`. Ordinary PRs and
 `main` pushes run static checks plus the Linux x64 build and unit suite.
-The literal `ci-test` PR label adds Linux x64 integration and Windows x64.
+The literal `ci-test` PR label adds Linux x64 integration, the real-harness suite and Windows x64.
 Linux integration stays in `ci-full` and release validation too;
 it was moved out of ordinary runs after the measured minimal lane exceeded
 the 12.5% runner-minute budget.
@@ -475,7 +475,7 @@ every push needs all six targets.
 | Tier | Triples | Trigger |
 | --- | --- | --- |
 | `minimal` | Linux Dylint (host + Windows/macOS cross-target) + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
-| `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
+| `extended` | minimal + Linux x64 integration + harness + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
 | `windows` | minimal + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
 | `macos` | minimal + both Darwin triples' build, unit and integration | PR labeled `ci-macos` |
 | `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch, the nightly `schedule` run |

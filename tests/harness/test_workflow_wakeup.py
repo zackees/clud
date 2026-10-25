@@ -8,6 +8,10 @@ import pytest
 from tests.harness.harness import Harness
 
 
+@pytest.mark.xfail(
+    reason="#2152: the interactive surface records no tool hooks on Claude Code 2.1.306",
+    strict=False,
+)
 @pytest.mark.timeout(240)
 def test_native_loop_scheduler_wakes_and_continues(harness: Harness) -> None:
     script = {"roles": [{"name": "main", "steps": [

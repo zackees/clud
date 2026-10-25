@@ -3,9 +3,9 @@
 The router's feature setup gives a run a feature branch
 (`grind/meta-100-1f3a`), its worktree at `<repo>/.clud/grind/worktrees/feature`
 and a draft feature PR (#101, base `main`, `Closes #100`). Goal PRs target the
-feature branch with `Refs #N`; once a goal PR merged, its lander labels the
-issue (and the meta) `grind:on-feature`, posts the `grind:v1` marker and adds
-the goal's `Closes` line to the feature PR (#1393 §2, S5).
+feature branch with `Refs #N`; once a goal PR merged, its lander posts the
+`grind:v1` marker and adds the goal's `Closes` line to the feature PR (#1393
+§2, S5). It never creates or applies a label in the target repo (#1958).
 Once the goals settle, `feature_merge` decides: `auto` readies the feature PR
 and merges it with `--merge` (never `--admin`), `decide_later` has the router
 mark it ready and leave it open, `comment_only` keeps the draft and the router
@@ -147,9 +147,6 @@ def _closes(goal: str) -> str:
     return " ".join(f"Closes #{n}" for n in [META, *done])
 
 
-LABEL = "grind:on-feature"
-
-
 def _marker(goal: str | None) -> str:
     goal_pr = f" goal-pr=#{goal}" if goal else ""
     return f"<!-- grind:v1 feature-pr=#{PR} branch={FEATURE}{goal_pr} run={RUN_ID} -->"
@@ -158,9 +155,6 @@ def _marker(goal: str | None) -> str:
 def _record(goal: str) -> str:
     """What the lander runs once a goal PR merged into the feature branch (#1393 §2)."""
     commands = [
-        f"gh label create {LABEL} --force",
-        f"gh issue edit {goal} --add-label {LABEL}",
-        f"gh issue edit {META} --add-label {LABEL}",
         f"gh issue comment {goal} --body 'Landed on {FEATURE} via #{goal}. {_marker(goal)}'",
     ]
     if goal == GOALS[0]:
@@ -203,12 +197,18 @@ def _goal_roles(
         planner = [_bash(add), _after(OK, _structured(plan))]
     write = {"file_path": f"{checkout}/{goal}.txt", "content": f"{goal}\n"}
     git = f"git -C {checkout}"
-    steps = [f"{git} fetch -q origin"]
+    # One GitHub/remote mutation per command (#1979): only `git push && gh pr
+    # create` may share one, so merging main in is its own step.
+    integrate: list[dict[str, Any]] = []
     if merge_main:
-        steps += [
-            f"{git} merge -q --no-ff origin/main -m 'merge main into {FEATURE}'",
-            f"{git} push -q origin HEAD:{FEATURE}",
-        ]
+        integrate.append(
+            _bash(
+                f"{git} fetch -q origin && "
+                f"{git} merge -q --no-ff origin/main -m 'merge main into {FEATURE}' && "
+                f"{git} push -q origin HEAD:{FEATURE}"
+            )
+        )
+    steps = [f"{git} fetch -q origin"]
     if not parallel:
         steps.append(f"{git} switch -q -c {branch} origin/{FEATURE}")
     steps += [
@@ -242,8 +242,14 @@ def _goal_roles(
             "integrator",
             at,
             [
-                _bash(" && ".join(steps)),
-                _after(OK, _structured({"pushed": True, "pr_url": url, "summary": "p"})),
+                s if i == 0 else _after(OK, s)
+                for i, s in enumerate(
+                    [
+                        *integrate,
+                        _bash(" && ".join(steps)),
+                        _structured({"pushed": True, "pr_url": url, "summary": "p"}),
+                    ]
+                )
             ],
         ),
         _role(f"lander:{goal}", "lander", [at, "Fix rounds used: 0 of"], land),
@@ -439,14 +445,16 @@ def test_f3_feature_pr_body_collects_closes_lines(harness: Harness) -> None:
     assert _calls(harness, "pr", "edit", PR), harness.read_gh_state()["calls"]
 
 
-def test_s5_landed_goals_get_the_label_and_marker(harness: Harness) -> None:
+def test_s5_landed_goals_get_the_marker_and_no_label(harness: Harness) -> None:
     result = _run(harness, _goals(harness, "sequential"))
     _no_notes(result)
     issues = harness.read_gh_state()["issues"]
+    # The marker is grind's only trace on the issue: no label (#1958).
+    for g in (*GOALS, META):
+        assert not issues[g]["labels"], issues[g]
     for g in GOALS:
-        assert LABEL in issues[g]["labels"], issues[g]
         assert any(_marker(g) in c["body"] for c in issues[g]["comments"]), issues[g]
-    assert LABEL in issues[META]["labels"], issues[META]
+    assert not _calls(harness, "label"), harness.read_gh_state()["calls"]
     metas = [c for c in issues[META]["comments"] if f"feature-pr=#{PR}" in c["body"]]
     assert len(metas) == 1, issues[META]["comments"]
     # Landing on the feature branch closes nothing.

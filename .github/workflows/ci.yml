@@ -494,6 +494,8 @@ jobs:
 
   # #1323: real Claude Code on the scripted mock agent backend. Full mode
   # only (ci-full): it installs Claude Code from npm.
+  # Linux-only, like integration: ci-test runs it, so validating a harness
+  # change never needs ci-full's macOS and Windows targets (#2149).
   test-linux-x64-harness:
     name: Test linux-x64 (harness)
     needs: [static, build-linux-x64]
@@ -501,7 +503,7 @@ jobs:
       ${{ always() && !cancelled()
           && needs.static.result == 'success'
           && needs.build-linux-x64.result == 'success'
-          && needs.static.outputs.mode == 'full' }}
+          && (needs.static.outputs.mode == 'extended' || needs.static.outputs.mode == 'full') }}
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
