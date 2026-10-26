@@ -15,6 +15,7 @@ pub mod block_bad_cmd;
 pub mod block_bad_cmd_rollout;
 pub mod bridge_log;
 pub mod cache_health;
+pub mod cache_heartbeat;
 pub mod capture;
 pub mod ci_local;
 pub mod civil_time;

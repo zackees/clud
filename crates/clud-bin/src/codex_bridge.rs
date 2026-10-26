@@ -2346,6 +2346,13 @@ fn serve_unified_anthropic_proxy(
         (stripped.0.as_slice(), stripped.1.as_slice())
     };
     let mut outcome = ProxyOutcome::local(500);
+    // #2046: compat routes get an out-of-band cache heartbeat while idle.
+    let heartbeat = (route != ConversationRoute::Claude && path == "/v1/messages")
+        .then(crate::cache_heartbeat::shared)
+        .flatten();
+    if let Some(beats) = heartbeat {
+        beats.begin(&conversation_key.id, Instant::now());
+    }
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
         // exactly what a failover is: a provider switch nobody typed.
@@ -2379,6 +2386,12 @@ fn serve_unified_anthropic_proxy(
         }
         Ok(())
     });
+    if let Some(beats) = heartbeat {
+        let succeeded = matches!(outcome, ProxyOutcome::Committed { status } if status < 400);
+        let target =
+            succeeded.then(|| heartbeat_target(base_url, path, body, headers, injected_api_key));
+        beats.finish(&conversation_key.id, target, Instant::now());
+    }
     if let Err(error) = routed {
         let failure = PipelineError::Translate(crate::codex_translate::TranslateError::Invalid(
             error.to_string(),
@@ -2387,6 +2400,30 @@ fn serve_unified_anthropic_proxy(
         return ProxyOutcome::local(500);
     }
     outcome
+}
+
+/// #2046: what the cache heartbeat replays: the request exactly as this hop
+/// sent it upstream (forwarded headers, injected credential, same body).
+fn heartbeat_target(
+    base_url: &str,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    injected_api_key: Option<&str>,
+) -> crate::cache_heartbeat::Target {
+    let mut sent: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| proxy_forwards_header(name, injected_api_key.is_some()))
+        .cloned()
+        .collect();
+    if let Some(api_key) = injected_api_key {
+        sent.push(("Authorization".to_string(), format!("Bearer {api_key}")));
+    }
+    crate::cache_heartbeat::Target {
+        url: format!("{}{path}", base_url.trim_end_matches('/')),
+        headers: sent,
+        body: body.to_vec(),
+    }
 }
 
 /// Tool type of Anthropic's server-side advisor (#1529).
