@@ -4798,7 +4798,10 @@ mod tests {
     fn merge_wait_refusals_name_the_watcher_as_the_way_to_wait_for_a_merge() {
         // #2035: every refused way to wait for a queued PR must point at the
         // watcher, which follows the merge queue to MERGED or an ejection.
-        for command in ["sleep 540; gh pr view 1847 --json state"] {
+        for command in [
+            "sleep 540; gh pr view 1847 --json state",
+            "while true; do gh pr view 1847 --json state; sleep 30; done",
+        ] {
             let reason = evaluate_command(command, None, false, &[])
                 .reason
                 .unwrap_or_else(|| panic!("{command} should be denied"));

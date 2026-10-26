@@ -205,8 +205,7 @@
   {
    "shape": "python stdin heredoc poll loop",
    "tool": "Bash",
-   "lint": "python-name-lint: allow",
-   "command": "python3 - <<'PY'\nimport subprocess, time\nwhile True:\n    out = subprocess.run(['gh', 'pr', 'checks', '1650'], capture_output=True, text=True).stdout\n    if 'pending' not in out:\n        print(out)\n        break\n    time.sleep(45)\nPY"
+   "lint": "python-name-lint: allow", "command": "python3 - <<'PY'\nimport subprocess, time\nwhile True:\n    out = subprocess.run(['gh', 'pr', 'checks', '1650'], capture_output=True, text=True).stdout\n    if 'pending' not in out:\n        print(out)\n        break\n    time.sleep(45)\nPY"
   },
   {
    "shape": "python -c poll loop",
@@ -268,6 +267,31 @@
   }
  ],
  "negatives": [
+  {
+   "shape": "gh run watch retried in a counted for (a run wait, not a PR wait: DD-189)",
+   "tool": "Bash",
+   "command": "r=36225466806; for i in $(seq 1 10); do gh run watch $r -R zackees/setup-soldr --interval 60 >/dev/null 2>&1 && break; [ \"$(gh run view $r -R zackees/setup-soldr --json status -q .status)\" = completed ] && break; done; gh run view $r -R zackees/setup-soldr --json conclusion"
+  },
+  {
+   "shape": "heredoc to .sh: run-list cancel loop (a run wait, not a PR wait: DD-189)",
+   "tool": "Bash",
+   "command": "SP=/tmp/s\ncat > \"$SP/cancel-branch.sh\" <<'EOF'\n#!/usr/bin/env bash\nfor i in $(seq 1 10); do\n  runs=$(gh run list --branch feat/meta-work-1209 --limit 20 --json databaseId,status 2>/dev/null || echo '[]')\n  sleep 10\ndone\nEOF\nchmod +x \"$SP/cancel-branch.sh\"\nbash \"$SP/cancel-branch.sh\" \"$SP\""
+  },
+  {
+   "shape": "python heredoc to .py poll loop (a run wait, not a PR wait: DD-189)",
+   "tool": "Bash",
+   "command": "cat > /tmp/503c/waitdone.py <<'E'\nimport json,subprocess,sys,time\nrepo,rid=sys.argv[1],sys.argv[2]\nwhile True:\n    d=json.loads(subprocess.check_output(['gh','run','view',rid,'-R',repo,'--json','status,conclusion']))\n    if d['status']=='completed':\n        print(d['conclusion']); break\n    time.sleep(30)\nE\npython /tmp/503c/waitdone.py zackees/soldr 36108012678"
+  },
+  {
+   "shape": "classic sleep chained to run list (a run wait, not a PR wait: DD-189)",
+   "tool": "Bash",
+   "command": "sleep 20; gh run list --limit 5 2>&1 | head -8"
+  },
+  {
+   "shape": "classic bare gh run watch (a run wait, not a PR wait: DD-189)",
+   "tool": "Bash",
+   "command": "gh run watch 35699851989 --repo zackees/zccache --exit-status --interval 60 > /tmp/release-watch.log 2>&1; echo \"EXIT=$?\"; tail -25 /tmp/release-watch.log"
+  },
   {
    "shape": "single gh pr checks",
    "tool": "Bash",
@@ -366,8 +390,7 @@
   {
    "shape": "python edit script with sleep code in triple quotes",
    "tool": "Bash",
-   "lint": "python-name-lint: allow",
-   "command": "python3 - <<'EOF'\np='ci/publish.py'\ns=open(p).read()\ns=s.replace('''RELEASE_WORKFLOW = \"auto-release.yml\"\n''','''RELEASE_WORKFLOW = \"auto-release.yml\"\nRELEASE_POLL_SEC = 15\n''')\ns=s.replace('''def wait():\n    while True:\n        out = subprocess.check_output([\"gh\", \"run\", \"view\", rid])\n        time.sleep(15)\n''','''def wait():\n    pass\n''')\nopen(p,'w').write(s)\nEOF"
+   "lint": "python-name-lint: allow", "command": "python3 - <<'EOF'\np='ci/publish.py'\ns=open(p).read()\ns=s.replace('''RELEASE_WORKFLOW = \"auto-release.yml\"\n''','''RELEASE_WORKFLOW = \"auto-release.yml\"\nRELEASE_POLL_SEC = 15\n''')\ns=s.replace('''def wait():\n    while True:\n        out = subprocess.check_output([\"gh\", \"run\", \"view\", rid])\n        time.sleep(15)\n''','''def wait():\n    pass\n''')\nopen(p,'w').write(s)\nEOF"
   },
   {
    "shape": "python one-shot json",
@@ -472,31 +495,6 @@
    "shape": "for loop over run ids, one cancel each",
    "tool": "Bash",
    "command": "for r in 36504804507 36504781998; do gh run cancel $r >/dev/null 2>&1; done"
-  },
-  {
-   "shape": "gh run watch retried in a counted for (a run wait, not a PR wait: DD-189)",
-   "tool": "Bash",
-   "command": "r=36225466806; for i in $(seq 1 10); do gh run watch $r -R zackees/setup-soldr --interval 60 >/dev/null 2>&1 && break; [ \"$(gh run view $r -R zackees/setup-soldr --json status -q .status)\" = completed ] && break; done; gh run view $r -R zackees/setup-soldr --json conclusion"
-  },
-  {
-   "shape": "heredoc to .sh: run-list cancel loop (a run wait, not a PR wait: DD-189)",
-   "tool": "Bash",
-   "command": "SP=/tmp/s\ncat > \"$SP/cancel-branch.sh\" <<'EOF'\n#!/usr/bin/env bash\nfor i in $(seq 1 10); do\n  runs=$(gh run list --branch feat/meta-work-1209 --limit 20 --json databaseId,status 2>/dev/null || echo '[]')\n  sleep 10\ndone\nEOF\nchmod +x \"$SP/cancel-branch.sh\"\nbash \"$SP/cancel-branch.sh\" \"$SP\""
-  },
-  {
-   "shape": "python heredoc to .py poll loop (a run wait, not a PR wait: DD-189)",
-   "tool": "Bash",
-   "command": "cat > /tmp/503c/waitdone.py <<'E'\nimport json,subprocess,sys,time\nrepo,rid=sys.argv[1],sys.argv[2]\nwhile True:\n    d=json.loads(subprocess.check_output(['gh','run','view',rid,'-R',repo,'--json','status,conclusion']))\n    if d['status']=='completed':\n        print(d['conclusion']); break\n    time.sleep(30)\nE\npython /tmp/503c/waitdone.py zackees/soldr 36108012678"
-  },
-  {
-   "shape": "classic sleep chained to run list (a run wait, not a PR wait: DD-189)",
-   "tool": "Bash",
-   "command": "sleep 20; gh run list --limit 5 2>&1 | head -8"
-  },
-  {
-   "shape": "classic bare gh run watch (a run wait, not a PR wait: DD-189)",
-   "tool": "Bash",
-   "command": "gh run watch 35699851989 --repo zackees/zccache --exit-status --interval 60 > /tmp/release-watch.log 2>&1; echo \"EXIT=$?\"; tail -25 /tmp/release-watch.log"
   }
  ]
 }
