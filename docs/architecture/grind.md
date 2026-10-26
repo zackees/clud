@@ -875,8 +875,12 @@ parallel mode, when the pack is at least `PACK_STAGGER_CHARS` (about 1K
 tokens) the first task runs alone and the rest start after it, since agents
 that start together all miss an empty cache. The cache is per model and
 system prompt: the reviewer (a different agent type) reads the same pack
-but does not share the workers' cache. The real-model cost measurement
-#1344 calls for stays manual.
+but does not share the workers' cache. Claude Code itself puts system
+reminders (git status, attribution) ahead of the prompt and indents every
+line of a workflow's computed task text, so the shared prefix is
+everything up to the marker line as delivered, not the pack bytes alone;
+`tests/harness/test_grind_context_pack.py` asserts it on the real Claude
+Code. The real-model cost measurement #1344 calls for stays manual.
 
 ## Tests
 

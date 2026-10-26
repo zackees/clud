@@ -16,7 +16,9 @@ from typing import Any
 from tests.harness.harness import Harness, RunResult
 from tests.harness.test_grind import _after, _goal_roles, _goals, _role, _script, _structured
 
-PACK_END = "\n--- end of context pack ---\n"
+# Claude Code's workflow harness indents every line of computed task text,
+# so match the marker's text, not its surrounding newlines.
+PACK_END = "--- end of context pack ---"
 TASKS = ("t1", "t2", "t3")
 # Large enough to pass the workflow's staggered-start threshold.
 EXCERPT = "\n".join(f"line {n}: let shared_context_{n} = {n};" for n in range(1, 160))
@@ -68,7 +70,7 @@ def _first(result: RunResult, role: str) -> dict[str, Any]:
 def _prefix(request: dict[str, Any]) -> str:
     """Everything the model sees, serialized, up to the end of the pack."""
     whole = json.dumps({"system": request.get("system"), "messages": request.get("messages")})
-    marker = json.dumps(PACK_END)[1:-1]
+    marker = PACK_END
     assert marker in whole, "the pack never reached this agent; messages begin:\n" + json.dumps(
         request.get("messages")
     )[:3000]
@@ -102,7 +104,7 @@ def test_the_reviewer_starts_from_the_same_pack(harness: Harness) -> None:
     reviewer = json.dumps(_first(result, "reviewer:g").get("messages"))
     pack = json.dumps(_first(result, "worker:g:t1").get("messages"))
     start = pack.index("Context pack for this goal")
-    end = pack.index(json.dumps(PACK_END)[1:-1]) + len(json.dumps(PACK_END)[1:-1])
+    end = pack.index(PACK_END) + len(PACK_END)
     assert pack[start:end] in reviewer
 
 
