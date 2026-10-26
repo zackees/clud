@@ -139,7 +139,7 @@ pub fn banner_suffix(schedule: &Schedule, now: i64) -> String {
             let name = Path::new(path)
                 .file_name()
                 .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-            let days = (after - now).max(0).div_ceil(24 * 60 * 60);
+            let days = ((after - now).max(0) as u64).div_ceil(24 * 60 * 60);
             format!("{name} in {days}d")
         })
         .collect();
