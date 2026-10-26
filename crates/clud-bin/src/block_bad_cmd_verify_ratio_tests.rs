@@ -130,7 +130,10 @@ fn kinds_split_verification_for_the_stats_view() {
     assert_eq!(classify_kind("Bash", "cargo clippy -p x"), Some(Kind::Lint));
     assert_eq!(classify_kind("Bash", "cargo build"), Some(Kind::Build));
     assert_eq!(classify_kind("Bash", "pytest tests/x.py"), Some(Kind::Test));
-    assert_eq!(classify_kind("Bash", "bosn ci run --job unit"), Some(Kind::Ci));
+    assert_eq!(
+        classify_kind("Bash", "bosn ci run --job unit"),
+        Some(Kind::Ci)
+    );
     assert_eq!(classify_kind("Bash", "git status"), Some(Kind::Other));
     assert_eq!(classify_kind("Read", ""), None);
     assert_eq!(classify("Bash", "git status"), None);
@@ -158,9 +161,19 @@ fn a_post_tool_use_adds_the_elapsed_time_to_the_calls_kind() {
     test.id = Some("t1".into());
     let (ledger, _) = observe(&Ledger::default(), &test, LIMITS);
     let ledger = finish(&ledger, "t1", 61_000).unwrap();
-    assert_eq!(ledger.totals[&Kind::Test], Total { calls: 1, ms: 60_000 });
+    assert_eq!(
+        ledger.totals[&Kind::Test],
+        Total {
+            calls: 1,
+            ms: 60_000
+        }
+    );
     assert!(ledger.pending.is_empty());
-    assert_eq!(finish(&ledger, "t1", 99_000), None, "a second finish is a no-op");
+    assert_eq!(
+        finish(&ledger, "t1", 99_000),
+        None,
+        "a second finish is a no-op"
+    );
     assert_eq!(finish(&ledger, "unknown", 99_000), None);
 }
 
@@ -195,7 +208,13 @@ fn verification_holding_most_of_the_bash_wall_time_trips_one_note() {
 #[test]
 fn the_share_is_not_judged_before_ten_minutes_of_bash() {
     let mut totals = BTreeMap::new();
-    totals.insert(Kind::Test, Total { calls: 1, ms: 300_000 });
+    totals.insert(
+        Kind::Test,
+        Total {
+            calls: 1,
+            ms: 300_000,
+        },
+    );
     assert_eq!(verify_share(&totals), None);
 }
 
@@ -239,12 +258,19 @@ fn after_a_note_the_next_workspace_lint_is_denied_exactly_once() {
     let mut ledger = Ledger::default();
     let mut verdicts = Vec::new();
     for letter in "evvvvevvvvevv".chars() {
-        let kind = if letter == 'e' { Kind::Edit } else { Kind::Test };
+        let kind = if letter == 'e' {
+            Kind::Edit
+        } else {
+            Kind::Test
+        };
         let (next, verdict) = observe(&ledger, &call(kind, 0), LIMITS);
         ledger = next;
         verdicts.extend(verdict);
     }
-    assert!(matches!(verdicts.as_slice(), [Verdict::Note(_)]), "{verdicts:?}");
+    assert!(
+        matches!(verdicts.as_slice(), [Verdict::Note(_)]),
+        "{verdicts:?}"
+    );
     let mut lint = call(Kind::Lint, 0);
     lint.workspace_lint = true;
     let (ledger, verdict) = observe(&ledger, &lint, LIMITS);

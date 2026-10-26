@@ -208,9 +208,9 @@ fn is_workspace_lint(kind: Kind, command: &str) -> bool {
 /// `packages/` or `libs/`. `None` when the layout says nothing.
 pub(super) fn package_of(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split(['/', '\\']).collect();
-    parts.windows(3).find_map(|w| {
-        matches!(w[0], "crates" | "packages" | "libs").then(|| w[1].to_string())
-    })
+    parts
+        .windows(3)
+        .find_map(|w| matches!(w[0], "crates" | "packages" | "libs").then(|| w[1].to_string()))
 }
 
 /// Wall time and call count for one kind.
@@ -368,7 +368,9 @@ pub(super) fn observe(previous: &Ledger, call: &Call, limits: Limits) -> (Ledger
     if class != Class::Verify || next.quiet > 0 {
         return (next, None);
     }
-    if let Some(share) = verify_share(&next.totals).filter(|s| limits.share > 0 && *s >= limits.share) {
+    if let Some(share) =
+        verify_share(&next.totals).filter(|s| limits.share > 0 && *s >= limits.share)
+    {
         quiet_after_note(&mut next);
         return (next, Some(Verdict::Note(share_text(share, limits.share))));
     }
@@ -563,10 +565,7 @@ fn edited_path(tool_input: Option<&Value>) -> Option<String> {
 }
 
 /// PreToolUse entry: a note to add or a call to deny, or `None`.
-pub(super) fn verdict(
-    payload: &super::HookPayloadView,
-    raw: &Value,
-) -> Option<Verdict> {
+pub(super) fn verdict(payload: &super::HookPayloadView, raw: &Value) -> Option<Verdict> {
     let session_id = payload.session_id.as_deref()?;
     let kind = classify_kind(&payload.tool_name, &payload.command)?;
     let limits = effective_limits();
@@ -613,7 +612,10 @@ pub(super) fn stats_text(ledger: &Ledger) -> String {
         .filter_map(|kind| ledger.totals.get(kind))
         .map(|total| total.ms)
         .sum();
-    let mut out = format!("{:<6} {:>6} {:>10} {:>7}\n", "kind", "calls", "wall", "bash%");
+    let mut out = format!(
+        "{:<6} {:>6} {:>10} {:>7}\n",
+        "kind", "calls", "wall", "bash%"
+    );
     for kind in Kind::ALL {
         let total = ledger.totals.get(&kind).copied().unwrap_or_default();
         let share = if kind == Kind::Edit || bash_ms == 0 {
