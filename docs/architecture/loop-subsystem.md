@@ -202,6 +202,36 @@ the daemon is still alive. Each `run_repeat_once`
 Windows) and `Containment::Contained` (kill-on-close Job Object). Output
 is captured into a TCP-broadcast log, not the user's terminal.
 
+## Cache heartbeat (compat routes, #2046)
+
+DeepSeek, OpenRouter and Kimi keep a request's prefix cache for about five
+minutes, refreshed only by use, so a loop iteration that waits longer
+re-enters cold. The unified gateway keeps it warm out of band
+(`crates/clud-bin/src/cache_heartbeat.rs`):
+
+- After each successful compat-route `/v1/messages` call it records the
+  request as sent upstream, per conversation. Claude-route traffic is not
+  touched.
+- When a conversation has been idle for `ttl - 15 s` (285 s by default) with
+  no request in flight, a background thread replays that body with one
+  appended user turn, `just respond with ok`, `max_tokens` 8, no streaming
+  and no thinking. System, tools and prior messages are byte-for-byte the
+  recorded ones, so the cached prefix is what gets read. The reply is
+  discarded.
+- **Resume contract.** The heartbeat never enters the conversation: Claude
+  Code, the loop, its markers, its iteration counters and `info.json` never
+  see it, so the next real turn continues exactly where it stopped. A real
+  request marks the conversation in flight, which blocks new heartbeats
+  until it finishes; it then restarts the idle clock, so time in flight is
+  never counted as idle. A real request may still start while a heartbeat is
+  out; it is not delayed.
+- At most 6 heartbeats per idle stretch (about 30 minutes), so an abandoned
+  session stops paying. A failed heartbeat is logged and dropped; it can
+  cost a warm cache, never a turn.
+- Enabled by default. `NO_CACHE_HEARTBEAT` set to a truthy value disables
+  it; unset or empty keeps it on. `CLUD_CACHE_TTL_SECS` overrides the 300 s
+  TTL (values at or under 15 s are ignored).
+
 ## Key types
 
 - `LoopMarkers { done_path: String, blocked_path: String }` —
