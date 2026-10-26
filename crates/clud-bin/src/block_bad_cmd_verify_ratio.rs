@@ -183,6 +183,7 @@ pub(super) fn classify_kind(tool_name: &str, command: &str) -> Option<Kind> {
 }
 
 /// The class of one call, from its tool name and shell command.
+#[cfg(test)]
 pub(super) fn classify(tool_name: &str, command: &str) -> Option<Class> {
     classify_kind(tool_name, command).and_then(Kind::class)
 }
@@ -493,6 +494,7 @@ fn store(path: &Path, ledger: &Ledger, fresh: bool) -> Option<()> {
 
 /// Record `class` for the session in `state_dir`; the counts when a note is
 /// due. Every failure returns `None`.
+#[cfg(test)]
 pub(super) fn observe_at(
     state_dir: &Path,
     session_id: &str,
