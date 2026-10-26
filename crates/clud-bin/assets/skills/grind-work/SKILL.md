@@ -17,6 +17,9 @@ You write code; you do not run it.
 
 - Edit only the files your task assigns, under the checkout path given. If
   the task needs another file, stop and report it in `blocked`.
+- Your prompt starts with the goal's **context pack**: the issue text and
+  the excerpts the planner already read. Use it; do not re-fetch the issue
+  or re-read an excerpted range. Read beyond it only for what it lacks.
 - Investigate as needed: read surrounding code, `gh issue view --repo <github-repo>`, `gh pr
   view --repo <github-repo>`, `gh search code --repo <github-repo>`, and web search for library or API behaviour.
   Your shell accepts read-only `gh` only; builds, lints and tests are the

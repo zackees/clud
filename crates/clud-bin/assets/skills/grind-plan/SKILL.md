@@ -59,6 +59,17 @@ later, one goal at a time.
    every push: do not invent lint or test commands; verify is just the
    focused test.
 
+6. **Context pack** (#1339, #1344). Return `context`, once for the goal:
+   `issue` is the goal issue's body and comments, verbatim, as you read them
+   in step 1 (empty when the brief is not an issue); `excerpts` are the code
+   ranges the workers and reviewer need, each `{path, start, end, why,
+   text}` with `text` the exact lines `start..end` (1-based, inclusive).
+   Prefer a few focused ranges over whole files, and stay under about
+   400 lines in total. The workflow places this pack, byte for byte, at the
+   start of every worker's and the reviewer's prompt, so they neither
+   re-fetch the issue nor re-read these ranges, and the prompt cache serves
+   it after the first agent. Put nothing task-specific in it.
+
 ## Platform coverage selection
 
 Native PR coverage follows the changed platform implementation: native API/FFI

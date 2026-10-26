@@ -284,6 +284,11 @@ const PLAN = {
     verify: { type: 'string', description: 'exact lint/build/test commands for the integrator, newline separated' },
     tasks: { type: 'array', items: { type: 'object', required: ['id', 'files', 'instructions'], properties: {
       id: { type: 'string' }, files: { type: 'array', items: { type: 'string' }, description: 'files this task writes; a check that writes nothing belongs in verify' }, instructions: { type: 'string' } } } },
+    context: { type: 'object', description: 'the context pack (#1339): issue text and code excerpts every worker and the reviewer start from', properties: {
+      issue: { type: 'string', description: "the goal issue's body and comments, verbatim" },
+      excerpts: { type: 'array', items: { type: 'object', required: ['path', 'start', 'end', 'text'], properties: {
+        path: { type: 'string' }, start: { type: 'integer' }, end: { type: 'integer' }, why: { type: 'string' },
+        text: { type: 'string', description: 'the exact lines start..end' } } } } } },
     problems: PROBLEMS,
   },
 }
@@ -682,16 +687,40 @@ const plan = (g) => light(() => agent(
   featurePlanNote(g),
   opts('planner', `plan:${g.id}`, 'Plan', PLAN)).then(r => collect(r, 'planner', g.id)))
 
+// The context pack (#1339, #1344): rendered once per goal and placed first
+// in every worker's and the reviewer's prompt, so their requests are
+// byte-identical up to PACK_END and the prompt cache serves the pack after
+// the first agent. Nothing that varies per agent may appear in it.
+const PACK_END = '\n--- end of context pack ---\n'
+// Below the prompt-cache minimum (about 1K tokens) a pack gains nothing from
+// a staggered start.
+const PACK_STAGGER_CHARS = 4000
+const packOf = (p) => {
+  const c = (p && p.context) || {}
+  const excerpts = Array.isArray(c.excerpts) ? c.excerpts : []
+  const issue = String(c.issue || '').trim()
+  if (!issue && !excerpts.length) return ''
+  const parts = ['Context pack for this goal. Read it before anything else; do not re-fetch the issue or re-read these ranges.']
+  if (issue) parts.push(`Issue:\n${issue}`)
+  for (const e of excerpts) parts.push(`${e.path}:${e.start}-${e.end}${e.why ? ` (${e.why})` : ''}\n${String(e.text || '')}`)
+  return parts.join('\n\n') + PACK_END
+}
+
+// Parallel workers share the pack's cache only if one request has written
+// it first: start the first task alone, then the rest together.
 const work = (p, g) => (PARALLEL
-  ? parallel(p.tasks.map(t => () => light(() => runTask(p, g, t))))
+  ? (packOf(p).length >= PACK_STAGGER_CHARS && p.tasks.length > 1
+    ? light(() => runTask(p, g, p.tasks[0])).then(first =>
+      parallel(p.tasks.slice(1).map(t => () => light(() => runTask(p, g, t)))).then(rest => [first, ...rest]))
+    : parallel(p.tasks.map(t => () => light(() => runTask(p, g, t)))))
   : p.tasks.reduce((acc, t) => acc.then(rs => runTask(p, g, t).then(r => [...rs, r])), Promise.resolve([])))
   .then(rs => ({ p, results: rs.filter(Boolean) }))
 const runTask = (p, g, t) => agent(
-  `Follow your built-in /grind-work procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nTask ${t.id}. Files you own: ${t.files.join(', ')}\n\n${t.instructions}`,
+  `${packOf(p)}Follow your built-in /grind-work procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nTask ${t.id}. Files you own: ${t.files.join(', ')}\n\n${t.instructions}`,
   opts('worker', `work:${g.id}/${t.id}`, 'Work', WORK)).then(r => collect(r, 'worker', g.id))
 
 const review = ({ p, results }, g) => light(() => agent(
-  `Follow your built-in /grind-review procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nWorker reports:\n${JSON.stringify(results, null, 1)}`,
+  `${packOf(p)}Follow your built-in /grind-review procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nWorker reports:\n${JSON.stringify(results, null, 1)}`,
   opts('reviewer', `review:${g.id}`, 'Review', REVIEW)).then(r => collect(r, 'reviewer', g.id))).then(r => ({ p, review: r }))
 
 const integrate = (p, g, note) => exclusive(() => agent(

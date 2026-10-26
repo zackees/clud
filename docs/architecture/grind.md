@@ -861,6 +861,23 @@ Other agents and the primary session are unaffected. The tests next to it
 own the exact allowlists. On top of the table, every `grind-*` role is
 denied `AskUserQuestion`, `gh issue create` and closing an issue.
 
+## Context pack (#1339, #1344)
+
+The planner returns `context` with its plan: the goal issue's body and
+comments verbatim, and the code excerpts the goal needs (`{path, start, end,
+why, text}`). `grind-run.js` renders it once per goal (`packOf`) and puts it
+**first** in every worker's and the reviewer's prompt, ending at
+`--- end of context pack ---`; nothing per-agent (task id, file list, round)
+may precede that line. Workers then neither re-fetch the issue nor re-read
+the excerpted ranges, and because their requests are byte-identical up to
+the separator, the prompt cache serves the pack after the first worker. In
+parallel mode, when the pack is at least `PACK_STAGGER_CHARS` (about 1K
+tokens) the first task runs alone and the rest start after it, since agents
+that start together all miss an empty cache. The cache is per model and
+system prompt: the reviewer (a different agent type) reads the same pack
+but does not share the workers' cache. The real-model cost measurement
+#1344 calls for stays manual.
+
 ## Tests
 
 The workflow, the agent types and the caps run end to end on the real Claude
