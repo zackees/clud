@@ -145,3 +145,42 @@ fn ingest_without_a_log_is_empty_and_writes_nothing() {
     assert!(ingest(&source).is_empty());
     assert!(!source.cursor.exists());
 }
+
+/// #2103: submodule checkouts (nested, and with a slashed name) are found
+/// from `.git/modules/**/config` alone; a module whose checkout is gone is
+/// skipped.
+#[test]
+fn submodule_checkouts_are_found_from_module_configs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("main");
+    let modules = main.join(".git").join("modules");
+    for sub in ["libs/a", "b", "b/inner", "gone"] {
+        if sub != "gone" {
+            std::fs::create_dir_all(main.join(sub)).unwrap();
+        }
+    }
+    write(
+        &modules.join("libs").join("a").join("config"),
+        "[core]\n\tworktree = ../../../../libs/a\n",
+    );
+    write(
+        &modules.join("b").join("config"),
+        "[core]\n\tworktree = ../../../b\n",
+    );
+    write(
+        &modules
+            .join("b")
+            .join("modules")
+            .join("inner")
+            .join("config"),
+        "[core]\n\tworktree = ../../../../../b/inner\n",
+    );
+    write(
+        &modules.join("gone").join("config"),
+        "[core]\n\tworktree = ../../../gone\n",
+    );
+    let mut found = submodule_checkouts(&main);
+    found.sort();
+    let canon = |p: &str| std::fs::canonicalize(main.join(p)).unwrap();
+    assert_eq!(found, vec![canon("b"), canon("b/inner"), canon("libs/a")]);
+}
