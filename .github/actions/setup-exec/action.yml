@@ -55,22 +55,23 @@ runs:
       # Install from the image's own package lists first: an unbounded
       # `apt-get update` against a slow mirror held a unit shard for 11+
       # minutes (#2063). Only a stale or missing list falls back to an update.
-      # Bounds: the network fetch gets most of the job's 20 minutes, because
-      # weston's closure is ~117 MB and a shared runner (local act under
-      # several sessions) legitimately needs more than 4 minutes for it; a
-      # single wall-clock cap over download + install killed it (exit 124,
-      # #2162). The local --no-download install stays short. Worst case
-      # 240 + 480 + 120 s stays under the job's timeout-minutes.
+      # dpkg fsyncs every file it unpacks; on a container's overlay disk
+      # shared by several local gate runs that crawled at ~5 s per package
+      # (26 of ~165 unpacked in 2 min) and the time cap killed it (exit 124,
+      # #2162). The download itself takes ~20 s. `--force-unsafe-io` drops the
+      # per-file fsync, which is safe on a throwaway runner. The fetch and the
+      # local install are bounded separately; worst case 240 + 300 + 300 s stays
+      # under the job's timeout-minutes.
       run: |
         set -euo pipefail
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
-                  -o APT::Keep-Downloaded-Packages=true)
+                  -o APT::Keep-Downloaded-Packages=true -o Dpkg::Options::=--force-unsafe-io)
         pkgs=(xvfb xauth xfonts-base xdotool weston libgl1-mesa-dri libegl1 libgles2
               libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1)
         debs="$HOME/gui-runtime-debs"
         mkdir -p "$debs"
         install_local() {
-          sudo timeout 120 apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"
+          sudo timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"
         }
         if compgen -G "$debs/*.deb" >/dev/null; then
           sudo cp "$debs"/*.deb /var/cache/apt/archives/
@@ -80,7 +81,7 @@ runs:
           echo "::warning::cached GUI runtime packages were incomplete; using the mirror"
         fi
         fetch() {
-          sudo timeout 480 apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${pkgs[@]}"
+          sudo timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${pkgs[@]}"
         }
         # An image shipped without package lists cannot satisfy the fast path.
         if ! compgen -G "/var/lib/apt/lists/*_Packages*" >/dev/null || ! fetch; then
