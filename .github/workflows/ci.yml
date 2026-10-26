@@ -362,16 +362,8 @@ jobs:
           PYTHONPATH: .ci-lint
           GITHUB_TOKEN: ${{ github.token }}
         run: '"$VENV_PY" -m ci_lint cache preprune --repo . --lockfile-changed --max-deletes 50'
-      # Every main push sweeps what preprune cannot see: generations superseded
-      # by a key-prefix change (soldr or config hash), entries saved on other
-      # refs, retired families, then LRU down to [cache].budget. Without it the
-      # repo sat at 10.5 GB and GitHub's own LRU evicted main's live build
-      # cache, so PRs restored a day-old fallback at a 67% hit rate (#2037).
-      - name: Sweep superseded and off-branch cache entries
-        env:
-          PYTHONPATH: .ci-lint
-          GITHUB_TOKEN: ${{ github.token }}
-        run: '"$VENV_PY" -m ci_lint cache janitor --repo . --default-branch main --max-deletes 50'
+      # The superseded/off-branch/LRU sweep moved to `queue-cache-janitor`,
+      # the run's final job (GEN-022), so it runs after every cache writer.
 
   # ---------------------------------------------------------------- dylint --
   # Dylint is required in every mode. The reusable workflow runs the custom
@@ -783,3 +775,44 @@ jobs:
             gh label create "$label" --color B60205 --description "Nightly full CI on main failed" 2>/dev/null || true
             gh issue create --title "Nightly full CI failed on main" --label "$label" --body "$body"
           fi
+
+  # GEN-022 (forge-ci/ci.yml#405): every merge-queue run and main push ends
+  # with the ci-lint cache janitor. It needs every other job and runs on
+  # always(), so it sweeps after every cache writer, even when a job failed:
+  # superseded generations (soldr or config hash changes), entries saved on
+  # other refs, retired families, then LRU down to [cache].budget. Without the
+  # sweep the repo sat at 10.5 GB and GitHub's own LRU evicted main's live
+  # build cache, so PRs restored a day-old fallback at a 67% hit rate (#2037).
+  # The non-cancelling `cache-janitor` group keeps one sweep at a time.
+  queue-cache-janitor:
+    name: End-of-queue cache janitor
+    needs: [cancel-superseded, static, static-checks, cache-maint, dylint, lint-linux-x64, build-linux-x64, test-linux-x64-unit, test-linux-x64-integration, test-linux-x64-harness, build-windows-x64, test-windows-x64, build-macos-arm, test-macos-arm, build-linux-arm, test-linux-arm, build-windows-arm, test-windows-arm, build-macos-x64, test-macos-x64, ci-ok, nightly-report]
+    if: always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: cache-janitor
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # The janitor reads only ci.toml from this repository.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: ci.toml
+          sparse-checkout-cone-mode: false
+      # ci.toml's `linter` pin (CT-004).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: zackees/ci.yml
+          ref: 839c8f6b03c08a94977d57eb339740407424a434
+          path: .ci-lint
+          persist-credentials: false
+          sparse-checkout: ci_lint
+      - name: Sweep superseded and off-branch cache entries
+        env:
+          PYTHONPATH: .ci-lint
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -P -m ci_lint cache janitor --repo . --default-branch main --max-deletes 50
