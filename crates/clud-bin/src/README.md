@@ -46,6 +46,8 @@ restoration and count-only status. See
   slices. `identity.rs` is the pure layer: every path spelling of a
   workspace root to one canonical form, repository and workspace ids, the
   `io.clud.dockhand.*` label contract and Docker-safe resource names.
+  `retention.rs` decides tiers, age eligibility and the pressure eviction
+  order, with the compaction advisory when GC cannot cover a deficit.
 - [platform/](platform/README.md) - the host-platform boundary (#1953): the
   only place in this crate that names a host. `mod.rs` selects `windows/` or
   `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
