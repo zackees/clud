@@ -37,8 +37,10 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
     let ok_id = rows.iter().find(|r| r.path == ok_path_str).unwrap().id;
     let fail_id = rows.iter().find(|r| r.path == fail_path_str).unwrap().id;
 
+    let mut reasons = SpareReasons::new();
     apply_purge_completion(
         &registry,
+        &mut reasons,
         PurgeCompletion {
             id: ok_id,
             path: ok_path.to_string_lossy().to_string(),
@@ -49,6 +51,7 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
     );
     apply_purge_completion(
         &registry,
+        &mut reasons,
         PurgeCompletion {
             id: fail_id,
             path: fail_path.to_string_lossy().to_string(),
@@ -64,6 +67,49 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
         .map(|r| r.path)
         .collect();
     assert_eq!(remaining, vec![fail_path.to_string_lossy().to_string()]);
+}
+
+/// Issue #2101: a completion the pool spared at delete time keeps the row
+/// and leaves `gc list` a pinned verdict with the pool's reason; a later
+/// completed purge of the same path clears it.
+#[test]
+fn a_spared_completion_keeps_the_row_and_records_a_pinned_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(&dir.path().join("spared.redb")).unwrap();
+    let wt = dir.path().join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let path = wt.to_string_lossy().to_string();
+    registry
+        .insert_if_new(&InsertInput {
+            kind: WORKTREE_KIND.to_string(),
+            path: path.clone(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            now_unix: 100,
+        })
+        .unwrap();
+    let id = registry.list(None).unwrap()[0].id;
+    let mut reasons = SpareReasons::new();
+    let completion = |spared| PurgeCompletion {
+        id,
+        path: path.clone(),
+        kind: WORKTREE_KIND.to_string(),
+        result: Ok(()),
+        spared,
+    };
+    apply_purge_completion(
+        &registry,
+        &mut reasons,
+        completion(Some("spared: uncommitted changes")),
+    );
+    assert_eq!(registry.list(None).unwrap().len(), 1, "a spare keeps the row");
+    let verdict = reasons.get(&path).expect("spare recorded");
+    assert_eq!(verdict.class, PurgeClass::Pinned);
+    assert_eq!(verdict.reason, "spared: uncommitted changes");
+
+    apply_purge_completion(&registry, &mut reasons, completion(None));
+    assert!(reasons.get(&path).is_none(), "a completed purge clears the spare");
 }
 
 /// Issue #268: while the pool is grinding through a purge the

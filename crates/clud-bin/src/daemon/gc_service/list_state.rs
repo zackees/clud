@@ -62,6 +62,11 @@ pub(super) struct SpareReasons {
     repo_snapshot_needs_refresh: bool,
     /// Issue #1603: paths with a reclaim queued or running on the pool.
     repo_reclaims_in_flight: HashSet<String>,
+    /// Issue #2101: registry rows the purge pool spared at delete time
+    /// (`reverify_before_delete`). Kept apart from `entries`, which each
+    /// extern probe replaces wholesale, so the spare survives until a later
+    /// purge of the same path removes it or is spared again.
+    delete_spares: HashMap<String, CachedDecision>,
 }
 
 impl SpareReasons {
@@ -150,8 +155,34 @@ impl SpareReasons {
         }
     }
 
+    /// The verdict `gc list` shows. A delete-time spare wins over the tick's
+    /// verdict: it was computed later, immediately before the delete it
+    /// refused, so a row the pool keeps sparing never reads `reclaimable`.
     pub(super) fn get(&self, path: &str) -> Option<&CachedDecision> {
-        self.entries.get(path)
+        self.delete_spares.get(path).or_else(|| self.entries.get(path))
+    }
+
+    /// Issue #2101: the pool refused to delete `path` for `reason`.
+    pub(super) fn record_delete_spare(
+        &mut self,
+        path: String,
+        reason: &'static str,
+        evaluated_unix: i64,
+    ) {
+        self.delete_spares.insert(
+            path,
+            CachedDecision {
+                class: PurgeClass::Pinned,
+                reason,
+                evaluated_unix,
+            },
+        );
+    }
+
+    /// Issue #2101: a later purge of `path` went ahead, so its old spare no
+    /// longer describes it.
+    pub(super) fn clear_delete_spare(&mut self, path: &str) {
+        self.delete_spares.remove(path);
     }
 
     /// Claim the right to start a probe. `false` means one is already
@@ -209,6 +240,7 @@ impl EntryState {
 /// |-------------------------------|-------------|---------------------------|
 /// | path missing                  | Dangling    | `dangling: path missing`  |
 /// | live session holds it         | Pinned      | `spared: live session`    |
+/// | spared at delete time (#2101) | Pinned      | the pool's reason         |
 /// | tick class `Dangling`         | Dangling    | the tick's own reason     |
 /// | tick class `Pinned`           | Pinned      | the tick's own reason     |
 /// | tick class `Spared`           | Reclaimable | the tick's own reason     |
@@ -254,6 +286,37 @@ mod tests {
             reason,
             evaluated_unix: 1_000,
         }
+    }
+
+    /// Issue #2101: a row the pool spared at delete time reads `pinned` with
+    /// the pool's reason, even though the tick still calls it reclaimable,
+    /// and the spare outlives the next extern-probe snapshot.
+    #[test]
+    fn a_delete_time_spare_is_pinned_and_survives_the_next_probe() {
+        let path = "/w/wt".to_string();
+        let mut reasons = SpareReasons::new();
+        reasons.replace_extern(
+            vec![(
+                path.clone(),
+                PurgeDecision {
+                    purge: true,
+                    reason: "reclaimable: clean and pushed",
+                    class: PurgeClass::Reclaimable,
+                },
+            )],
+            1_000,
+        );
+        reasons.record_delete_spare(path.clone(), "spared: uncommitted changes", 1_100);
+        reasons.replace_extern(Vec::new(), 1_200);
+        assert_eq!(
+            derive_state(true, false, reasons.get(&path)),
+            (EntryState::Pinned, Some("spared: uncommitted changes"))
+        );
+        reasons.clear_delete_spare(&path);
+        assert_eq!(
+            derive_state(true, false, reasons.get(&path)),
+            (EntryState::Reclaimable, None)
+        );
     }
 
     /// Assert state **and** reason, not just state — a pinned row that

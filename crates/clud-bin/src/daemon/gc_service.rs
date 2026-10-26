@@ -612,7 +612,7 @@ fn handle_registry_msg(
             // Hung-up callers are fine — the worker keeps serving the rest.
             let _ = req.reply_tx.send(reply);
         }
-        RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, c),
+        RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, spare_reasons, c),
         RegistryMsg::ExternVerdicts(verdicts) => {
             spare_reasons.replace_extern(verdicts, now_unix());
         }
@@ -702,14 +702,21 @@ fn apply_repo_worktree_reclaimed(
     }
 }
 
-fn apply_purge_completion(registry: &Registry, c: PurgeCompletion) {
+fn apply_purge_completion(
+    registry: &Registry,
+    spare_reasons: &mut SpareReasons,
+    c: PurgeCompletion,
+) {
     if let Some(reason) = c.spared {
         eprintln!(
             "[clud] gc purge: spared {} ({}) at delete time — {reason}",
             c.path, c.kind
         );
+        // #2101: `gc list` shows it pinned with this reason, not reclaimable.
+        spare_reasons.record_delete_spare(c.path, reason, now_unix());
         return;
     }
+    spare_reasons.clear_delete_spare(&c.path);
     match c.result {
         Ok(()) => match registry.delete(c.id) {
             Ok(()) => eprintln!("[gc] purge: removed {} ({})", c.path, c.kind),
