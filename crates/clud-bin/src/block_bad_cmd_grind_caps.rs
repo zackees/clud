@@ -685,6 +685,16 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
     if bundled_tool(words).is_some_and(|t| READ_ONLY_TOOLS.contains(&t)) {
         return None;
     }
+    // #1339 item 6: every role may search and preview with ast-grep; only
+    // the integrator applies a rewrite.
+    if bundled_tool(words) == Some("code/ast_grep.py") {
+        return (role != INTEGRATOR && ast_grep_writes(&words[4..])).then(|| {
+            format!(
+                "{role} may search and preview with ast-grep, but not apply a rewrite \
+                 (`-U`, `--update-all`, `-i`, `new`); report the rewrite for the integrator (#1339)"
+            )
+        });
+    }
     match role {
         PLANNER => {
             if inspect_ok(&program, words) || is_gh_read(words) {
@@ -1525,6 +1535,16 @@ fn strip_gh_repo_flag(tokens: &[String]) -> Vec<String> {
 /// Bundled tools that only read, open to every capped role (#1339).
 const READ_ONLY_TOOLS: &[&str] = &["git/state.py", "code/outline.py"];
 
+/// Whether ast-grep arguments write files: `-U`/`--update-all` and
+/// `-i`/`--interactive` apply rewrites, and `new` scaffolds files.
+fn ast_grep_writes(args: &[String]) -> bool {
+    args.first().is_some_and(|w| w == "new" || w == "lsp")
+        || args.iter().any(|w| match w.strip_prefix("--") {
+            Some(long) => long == "update-all" || long == "interactive",
+            None => w.starts_with('-') && w[1..].contains(['U', 'i']),
+        })
+}
+
 /// The tool a `clud tool run <tool>` statement runs.
 fn bundled_tool(words: &[String]) -> Option<&str> {
     (is_clud(&words[0])
@@ -2139,6 +2159,41 @@ mod tests {
         }
         for role in [PLANNER, LANDER] {
             assert!(!allowed(role, patch, &facts), "{role}");
+        }
+    }
+
+    /// #1339 item 6: ast-grep searches for every role, rewrites for the integrator.
+    #[test]
+    fn only_the_integrator_applies_ast_grep_rewrites() {
+        let facts = run(true, false);
+        let tool = "\"$CLUD_EXE\" tool run code/ast_grep.py";
+        for role in [PLANNER, WORKER, REVIEWER, LANDER, INTEGRATOR] {
+            for args in [
+                "run -p 'foo($A)' -l rust src",
+                "run -p 'f($A)' -r 'g($A)' src",
+            ] {
+                assert!(
+                    allowed(role, &format!("{tool} {args}"), &facts),
+                    "{role}: {args}"
+                );
+            }
+        }
+        for args in [
+            "run -p a -r b -U src",
+            "run -p a --update-all",
+            "run -i -p a",
+            "new rule",
+        ] {
+            assert!(
+                allowed(INTEGRATOR, &format!("{tool} {args}"), &facts),
+                "{args}"
+            );
+            for role in [PLANNER, WORKER, REVIEWER, LANDER] {
+                assert!(
+                    !allowed(role, &format!("{tool} {args}"), &facts),
+                    "{role}: {args}"
+                );
+            }
         }
     }
 

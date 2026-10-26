@@ -182,6 +182,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "code/ast_grep.py",
+        body: include_str!("../assets/tools/code/ast_grep.py"),
+        // Structural search, or a rewrite only with `-U` (#1339 item 6); a
+        // kill mid-rewrite can leave some files rewritten.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(60 * 5),
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/review_range.py",
         body: include_str!("../assets/tools/git/review_range.py"),
         // Read-only git/gh query (#1301): pins the diff range a review reads.
@@ -515,6 +525,17 @@ mod tests {
             tool.body.contains("grind-facts"),
             "patch.py must read the task's files"
         );
+    }
+
+    #[test]
+    fn bundled_includes_code_ast_grep() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "code/ast_grep.py")
+            .expect("BUNDLED_TOOLS must include code/ast_grep.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(tool.body.contains("\"ast-grep-cli=="));
     }
 
     #[test]

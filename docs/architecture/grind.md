@@ -857,7 +857,8 @@ and Glob tools: a shell `grep -r` and a `find` without `-maxdepth` are
 refused, and `git grep` is a read-only git command (#1339). Every role may
 run the read-only `git/state.py` and `code/outline.py` tools; workers and
 reviewers may run `code/patch.py`, which itself refuses files outside the
-recorded task list. The integrator's bans also look inside wrappers such as `bash -c`.
+recorded task list. Every role may search and preview with
+`code/ast_grep.py`; only the integrator applies a rewrite (`-U`, `-i`, `new`). The integrator's bans also look inside wrappers such as `bash -c`.
 A legacy planner dependency may name only goals listed before it. An approved
 run graph is validated for cycles and ordered before scheduling; the planner
 cannot drop its merge dependencies. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
