@@ -91,7 +91,10 @@ fn run_argv(session_root: &Path, argv: Vec<String>) -> Run {
     // Exit is not end of output: lines can reach the queue after the exit
     // code on a loaded machine, and `drain` stops at exit. `wait` ran the
     // bounded capture drain, so the queues are complete now (#2159).
-    for (out, kind) in [(&mut stdout, StreamKind::Stdout), (&mut stderr, StreamKind::Stderr)] {
+    for (out, kind) in [
+        (&mut stdout, StreamKind::Stdout),
+        (&mut stderr, StreamKind::Stderr),
+    ] {
         for bytes in process.drain_stream(kind) {
             out.push_str(&String::from_utf8_lossy(&bytes));
             out.push('\n');
