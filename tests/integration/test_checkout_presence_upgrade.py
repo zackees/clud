@@ -225,7 +225,8 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
             f"in {_QUIET_WINDOW_SECS}s after presence went quiet"
         )
         assert cpu_used <= _MAX_IDLE_CPU_FRACTION * _QUIET_WINDOW_SECS, (
-            f"session used {cpu_used:.2f}s of CPU in {_QUIET_WINDOW_SECS}s after presence went quiet"
+            f"session used {cpu_used:.2f}s of CPU in {_QUIET_WINDOW_SECS}s "
+            "after presence went quiet"
         )
     finally:
         if session.poll() is None:
