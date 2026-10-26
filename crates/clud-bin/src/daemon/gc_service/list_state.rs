@@ -159,7 +159,9 @@ impl SpareReasons {
     /// verdict: it was computed later, immediately before the delete it
     /// refused, so a row the pool keeps sparing never reads `reclaimable`.
     pub(super) fn get(&self, path: &str) -> Option<&CachedDecision> {
-        self.delete_spares.get(path).or_else(|| self.entries.get(path))
+        self.delete_spares
+            .get(path)
+            .or_else(|| self.entries.get(path))
     }
 
     /// Issue #2101: the pool refused to delete `path` for `reason`.

@@ -103,13 +103,20 @@ fn a_spared_completion_keeps_the_row_and_records_a_pinned_verdict() {
         &mut reasons,
         completion(Some("spared: uncommitted changes")),
     );
-    assert_eq!(registry.list(None).unwrap().len(), 1, "a spare keeps the row");
+    assert_eq!(
+        registry.list(None).unwrap().len(),
+        1,
+        "a spare keeps the row"
+    );
     let verdict = reasons.get(&path).expect("spare recorded");
     assert_eq!(verdict.class, PurgeClass::Pinned);
     assert_eq!(verdict.reason, "spared: uncommitted changes");
 
     apply_purge_completion(&registry, &mut reasons, completion(None));
-    assert!(reasons.get(&path).is_none(), "a completed purge clears the spare");
+    assert!(
+        reasons.get(&path).is_none(),
+        "a completed purge clears the spare"
+    );
 }
 
 /// Issue #268: while the pool is grinding through a purge the
