@@ -728,7 +728,7 @@ jobs:
           strategy: soldr
           profile: dev
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: 'soldr cargo test -p clud --lib self_install:: -- --test-threads=1'
+      - run: 'soldr cargo test -p clud --lib self_install::'
 
   catalog-site:
     name: Published release to catalog and Pages
