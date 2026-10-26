@@ -212,7 +212,7 @@ fn expect_purge_completions(
         }
         match rx.recv_timeout(remaining) {
             Ok(RegistryMsg::PurgeCompletion(c)) => {
-                apply_purge_completion(registry, c);
+                apply_purge_completion(registry, &mut SpareReasons::new(), c);
                 applied += 1;
             }
             Ok(_) => other_messages += 1,
@@ -248,7 +248,7 @@ fn drain_purge_completions(
         let wait = quiet_for.min(remaining);
         match rx.recv_timeout(wait) {
             Ok(RegistryMsg::PurgeCompletion(c)) => {
-                apply_purge_completion(registry, c);
+                apply_purge_completion(registry, &mut SpareReasons::new(), c);
                 drained += 1;
             }
             Ok(RegistryMsg::Op(_)) => {

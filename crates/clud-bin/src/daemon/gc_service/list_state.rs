@@ -62,6 +62,10 @@ pub(super) struct SpareReasons {
     repo_snapshot_needs_refresh: bool,
     /// Issue #1603: paths with a reclaim queued or running on the pool.
     repo_reclaims_in_flight: HashSet<String>,
+    /// Issue #2101: rows the purge pool's delete-time re-check spared, with
+    /// its reason. Kept apart from `entries`, which each extern snapshot
+    /// replaces wholesale; cleared when the row is finally removed.
+    delete_spares: HashMap<String, &'static str>,
 }
 
 impl SpareReasons {
@@ -154,6 +158,20 @@ impl SpareReasons {
         self.entries.get(path)
     }
 
+    /// Issue #2101: the delete-time re-check spared `path`.
+    pub(super) fn record_delete_spare(&mut self, path: String, reason: &'static str) {
+        self.delete_spares.insert(path, reason);
+    }
+
+    /// Issue #2101: `path` was removed; its delete-time spare no longer applies.
+    pub(super) fn clear_delete_spare(&mut self, path: &str) {
+        self.delete_spares.remove(path);
+    }
+
+    pub(super) fn delete_spare(&self, path: &str) -> Option<&'static str> {
+        self.delete_spares.get(path).copied()
+    }
+
     /// Claim the right to start a probe. `false` means one is already
     /// running; a second would duplicate every `git` spawn for no benefit.
     pub(super) fn begin_probe(&mut self) -> bool {
@@ -209,6 +227,7 @@ impl EntryState {
 /// |-------------------------------|-------------|---------------------------|
 /// | path missing                  | Dangling    | `dangling: path missing`  |
 /// | live session holds it         | Pinned      | `spared: live session`    |
+/// | spared at delete time (#2101) | Pinned      | the re-check's reason     |
 /// | tick class `Dangling`         | Dangling    | the tick's own reason     |
 /// | tick class `Pinned`           | Pinned      | the tick's own reason     |
 /// | tick class `Spared`           | Reclaimable | the tick's own reason     |
@@ -220,9 +239,14 @@ impl EntryState {
 /// row. Painting it yellow would make most of a working tree yellow and
 /// destroy exactly the signal #896 is trying to add — but its reason is
 /// still carried, so `--json` can explain the delay.
+///
+/// A delete-time spare (#2101) is a fresher verdict than the tick's: the purge
+/// pool re-checked the row immediately before deleting it and kept it, so a
+/// `reclaimable` label would be a promise GC keeps breaking.
 pub(super) fn derive_state(
     path_exists: bool,
     live_locked: bool,
+    delete_spare: Option<&'static str>,
     cached: Option<&CachedDecision>,
 ) -> (EntryState, Option<&'static str>) {
     if !path_exists {
@@ -230,6 +254,9 @@ pub(super) fn derive_state(
     }
     if live_locked {
         return (EntryState::Pinned, Some("spared: live session"));
+    }
+    if let Some(reason) = delete_spare {
+        return (EntryState::Pinned, Some(reason));
     }
     match cached {
         Some(d) => match d.class {
@@ -265,6 +292,7 @@ mod tests {
             derive_state(
                 false,
                 true,
+                None,
                 Some(&cached(PurgeClass::Pinned, "pinned: whatever"))
             ),
             (EntryState::Dangling, Some("dangling: path missing"))
@@ -274,6 +302,7 @@ mod tests {
             derive_state(
                 true,
                 true,
+                None,
                 Some(&cached(
                     PurgeClass::Reclaimable,
                     "reclaimable: clean and pushed"
@@ -286,6 +315,7 @@ mod tests {
             derive_state(
                 true,
                 false,
+                None,
                 Some(&cached(
                     PurgeClass::Pinned,
                     "pinned: uncommitted or unpushed work"
@@ -301,6 +331,7 @@ mod tests {
             derive_state(
                 true,
                 false,
+                None,
                 Some(&cached(PurgeClass::Dangling, "dangling: path missing"))
             ),
             (EntryState::Dangling, Some("dangling: path missing"))
@@ -310,6 +341,7 @@ mod tests {
             derive_state(
                 true,
                 false,
+                None,
                 Some(&cached(
                     PurgeClass::Reclaimable,
                     "reclaimable: clean and pushed"
@@ -319,7 +351,7 @@ mod tests {
         );
         // Never evaluated (fresh daemon) → also plain, not a fake verdict.
         assert_eq!(
-            derive_state(true, false, None),
+            derive_state(true, false, None, None),
             (EntryState::Reclaimable, None)
         );
     }
@@ -334,6 +366,7 @@ mod tests {
         let (state, reason) = derive_state(
             true,
             false,
+            None,
             Some(&cached(PurgeClass::Spared, "spared: recently active")),
         );
         assert_eq!(state, EntryState::Reclaimable);
@@ -385,6 +418,39 @@ mod tests {
             cache.begin_probe(),
             "a delivered snapshot must free the slot"
         );
+    }
+
+    /// Issue #2101: a row the purge pool re-checked and kept is pinned with
+    /// that reason, not advertised as reclaimable; a live lock still wins.
+    #[test]
+    fn a_row_spared_at_delete_time_is_pinned_with_its_reason() {
+        let reason = "pinned: uncommitted or unpushed work";
+        assert_eq!(
+            derive_state(true, false, Some(reason), None),
+            (EntryState::Pinned, Some(reason))
+        );
+        assert_eq!(
+            derive_state(
+                true,
+                false,
+                Some(reason),
+                Some(&cached(
+                    PurgeClass::Reclaimable,
+                    "reclaimable: clean and pushed"
+                ))
+            ),
+            (EntryState::Pinned, Some(reason))
+        );
+        assert_eq!(
+            derive_state(true, true, Some(reason), None),
+            (EntryState::Pinned, Some("spared: live session"))
+        );
+        let mut cache = SpareReasons::new();
+        cache.record_delete_spare("/w".to_string(), reason);
+        cache.replace_extern(Vec::new(), 1);
+        assert_eq!(cache.delete_spare("/w"), Some(reason), "snapshots keep it");
+        cache.clear_delete_spare("/w");
+        assert_eq!(cache.delete_spare("/w"), None);
     }
 
     #[test]

@@ -39,6 +39,7 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
 
     apply_purge_completion(
         &registry,
+        &mut SpareReasons::new(),
         PurgeCompletion {
             id: ok_id,
             path: ok_path.to_string_lossy().to_string(),
@@ -49,6 +50,7 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
     );
     apply_purge_completion(
         &registry,
+        &mut SpareReasons::new(),
         PurgeCompletion {
             id: fail_id,
             path: fail_path.to_string_lossy().to_string(),
