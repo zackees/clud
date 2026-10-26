@@ -42,6 +42,10 @@ restoration and count-only status. See
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
+- `dockhand/` - the workspace-aware Docker supervisor (#926), built in
+  slices. `identity.rs` is the pure layer: every path spelling of a
+  workspace root to one canonical form, repository and workspace ids, the
+  `io.clud.dockhand.*` label contract and Docker-safe resource names.
 - [platform/](platform/README.md) - the host-platform boundary (#1953): the
   only place in this crate that names a host. `mod.rs` selects `windows/` or
   `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
