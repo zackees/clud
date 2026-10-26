@@ -260,7 +260,8 @@ fn drain_purge_completions(
             Ok(
                 RegistryMsg::ExternVerdicts(_)
                 | RegistryMsg::RepoWorktreeVerdicts(_)
-                | RegistryMsg::RepoWorktreeReclaimed { .. },
+                | RegistryMsg::RepoWorktreeReclaimed { .. }
+                | RegistryMsg::RepoHints(_),
             ) => {
                 // Issue #946: the off-worker probe publishes here. These
                 // tests drive the tick directly and assert on the registry,
@@ -1614,4 +1615,40 @@ fn dangling_source_rows_are_forgotten_and_present_ones_kept() {
     // Trash rows keep their own reaper.
     assert_eq!(registry.list(Some("trash")).unwrap().len(), 1);
     assert!(present.is_dir());
+}
+
+/// Issue #2103: a repo only the shim saw joins this scan's repo list, is
+/// handed to the worker, and lands in `repo_visits` without a launch count.
+#[test]
+fn shim_hints_join_the_scan_and_register_the_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("seen-by-shim");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let repo = fs::canonicalize(repo).unwrap();
+    let repo_key = repo.to_string_lossy().into_owned();
+    let source = shim_hints::HintSource::under(&dir.path().join("state"));
+    fs::create_dir_all(source.log.parent().unwrap()).unwrap();
+    fs::write(
+        &source.log,
+        format!("{}\n", serde_json::json!({"cwd": repo, "argv": ["status"]})),
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let roots = with_shim_hints(vec!["/already/known".to_string()], Some(&source), &tx);
+    assert_eq!(roots, vec!["/already/known".to_string(), repo_key.clone()]);
+    let Ok(RegistryMsg::RepoHints(repos)) = rx.try_recv() else {
+        panic!("the hints go to the worker");
+    };
+    let registry = Registry::open_at(&dir.path().join("hints.redb")).unwrap();
+    record_repo_hints(&registry, &repos, 100);
+    record_repo_hints(&registry, &repos, 200);
+    let rows = registry.list_repo_visits().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].repo_root, repo_key);
+    assert_eq!((rows[0].run_count, rows[0].last_visited_unix), (0, 100));
+    assert!(
+        with_shim_hints(Vec::new(), Some(&source), &tx).is_empty(),
+        "a consumed line is not read twice"
+    );
+    assert!(rx.try_recv().is_err());
 }

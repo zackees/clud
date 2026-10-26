@@ -170,6 +170,28 @@ fn record_repo_visit_distinguishes_keys() {
 }
 
 #[test]
+fn note_repo_inserts_once_and_never_counts_a_launch() {
+    let reg = fresh_registry("repo-visit-note");
+    assert!(reg.note_repo("/dev/seen", "/dev/seen/sub", 100).unwrap());
+    assert!(!reg.note_repo("/dev/seen", "/dev/seen", 200).unwrap());
+    reg.record_repo_visit("/dev/launched", "/dev/launched", 300)
+        .unwrap();
+    assert!(!reg.note_repo("/dev/launched", "/elsewhere", 400).unwrap());
+    let rows = reg.list_repo_visits().expect("list");
+    let seen = rows.iter().find(|r| r.repo_root == "/dev/seen").unwrap();
+    assert_eq!((seen.run_count, seen.last_visited_unix), (0, 100));
+    assert_eq!(seen.last_cwd, "/dev/seen/sub");
+    let launched = rows
+        .iter()
+        .find(|r| r.repo_root == "/dev/launched")
+        .unwrap();
+    assert_eq!(
+        (launched.run_count, launched.last_cwd.as_str()),
+        (1, "/dev/launched")
+    );
+}
+
+#[test]
 fn insert_then_list_round_trips() {
     let reg = fresh_registry("rt");
     insert(&reg, "worktree", "/tmp/a", 100);

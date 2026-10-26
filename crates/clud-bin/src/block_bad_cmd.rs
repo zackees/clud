@@ -6186,6 +6186,38 @@ mod tests {
         });
     }
 
+    /// #2103 item 6: `-C` moves where the clone lands, and the guard judges
+    /// that real destination, so `git -C <dir> clone` gets no way around it.
+    #[test]
+    fn git_dash_c_clone_is_judged_at_its_real_destination() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            let cwd = PathBuf::from("/repo");
+            let evaluate = |command: &str| {
+                evaluate_command_with_policy_dialect_and_repo_root(
+                    command,
+                    Some(&cwd),
+                    false,
+                    &[],
+                    &[],
+                    ShellDialect::Posix,
+                    Some(Path::new("/repo")),
+                )
+            };
+            let outside = evaluate("git -C ../scratch clone https://example.com/foo.git");
+            let reason = outside.reason.expect("a -C clone outside is denied");
+            assert!(
+                reason.contains(CLONE_EXTERN_REPOS_GUARD_RULE_ID),
+                "{reason}"
+            );
+            let inside = evaluate("git -C .extern-repos clone https://example.com/foo.git");
+            assert!(inside.reason.is_none(), "{:?}", inside.reason);
+            assert_eq!(
+                inside.git_path_captures[0].path,
+                PathBuf::from("/repo/.extern-repos/foo")
+            );
+        });
+    }
+
     #[test]
     fn git_clone_outside_repo_context_is_not_guarded_but_is_still_tracked() {
         // `repo_root: None` models a cwd that isn't known to be inside any

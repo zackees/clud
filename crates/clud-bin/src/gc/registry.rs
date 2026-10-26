@@ -285,6 +285,31 @@ impl Registry {
         Ok(())
     }
 
+    /// Issue #2103: register a repo the `git`/`gh` shim saw. Inserts a row
+    /// with `run_count` 0 when the repo is new and leaves an existing row
+    /// alone, so a shim call never counts as a `clud` launch. Returns
+    /// whether a row was inserted.
+    pub fn note_repo(&self, repo_root: &str, cwd: &str, now_unix: i64) -> Result<bool, GcError> {
+        let wtxn = self.db.begin_write()?;
+        let inserted = {
+            let mut table = wtxn.open_table(REPO_VISITS)?;
+            if table.get(repo_root)?.is_some() {
+                false
+            } else {
+                let row = RepoVisitRow {
+                    last_visited_unix: now_unix,
+                    run_count: 0,
+                    last_cwd: cwd.to_string(),
+                };
+                let bytes = serde_json::to_vec(&row)?;
+                table.insert(repo_root, bytes.as_slice())?;
+                true
+            }
+        };
+        wtxn.commit()?;
+        Ok(inserted)
+    }
+
     /// Issue #183: return every `repo_visits` row, newest first.
     pub fn list_repo_visits(&self) -> Result<Vec<RepoVisit>, GcError> {
         let rtxn = self.db.begin_read()?;
