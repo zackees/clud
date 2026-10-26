@@ -7,10 +7,12 @@ use std::sync::Mutex as StdMutex;
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
 /// Take [`ENV_LOCK`] even after another test panicked while holding it.
-/// Each test sets every variable it reads, so a poisoned guard protects
-/// nothing, and one failure must not fail every later test (#2181).
+/// The lock only serializes; it guards no data a panic could leave
+/// half-written, so one failure must not fail every later test (#2181).
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Build a unique DB path inside a TempDir that's intentionally
