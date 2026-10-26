@@ -85,11 +85,22 @@ pub fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
     });
 }
 
+// `libc` defines these for Linux but not for Apple targets, whose values
+// differ (`<sys/signal.h>`).
+#[cfg(target_os = "macos")]
+const SI_USER: libc::c_int = 0x10001;
+#[cfg(target_os = "macos")]
+const SI_QUEUE: libc::c_int = 0x10002;
+#[cfg(not(target_os = "macos"))]
+const SI_USER: libc::c_int = libc::SI_USER;
+#[cfg(not(target_os = "macos"))]
+const SI_QUEUE: libc::c_int = libc::SI_QUEUE;
+
 /// The sender `siginfo_t` names (#520). Only a signal sent by a process
 /// (`kill(2)`, `SI_USER`) or `sigqueue(3)` (`SI_QUEUE`) carries one; a
 /// terminal-generated SIGHUP or SIGQUIT does not.
 fn signal_origin(info: &libc::siginfo_t) -> Option<crate::ctrl_c_track::SignalOrigin> {
-    if info.si_code != libc::SI_USER && info.si_code != libc::SI_QUEUE {
+    if info.si_code != SI_USER && info.si_code != SI_QUEUE {
         return None;
     }
     // SAFETY: for SI_USER/SI_QUEUE the kernel fills the `_kill`/`_rt`
