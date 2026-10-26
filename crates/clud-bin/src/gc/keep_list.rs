@@ -120,7 +120,7 @@ pub fn run_cli(path: Option<&Path>, remove: bool, list: bool) -> i32 {
         };
     }
     let raw = path.unwrap_or(Path::new("."));
-    let entry = fs::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf());
+    let entry = crate::path_norm::canonicalize_plain(raw).unwrap_or_else(|_| raw.to_path_buf());
     let entry = entry.to_string_lossy().into_owned();
     match update(&file, &entry, !remove) {
         Ok(true) if remove => {

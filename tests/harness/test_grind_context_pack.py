@@ -69,7 +69,9 @@ def _prefix(request: dict[str, Any]) -> str:
     """Everything the model sees, serialized, up to the end of the pack."""
     whole = json.dumps({"system": request.get("system"), "messages": request.get("messages")})
     marker = json.dumps(PACK_END)[1:-1]
-    assert marker in whole, "the pack never reached this agent"
+    assert marker in whole, "the pack never reached this agent; messages begin:\n" + json.dumps(
+        request.get("messages")
+    )[:3000]
     return whole[: whole.index(marker) + len(marker)]
 
 
