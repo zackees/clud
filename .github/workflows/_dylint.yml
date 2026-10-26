@@ -128,13 +128,14 @@ jobs:
         run: |
           [ "$DYLINT_PASS" = "host" ] || { echo "not the host leg"; exit 0; }
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
-          soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
-          soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
+          (cd dylints/ban_manual_slash_normalize && soldr --no-cache cargo fmt --all -- --check)
+          (cd dylints/enforce_platform_boundary && soldr --no-cache cargo fmt --all -- --check)
       - name: Test dylint crate
         if: steps.pass.outputs.cache-hit != 'true'
         run: |
           [ "$DYLINT_PASS" = "host" ] || { echo "not the host leg"; exit 0; }
-          RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+          # Run from the crate so its .cargo/config.toml applies (RUST-016).
+          (cd dylints/ban_manual_slash_normalize && RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test)
           # enforce_platform_boundary's UI test (`ui/boundary.rs`) launches
           # nested Cargo through dylint_testing, outside soldr's Dylint front
           # door: keep the rustup proxy visible and point the runner at the
@@ -149,8 +150,9 @@ jobs:
           test -d "${RUSTUP_HOME:?}/toolchains/$qualified"
           ln -sfnT "$qualified" "$DYLINT_DRIVER_PATH/nightly-2026-05-28"
           ln -sfnT "$qualified" "$RUSTUP_HOME/toolchains/nightly-2026-05-28"
-          RUSTUP_TOOLCHAIN=nightly-2026-05-28 CARGO_TARGET_DIR="$PWD/target/dylint-tests" \
-            soldr cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
+          (cd dylints/enforce_platform_boundary && \
+            RUSTUP_TOOLCHAIN=nightly-2026-05-28 CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/dylint-tests" \
+            soldr cargo test)
       - name: Run dylint over workspace
         if: steps.pass.outputs.cache-hit != 'true'
         run: |
