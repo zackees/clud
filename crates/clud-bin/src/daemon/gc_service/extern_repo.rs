@@ -115,6 +115,17 @@ pub(super) fn probe_cmd(
     probe_cmd_streams(program, cwd, args, timeout).map(|(code, stdout, _)| (code, stdout))
 }
 
+thread_local! {
+    /// #2103: probe commands this thread killed at their deadline, so the
+    /// resumable scanner can tell a timed-out repo from a broken one.
+    static PROBE_TIMEOUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Running count of [`probe_cmd_streams`] timeouts on the calling thread.
+pub(super) fn probe_timeouts_on_this_thread() -> u64 {
+    PROBE_TIMEOUTS.with(std::cell::Cell::get)
+}
+
 /// [`probe_cmd`] that also returns stderr, kept apart from stdout, for a
 /// caller that reports why a command failed (#1628/#1632: a reclaim's
 /// `git worktree remove` exit code alone named no cause).
@@ -175,6 +186,7 @@ pub(super) fn probe_cmd_streams(
         if Instant::now() >= deadline {
             // A wedged git must never hold the registry worker.
             let _ = process.kill();
+            PROBE_TIMEOUTS.with(|n| n.set(n.get() + 1));
             return None;
         }
     }

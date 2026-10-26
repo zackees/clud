@@ -33,6 +33,7 @@ pub(crate) mod repo_worktree_cli;
 mod repo_worktree_probe;
 mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
+mod scan_queue;
 mod shim_hints;
 mod source_guard;
 mod worktree_schedule_exec;
@@ -1016,6 +1017,16 @@ fn production_hint_source() -> Option<shim_hints::HintSource> {
     }
 }
 
+fn production_scan_queue_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        crate::daemon::default_state_dir()
+            .ok()
+            .map(|state| scan_queue::queue_path(&state))
+    }
+}
+
 fn production_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
         None
@@ -1140,6 +1151,8 @@ fn spawn_repo_worktree_probe(
     let tx = completion_tx.clone();
     let activity = activity.cloned();
     let hint_source = production_hint_source();
+    let queue_file = production_scan_queue_file();
+    let previous = spare_reasons.repo_worktrees().0.to_vec();
     let spawned = thread::Builder::new()
         .name("clud-gc-repo-worktree-probe".to_string())
         .spawn(move || {
@@ -1148,7 +1161,10 @@ fn spawn_repo_worktree_probe(
             let repo_roots = with_shim_hints(repo_roots, hint_source.as_ref(), &tx);
             let procs = repo_worktree_probe::collect_process_cwds();
             migrate_legacy_worktree_root(&live_cwds, &procs);
-            let rows = repo_worktree_probe::probe_repos(
+            // #2103: resumable, per-item persisted, time-budgeted.
+            let rows = scan_queue::probe_all(
+                queue_file.as_deref(),
+                &previous,
                 &repo_roots,
                 &live_cwds,
                 &procs,
