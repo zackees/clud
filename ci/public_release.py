@@ -13,7 +13,8 @@ from urllib.request import Request, urlopen
 from installer.catalog import ONLINE_URL, version_key
 from installer.verify_native_assets import verify as verify_native_assets
 
-REPO = "zackees/clud"
+# The repository moved to talos-hq (#2126). One owner for every release URL.
+REPO = "talos-hq/clud"
 API = f"https://api.github.com/repos/{REPO}"
 
 

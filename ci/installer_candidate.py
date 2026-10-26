@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from urllib.request import urlopen
 
+from ci.public_release import REPO
 from installer.catalog import ONLINE_URL, SCHEMA, verify_static_musl_elf, version_key
 from installer.verify_native_assets import verify_format
 
@@ -94,7 +95,7 @@ def build_fixture(artifacts: Path, output: Path, source_sha: str, version: str) 
                 "size_bytes": metadata["size_bytes"],
                 "sha256": metadata["sha256"],
                 "urls": [
-                    f"https://github.com/zackees/clud/releases/download/{version}/{metadata['filename']}"
+                    f"https://github.com/{REPO}/releases/download/{version}/{metadata['filename']}"
                 ],
                 "provides": ["clud"],
             },
