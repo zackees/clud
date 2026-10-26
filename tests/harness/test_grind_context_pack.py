@@ -82,7 +82,7 @@ def _divergence(prefixes: dict[str, str]) -> str:
     base = prefixes["t1"]
     lines = []
     for task, other in prefixes.items():
-        at = next((i for i, (a, b) in enumerate(zip(base, other)) if a != b), None)
+        at = next((i for i, (a, b) in enumerate(zip(base, other, strict=False)) if a != b), None)
         if at is None and len(base) == len(other):
             lines.append(f"{task}: identical to t1")
             continue
