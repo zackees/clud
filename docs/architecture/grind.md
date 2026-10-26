@@ -861,6 +861,29 @@ Other agents and the primary session are unaffected. The tests next to it
 own the exact allowlists. On top of the table, every `grind-*` role is
 denied `AskUserQuestion`, `gh issue create` and closing an issue.
 
+## Context pack (#1339, #1344)
+
+The planner returns `context` with its plan: the goal issue's body and
+comments verbatim, and the code excerpts the goal needs (`{path, start, end,
+why, text}`). `grind-run.js` renders it once per goal (`packOf`) and puts it
+**first** in every worker's and the reviewer's prompt, ending at
+`--- end of context pack ---`; nothing per-agent (task id, file list, round)
+may precede that line. Workers then neither re-fetch the issue nor re-read
+the excerpted ranges. Claude Code puts system reminders ahead of each
+agent's prompt, including a **git status snapshot taken when that agent
+starts**, and indents every line of a workflow's computed task text. So
+workers' requests are byte-identical up to the pack's end only while they
+start against the same checkout state: a worker started after another has
+written files sees `?? <file>` where the first saw `(clean)`. Parallel
+workers therefore start together (a staggered start, tried first, made the
+first worker's prefix diverge from the rest), but startup order is still not
+guaranteed: a worker that starts after a sibling's first write misses the
+shared prefix at that status line; sequential workers each see
+the previous one's changes and do not share. The reviewer, a different agent
+type, reads the same pack without sharing the workers' cache.
+`tests/harness/test_grind_context_pack.py` asserts the prefix on the real
+Claude Code with that status block masked. The real-model cost measurement #1344 calls for stays manual.
+
 ## Tests
 
 The workflow, the agent types and the caps run end to end on the real Claude

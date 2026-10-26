@@ -13,6 +13,8 @@ Use the prompt's **GitHub repository** (`OWNER/REPO`) as `<github-repo>`. Keep t
 
 Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
 
+- Your prompt starts with the goal's **context pack** (issue text and
+  planner excerpts). Use it instead of re-fetching the issue.
 - Read every file the workers touched and every file they should have
   touched. Judge the change against the goal, not the task list; missing
   pieces are yours to add.
