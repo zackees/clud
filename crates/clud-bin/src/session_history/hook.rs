@@ -369,7 +369,11 @@ mod tests {
     #[test]
     fn a_windows_program_path_that_needs_quoting_produces_no_fragment() {
         let state = Path::new("C:/state");
-        for exe in ["C:/Program Files/clud/clud.exe", "C:/a&b/clud.exe", "C:/a(b)/clud.exe"] {
+        for exe in [
+            "C:/Program Files/clud/clud.exe",
+            "C:/a&b/clud.exe",
+            "C:/a(b)/clud.exe",
+        ] {
             assert!(
                 settings_fragment(Path::new(exe), state, "claude", None, true).is_none(),
                 "{exe}"
