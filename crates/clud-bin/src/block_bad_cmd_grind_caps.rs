@@ -61,6 +61,7 @@ const GIT_READ: &[&str] = &[
     "cat-file",
     "rev-list",
     "blame",
+    "grep",
 ];
 
 /// `find -exec`/`-delete` run or remove things, and `tail -f` never exits.
@@ -567,6 +568,37 @@ fn native_watch_reason(role: &str, words: &[String]) -> Option<String> {
     ))
 }
 
+/// #1339 item 9: a shell `grep -r` or `find` walks ignored trees (`target/`
+/// holds gigabytes); the Grep and Glob tools use ripgrep and respect
+/// `.gitignore`. A depth-bounded `find` lists a directory and stays open.
+fn shell_search_reason(role: &str, program: &str, words: &[String]) -> Option<String> {
+    if words[0].contains(['/', '\\']) {
+        return None;
+    }
+    let args = &words[1..];
+    let (what, tool) = match program {
+        "grep" if args.iter().any(|w| is_recursive_grep_flag(w)) => ("grep -r", "Grep"),
+        "find" if !args.iter().any(|w| w == "-maxdepth") => ("find", "Glob"),
+        _ => return None,
+    };
+    Some(format!(
+        "{role} may not run `{what}` over the tree: use the {tool} tool, which respects \
+         .gitignore, or `git grep` (#1339)"
+    ))
+}
+
+fn is_recursive_grep_flag(word: &str) -> bool {
+    match word.strip_prefix("--") {
+        Some(long) => {
+            matches!(
+                long,
+                "recursive" | "dereference-recursive" | "directories=recurse"
+            )
+        }
+        None => word.len() > 1 && word.starts_with('-') && word[1..].contains(['r', 'R']),
+    }
+}
+
 /// Whether a command is a shell loop that runs the repo's lint or test script
 /// (`for i in 1 2 3; do bash test; done`, `until ./test; do :; done`), which
 /// reruns a deterministic failure instead of reading it (#1425). The flat
@@ -643,7 +675,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
                 .to_string(),
         );
     }
-    if let Some(reason) = remote_ci_reason(role, words).or_else(|| native_watch_reason(role, words))
+    if let Some(reason) = remote_ci_reason(role, words)
+        .or_else(|| native_watch_reason(role, words))
+        .or_else(|| shell_search_reason(role, &program, words))
     {
         return Some(reason);
     }
@@ -2074,6 +2108,34 @@ mod tests {
         assert!(allowed(INTEGRATOR, act, &run(true, true)));
     }
 
+    /// #1339 item 9: Grep and Glob, not a shell walk of the tree.
+    #[test]
+    fn roles_refuse_shell_tree_walks() {
+        let facts = run(true, false);
+        for role in [PLANNER, REVIEWER, INTEGRATOR, LANDER] {
+            for (command, tool) in [
+                ("grep -rn foo .", "Grep"),
+                ("grep -R foo src", "Grep"),
+                ("grep --recursive foo", "Grep"),
+                ("find . -name '*.rs'", "Glob"),
+            ] {
+                let reason = shell_reason(role, command, &facts);
+                assert!(
+                    reason.as_deref().is_some_and(|r| r.contains(tool)),
+                    "{role}: {command}: {reason:?}"
+                );
+            }
+        }
+        for command in [
+            "grep -n foo src/main.rs",
+            "find src -maxdepth 1 -name '*.rs'",
+            "git grep -n foo",
+            "rg foo src",
+        ] {
+            assert!(allowed(PLANNER, command, &facts), "{command}");
+        }
+    }
+
     /// #1339 item 8: `pr_merge_watch` is the only CI waiter.
     #[test]
     fn lander_and_integrator_refuse_native_ci_watchers() {
@@ -2209,7 +2271,7 @@ mod tests {
     fn inspection_cannot_run_delete_or_hang() {
         let facts = run(true, true);
         for role in [PLANNER, LANDER] {
-            assert!(allowed(role, "find src -name '*.rs'", &facts));
+            assert!(allowed(role, "find src -maxdepth 2 -name '*.rs'", &facts));
             assert!(!allowed(role, "find . -exec cargo build ;", &facts));
             assert!(!allowed(role, "find . -delete", &facts));
             assert!(allowed(role, "tail -n 60 log.txt", &facts));
