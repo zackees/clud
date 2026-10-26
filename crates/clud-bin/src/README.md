@@ -42,17 +42,6 @@ restoration and count-only status. See
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
-- `dockhand/` - the workspace-aware Docker supervisor (#926), built in
-  slices. `identity.rs` is the pure layer: every path spelling of a
-  workspace root to one canonical form, repository and workspace ids, the
-  `io.clud.dockhand.*` label contract and Docker-safe resource names.
-  `retention.rs` decides tiers, age eligibility and the pressure eviction
-  order, with the compaction advisory when GC cannot cover a deficit.
-  `lease.rs` holds the command-scoped lease rules: two-failure expiry, the
-  start/resume destruction grace window and the reap deadline.
-  `done.rs` gates derived done signals behind the clean-and-pushed rule.
-  `registry.rs` persists generations and leases with a random registry id,
-  fails closed on a corrupt or newer file, and builds the retention view.
 - [platform/](platform/README.md) - the host-platform boundary (#1953): the
   only place in this crate that names a host. `mod.rs` selects `windows/` or
   `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
