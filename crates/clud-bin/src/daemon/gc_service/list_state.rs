@@ -289,14 +289,20 @@ mod tests {
     fn state_matrix_covers_every_precedence_step() {
         // Missing path outranks everything, including a live lock.
         assert_eq!(
-            derive_state(false, true, None,
+            derive_state(
+                false,
+                true,
+                None,
                 Some(&cached(PurgeClass::Pinned, "pinned: whatever"))
             ),
             (EntryState::Dangling, Some("dangling: path missing"))
         );
         // A live session outranks a cached verdict.
         assert_eq!(
-            derive_state(true, true, None,
+            derive_state(
+                true,
+                true,
+                None,
                 Some(&cached(
                     PurgeClass::Reclaimable,
                     "reclaimable: clean and pushed"
@@ -306,7 +312,10 @@ mod tests {
         );
         // A recorded pin surfaces the tick's own reason verbatim.
         assert_eq!(
-            derive_state(true, false, None,
+            derive_state(
+                true,
+                false,
+                None,
                 Some(&cached(
                     PurgeClass::Pinned,
                     "pinned: uncommitted or unpushed work"
@@ -319,14 +328,20 @@ mod tests {
         );
         // A cached `Dangling` verdict stays dangling.
         assert_eq!(
-            derive_state(true, false, None,
+            derive_state(
+                true,
+                false,
+                None,
                 Some(&cached(PurgeClass::Dangling, "dangling: path missing"))
             ),
             (EntryState::Dangling, Some("dangling: path missing"))
         );
         // Evaluated and reclaimable → plain row, no reason, no color.
         assert_eq!(
-            derive_state(true, false, None,
+            derive_state(
+                true,
+                false,
+                None,
                 Some(&cached(
                     PurgeClass::Reclaimable,
                     "reclaimable: clean and pushed"
@@ -348,7 +363,10 @@ mod tests {
     /// The reason still rides along so `--json` can explain the delay.
     #[test]
     fn a_merely_too_recent_checkout_stays_reclaimable() {
-        let (state, reason) = derive_state(true, false, None,
+        let (state, reason) = derive_state(
+            true,
+            false,
+            None,
             Some(&cached(PurgeClass::Spared, "spared: recently active")),
         );
         assert_eq!(state, EntryState::Reclaimable);
@@ -416,7 +434,10 @@ mod tests {
                 true,
                 false,
                 Some(reason),
-                Some(&cached(PurgeClass::Reclaimable, "reclaimable: clean and pushed"))
+                Some(&cached(
+                    PurgeClass::Reclaimable,
+                    "reclaimable: clean and pushed"
+                ))
             ),
             (EntryState::Pinned, Some(reason))
         );

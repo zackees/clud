@@ -702,7 +702,11 @@ fn apply_repo_worktree_reclaimed(
     }
 }
 
-fn apply_purge_completion(registry: &Registry, spare_reasons: &mut SpareReasons, c: PurgeCompletion) {
+fn apply_purge_completion(
+    registry: &Registry,
+    spare_reasons: &mut SpareReasons,
+    c: PurgeCompletion,
+) {
     if let Some(reason) = c.spared {
         eprintln!(
             "[clud] gc purge: spared {} ({}) at delete time — {reason}",
