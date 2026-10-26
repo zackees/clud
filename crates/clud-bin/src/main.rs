@@ -252,6 +252,29 @@ fn dispatch_before_startup(args: &args::Args) -> Option<i32> {
 /// Hook, statusline and tool invocations: they run many times per session,
 /// so they must not touch the daemon, the runtime cache, or any launch
 /// machinery.
+fn session_stats(session: Option<&str>) -> i32 {
+    let id = session
+        .map(str::to_string)
+        .or_else(|| std::env::var(clud::grind_facts::SESSION_ENV).ok())
+        .filter(|id| !id.is_empty());
+    let Some(id) = id else {
+        eprintln!(
+            "clud session stats: no session id; run it inside a Claude Code session or pass --session <id>"
+        );
+        return 2;
+    };
+    match clud::block_bad_cmd::session_stats(&id) {
+        Some(text) => {
+            print!("{text}");
+            0
+        }
+        None => {
+            eprintln!("clud session stats: nothing recorded for session {id}");
+            1
+        }
+    }
+}
+
 fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
     let code = match cmd? {
         // #1189: Claude Code runs `clud statusline` as its statusLine command
@@ -283,6 +306,10 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
         // normal clud startup so hook/tool invocations do not connect to the
         // daemon, touch runtime-cache, start title keepers, or register as
         // foreground clud sessions.
+        // #2122: reads the verify-ratio ledger only; no daemon, no launch.
+        args::Command::Session {
+            action: args::SessionAction::Stats { session },
+        } => session_stats(session.as_deref()),
         args::Command::InternalStartCmd => clud::platform::start_terminal::run(),
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),

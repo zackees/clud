@@ -418,9 +418,26 @@ exceed `ratio x max(edits, 1)`, the allowed call carries one PreToolUse
 permission decision and never denies. After a note it stays quiet for 30
 classified calls. `CLUD_VERIFY_EDIT_RATIO=<n>` wins, then
 `hooks.verify_edit_ratio` in `~/.clud/settings.json`, default `3`; `0` turns
-it off. It fails open like the repeat guard. Bash wall-time shares and a
-`clud session stats` view are not measured here: PreToolUse sees no
-durations.
+it off. It fails open like the repeat guard.
+
+#2122 adds three signals over the same per-session ledger. They share the
+note's quiet window.
+- **Wall-time share:** each Bash PreToolUse records its start under its
+  `tool_use_id`. The matching PostToolUse or PostToolUseFailure (same
+  dispatcher, `Bash` matcher) adds the elapsed time to that call's kind
+  (lint, build, test, ci, other). Once 10 minutes of Bash are measured, a
+  verification share of at least `CLUD_VERIFY_WALL_SHARE` /
+  `hooks.verify_wall_share` (default 70%, `0` off) notes once.
+- **Modifiers:** three `--workspace`/`--all`/`--release` runs in a row, each
+  after edits to a single package (the directory after `crates/`,
+  `packages/` or `libs/`), note with `-p <package>`.
+- **Escalation:** after any note, if verification still outnumbers edits
+  past the ratio, the next workspace-wide lint (`bash lint`, a wide
+  clippy/ruff, a whole-plan `bosn ci run`, `local-gate run`) is denied once
+  per session. Repeating the command runs it.
+
+`clud session stats [--session <id>]` prints the per-kind calls, wall time
+and Bash share from the ledger. The id defaults to `CLAUDE_CODE_SESSION_ID`.
 - **Override:** a command carrying `CLUD_ALLOW_REPEAT=1` skips the guard for
   that call and writes `REPEAT-GUARD-OVERRIDE` with the tool name to the hook
   log (`~/.clud/tools/hooks/block-bad-cmd.log`). `CLUD_ALLOW_ALL_CMDS=1`, in
