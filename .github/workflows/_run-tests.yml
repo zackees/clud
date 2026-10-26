@@ -100,9 +100,19 @@ jobs:
       # toolchain and fails every job. See lint:8-24.
       # #1323: the harness suite drives the real Claude Code, pinned so the
       # request shapes the mock backend speaks stay fixed.
+      # zackees/ci.yml#404: install into a job-private prefix, never the
+      # Node toolcache. The toolcache is shared, read-only state that a job
+      # need not own (non-root local runners get EACCES there); a
+      # $RUNNER_TEMP prefix behaves identically on every runner.
       - name: Install pinned Claude Code
         if: inputs.suite == 'harness'
-        run: npm install -g @anthropic-ai/claude-code@2.1.306
+        shell: bash
+        run: |
+          prefix="$RUNNER_TEMP/clud-npm-global"
+          mkdir -p "$prefix"
+          npm install --global --prefix "$prefix" @anthropic-ai/claude-code@2.1.306
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/claude" --version
 
       - name: Install pinned GitLab CLI for secret acceptance
         if: inputs.suite == 'unit'
