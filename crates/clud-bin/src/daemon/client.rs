@@ -39,9 +39,18 @@ struct IncompatibleDaemonVersion {
 
 impl fmt::Display for IncompatibleDaemonVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // #2163: restarting the daemon from this older clud would downgrade
+        // it under every session already on the newer one.
+        if compare_versions(&self.running, self.client) == Some(Ordering::Greater) {
+            return write!(
+                f,
+                "daemon pid {} runs version {}, newer than this clud {}; start a new session with the newer clud (do not restart the daemon from this one, which would downgrade it)",
+                self.pid, self.running, self.client
+            );
+        }
         write!(
             f,
-            "daemon pid {} runs version {}, newer than clud {}; run `clud daemon stop` or `clud daemon restart` to replace it",
+            "daemon pid {} runs version {}, which clud {} cannot compare; run `clud daemon stop` or `clud daemon restart` to replace it",
             self.pid, self.running, self.client
         )
     }
