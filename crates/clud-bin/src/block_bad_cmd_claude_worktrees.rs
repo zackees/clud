@@ -82,8 +82,8 @@ fn refusal(target: &str) -> String {
          linter and build. Use a worktree only when the work needs one (#1971); then create it \
          with `git worktree add ~/.clud/worktrees/<repo>-wt-<name> -b <branch>` (Claude Code's own \
          isolated agents are placed there automatically). Put notes and scratch files in the \
-         session scratchpad. To write there anyway for this one call, set the real environment \
-         variable {BAD_CMD_OVERRIDE_ENV}=\"{RULE_ID}:<your reason>\"."
+         session scratchpad. {}",
+        override_hint(RULE_ID)
     )
 }
 

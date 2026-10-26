@@ -358,3 +358,18 @@ fn worktree_root_guard_honors_its_override() {
         },
     );
 }
+
+/// #2103 (from #1961): the clone guard's hint says the override must be the
+/// hook's real environment, since a `VAR=value` prefix on the command never
+/// reaches it — the inline spelling #1961's agent tried is still denied.
+#[test]
+fn clone_guard_hint_names_the_real_environment_not_an_inline_prefix() {
+    temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+        let command = "CLUD_BAD_CMD_OVERRIDE='git-clone-outside-extern-repos:x' \
+                       git -C /elsewhere clone https://example.com/foo.git foo";
+        let reason = evaluate(command, "/repo", Some("/repo"))
+            .reason
+            .expect("an inline prefix does not bypass the guard");
+        assert!(reason.contains("not text prepended"), "{reason}");
+    });
+}

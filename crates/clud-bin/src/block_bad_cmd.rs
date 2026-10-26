@@ -2609,11 +2609,19 @@ fn evaluate_structured_rules(
 fn deny_message(reason: &str, replacement: &str, id: Option<&str>, allow_override: bool) -> String {
     let mut message = format!("{reason} Use `{replacement}` instead.");
     if let (true, Some(id)) = (allow_override, id) {
-        message.push_str(&format!(
-            " To intentionally bypass this rule for this one command, set the real environment variable {BAD_CMD_OVERRIDE_ENV}=\"{id}:<your reason for needing the raw command>\" for this tool call (not text prepended to the command itself) and re-run the exact same command unchanged."
-        ));
+        message.push(' ');
+        message.push_str(&override_hint(id));
     }
     message
+}
+
+/// #2103: the one wording of the bypass hint. The hook reads the override
+/// from its own environment only, so a `VAR=value` prefix on the command
+/// never reaches it; every guard says so instead of a bare "Set X=...".
+pub(crate) fn override_hint(id: &str) -> String {
+    format!(
+        "To intentionally bypass this rule for this one command, set the real environment variable {BAD_CMD_OVERRIDE_ENV}=\"{id}:<your reason for needing the raw command>\" for this tool call (not text prepended to the command itself) and re-run the exact same command unchanged."
+    )
 }
 
 fn match_mode_str(mode: MatchMode) -> &'static str {
@@ -2852,7 +2860,7 @@ fn worktree_root_denial(
         WorktreeAddRewrite::advice,
     );
     format!(
-        "git worktree add outside clud's worktree root is not allowed: {destination} would never be reclaimed. Worktrees go in {root}/<repo>-wt-<name>, where the daemon reclaims them once their work lands.{advice} Set {BAD_CMD_OVERRIDE_ENV}=\"{WORKTREE_ROOT_GUARD_RULE_ID}:<your reason for needing the raw command>\" to create one elsewhere anyway."
+        "git worktree add outside clud's worktree root is not allowed: {destination} would never be reclaimed. Worktrees go in {root}/<repo>-wt-<name>, where the daemon reclaims them once their work lands.{advice} {}", override_hint(WORKTREE_ROOT_GUARD_RULE_ID)
     )
 }
 
@@ -2996,8 +3004,9 @@ fn unresolved_git_destination_reason(
         return None;
     }
     Some(format!(
-        "`{}` creates a checkout whose program or destination depends on a value only known when it runs, so the hook cannot verify where it lands. Spell the destination out literally. Set {BAD_CMD_OVERRIDE_ENV}=\"{rule}:<your reason for needing the raw command>\" to run it anyway.",
-        invocation.source
+        "`{}` creates a checkout whose program or destination depends on a value only known when it runs, so the hook cannot verify where it lands. Spell the destination out literally. {}",
+        invocation.source,
+        override_hint(rule)
     ))
 }
 
@@ -3150,7 +3159,7 @@ fn extern_repos_violation_reason(
         .first()
         .map_or_else(String::new, |root| crate::path_norm::display_slash(root));
     Some(format!(
-        "git clone outside this repo's extern directory is discouraged: cross-repo checkouts belong beside the repo, at {destination}/<name>, so clud can reclaim them and so linters and build scripts pointed at the repo never walk into them. Set {BAD_CMD_OVERRIDE_ENV}=\"{CLONE_EXTERN_REPOS_GUARD_RULE_ID}:<your reason for needing the raw command>\" to clone elsewhere anyway."
+        "git clone outside this repo's extern directory is discouraged: cross-repo checkouts belong beside the repo, at {destination}/<name>, so clud can reclaim them and so linters and build scripts pointed at the repo never walk into them. {}", override_hint(CLONE_EXTERN_REPOS_GUARD_RULE_ID)
     ))
 }
 
