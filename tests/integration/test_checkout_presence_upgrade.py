@@ -29,7 +29,8 @@ from ._daemon_helpers import managed_env
 
 pytestmark = pytest.mark.integration
 
-_NOTE = "checkout presence disabled"
+# Two of the old 500 ms retry intervals with no new probe: presence gave up.
+_SETTLE_SECS = 1.0
 # Four of the old 500 ms retry intervals, plus margin.
 _QUIET_WINDOW_SECS = 3.0
 # An idle session in a busy CI container stays far below this. The pre-fix
@@ -136,6 +137,24 @@ def _wait_until_dead(daemon: psutil.Process, timeout: float = 15.0) -> None:
     raise AssertionError(f"daemon pid {daemon.pid} still running after kill")
 
 
+def _wait_for_probes_to_stop(count_file: Path, session: process.Popen) -> int:
+    """Wait until the session has probed the newer daemon and then stopped.
+
+    The disabled notice is held until the session exits (#2163), so the
+    probe count is the only live signal that presence gave up."""
+    deadline = time.monotonic() + 20
+    last, since = _probes(count_file), time.monotonic()
+    while time.monotonic() < deadline:
+        assert session.poll() is None, f"session exited early: {session.returncode}"
+        time.sleep(0.1)
+        now = _probes(count_file)
+        if now != last:
+            last, since = now, time.monotonic()
+        elif last > 0 and time.monotonic() - since >= _SETTLE_SECS:
+            return last
+    raise AssertionError(f"presence never gave up on the newer daemon: {last} probes")
+
+
 def _cpu_seconds(pid: int) -> float:
     times = psutil.Process(pid).cpu_times()
     return times.user + times.system
@@ -194,29 +213,19 @@ def test_old_session_disables_presence_when_a_newer_daemon_takes_over(
         old_daemon.kill()
         _wait_until_dead(old_daemon)
 
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and not any(_NOTE in line for line in stderr):
-            _drain_stderr(session, stderr, 0.5)
-        assert any(_NOTE in line for line in stderr), (
-            "presence never disabled itself after the upgrade:\n" + "".join(stderr)
-        )
-
-        probes_at_note = _probes(count_file)
+        probes_at_quiet = _wait_for_probes_to_stop(count_file, session)
         cpu_before = _cpu_seconds(session.pid)
         _drain_stderr(session, stderr, _QUIET_WINDOW_SECS)
         cpu_used = _cpu_seconds(session.pid) - cpu_before
-        probes_after_note = _probes(count_file) - probes_at_note
+        probes_after_quiet = _probes(count_file) - probes_at_quiet
 
         assert session.poll() is None, "the session must keep running without presence"
-        notes = [line for line in stderr if _NOTE in line]
-        assert len(notes) == 1, f"expected one note, got {len(notes)}:\n" + "".join(stderr)
-        assert "999.0.0" in notes[0], notes[0]
-        assert probes_after_note == 0, (
-            f"the session kept probing the newer daemon: {probes_after_note} probes "
-            f"in {_QUIET_WINDOW_SECS}s after the note"
+        assert probes_after_quiet == 0, (
+            f"the session kept probing the newer daemon: {probes_after_quiet} probes "
+            f"in {_QUIET_WINDOW_SECS}s after presence went quiet"
         )
         assert cpu_used <= _MAX_IDLE_CPU_FRACTION * _QUIET_WINDOW_SECS, (
-            f"session used {cpu_used:.2f}s of CPU in {_QUIET_WINDOW_SECS}s after the note"
+            f"session used {cpu_used:.2f}s of CPU in {_QUIET_WINDOW_SECS}s after presence went quiet"
         )
     finally:
         if session.poll() is None:
