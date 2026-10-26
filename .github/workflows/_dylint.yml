@@ -67,7 +67,7 @@ jobs:
       - name: Compute pass key
         id: pass-key
         run: |
-          digest=$(git ls-files -s | awk -F'\t' -v keep='.github/workflows/_dylint.yml' 'BEGIN { n = split(keep, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 } $2 in want || $2 ~ /^tests\/fixtures\// || ($2 !~ /^(docs|bench|tests|ci|\.github)\// && $2 !~ /^[^/]*\.md$/ && $2 !~ /^(ci|local-gate|bosn)\.toml$/)' | sha256sum | cut -c1-16)
+          digest=$(git ls-files -s | awk -F'\t' -v keep='.github/workflows/_dylint.yml' 'BEGIN { n = split(keep, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 } ($2 in want) || $2 ~ /^tests\/fixtures\// || ($2 !~ /^(docs|bench|tests|ci|\.github)\// && $2 !~ /^[^\/]*\.md$/ && $2 !~ /^(ci|local-gate|bosn)\.toml$/)' | sha256sum | cut -c1-16)
           echo "key=pass-v1-dylint-${{ matrix.pass }}-${digest}" >> "$GITHUB_OUTPUT"
       - name: Look up pass marker
         id: pass
