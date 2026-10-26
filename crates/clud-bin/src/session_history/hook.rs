@@ -53,6 +53,13 @@ pub const EVENTS: [&str; 3] = ["SessionStart", "PostCompact", "SessionEnd"];
 /// line is (#1189): a path containing `"`, `$` or a backtick cannot be
 /// quoted safely for every shell Claude Code may use, so no fragment is
 /// produced and the launch simply runs without index updates.
+///
+/// On Windows the program path is left unquoted (#2199): Claude Code may run
+/// hooks under PowerShell, which parses a leading quoted string as an
+/// expression and rejects the arguments after it, while bash rejects the
+/// `&` call operator PowerShell would need. A bare path parses in PowerShell,
+/// Git Bash and cmd alike, so a Windows program path that needs quoting
+/// (whitespace or any shell metacharacter) gets no fragment either.
 pub fn settings_fragment(
     exe: &Path,
     state_dir: &Path,
@@ -76,13 +83,15 @@ pub fn settings_fragment(
         || unsafe_text(&dir)
         || recovery.as_deref().is_some_and(unsafe_text)
         || !route.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || (windows && !bare_program_path(&exe))
     {
         return None;
     }
+    let program = if windows { exe } else { format!("\"{exe}\"") };
     let mut hooks = serde_json::Map::new();
     for event in EVENTS {
         let mut command =
-            format!("\"{exe}\" session-hook --event {event} --route {route} --state-dir \"{dir}\"");
+            format!("{program} session-hook --event {event} --route {route} --state-dir \"{dir}\"");
         if let (Some(recovery), "SessionStart") = (&recovery, event) {
             command.push_str(&format!(" --recovery-file \"{recovery}\""));
         }
@@ -92,6 +101,15 @@ pub fn settings_fragment(
         );
     }
     Some(serde_json::json!({ "hooks": hooks }))
+}
+
+/// Whether `path` reads as one program token, unquoted, in PowerShell, bash
+/// and cmd.
+fn bare_program_path(path: &str) -> bool {
+    !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ':' | '/' | '\\' | '.' | '_' | '-'))
 }
 
 /// A portable recovery payload handed to the new session's `SessionStart`.
@@ -322,6 +340,43 @@ mod tests {
                 command.contains("--recovery-file"),
                 event == "SessionStart",
                 "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_fragment_leaves_the_program_unquoted_for_powershell() {
+        // #2199: PowerShell rejected `"C:/.../clud.exe" session-hook ...`.
+        let fragment = settings_fragment(
+            Path::new("C:\\Users\\me\\.local\\bin\\clud.exe"),
+            Path::new("C:\\Users\\me\\.clud\\state"),
+            "claude",
+            None,
+            true,
+        )
+        .unwrap();
+        for event in EVENTS {
+            let command = fragment["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(
+                command.starts_with("C:/Users/me/.local/bin/clud.exe session-hook --event "),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_program_path_that_needs_quoting_produces_no_fragment() {
+        let state = Path::new("C:/state");
+        for exe in [
+            "C:/Program Files/clud/clud.exe",
+            "C:/a&b/clud.exe",
+            "C:/a(b)/clud.exe",
+        ] {
+            assert!(
+                settings_fragment(Path::new(exe), state, "claude", None, true).is_none(),
+                "{exe}"
             );
         }
     }
