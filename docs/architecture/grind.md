@@ -852,7 +852,9 @@ decompose (command substitution, subshells) are refused for capped roles, as
 are `find -exec`/`-delete`, `tail -f`, and git global options other than
 `-C`. The lander and integrator wait on CI only through `pr_merge_watch`:
 `gh run watch`, `gh run view --watch` and `gh pr checks --watch` are refused
-with a message naming it (#1339). The integrator's bans also look inside wrappers such as `bash -c`.
+with a message naming it (#1339). Every capped role searches with the Grep
+and Glob tools: a shell `grep -r` and a `find` without `-maxdepth` are
+refused, and `git grep` is a read-only git command (#1339). The integrator's bans also look inside wrappers such as `bash -c`.
 A legacy planner dependency may name only goals listed before it. An approved
 run graph is validated for cycles and ordered before scheduling; the planner
 cannot drop its merge dependencies. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
