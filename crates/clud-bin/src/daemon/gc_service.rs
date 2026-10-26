@@ -33,6 +33,7 @@ pub(crate) mod repo_worktree_cli;
 mod repo_worktree_probe;
 mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
+mod shim_hints;
 mod source_guard;
 
 use super::watch_service as gc_watch_service;
@@ -115,6 +116,9 @@ pub(super) enum RegistryMsg {
         path: String,
         outcome: ReclaimOutcome,
     },
+    /// Issue #2103: repos the `git`/`gh` shim saw, as `repo_root -> cwd`,
+    /// read off-worker by the repo-worktree probe (`shim_hints`).
+    RepoHints(std::collections::BTreeMap<String, String>),
 }
 
 /// Issue #268: result of one entry's parallel filesystem deletion,
@@ -622,6 +626,7 @@ fn handle_registry_msg(
         RegistryMsg::RepoWorktreeReclaimed { path, outcome } => {
             apply_repo_worktree_reclaimed(spare_reasons, &path, &outcome);
         }
+        RegistryMsg::RepoHints(repos) => record_repo_hints(registry, &repos, now_unix()),
         RegistryMsg::WatchRescan(roots) => {
             for root in roots {
                 let _ = reconcile_registered_dir(
@@ -978,6 +983,38 @@ struct RepoWorktreeGcConfig {
 /// #1485: the production worktree root. `None` under `cfg(test)`, so no
 /// unit test can probe (let alone reclaim) the developer's real
 /// `~/.clud/worktrees`; tests inject a tempdir root instead.
+/// Issue #2103: register each repo the shim saw. A repo already known keeps
+/// its row untouched (`Registry::note_repo`).
+fn record_repo_hints(
+    registry: &Registry,
+    repos: &std::collections::BTreeMap<String, String>,
+    now: i64,
+) {
+    let mut added = 0usize;
+    for (repo_root, cwd) in repos {
+        match registry.note_repo(repo_root, cwd, now) {
+            Ok(true) => added += 1,
+            Ok(false) => {}
+            Err(err) => eprintln!("[clud] gc: shim repo hint {repo_root} failed: {err}"),
+        }
+    }
+    if added > 0 {
+        eprintln!("[clud] gc: registered {added} repo(s) seen by the git/gh shim");
+    }
+}
+
+/// The shim log to read repo hints from; `None` in tests, which must never
+/// read `~/.clud`.
+fn production_hint_source() -> Option<shim_hints::HintSource> {
+    if cfg!(test) {
+        None
+    } else {
+        crate::daemon::default_state_dir()
+            .ok()
+            .map(|state| shim_hints::HintSource::under(&state))
+    }
+}
+
 fn production_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
         None
@@ -1097,10 +1134,13 @@ fn spawn_repo_worktree_probe(
     }
     let tx = completion_tx.clone();
     let activity = activity.cloned();
+    let hint_source = production_hint_source();
     let spawned = thread::Builder::new()
         .name("clud-gc-repo-worktree-probe".to_string())
         .spawn(move || {
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
+            // #2103: repos only the shim has seen join this same scan.
+            let repo_roots = with_shim_hints(repo_roots, hint_source.as_ref(), &tx);
             let procs = repo_worktree_probe::collect_process_cwds();
             migrate_legacy_worktree_root(&live_cwds, &procs);
             let rows = repo_worktree_probe::probe_repos(
@@ -1138,6 +1178,28 @@ fn spawn_repo_worktree_probe(
     if spawned.is_err() {
         spare_reasons.repo_probe_finished();
     }
+}
+
+/// Issue #2103: add the repos the shim log names to `repo_roots`, and hand
+/// them to the worker to persist. Runs on the probe thread.
+fn with_shim_hints(
+    mut repo_roots: Vec<String>,
+    source: Option<&shim_hints::HintSource>,
+    tx: &mpsc::Sender<RegistryMsg>,
+) -> Vec<String> {
+    let Some(source) = source else {
+        return repo_roots;
+    };
+    let seen = shim_hints::ingest(source);
+    for root in seen.keys() {
+        if !repo_roots.contains(root) {
+            repo_roots.push(root.clone());
+        }
+    }
+    if !seen.is_empty() {
+        let _ = tx.send(RegistryMsg::RepoHints(seen));
+    }
+    repo_roots
 }
 
 /// The roots whose missing children orphan an `act` container (#1878):

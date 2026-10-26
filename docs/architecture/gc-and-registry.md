@@ -345,6 +345,18 @@ the default branch, so ancestry-based checks call them live work forever
 - **Discovery.** Worktrees of repos already in the registry's repo-visit
   table (`record_repo_visit`), via `git worktree list --porcelain`; no
   filesystem crawl. Repos sharing a git common dir are probed once.
+- **Shim hints (#2103).** A `clud` launch is not the only way a repo gets
+  into that table. Each probe pass first tails the `git`/`gh` shim log
+  (`<state>/logs/shim/git-gh.jsonl`) from the byte offset saved in
+  `<state>/gc/shim-hints.offset` (`daemon/gc_service/shim_hints.rs`). For
+  each logged call it resolves the `cwd`, and every argv token that names
+  an existing directory, to the main checkout that owns it. It reads only
+  the `.git`, `gitdir` and `commondir` files, and parses no subcommands.
+  Repos found this way join the same pass. The worker records them with
+  `Registry::note_repo`, which inserts a row with `run_count` 0 and leaves
+  an existing row alone. A worktree made by any route that touched the
+  shim is therefore listed within one scan. A bare repo, or a linked
+  worktree of a submodule, cannot be named without git and is skipped.
 - **Where it runs.** The worker reads the visit list and hands it to a
   `clud-gc-repo-worktree-probe` thread (`spawn_repo_worktree_probe`), which
   sends a complete snapshot back as `RegistryMsg::RepoWorktreeVerdicts`, the
