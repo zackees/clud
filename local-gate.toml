@@ -16,6 +16,9 @@ verify = "ci.yml:static"
 # The hosted verifier reads this requirement from the PR base. Default bot
 # exemptions still receive a full remote run.
 mode = "enforce"
+# cancel-superseded (GEN-022, ci.yml#409) runs only on merge_group, first,
+# with no `needs:`; only the end-of-queue cache janitor depends on it.
+verify-exempt = ["cancel-superseded"]
 
 # Bosn's full run keeps its parallel schedule when three or more lanes miss.
 # The shared ci-lint verifier derives checks from these workflows and
