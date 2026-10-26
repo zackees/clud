@@ -210,7 +210,19 @@ pub fn write_cache(path: &Path, entry: &CachedTreeSize) -> std::io::Result<()> {
 /// Daemon side: run the bounded walk and record it. `warn_bytes == 0`
 /// removes any old cache instead of walking.
 pub fn refresh_cache(wt_root: &Path, warn_bytes: u64, now_unix: i64) -> std::io::Result<()> {
-    refresh_cache_at(&cache_path_for(wt_root), wt_root, warn_bytes, now_unix)
+    refresh_cache_at(&cache_path_for(wt_root), wt_root, warn_bytes, now_unix)?;
+    // #2101: an over-limit root also records which worktrees are largest.
+    match read_cache(&cache_path_for(wt_root)).map(|c| c.check) {
+        Some(SizeCheck::Over(_)) => crate::gc::worktree_top::refresh(
+            wt_root,
+            crate::gc::worktree_root::SIZE_SCAN_ENTRY_BUDGET,
+            now_unix,
+        ),
+        _ => {
+            crate::gc::worktree_top::clear(wt_root);
+            Ok(())
+        }
+    }
 }
 
 /// Daemon side for `~/.clud/tmp` (#1327). Read-only walk; deletes nothing
@@ -256,7 +268,15 @@ pub fn launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
     let root = worktree_root_for(home);
     let cached = read_cache(&cache_path_for(&root));
     match banner_decision(cached.as_ref(), warn_bytes, now_unix) {
-        BannerVerdict::Warn { bytes } => Some(banner_line(&root, bytes, warn_bytes)),
+        BannerVerdict::Warn { bytes } => {
+            let checked = cached.map_or(now_unix, |c| c.checked_unix);
+            let top = crate::gc::worktree_top::read_for(&root, checked, MAX_CACHE_AGE_SECS);
+            Some(format!(
+                "{}{}",
+                banner_line(&root, bytes, warn_bytes),
+                crate::gc::worktree_top::suffix(&top)
+            ))
+        }
         BannerVerdict::Skip(_) => None,
     }
 }

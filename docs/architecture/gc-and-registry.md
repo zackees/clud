@@ -486,7 +486,11 @@ the default branch, so ancestry-based checks call them live work forever
   missing, corrupt, older than 6 h or future-dated, or the walk ran out of
   entry budget (`clud gc list` still reports that case). The decision is the
   pure `banner_decision` table. If the probe never runs (reclaim mode `off`)
-  the cache is never written and the banner stays silent.
+  the cache is never written and the banner stays silent. When the root is
+  over the limit, the same thread also sizes each direct child (one shared
+  entry budget) and writes the three largest to `~/.clud/worktrees-top.json`;
+  the banner appends `; largest: <name> (<size>), …`, with `≥` for a child
+  the budget cut short (#2101, `gc::worktree_top`).
 - **Keep list (#2101).** `clud gc keep [PATH]` (default `.`; `--remove`,
   `--list`) records a canonical path in `~/.clud/gc-keep.json`, no daemon
   needed. A kept path covers itself and everything below it. The tick skips

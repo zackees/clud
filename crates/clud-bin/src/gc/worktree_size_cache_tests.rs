@@ -298,3 +298,20 @@ fn clud_cache_refresh_and_launch_warning_round_trip_and_never_delete() {
     assert!(!clud_cache_size_path_for(home.path()).exists());
     assert!(blob.exists());
 }
+
+/// #2101 item 3: an over-limit refresh names the largest worktrees in the
+/// banner; dropping back under the limit clears the list.
+#[test]
+fn over_limit_refresh_names_the_largest_worktrees() {
+    let home = tempdir().unwrap();
+    let root = crate::gc::worktree_root::worktree_root_for(home.path());
+    std::fs::create_dir_all(root.join("repo-wt-big")).unwrap();
+    std::fs::write(root.join("repo-wt-big").join("blob"), vec![0u8; 4096]).unwrap();
+    let settings = crate::clud_settings::settings_path_at(home.path());
+    std::fs::write(&settings, br#"{"worktrees":{"warn_bytes":1024}}"#).unwrap();
+    refresh_cache(&root, 1024, NOW).unwrap();
+    let line = launch_warning_at(home.path(), NOW).expect("over limit warns");
+    assert!(line.contains("; largest: repo-wt-big ("), "{line}");
+    refresh_cache(&root, 1 << 40, NOW).unwrap();
+    assert!(crate::gc::worktree_top::read_for(&root, NOW, 60).is_empty());
+}
