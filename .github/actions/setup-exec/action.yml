@@ -54,7 +54,13 @@ runs:
       shell: bash
       # Install from the image's own package lists first: an unbounded
       # `apt-get update` against a slow mirror held a unit shard for 11+
-      # minutes (#2063). Only a stale list falls back to a bounded update.
+      # minutes (#2063). Only a stale or missing list falls back to an update.
+      # Bounds: the network fetch gets most of the job's 20 minutes, because
+      # weston's closure is ~117 MB and a shared runner (local act under
+      # several sessions) legitimately needs more than 4 minutes for it; a
+      # single wall-clock cap over download + install killed it (exit 124,
+      # #2162). The local --no-download install stays short. Worst case
+      # 240 + 480 + 120 s stays under the job's timeout-minutes.
       run: |
         set -euo pipefail
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
@@ -63,21 +69,26 @@ runs:
               libxkbcommon-x11-0 libxi6 libxcursor1 libxinerama1)
         debs="$HOME/gui-runtime-debs"
         mkdir -p "$debs"
+        install_local() {
+          sudo timeout 120 apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"
+        }
         if compgen -G "$debs/*.deb" >/dev/null; then
           sudo cp "$debs"/*.deb /var/cache/apt/archives/
-          if sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"; then
+          if install_local; then
             exit 0
           fi
           echo "::warning::cached GUI runtime packages were incomplete; using the mirror"
         fi
-        install() {
-          sudo timeout 240 apt-get "${apt_opts[@]}" install -y --no-install-recommends "${pkgs[@]}"
+        fetch() {
+          sudo timeout 480 apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${pkgs[@]}"
         }
-        if ! install; then
-          echo "::warning::package install from the image lists failed; refreshing them"
-          sudo timeout 120 apt-get "${apt_opts[@]}" update -qq
-          install
+        # An image shipped without package lists cannot satisfy the fast path.
+        if ! compgen -G "/var/lib/apt/lists/*_Packages*" >/dev/null || ! fetch; then
+          echo "::warning::package lists missing or stale; refreshing them"
+          sudo timeout 240 apt-get "${apt_opts[@]}" update -qq
+          fetch
         fi
+        install_local
         cp /var/cache/apt/archives/*.deb "$debs"/ 2>/dev/null || true
         if compgen -G "$debs/*.deb" >/dev/null; then
           echo "debs=true" >> "$GITHUB_OUTPUT"
