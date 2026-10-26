@@ -5,6 +5,7 @@
 //! on: canonical workspace roots, workspace ids, label sets and resource
 //! names. Nothing here talks to Docker or the filesystem.
 
+pub mod done;
 pub mod identity;
 pub mod lease;
 pub mod retention;
