@@ -28,7 +28,7 @@ const CODEX_CONFIG_OVERRIDES_NOTE: &str =
 const SHELL_DISABLE_POWERSHELL_NOTE: &str =
     "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
 const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
-    "When true, session gh PR-check watches use the bundled fail-fast waiter; cmd-scan still denies run-id watches, hand-rolled polling, and native PR watches when the shim is unavailable. On by default (DD-065); toggle with `clud settings`.";
+    "When true, session gh PR-check watches use the bundled fail-fast waiter; cmd-scan still denies hand-rolled PR polling and native PR watches when the shim is unavailable; run watches are not PR waits (DD-189). On by default (DD-065); toggle with `clud settings`.";
 
 const GIT_GH_READ_BROKER_NOTE: &str =
     "When true, session `gh api` GET calls are answered by the clud daemon's read broker: a shared ETag cache with a 30-60 s TTL that revalidates with free 304s and saves the GitHub REST budget. Output stays byte-identical; any miss runs the real gh. On by default (#1743, DD-150); toggle with `clud settings`.";

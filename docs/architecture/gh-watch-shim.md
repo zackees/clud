@@ -30,7 +30,9 @@ flags fail explicitly so the shim cannot silently change a future CLI's
 output or wait contract.
 
 The command guard permits the canonical PR-check watch only when
-`CLUD_GH_SHIM_ACTIVE=1`. It still denies run-id watches and polling loops.
+`CLUD_GH_SHIM_ACTIVE=1`. It still denies PR polling loops. Run watches
+(`gh run watch <id>`) are not PR waits and fall through
+([DD-189](../DESIGN_DECISIONS.md#dd-189-only-pr-waits-are-routed-through-the-fail-fast-watcher)).
 If installation or target resolution fails, that marker is absent/zero and
 the old guard denial remains; the alias itself still relays to the real `gh`.
 Every in-session `gh` call, relayed or watched, is run as a child and

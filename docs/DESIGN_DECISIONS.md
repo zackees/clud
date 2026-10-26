@@ -7282,3 +7282,29 @@ clud.
 is invisible to automatic cleanup. That is the declared-daemon contract, not
 a leak. The dashboard action only accepts identities from the daemon's own
 sample and prunes declared daemons, so it cannot reach arbitrary PIDs.
+
+## DD-189: Only PR waits are routed through the fail-fast watcher
+
+**Amendment to:** DD-065, DD-116 and #1880 category F.
+
+**Context:** The fail-fast rule exists because a PR wait kept waiting for
+every matrix lane after a required check was already red. Its guard grew to
+treat every GitHub run read as a PR wait: `gh run watch`, `gh run view`,
+`gh run list`, and REST reads of `actions/runs`, `actions/jobs`,
+`check-runs`, `statuses` and `pages/builds`. A run with no PR (a tag-push
+release, a dispatch, a schedule) then had no plain way to wait. Every
+attempt was refused with PR advice, and an agent watching the 2.8.34 release
+looped on refusals.
+
+**Decision:** the GitHub wait guard covers PR waits only: `gh pr checks
+--watch` outside the gh-shim session, and `gh pr checks` or `gh pr view
+--json <status field>` polled in a loop or after a sleep. Run reads and
+`gh run watch <id>` fall through like any other command. `gh run watch` ends
+with its run, so it is a bounded waiter. `github/run_watch.py` remains
+available when fail-fast or cancellation is wanted. The general
+hand-written-wait rule (DD-168) is unchanged: an unbounded loop or a long
+sleep is still refused whatever it polls. The grind lander's capability list
+is a role policy and still names run watches.
+
+**Consequences:** an agent may block on `gh run watch` for a whole run. That
+is the cost of the run itself, not a matrix it no longer cares about.

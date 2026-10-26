@@ -122,7 +122,7 @@ struct Facts {
     sleeps: Vec<Option<f64>>,
     follow: bool,
     watch: bool,
-    /// A native watcher (`gh run watch`, `gh pr checks --watch`), canonical or not.
+    /// A native PR watcher (`gh pr checks --watch`), canonical or not.
     any_native: bool,
     /// A native watcher that is not the gh-shim's canonical PR watch.
     raw_native: bool,
@@ -186,13 +186,13 @@ impl Facts {
         let has_sleep = !self.sleeps.is_empty();
         let poll = self.any_native || ((self.unbounded || has_sleep) && self.gh_read);
         let what = if self.any_native && looping {
-            "a native GitHub watcher (`gh run watch`, `gh pr checks --watch`) retried in a loop"
+            "a native PR watcher (`gh pr checks --watch`) retried in a loop"
         } else if self.unbounded {
             "a `while`/`until`/infinite `for` loop"
         } else if self.bounded && has_sleep {
             "a `for` loop that sleeps between iterations"
         } else if self.raw_native && native_gate {
-            "a native GitHub watcher (`gh run watch`, or `gh pr checks --watch` outside a clud gh-shim session)"
+            "a native PR watcher (`gh pr checks --watch` outside a clud gh-shim session)"
         } else if self.follow {
             "`tail -f`/`--follow` without `timeout`"
         } else if self.watch {
