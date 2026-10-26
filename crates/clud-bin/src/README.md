@@ -51,6 +51,8 @@ restoration and count-only status. See
   `lease.rs` holds the command-scoped lease rules: two-failure expiry, the
   start/resume destruction grace window and the reap deadline.
   `done.rs` gates derived done signals behind the clean-and-pushed rule.
+  `registry.rs` persists generations and leases with a random registry id,
+  fails closed on a corrupt or newer file, and builds the retention view.
 - [platform/](platform/README.md) - the host-platform boundary (#1953): the
   only place in this crate that names a host. `mod.rs` selects `windows/` or
   `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
