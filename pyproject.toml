@@ -54,6 +54,15 @@ test = [
     "pywinpty>=3.0.5; sys_platform == 'win32'",
     "psutil>=5.9",
     "running-process==4.10.1",
+    # `tests/test_outline_tool.py` parses fixtures with the same grammars the
+    # bundled `code/outline.py` script pins.
+    "tree-sitter==0.26.0",
+    "tree-sitter-rust==0.24.2",
+    "tree-sitter-python==0.25.0",
+    "tree-sitter-javascript==0.25.0",
+    "tree-sitter-typescript==0.23.2",
+    "tree-sitter-c==0.24.2",
+    "tree-sitter-cpp==0.23.4",
     # `tests/test_mcp_server.py` imports the bridge module directly, and
     # skips itself when the SDK is absent.
     #
