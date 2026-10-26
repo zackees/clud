@@ -272,9 +272,13 @@ pub fn launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
             let checked = cached.map_or(now_unix, |c| c.checked_unix);
             let top = crate::gc::worktree_top::read_for(&root, checked, MAX_CACHE_AGE_SECS);
             Some(format!(
-                "{}{}",
+                "{}{}{}",
                 banner_line(&root, bytes, warn_bytes),
-                crate::gc::worktree_top::suffix(&top)
+                crate::gc::worktree_top::suffix(&top),
+                crate::gc::worktree_schedule::banner_suffix(
+                    &crate::gc::worktree_schedule::load(&root),
+                    now_unix
+                )
             ))
         }
         BannerVerdict::Skip(_) => None,

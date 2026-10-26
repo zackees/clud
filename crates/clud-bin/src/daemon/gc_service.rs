@@ -35,6 +35,7 @@ mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
 mod shim_hints;
 mod source_guard;
+mod worktree_schedule_exec;
 
 use super::watch_service as gc_watch_service;
 
@@ -1176,6 +1177,8 @@ fn spawn_repo_worktree_probe(
             // Issue #1610: size worktrees here, off the launch path, so the
             // launch banner only reads the cached result.
             refresh_worktree_size_cache(wt_root.as_deref());
+            // #2101: warn about, then trash, oversized unmerged worktrees.
+            worktree_schedule_exec::run(wt_root.as_deref(), &rows, &live_cwds, &procs, mode, &tx);
             // Release the probe slot only after all filesystem work is done.
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
         });
