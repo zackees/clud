@@ -4751,7 +4751,7 @@ mod tests {
             let reason = evaluate_command_with_policy_and_dialect(command, None, false, &[], &[], dialect)
                 .reason
                 .unwrap_or_else(|| panic!("{command} should still be a refused wait"));
-            assert!(!reason.contains("pr_merge_watch"), "{command}: {reason}");
+            assert!(!reason.contains("For a PR start"), "{command}: {reason}");
         }
     }
 
