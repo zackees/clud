@@ -33,7 +33,7 @@ fn eligible(g: &Generation) -> bool {
 
 #[test]
 fn a_lease_protects_whatever_the_age_or_done_state() {
-    let mut g = idle(generation("a"), 10_000);
+    let mut g = idle(generation("a"), 1000);
     g.leased = true;
     g.workspace_done = true;
     assert_eq!(tier(&g), Tier::Leased);
