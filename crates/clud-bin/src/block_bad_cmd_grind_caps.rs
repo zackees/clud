@@ -681,12 +681,8 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
     {
         return Some(reason);
     }
-    // #1339: the read-only one-call git state is open to every role.
-    if is_clud(&words[0])
-        && words.get(1).is_some_and(|w| w == "tool")
-        && words.get(2).is_some_and(|w| w == "run")
-        && words.get(3).is_some_and(|w| w == "git/state.py")
-    {
+    // #1339: the read-only git state and code outline are open to every role.
+    if bundled_tool(words).is_some_and(|t| READ_ONLY_TOOLS.contains(&t)) {
         return None;
     }
     match role {
@@ -858,6 +854,8 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
         // Workers and reviewers hold a shell only to investigate on GitHub:
         // read-only `gh`.
         WORKER | REVIEWER if is_gh_read(words) => None,
+        // The patch tool refuses files outside the run facts' task list itself.
+        WORKER | REVIEWER if bundled_tool(words) == Some("code/patch.py") => None,
         WORKER | REVIEWER if runs_repo_script(words) => Some(format!(
             "{role} may not run the repo's lint or test scripts; the grind-integrator runs \
              lint/test before every push"
@@ -1524,6 +1522,18 @@ fn strip_gh_repo_flag(tokens: &[String]) -> Vec<String> {
     out
 }
 
+/// Bundled tools that only read, open to every capped role (#1339).
+const READ_ONLY_TOOLS: &[&str] = &["git/state.py", "code/outline.py"];
+
+/// The tool a `clud tool run <tool>` statement runs.
+fn bundled_tool(words: &[String]) -> Option<&str> {
+    (is_clud(&words[0])
+        && words.get(1).is_some_and(|w| w == "tool")
+        && words.get(2).is_some_and(|w| w == "run"))
+    .then(|| words.get(3).map(String::as_str))
+    .flatten()
+}
+
 fn is_clud(word: &str) -> bool {
     matches!(word, "$CLUD_EXE" | "${CLUD_EXE}" | "\"$CLUD_EXE\"") || program_name(word) == "clud"
 }
@@ -2106,6 +2116,30 @@ mod tests {
         let act = "act -W .github/workflows/ci.yml -j test --pull=false";
         assert!(!allowed(INTEGRATOR, act, &run(true, false)));
         assert!(allowed(INTEGRATOR, act, &run(true, true)));
+    }
+
+    /// #1339 items 4-5: every role may outline code; workers and reviewers
+    /// may patch, and the patch tool enforces the task's file list.
+    #[test]
+    fn roles_may_outline_and_writers_may_patch() {
+        let facts = run(true, false);
+        for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+            assert!(
+                allowed(
+                    role,
+                    "\"$CLUD_EXE\" tool run code/outline.py src/lib.rs",
+                    &facts
+                ),
+                "{role}"
+            );
+        }
+        let patch = "\"$CLUD_EXE\" tool run code/patch.py <<'EOF'\n=== a.rs\nEOF";
+        for role in [WORKER, REVIEWER, INTEGRATOR] {
+            assert!(allowed(role, patch, &facts), "{role}");
+        }
+        for role in [PLANNER, LANDER] {
+            assert!(!allowed(role, patch, &facts), "{role}");
+        }
     }
 
     /// #1339 item 9: Grep and Glob, not a shell walk of the tree.

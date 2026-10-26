@@ -24,7 +24,10 @@ Its output holds counts and salted fingerprints, never raw content (#1276,
 
 `code/outline.py` lists a file's definitions (Rust, Python, JS/TS, C/C++,
 via pinned tree-sitter wheels) and Markdown headings with line ranges, so
-`/grind` agents read one range instead of paging through a file (#1339).
+`/grind` agents read one range instead of paging through a file (#1339). `code/patch.py` applies
+search/replace blocks across files all-or-nothing, each block matching
+exactly once; in a `/grind` run it refuses files outside the run facts'
+task list for the checkout (#1339).
 
 PR watcher callers select a declared session/background/foreground wait and
 required-check or all-check completion scope; see

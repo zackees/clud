@@ -172,6 +172,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "code/patch.py",
+        body: include_str!("../assets/tools/code/patch.py"),
+        // Writes files all-or-nothing (#1339 item 5) and finishes in
+        // milliseconds; a kill before the write loop leaves nothing behind.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(60),
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/review_range.py",
         body: include_str!("../assets/tools/git/review_range.py"),
         // Read-only git/gh query (#1301): pins the diff range a review reads.
@@ -491,6 +501,20 @@ mod tests {
         assert!(tool.body.contains("managed-by: clud"));
         assert!(!tool.body.contains("import subprocess"));
         assert!(tool.body.contains("\"tree-sitter=="));
+    }
+
+    #[test]
+    fn bundled_includes_code_patch() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "code/patch.py")
+            .expect("BUNDLED_TOOLS must include code/patch.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(
+            tool.body.contains("grind-facts"),
+            "patch.py must read the task's files"
+        );
     }
 
     #[test]
