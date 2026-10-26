@@ -19,8 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ci import pytest_shard, release_gate, run_bundle
-from ci.ci_matrix import LINUX_X64_UNIT_SHARDS, TARGETS
+from ci import pytest_shard, run_bundle
+from ci.ci_matrix import LINUX_X64_UNIT_SHARDS
 from ci.env import is_clud_session_var
 from ci.pytest_shard import SHARD_OPTION, applied_marker, assign_files, load_weights, parse_spec
 from ci.run_bundle import Shard, parse_shard, run_unit_suite, shard_was_applied
@@ -319,12 +319,3 @@ def test_the_reusable_workflow_forwards_the_shard() -> None:
     assert "--shard ${{ inputs.shard }}" in text
     # Matrix shards upload concurrently; a shared artifact name would collide.
     assert "inputs.shard != 'all'" in text
-
-
-def test_release_gate_requires_one_job_per_shard_and_no_bare_linux_unit_job() -> None:
-    triple = TARGETS[0].triple
-    for shard in LINUX_X64_UNIT_SHARDS:
-        assert f"Test linux-x64 (unit) ({shard}) / {triple} unit" in release_gate.REQUIRED_JOBS
-    assert f"Test linux-x64 (unit) / {triple} unit" not in release_gate.REQUIRED_JOBS
-    # Every other lane keeps its single unit cell.
-    assert "Test windows-x64 (unit) / x86_64-pc-windows-msvc unit" in release_gate.REQUIRED_JOBS

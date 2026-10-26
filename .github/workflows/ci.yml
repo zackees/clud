@@ -40,6 +40,17 @@ on:
         description: Exact reachable commit SHA to validate
         required: true
         type: string
+  # The release (auto-release.yml) runs this whole workflow on the tagged SHA
+  # in its own run. A release recomputes everything: from a tag push the
+  # attestation and reuse steps below never fire (they key on pull_request or
+  # a main push), and a non-empty candidate_sha resolves the full tier exactly
+  # as a manual dispatch does. Nothing earlier is consulted (#2202).
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact commit SHA to validate
+        required: true
+        type: string
 
 # Deliberately NO `profile` input anywhere in this file. Release builds are
 # reachable only from auto-release.yml; _build-target.yml enforces that.
@@ -48,10 +59,11 @@ on:
 # as obs-rust/obs-studio's push build): the merge queue already tested each
 # merged tree, so a burst of merges must not stack parallel main runs. The
 # nightly and SHA-pinned dispatch runs on main stay independent (run_id), and
-# every other ref cancels its superseded run.
+# every other ref cancels its superseded run. A candidate run (manual
+# dispatch or the release's call) is always independent and never cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' && 'main-push' || github.run_id) || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ inputs.candidate_sha && format('candidate-{0}', github.run_id) || github.ref == 'refs/heads/main' && (github.event_name == 'push' && 'main-push' || github.run_id) || github.ref }}
+  cancel-in-progress: ${{ !inputs.candidate_sha && github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -125,15 +137,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
           fetch-depth: 0
       - name: Verify source and workflow provenance
         id: source
         shell: bash
         env:
-          SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
           EVENT_SHA: ${{ github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
+          # A release call arrives as the caller's tag push; a candidate SHA
+          # makes it a dispatch for provenance and mode resolution.
+          EVENT_NAME: ${{ inputs.candidate_sha && 'workflow_dispatch' || github.event_name }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::invalid source SHA'; exit 1; }
@@ -151,7 +165,7 @@ jobs:
       - name: Resolve CI mode and candidate SHA
         id: mode
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_NAME: ${{ inputs.candidate_sha && 'workflow_dispatch' || github.event_name }}
           EVENT_SHA: ${{ github.sha }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           DISPATCH_TIER: full
@@ -252,8 +266,7 @@ jobs:
 
   # Everything platform-independent, once, on the cheapest runner. Previously
   # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
-  # inside ci/lint.py so a ruff error reds out in well under a minute. The
-  # display name is pinned by ci/release_gate.py.
+  # inside ci/lint.py so a ruff error reds out in well under a minute.
   static-checks:
     name: Static checks
     needs: static
@@ -445,7 +458,7 @@ jobs:
   # in-process parallelism (pytest-xdist) measured slower, not faster. It runs
   # as independent jobs instead: the Rust harnesses, and each half of the
   # pytest suite (ci/pytest_shard.py). LINUX_X64_UNIT_SHARDS in ci/ci_matrix.py
-  # owns the names; ci/release_gate.py requires one job per shard.
+  # owns the names.
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]

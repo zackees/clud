@@ -78,8 +78,7 @@ SUITES: tuple[str, ...] = ("unit", "integration")
 #: `ci/pytest_shard.py`): the Rust harnesses, then each half of the pytest
 #: suite. The suite is CPU-bound and hosted runners are two physical cores, so
 #: separate machines are the only parallelism that helps. The names are the
-#: matrix values in `ci.yml` and, through them, the job names `ci/release_gate.py`
-#: requires.
+#: matrix values in `ci.yml`.
 LINUX_X64_UNIT_SHARDS: tuple[str, ...] = ("rust", "py1of3", "py2of3", "py3of3")
 
 
