@@ -178,7 +178,8 @@ def test_pinned_claude_code_never_installs_into_the_node_toolcache():
     assert '--prefix "$prefix"' in step
     assert 'prefix="$RUNNER_TEMP/' in step
     assert '"$prefix/bin" >> "$GITHUB_PATH"' in step
-    assert "ACT" not in step and "RUNNER_ENVIRONMENT" not in step
+    assert "ACT" not in step
+    assert "RUNNER_ENVIRONMENT" not in step
 
 
 def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
