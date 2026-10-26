@@ -60,7 +60,6 @@ pub mod extern_root;
 pub mod build_id;
 pub mod clud_repo_dev;
 pub mod dnd;
-pub mod dockhand;
 pub mod failover;
 pub mod foreground_runtime;
 pub mod fs_private;
