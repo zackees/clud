@@ -108,3 +108,193 @@ fn the_note_is_context_not_a_permission_decision() {
         .unwrap()
         .contains("12 lint/build/test/CI calls"));
 }
+
+const LIMITS: Limits = Limits {
+    ratio: DEFAULT_RATIO,
+    share: DEFAULT_SHARE,
+};
+
+fn call(kind: Kind, now_ms: u64) -> Call {
+    Call {
+        kind,
+        wide: false,
+        workspace_lint: false,
+        package: None,
+        id: None,
+        now_ms,
+    }
+}
+
+#[test]
+fn kinds_split_verification_for_the_stats_view() {
+    assert_eq!(classify_kind("Bash", "cargo clippy -p x"), Some(Kind::Lint));
+    assert_eq!(classify_kind("Bash", "cargo build"), Some(Kind::Build));
+    assert_eq!(classify_kind("Bash", "pytest tests/x.py"), Some(Kind::Test));
+    assert_eq!(classify_kind("Bash", "bosn ci run --job unit"), Some(Kind::Ci));
+    assert_eq!(classify_kind("Bash", "git status"), Some(Kind::Other));
+    assert_eq!(classify_kind("Read", ""), None);
+    assert_eq!(classify("Bash", "git status"), None);
+}
+
+#[test]
+fn wide_flags_packages_and_workspace_lint_are_recognized() {
+    assert!(is_wide("cargo clippy --workspace --all-targets"));
+    assert!(is_wide("cargo test --release -p x"));
+    assert!(!is_wide("cargo clippy -p x --all-targets"));
+    assert_eq!(
+        package_of("/r/crates/clud-bin/src/a.rs").as_deref(),
+        Some("clud-bin")
+    );
+    assert_eq!(package_of("docs/a.md"), None);
+    assert!(is_workspace_lint(Kind::Lint, "bash lint"));
+    assert!(is_workspace_lint(Kind::Ci, "bosn ci run --workspace ."));
+    assert!(!is_workspace_lint(Kind::Ci, "bosn ci run --job unit"));
+    assert!(!is_workspace_lint(Kind::Test, "cargo test --workspace"));
+}
+
+#[test]
+fn a_post_tool_use_adds_the_elapsed_time_to_the_calls_kind() {
+    let mut test = call(Kind::Test, 1_000);
+    test.id = Some("t1".into());
+    let (ledger, _) = observe(&Ledger::default(), &test, LIMITS);
+    let ledger = finish(&ledger, "t1", 61_000).unwrap();
+    assert_eq!(ledger.totals[&Kind::Test], Total { calls: 1, ms: 60_000 });
+    assert!(ledger.pending.is_empty());
+    assert_eq!(finish(&ledger, "t1", 99_000), None, "a second finish is a no-op");
+    assert_eq!(finish(&ledger, "unknown", 99_000), None);
+}
+
+#[test]
+fn verification_holding_most_of_the_bash_wall_time_trips_one_note() {
+    let mut ledger = Ledger::default();
+    // 3 min of other shell work, 8 min of tests: 72% of 11 min.
+    for (n, (kind, ms)) in [(Kind::Other, 180_000), (Kind::Test, 480_000)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut c = call(kind, 0);
+        c.id = Some(format!("c{n}"));
+        ledger = observe(&ledger, &c, LIMITS).0;
+        ledger = finish(&ledger, &format!("c{n}"), ms).unwrap();
+    }
+    assert_eq!(verify_share(&ledger.totals), Some(72));
+    // A balanced window, so only the share signal can trip.
+    ledger.window = "ev".repeat(5);
+    let (ledger, verdict) = observe(&ledger, &call(Kind::Test, 0), LIMITS);
+    assert!(
+        matches!(&verdict, Some(Verdict::Note(n)) if n.contains("72%")),
+        "{verdict:?}"
+    );
+    assert_eq!(observe(&ledger, &call(Kind::Test, 0), LIMITS).1, None);
+    let off = Limits { share: 0, ..LIMITS };
+    let mut fresh = ledger.clone();
+    fresh.quiet = 0;
+    assert_eq!(observe(&fresh, &call(Kind::Test, 0), off).1, None);
+}
+
+#[test]
+fn the_share_is_not_judged_before_ten_minutes_of_bash() {
+    let mut totals = BTreeMap::new();
+    totals.insert(Kind::Test, Total { calls: 1, ms: 300_000 });
+    assert_eq!(verify_share(&totals), None);
+}
+
+#[test]
+fn repeated_wide_runs_after_single_package_edits_trip_the_modifier_note() {
+    let mut ledger = Ledger::default();
+    let mut notes = Vec::new();
+    for _ in 0..MODIFIER_REPEATS {
+        let mut edit = call(Kind::Edit, 0);
+        edit.package = Some("clud-bin".into());
+        ledger = observe(&ledger, &edit, LIMITS).0;
+        let mut wide = call(Kind::Lint, 0);
+        wide.wide = true;
+        let (next, verdict) = observe(&ledger, &wide, LIMITS);
+        ledger = next;
+        notes.extend(verdict);
+    }
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(matches!(&notes[0], Verdict::Note(n) if n.contains("-p clud-bin")));
+}
+
+#[test]
+fn wide_runs_after_multi_package_edits_are_fine() {
+    let mut ledger = Ledger::default();
+    for _ in 0..5 {
+        for package in ["a", "b"] {
+            let mut edit = call(Kind::Edit, 0);
+            edit.package = Some(package.into());
+            ledger = observe(&ledger, &edit, LIMITS).0;
+        }
+        let mut wide = call(Kind::Lint, 0);
+        wide.wide = true;
+        let (next, verdict) = observe(&ledger, &wide, LIMITS);
+        ledger = next;
+        assert_eq!(verdict, None);
+    }
+}
+
+#[test]
+fn after_a_note_the_next_workspace_lint_is_denied_exactly_once() {
+    let mut ledger = Ledger::default();
+    let mut verdicts = Vec::new();
+    for letter in "evvvvevvvvevv".chars() {
+        let kind = if letter == 'e' { Kind::Edit } else { Kind::Test };
+        let (next, verdict) = observe(&ledger, &call(kind, 0), LIMITS);
+        ledger = next;
+        verdicts.extend(verdict);
+    }
+    assert!(matches!(verdicts.as_slice(), [Verdict::Note(_)]), "{verdicts:?}");
+    let mut lint = call(Kind::Lint, 0);
+    lint.workspace_lint = true;
+    let (ledger, verdict) = observe(&ledger, &lint, LIMITS);
+    assert!(matches!(verdict, Some(Verdict::Deny(_))), "{verdict:?}");
+    // Repeating the command runs it: the deny is spent.
+    let (_, verdict) = observe(&ledger, &lint, LIMITS);
+    assert_eq!(verdict, None);
+}
+
+#[test]
+fn no_note_means_no_escalation() {
+    let mut lint = call(Kind::Lint, 0);
+    lint.workspace_lint = true;
+    let mut ledger = Ledger::default();
+    for _ in 0..5 {
+        let (next, verdict) = observe(&ledger, &lint, LIMITS);
+        ledger = next;
+        assert_eq!(verdict, None);
+    }
+}
+
+#[test]
+fn a_1988_ledger_without_the_new_fields_still_loads() {
+    let old: Ledger = serde_json::from_str(r#"{"window":"evv","quiet":2}"#).unwrap();
+    assert_eq!(old.window, "evv");
+    assert!(old.totals.is_empty() && !old.noted);
+}
+
+#[test]
+fn timing_and_stats_round_trip_through_the_session_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut test = call(Kind::Test, 0);
+    test.id = Some("t1".into());
+    observe_call_at(dir.path(), "s1", &test, LIMITS);
+    finish_at(dir.path(), "s1", "t1", 90_000).unwrap();
+    let mut edit = call(Kind::Edit, 0);
+    edit.package = Some("x".into());
+    observe_call_at(dir.path(), "s1", &edit, LIMITS);
+    let text = stats_at(dir.path(), "s1").unwrap();
+    assert!(text.contains("test        1      1m30s    100%"), "{text}");
+    assert!(text.contains("edit        1          -       -"), "{text}");
+    assert!(text.contains("bash wall time: 1m30s"), "{text}");
+    assert_eq!(stats_at(dir.path(), "nobody"), None);
+    assert_eq!(finish_at(dir.path(), "nobody", "t1", 1), None);
+}
+
+#[test]
+fn the_share_limit_comes_from_env_then_settings_then_default() {
+    let settings = serde_json::json!({"hooks": {"verify_wall_share": 50}});
+    assert_eq!(share_from(Some("0"), Some(&settings)), 0);
+    assert_eq!(share_from(None, Some(&settings)), 50);
+    assert_eq!(share_from(None, None), DEFAULT_SHARE);
+}

@@ -474,6 +474,10 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 0;
     };
     block_bad_cmd_grind_gate::observe(event, raw_payload, &payload);
+    // #2122: a finished Bash call's wall time, for the verify-ratio share.
+    if matches!(event, "PostToolUse" | "PostToolUseFailure") {
+        block_bad_cmd_verify_ratio::record_finish(raw_payload, payload.session_id.as_deref());
+    }
     append_log(&format!(
         "tool_name={:?} cwd={:?} command={:?}",
         payload.tool_name,
@@ -549,13 +553,19 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
             return 2;
         }
     }
-    // #1988: classify the call; an advisory note rides on the final allow.
+    // #1988/#2122: classify the call; an advisory note rides on the final
+    // allow, and the one escalation deny is returned here.
     let verify_note = if event == PRE_TOOL_USE_EVENT {
-        block_bad_cmd_verify_ratio::note(
-            &payload.tool_name,
-            &payload.command,
-            payload.session_id.as_deref(),
-        )
+        match block_bad_cmd_verify_ratio::verdict(&payload, raw_payload) {
+            Some(block_bad_cmd_verify_ratio::Verdict::Deny(reason)) => {
+                append_log(&format!("VERIFY-RATIO-ESCALATED: {reason}"));
+                println!("{}", deny_json(&reason));
+                eprintln!("{reason}");
+                return 2;
+            }
+            Some(block_bad_cmd_verify_ratio::Verdict::Note(note)) => Some(note),
+            None => None,
+        }
     } else {
         None
     };
@@ -3802,6 +3812,12 @@ mod block_bad_cmd_repeat;
 
 #[path = "block_bad_cmd_verify_ratio.rs"]
 mod block_bad_cmd_verify_ratio;
+
+/// `clud session stats` (#2122): the verify-ratio breakdown for a session.
+pub fn session_stats(session_id: &str) -> Option<String> {
+    let state_dir = crate::daemon::default_state_dir().ok()?;
+    block_bad_cmd_verify_ratio::stats_at(&state_dir, session_id)
+}
 
 #[path = "block_bad_cmd_hook_notice.rs"]
 mod block_bad_cmd_hook_notice;

@@ -986,6 +986,11 @@ pub enum Command {
         #[arg(long = "chain-b64")]
         chain_b64: Option<String>,
     },
+    /// Inspect the current agent session (#2122).
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
     /// Internal (#922): Claude lifecycle hook that keeps clud's per-cwd
     /// session index current. Claude Code runs this; it reads the hook
     /// payload on stdin and never fails the session.
@@ -1405,6 +1410,18 @@ pub enum ExternSubcommand {
     },
 }
 
+/// Subcommands under `clud session` (#2122).
+#[derive(Subcommand, Debug, Clone)]
+pub enum SessionAction {
+    /// The session's edit/lint/build/test/CI breakdown with Bash wall time,
+    /// as clud's verify-ratio hook recorded it.
+    Stats {
+        /// Claude Code session id; defaults to `CLAUDE_CODE_SESSION_ID`.
+        #[arg(long = "session")]
+        session: Option<String>,
+    },
+}
+
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
@@ -1523,6 +1540,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "deepseek-auth",
     "run",
     "statusline",
+    "session",
     "session-hook",
     "__daemon",
     "__worker",

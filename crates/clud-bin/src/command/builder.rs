@@ -841,6 +841,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::InternalStartCmd)
         | Some(Command::InternalDaemon { .. })
         | Some(Command::Statusline { .. })
+        | Some(Command::Session { .. })
         | Some(Command::SessionHook { .. })
         | Some(Command::InternalWorker { .. }) => {}
         Some(Command::Run) | None => {
