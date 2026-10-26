@@ -100,12 +100,17 @@ const SI_QUEUE: libc::c_int = libc::SI_QUEUE;
 /// (`kill(2)`, `SI_USER`) or `sigqueue(3)` (`SI_QUEUE`) carries one; a
 /// terminal-generated SIGHUP or SIGQUIT does not.
 fn signal_origin(info: &libc::siginfo_t) -> Option<crate::ctrl_c_track::SignalOrigin> {
-    if info.si_code != SI_USER && info.si_code != SI_QUEUE {
+    // macOS delivers a `kill(2)` with `si_code` 0, not its `SI_USER`
+    // (0x10001); on Linux `SI_USER` is 0 already.
+    if info.si_code != 0 && info.si_code != SI_USER && info.si_code != SI_QUEUE {
         return None;
     }
-    // SAFETY: for SI_USER/SI_QUEUE the kernel fills the `_kill`/`_rt`
-    // member, whose leading pid/uid fields these accessors read.
+    // SAFETY: for these codes the kernel fills the `_kill`/`_rt` member,
+    // whose leading pid/uid fields these accessors read.
     let (pid, uid) = unsafe { (info.si_pid(), info.si_uid()) };
+    if pid <= 0 {
+        return None;
+    }
     Some(crate::ctrl_c_track::SignalOrigin {
         pid: u32::try_from(pid).unwrap_or(0),
         uid,
