@@ -58,11 +58,7 @@ pub(super) fn ingest(source: &HintSource) -> BTreeMap<String, String> {
         return repos;
     }
     let mut buf = Vec::new();
-    if file
-        .take(MAX_BYTES_PER_PASS)
-        .read_to_end(&mut buf)
-        .is_err()
-    {
+    if file.take(MAX_BYTES_PER_PASS).read_to_end(&mut buf).is_err() {
         return repos;
     }
     let Some(last_newline) = buf.iter().rposition(|&b| b == b'\n') else {

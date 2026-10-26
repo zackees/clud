@@ -181,8 +181,14 @@ fn note_repo_inserts_once_and_never_counts_a_launch() {
     let seen = rows.iter().find(|r| r.repo_root == "/dev/seen").unwrap();
     assert_eq!((seen.run_count, seen.last_visited_unix), (0, 100));
     assert_eq!(seen.last_cwd, "/dev/seen/sub");
-    let launched = rows.iter().find(|r| r.repo_root == "/dev/launched").unwrap();
-    assert_eq!((launched.run_count, launched.last_cwd.as_str()), (1, "/dev/launched"));
+    let launched = rows
+        .iter()
+        .find(|r| r.repo_root == "/dev/launched")
+        .unwrap();
+    assert_eq!(
+        (launched.run_count, launched.last_cwd.as_str()),
+        (1, "/dev/launched")
+    );
 }
 
 #[test]

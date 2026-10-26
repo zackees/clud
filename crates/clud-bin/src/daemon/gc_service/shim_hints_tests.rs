@@ -14,7 +14,11 @@ fn repo_with_linked_worktree(root: &Path) -> (PathBuf, PathBuf) {
     let main = root.join("main");
     std::fs::create_dir_all(main.join(".git").join("worktrees").join("wt")).unwrap();
     write(
-        &main.join(".git").join("worktrees").join("wt").join("commondir"),
+        &main
+            .join(".git")
+            .join("worktrees")
+            .join("wt")
+            .join("commondir"),
         "../..\n",
     );
     let wt = root.join("elsewhere").join("wt");
@@ -116,7 +120,11 @@ fn ingest_resumes_from_its_offset_and_leaves_a_partial_line() {
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(offset, first.len() as u64, "the partial line is not consumed");
+    assert_eq!(
+        offset,
+        first.len() as u64,
+        "the partial line is not consumed"
+    );
     assert!(ingest(&source).is_empty(), "nothing new past the offset");
 }
 

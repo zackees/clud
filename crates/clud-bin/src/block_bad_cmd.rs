@@ -6205,7 +6205,10 @@ mod tests {
             };
             let outside = evaluate("git -C ../scratch clone https://example.com/foo.git");
             let reason = outside.reason.expect("a -C clone outside is denied");
-            assert!(reason.contains(CLONE_EXTERN_REPOS_GUARD_RULE_ID), "{reason}");
+            assert!(
+                reason.contains(CLONE_EXTERN_REPOS_GUARD_RULE_ID),
+                "{reason}"
+            );
             let inside = evaluate("git -C .extern-repos clone https://example.com/foo.git");
             assert!(inside.reason.is_none(), "{:?}", inside.reason);
             assert_eq!(
