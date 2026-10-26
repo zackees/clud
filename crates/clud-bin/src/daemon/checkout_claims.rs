@@ -306,15 +306,18 @@ pub(super) fn all_live(state_dir: &Path) -> io::Result<Vec<(CheckoutKey, Checkou
 
 pub struct ForegroundCheckoutPresence {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<JoinHandle<Option<String>>>,
     claim_intent_path: PathBuf,
 }
 
 impl Drop for ForegroundCheckoutPresence {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        // The session has exited and restored the terminal by now, so the
+        // presence thread's notice is printed here rather than over the
+        // harness's live screen (#2163).
+        if let Some(Ok(Some(notice))) = self.thread.take().map(JoinHandle::join) {
+            eprintln!("{notice}");
         }
         let _ = fs::remove_file(&self.claim_intent_path);
     }
@@ -395,7 +398,7 @@ pub fn start_foreground_presence(
         .name("clud-checkout-presence".to_string())
         .spawn(move || {
             let end = maintain_presence(stream, &state_dir, &checkout, &occupant, &thread_stop);
-            report_presence_end(end, &interrupted);
+            presence_end_notice(end, &interrupted)
         })?;
     Ok(Some(ForegroundCheckoutPresence {
         stop,
@@ -585,20 +588,21 @@ enum PresenceEnd {
     Disabled(io::Error),
 }
 
-fn report_presence_end(end: PresenceEnd, interrupted: &AtomicBool) {
+/// The notice to show once the session has exited, interrupting the session
+/// when its claim was lost. The presence thread runs while the harness owns
+/// the terminal, so it must never print itself (#2163).
+fn presence_end_notice(end: PresenceEnd, interrupted: &AtomicBool) -> Option<String> {
     match end {
-        PresenceEnd::Stopped => {}
+        PresenceEnd::Stopped => None,
         PresenceEnd::ClaimLost(error) => {
-            eprintln!(
-                "[clud] checkout claim lost after daemon restart: {error}; stopping this session"
-            );
             interrupted.store(true, Ordering::SeqCst);
+            Some(format!(
+                "[clud] checkout claim lost after daemon restart: {error}; stopped this session"
+            ))
         }
-        PresenceEnd::Disabled(error) => {
-            eprintln!(
-                "[clud] checkout presence disabled: {error}; restart the session to re-register"
-            );
-        }
+        PresenceEnd::Disabled(error) => Some(format!(
+            "[clud] checkout presence was disabled during this session: {error}"
+        )),
     }
 }
 
@@ -1112,16 +1116,21 @@ mod tests {
     #[test]
     fn only_a_lost_claim_interrupts_the_session() {
         let interrupted = AtomicBool::new(false);
-        report_presence_end(PresenceEnd::Stopped, &interrupted);
-        report_presence_end(
+        assert_eq!(
+            presence_end_notice(PresenceEnd::Stopped, &interrupted),
+            None
+        );
+        let disabled = presence_end_notice(
             PresenceEnd::Disabled(io::Error::other("newer daemon")),
             &interrupted,
         );
+        assert!(disabled.is_some_and(|notice| notice.contains("newer daemon")));
         assert!(!interrupted.load(Ordering::SeqCst));
-        report_presence_end(
+        let lost = presence_end_notice(
             PresenceEnd::ClaimLost(io::Error::from(io::ErrorKind::AlreadyExists)),
             &interrupted,
         );
+        assert!(lost.is_some_and(|notice| notice.contains("claim lost")));
         assert!(interrupted.load(Ordering::SeqCst));
     }
 }

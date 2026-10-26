@@ -87,8 +87,8 @@ fn newer_daemon_is_refused_and_rendered_yellow() {
     assert!(rendered.starts_with("\x1b[33m[clud] error:"));
     assert!(rendered.ends_with("\x1b[0m"));
     assert!(rendered.contains(&format!("pid {}", info.pid)));
-    assert!(rendered.contains("clud daemon stop"));
-    assert!(rendered.contains("clud daemon restart"));
+    assert!(rendered.contains("start a new session with the newer clud"));
+    assert!(!rendered.contains("`clud daemon restart`"));
     assert!(daemon_info_path(tmp.path()).exists());
 }
 
