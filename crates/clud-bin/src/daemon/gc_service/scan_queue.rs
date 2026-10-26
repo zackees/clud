@@ -230,7 +230,7 @@ mod tests {
     fn a_killed_pass_resumes_with_the_repos_it_did_not_reach() {
         let mut q = queue(&["/a", "/b", "/c"]);
         let mut saved = Vec::new();
-        let mut budget = 1;
+        let mut budget = 1u32;
         run_pass(
             &mut q,
             &[],
