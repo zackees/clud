@@ -125,6 +125,55 @@ pub(super) fn repo_root_for(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// #2103: the checkouts of `repo_root`'s submodules, nested ones included,
+/// from filesystem reads alone. Each submodule's git dir sits under
+/// `<repo>/.git/modules/`, and its `config` names the checkout through
+/// `core.worktree` (relative to that git dir). Queued as roots, they let the
+/// probe list a submodule's own linked worktrees. Bounded to a few hundred
+/// module dirs so a pathological tree cannot stall the probe thread.
+pub(super) fn submodule_checkouts(repo_root: &Path) -> Vec<PathBuf> {
+    const MAX_MODULE_DIRS: usize = 512;
+    let mut out = Vec::new();
+    let mut stack = vec![repo_root.join(".git").join("modules")];
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > MAX_MODULE_DIRS {
+                return out;
+            }
+            let git_dir = entry.path();
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            if let Some(checkout) = core_worktree(&git_dir) {
+                out.push(checkout);
+            }
+            // Nested submodules live in `<git_dir>/modules`; a module name
+            // with slashes nests plain directories without a `config`.
+            stack.push(git_dir.join("modules"));
+            if !git_dir.join("config").is_file() {
+                stack.push(git_dir);
+            }
+        }
+    }
+    out
+}
+
+/// `core.worktree` from `<git_dir>/config`, resolved against `git_dir`, if
+/// that checkout exists.
+fn core_worktree(git_dir: &Path) -> Option<PathBuf> {
+    let config = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let value = config.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once('=')?;
+        (key.trim().eq_ignore_ascii_case("worktree")).then(|| value.trim().to_string())
+    })?;
+    std::fs::canonicalize(git_dir.join(value)).ok()
+}
+
 fn checkout_from_gitfile(checkout: &Path, gitfile: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(gitfile).ok()?;
     let gitdir = checkout.join(text.lines().next()?.strip_prefix("gitdir:")?.trim());

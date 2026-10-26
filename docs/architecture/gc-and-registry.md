@@ -357,6 +357,11 @@ the default branch, so ancestry-based checks call them live work forever
   an existing row alone. A worktree made by any route that touched the
   shim is therefore listed within one scan. A bare repo, or a linked
   worktree of a submodule, cannot be named without git and is skipped.
+- **Submodules (#2103).** Before each pass, every queued root's
+  `.git/modules/**/config` is read for `core.worktree`, and each existing
+  submodule checkout is queued as a root of its own, so a submodule's linked
+  worktrees appear as `repo-worktree` rows (`shim_hints::submodule_checkouts`,
+  file reads only, at most 512 module dirs per repo).
 - **Filesystem backstop (#2103).** A repo made with an absolute `git` path
   or copied with `cp -a` never passes the shim. Each probe pass also
   advances a bounded crawl of the home directory (at most 50,000 entries;

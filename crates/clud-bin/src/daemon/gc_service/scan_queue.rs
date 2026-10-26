@@ -175,6 +175,18 @@ pub(super) fn probe_all(
     if let Some(root) = wt_root {
         roots.extend(probe::worktree_root_children(root));
     }
+    // #2103: submodules of known repos, so their linked worktrees are listed.
+    let submodules: Vec<String> = roots
+        .iter()
+        .flat_map(|root| super::shim_hints::submodule_checkouts(Path::new(root)))
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !roots.contains(p))
+        .collect();
+    for sub in submodules {
+        if !roots.contains(&sub) {
+            roots.push(sub);
+        }
+    }
     let mut queue = load(queue_file);
     queue.sync(&roots);
     let mut seen_roots = std::collections::HashSet::new();
