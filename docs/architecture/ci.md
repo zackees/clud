@@ -222,8 +222,8 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@e84ffcd0b49662bcc44f3ba99b25346b4b8cf959 ci-lint local-gate run
-uvx --from git+https://github.com/zackees/ci.yml@e84ffcd0b49662bcc44f3ba99b25346b4b8cf959 ci-lint local-gate push --sha <stamped-head>
+uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint local-gate push --sha <stamped-head>
 ```
 
 The gate refuses an uncommitted tree. On a cold commit it invokes
