@@ -131,9 +131,6 @@ lanes = ["unit"]
 # never read local attestations.
 [gate.trust]
 mode = "enforce"
-# cancel-superseded (GEN-022, ci.yml#409) runs only on merge_group, first,
-# with no `needs:`; only the end-of-queue cache janitor depends on it.
-verify-exempt = ["cancel-superseded"]
 skip = [
   "ci.yml:static-checks",
   "ci.yml:dylint",

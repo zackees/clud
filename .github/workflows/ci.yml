@@ -815,4 +815,4 @@ jobs:
         env:
           PYTHONPATH: .ci-lint
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -P -m ci_lint cache janitor --repo . --default-branch main --max-deletes 50
+        run: python -P -m ci_lint cache janitor --repo . --default-branch main --max-deletes 50
