@@ -692,9 +692,6 @@ const plan = (g) => light(() => agent(
 // byte-identical up to PACK_END and the prompt cache serves the pack after
 // the first agent. Nothing that varies per agent may appear in it.
 const PACK_END = '\n--- end of context pack ---\n'
-// Below the prompt-cache minimum (about 1K tokens) a pack gains nothing from
-// a staggered start.
-const PACK_STAGGER_CHARS = 4000
 const packOf = (p) => {
   const c = (p && p.context) || {}
   const excerpts = Array.isArray(c.excerpts) ? c.excerpts : []
@@ -706,13 +703,11 @@ const packOf = (p) => {
   return parts.join('\n\n') + PACK_END
 }
 
-// Parallel workers share the pack's cache only if one request has written
-// it first: start the first task alone, then the rest together.
+// Parallel workers start together on purpose (#1344): Claude Code puts a
+// git status snapshot ahead of each agent's prompt, so a worker started
+// after another has written files would see a different prefix.
 const work = (p, g) => (PARALLEL
-  ? (packOf(p).length >= PACK_STAGGER_CHARS && p.tasks.length > 1
-    ? light(() => runTask(p, g, p.tasks[0])).then(first =>
-      parallel(p.tasks.slice(1).map(t => () => light(() => runTask(p, g, t)))).then(rest => [first, ...rest]))
-    : parallel(p.tasks.map(t => () => light(() => runTask(p, g, t)))))
+  ? parallel(p.tasks.map(t => () => light(() => runTask(p, g, t))))
   : p.tasks.reduce((acc, t) => acc.then(rs => runTask(p, g, t).then(r => [...rs, r])), Promise.resolve([])))
   .then(rs => ({ p, results: rs.filter(Boolean) }))
 const runTask = (p, g, t) => agent(

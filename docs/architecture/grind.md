@@ -869,18 +869,18 @@ why, text}`). `grind-run.js` renders it once per goal (`packOf`) and puts it
 **first** in every worker's and the reviewer's prompt, ending at
 `--- end of context pack ---`; nothing per-agent (task id, file list, round)
 may precede that line. Workers then neither re-fetch the issue nor re-read
-the excerpted ranges, and because their requests are byte-identical up to
-the separator, the prompt cache serves the pack after the first worker. In
-parallel mode, when the pack is at least `PACK_STAGGER_CHARS` (about 1K
-tokens) the first task runs alone and the rest start after it, since agents
-that start together all miss an empty cache. The cache is per model and
-system prompt: the reviewer (a different agent type) reads the same pack
-but does not share the workers' cache. Claude Code itself puts system
-reminders (git status, attribution) ahead of the prompt and indents every
-line of a workflow's computed task text, so the shared prefix is
-everything up to the marker line as delivered, not the pack bytes alone;
-`tests/harness/test_grind_context_pack.py` asserts it on the real Claude
-Code. The real-model cost measurement #1344 calls for stays manual.
+the excerpted ranges. Claude Code puts system reminders ahead of each
+agent's prompt, including a **git status snapshot taken when that agent
+starts**, and indents every line of a workflow's computed task text. So
+workers' requests are byte-identical up to the pack's end only while they
+start against the same checkout state: a worker started after another has
+written files sees `?? <file>` where the first saw `(clean)`. Parallel
+workers therefore start together (a staggered start, tried first, made the
+first worker's prefix diverge from the rest); sequential workers each see
+the previous one's changes and do not share. The reviewer, a different agent
+type, reads the same pack without sharing the workers' cache.
+`tests/harness/test_grind_context_pack.py` asserts the shared prefix on the
+real Claude Code. The real-model cost measurement #1344 calls for stays manual.
 
 ## Tests
 

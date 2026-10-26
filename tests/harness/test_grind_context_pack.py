@@ -3,9 +3,10 @@
 The planner returns the goal's issue text and code excerpts once; the
 workflow puts that pack first in every worker's and the reviewer's prompt.
 #1344's premise is that the workers' requests are then byte-identical up to
-the end of the pack, so the prompt cache serves it after the first worker.
-If Claude Code put anything agent-specific ahead of the pack, the first test
-here fails and the caching design stops there.
+the end of the pack. Claude Code puts a git status snapshot ahead of every
+agent's prompt, so this holds only for workers that start against the same
+checkout state; the workflow starts parallel workers together for that
+reason.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from tests.harness.test_grind import _after, _goal_roles, _goals, _role, _script
 # so match the marker's text, not its surrounding newlines.
 PACK_END = "--- end of context pack ---"
 TASKS = ("t1", "t2", "t3")
-# Large enough to pass the workflow's staggered-start threshold.
 EXCERPT = "\n".join(f"line {n}: let shared_context_{n} = {n};" for n in range(1, 160))
 
 
@@ -124,14 +124,3 @@ def test_the_reviewer_starts_from_the_same_pack(harness: Harness) -> None:
     start = pack.index("Context pack for this goal")
     end = pack.index(PACK_END) + len(PACK_END)
     assert pack[start:end] in reviewer
-
-
-def test_the_first_worker_runs_before_the_rest_start(harness: Harness) -> None:
-    result = _run(harness)
-    first = [r for r in result.requests if r["role"] == "worker:g:t1"]
-    others = [r for r in result.requests if r["role"] in ("worker:g:t2", "worker:g:t3")]
-    assert first
-    assert others
-    assert min(r["t_start"] for r in others) >= max(r["t_end"] for r in first), (
-        "the other workers started before the first could write the cache"
-    )

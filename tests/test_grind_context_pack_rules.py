@@ -49,10 +49,12 @@ def test_nothing_per_agent_enters_the_pack() -> None:
         assert varying not in body, f"{varying} would make the pack differ per agent"
 
 
-def test_parallel_workers_stagger_only_for_a_cacheable_pack() -> None:
+def test_parallel_workers_start_together() -> None:
+    """A staggered start gave later workers a different git status snapshot
+    ahead of the pack, so their prefixes diverged from the first (#1344)."""
     js = _workflow()
-    assert "const PACK_STAGGER_CHARS = 4000" in js
-    assert "packOf(p).length >= PACK_STAGGER_CHARS && p.tasks.length > 1" in js
+    assert "PACK_STAGGER" not in js
+    assert "Parallel workers start together on purpose (#1344)" in js
 
 
 def test_the_planner_returns_the_pack_and_workers_use_it() -> None:
