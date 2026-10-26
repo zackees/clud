@@ -511,7 +511,10 @@ mod tests {
             .expect("BUNDLED_TOOLS must include code/patch.py");
         assert!(tool.body.contains("managed-by: clud"));
         assert!(!tool.body.contains("import subprocess"));
-        assert!(tool.body.contains("grind-facts"), "patch.py must read the task's files");
+        assert!(
+            tool.body.contains("grind-facts"),
+            "patch.py must read the task's files"
+        );
     }
 
     #[test]
