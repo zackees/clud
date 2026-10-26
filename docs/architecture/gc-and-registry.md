@@ -357,6 +357,16 @@ the default branch, so ancestry-based checks call them live work forever
   an existing row alone. A worktree made by any route that touched the
   shim is therefore listed within one scan. A bare repo, or a linked
   worktree of a submodule, cannot be named without git and is skipped.
+- **Resumable scan (#2103).** The pass walks a durable queue of roots,
+  `<state>/gc/scan-queue.json`, rewritten atomically after every item; a
+  scanned root moves to the back, so a daemon killed mid-scan resumes with
+  the roots it had not reached. A pass stops after 5 minutes and the
+  unreached roots keep their previous rows. A root whose `git`/`gh` call
+  was killed at its deadline keeps its previous rows relabelled `pinned` /
+  `scan timed out ×N` (never reclaimed on a timeout) and moves to the back;
+  the count resets on its next clean scan. Each item remembers the row
+  paths it last produced, because a row's `repo_root` is the main checkout,
+  not the queued root (`daemon/gc_service/scan_queue.rs`).
 - **Where it runs.** The worker reads the visit list and hands it to a
   `clud-gc-repo-worktree-probe` thread (`spawn_repo_worktree_probe`), which
   sends a complete snapshot back as `RegistryMsg::RepoWorktreeVerdicts`, the

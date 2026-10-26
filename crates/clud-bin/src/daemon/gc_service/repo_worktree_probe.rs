@@ -631,33 +631,62 @@ pub(crate) fn probe_repos(
     if let Some(root) = wt_root {
         repo_roots.extend(worktree_root_children(root));
     }
-    let repo_roots = repo_roots.as_slice();
     let mut seen_roots = HashSet::new();
-    let mut seen_paths = HashSet::new();
     let mut out = Vec::new();
-    for root in repo_roots {
-        let root = Path::new(root);
-        if !root.try_exists().unwrap_or(false) {
-            continue;
-        }
-        let Some(common) = git(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        ) else {
-            continue;
-        };
-        if !seen_roots.insert(canonical(Path::new(common.trim()))) {
-            continue;
-        }
-        let prs = lookup_prs(root);
-        for row in probe_repo_with(root, live_cwds, procs, prs.as_deref(), wt_root) {
-            if seen_paths.insert(row.path.clone()) {
-                out.push(row);
-            }
-        }
+    for root in &repo_roots {
+        out.extend(probe_one_root(
+            Path::new(root),
+            live_cwds,
+            procs,
+            wt_root,
+            &mut seen_roots,
+        ));
     }
-    // #1486: every worktrees child no worktree list claimed is judged as a
-    // reservation, so an unused `alloc_wt_path` directory is not leaked.
+    with_reservations(dedupe_rows(out), live_cwds, procs, wt_root)
+}
+
+/// #2103: probe one queued root. Empty when it is missing, not a repo, or a
+/// repo another root in this pass already covered (same common dir).
+pub(crate) fn probe_one_root(
+    root: &Path,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+    wt_root: Option<&Path>,
+    seen_roots: &mut HashSet<PathBuf>,
+) -> Vec<RepoWorktreeRow> {
+    if !root.try_exists().unwrap_or(false) {
+        return Vec::new();
+    }
+    let Some(common) = git(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) else {
+        return Vec::new();
+    };
+    if !seen_roots.insert(canonical(Path::new(common.trim()))) {
+        return Vec::new();
+    }
+    let prs = lookup_prs(root);
+    probe_repo_with(root, live_cwds, procs, prs.as_deref(), wt_root)
+}
+
+/// First row per path wins.
+pub(crate) fn dedupe_rows(rows: Vec<RepoWorktreeRow>) -> Vec<RepoWorktreeRow> {
+    let mut seen = HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(row.path.clone()))
+        .collect()
+}
+
+/// #1486: every worktrees child no worktree list claimed is judged as a
+/// reservation, so an unused `alloc_wt_path` directory is not leaked.
+pub(crate) fn with_reservations(
+    mut out: Vec<RepoWorktreeRow>,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+    wt_root: Option<&Path>,
+) -> Vec<RepoWorktreeRow> {
+    out.retain(|row| !row.reservation);
     if let Some(root) = wt_root {
         let claimed: HashSet<PathBuf> = out.iter().map(|r| canonical(Path::new(&r.path))).collect();
         for child in worktree_root_children(root) {
