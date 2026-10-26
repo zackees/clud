@@ -749,23 +749,19 @@ soldr's own benchmarks rather than from a temporary regression here.
 
 ### macOS: SDK provisioning
 
-`build.rs:27-28` emits `cargo:rustc-link-lib=framework=Accelerate`
-unconditionally for any `target.contains("apple")`, with **no feature to turn it
-off**. Linking `-framework Accelerate` requires a real macOS SDK. `GGML_BLAS=OFF`
-stops CMake from *building* the BLAS backend, but does not remove that hardcoded
-link directive — the SDK is still required for the framework stub, and for every
-other system framework `cpal`/`rodio`/`arboard` pull in on darwin.
+Linking a darwin binary needs a real macOS SDK for the system frameworks
+`cpal`/`rodio`/`arboard` pull in. soldr's blessed Apple-target path resolves the
+target-shaped SDK from its toolchain catalogue: the setup composite runs `soldr
+prepare --target <apple-triple>` and exports `SDKROOT` plus the target-scoped
+compiler and linker settings to later steps.
 
-Linux→macOS cross therefore needs a real SDK on the runner. soldr 0.8.28's
-blessed Apple-target path resolves the target-shaped SDK from its toolchain
-catalogue. The setup composite runs `soldr prepare --target <apple-triple>`
-and exports the resulting environment to later workflow steps.
-
-That environment includes `SDKROOT` plus target-scoped compiler/linker
-settings. `ci/xbuild.py` forwards the same path as `CMAKE_OSX_SYSROOT`, then
-routes link-producing builds through `soldr build`. Both Darwin triples now
-build on `ubuntu-24.04`; native macOS product-test runners only download and
-execute the bundles. The Linux-only Dylint job is separate.
+`ci/xbuild.py` adds nothing for darwin (#648): it used to forward `SDKROOT` as
+`CMAKE_OSX_SYSROOT` and turn off ggml's BLAS/Metal backends for whisper.cpp,
+which left with whisper-rs (#1207). `build` runs as `soldr build --target`, and
+clippy, test harnesses and doc tests run as setup-soldr's target hook `soldr cargo
+<verb> --target`. Both Darwin triples build on `ubuntu-24.04`; the native macOS
+runners only download and execute the bundles. The Linux-only Dylint job is
+separate.
 
 ## Cache model
 
