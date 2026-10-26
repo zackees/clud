@@ -77,6 +77,23 @@ def _prefix(request: dict[str, Any]) -> str:
     return whole[: whole.index(marker) + len(marker)]
 
 
+def _divergence(prefixes: dict[str, str]) -> str:
+    """Where each worker's prefix first differs from t1's, with context."""
+    base = prefixes["t1"]
+    lines = []
+    for task, other in prefixes.items():
+        at = next((i for i, (a, b) in enumerate(zip(base, other)) if a != b), None)
+        if at is None and len(base) == len(other):
+            lines.append(f"{task}: identical to t1")
+            continue
+        at = min(len(base), len(other)) if at is None else at
+        lines.append(
+            f"{task}: differs at {at}\n  t1:    {base[max(0, at - 200) : at + 200]!r}"
+            f"\n  {task}: {other[max(0, at - 200) : at + 200]!r}"
+        )
+    return "\n".join(lines)
+
+
 def _run(harness: Harness) -> RunResult:
     result = harness.run(
         "start grind",
@@ -91,7 +108,8 @@ def test_workers_are_byte_identical_up_to_the_end_of_the_pack(harness: Harness) 
     result = _run(harness)
     prefixes = {t: _prefix(_first(result, f"worker:g:{t}")) for t in TASKS}
     assert len(set(prefixes.values())) == 1, (
-        "worker requests differ before the pack ends; the shared prefix cannot cache"
+        "worker requests differ before the pack ends; the shared prefix cannot cache:\n"
+        + _divergence(prefixes)
     )
     assert "make the three files" in prefixes["t1"]
     assert "shared_context_159" in prefixes["t1"]
