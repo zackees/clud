@@ -26,6 +26,7 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 mod act_containers;
 mod extern_repo;
 mod filesystem;
+mod fs_backstop;
 mod legacy_worktree_root;
 mod list_state;
 mod repo_worktree;
@@ -1152,6 +1153,10 @@ fn spawn_repo_worktree_probe(
     let activity = activity.cloned();
     let hint_source = production_hint_source();
     let queue_file = production_scan_queue_file();
+    let crawl_file = (!cfg!(test))
+        .then(crate::daemon::default_state_dir)
+        .and_then(Result::ok)
+        .map(|state| fs_backstop::crawl_path(&state));
     let previous = spare_reasons.repo_worktrees().0.to_vec();
     let spawned = thread::Builder::new()
         .name("clud-gc-repo-worktree-probe".to_string())
@@ -1159,6 +1164,8 @@ fn spawn_repo_worktree_probe(
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
             // #2103: repos only the shim has seen join this same scan.
             let repo_roots = with_shim_hints(repo_roots, hint_source.as_ref(), &tx);
+            // #2103 item 5: repos no shim call named (absolute git, `cp -a`).
+            let repo_roots = with_fs_backstop(repo_roots, crawl_file.as_deref(), &tx);
             let procs = repo_worktree_probe::collect_process_cwds();
             migrate_legacy_worktree_root(&live_cwds, &procs);
             // #2103: resumable, per-item persisted, time-budgeted.
@@ -1221,6 +1228,33 @@ fn with_shim_hints(
     }
     if !seen.is_empty() {
         let _ = tx.send(RegistryMsg::RepoHints(seen));
+    }
+    repo_roots
+}
+
+/// #2103 item 5: advance the bounded home-directory crawl one step and add
+/// what it found, registering the repos like shim hints. `None` (unit tests)
+/// skips it.
+fn with_fs_backstop(
+    mut repo_roots: Vec<String>,
+    crawl_file: Option<&Path>,
+    tx: &mpsc::Sender<RegistryMsg>,
+) -> Vec<String> {
+    let (Some(crawl_file), Some(home)) = (crawl_file, crate::home::user_home()) else {
+        return repo_roots;
+    };
+    let mut state = fs_backstop::load(crawl_file);
+    let found = fs_backstop::step(&mut state, &home, fs_backstop::ENTRIES_PER_PASS, now_unix());
+    if let Err(err) = fs_backstop::save(crawl_file, &state) {
+        eprintln!("[clud] gc: filesystem crawl state not saved: {err}");
+    }
+    for root in found.keys() {
+        if !repo_roots.contains(root) {
+            repo_roots.push(root.clone());
+        }
+    }
+    if !found.is_empty() {
+        let _ = tx.send(RegistryMsg::RepoHints(found));
     }
     repo_roots
 }

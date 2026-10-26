@@ -357,6 +357,14 @@ the default branch, so ancestry-based checks call them live work forever
   an existing row alone. A worktree made by any route that touched the
   shim is therefore listed within one scan. A bare repo, or a linked
   worktree of a submodule, cannot be named without git and is skipped.
+- **Filesystem backstop (#2103).** A repo made with an absolute `git` path
+  or copied with `cp -a` never passes the shim. Each probe pass also
+  advances a bounded crawl of the home directory (at most 50,000 entries;
+  the pending stack persists in `<state>/gc/fs-crawl.json`, so a sweep
+  spans passes and restarts). Every `.git` it meets is resolved with the
+  shim resolver and registered as a hint. Symlinks are not followed;
+  `node_modules`, `target`, caches and similar trees are skipped. A
+  finished sweep repeats at most weekly (`daemon/gc_service/fs_backstop.rs`).
 - **Resumable scan (#2103).** The pass walks a durable queue of roots,
   `<state>/gc/scan-queue.json`, rewritten atomically after every item; a
   scanned root moves to the back, so a daemon killed mid-scan resumes with
