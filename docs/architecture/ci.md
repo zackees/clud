@@ -39,26 +39,32 @@ suite is CPU-bound (every test launches real `clud` processes) and a hosted
 "4 vCPU" runner is two physical cores, so in-process parallelism does not help
 (pytest-xdist measured slower, 172 s against ~135 s serial, with a 2.5x
 per-test slowdown from contention); separate machines do not contend, so the
-split costs only the extra jobs' setup. `ci/release_gate.py` requires one
-cell per shard. Refresh the weights from a run's `logs/pytest-unit.xml` when
+split costs only the extra jobs' setup. Refresh the weights from a run's `logs/pytest-unit.xml` when
 the balance drifts, or from the shard jobs' timestamped logs (`gh run view
 --log --job`: each pytest progress line's timestamp minus the previous one's
 is that file's time). Average at least two runs. A stale or missing entry
 only costs balance, never coverage. All other lanes run the whole suite in one job (`--shard all`).
 
-The release workflow's `full-ci-gate` checks for a completed successful manual
-`CI full <candidate SHA>` run before any release build or publisher starts. It
-checks `CI OK`, Dylint, and the build plus unit and integration execution jobs
-for all six triples; absent, skipped, cancelled, or failed cells reject the
-release. A tag push can start the release workflow, but it cannot publish until
-the exact tagged commit has this full CI proof. A routine `main` version change
-does not trigger that workflow. Run full CI with `candidate_sha` on the
-candidate's branch before tagging or calling `ci/publish.py`; dry-run publish
-still only describes the intended dispatch and makes no remote calls.
+### A release recomputes its own proof (#2202)
 
-This gate reads the latest 100 manual CI runs, so an older proof can age out and
-must be rerun. It establishes complete dev-profile CI execution, not release
-wheel execution: release-profile artifacts are built after the gate. The
+The release workflow's `full-ci-gate` job **runs** `ci.yml` on the exact
+tagged SHA, inside the release run, as a reusable-workflow call with
+`candidate_sha`. A non-empty candidate resolves the full tier (all six
+triples, Dylint, unit and integration) exactly as a manual dispatch does, and
+`CI OK` fails the job unless every selected job passed. No release build or
+publisher starts until it succeeds. A routine `main` version change does not
+trigger the release.
+
+A release consults no earlier evidence: no local-gate attestation, no
+default-branch reuse decision, and no earlier CI run. The attestation and
+reuse steps in `ci.yml` key on a pull request or a `main` push; a call from a
+tag push is neither, and `tests/test_release_gate.py` pins that. This
+replaced a lookup of a separately dispatched `CI full <sha>` run, which
+failed any tag pushed without that manual step. It is the fleet rule
+REL-007 in forge-ci/ci.yml `docs/policy-general.md`.
+
+The gate establishes complete dev-profile CI execution, not release wheel
+execution: release-profile artifacts are built after it. The
 target/label policy lives in `ci/ci_matrix.py`; the workflow has no preceding
 matrix-planning runner job.
 
@@ -1143,8 +1149,7 @@ host/Windows/macOS passes took 28s/49s/69s at a 100% hit rate, against
 downloads that target's `rust-std` and cross sysroot (LLVM, MSVC or Apple SDK)
 each run. One triple per OS is enough for the same reason
 Clippy needs only two: this workspace gates by OS, not architecture. The
-`CI OK` gate requires the Dylint result even on an unlabeled PR, and
-`ci/release_gate.py` pins the three leg names `Dylint / Dylint (<pass>)`.
+`CI OK` gate requires the Dylint result even on an unlabeled PR.
 The passes are parallel legs of one Linux matrix (#2061): back to back they
 took 5m20s and were the slowest required job once the build cook went warm.
 

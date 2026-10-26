@@ -126,22 +126,23 @@ jobs:
           )
           PY
 
+  # A release recomputes its own proof (#2202): the complete full-tier CI
+  # workflow runs on the exact tagged SHA inside this run. No attestation,
+  # reuse decision or earlier run is consulted, so a tag never waits on a
+  # manual pre-dispatch. ci.yml's `CI OK` fails unless every selected job
+  # passed, which fails this job and blocks every builder and publisher.
   full-ci-gate:
-    name: Exact SHA full CI gate
+    name: Exact SHA full CI
     needs: preflight
-    runs-on: ubuntu-24.04
+    uses: ./.github/workflows/ci.yml
+    with:
+      candidate_sha: ${{ needs.preflight.outputs.candidate_sha }}
+    # The union ci.yml's jobs request; a called workflow cannot exceed it.
     permissions:
       contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
-      - name: Require complete full CI execution before any release build or publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
-        run: python -m ci.release_gate
+      actions: write
+      pull-requests: read
+      issues: write
 
   snapshot-public:
     name: Snapshot prior public stable release and Pages pointer
