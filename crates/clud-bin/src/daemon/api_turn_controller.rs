@@ -286,6 +286,20 @@ fn drain_jsonl(
             ReadStatus::Eof => break,
         }
     }
+    // Exit is not end of output: the last lines can reach the capture queue
+    // after the exit code on a loaded machine. `wait` runs running-process's
+    // bounded capture drain, so the queue is complete once it returns (#2159).
+    let _ = process.wait(None);
+    for event in process.drain_combined() {
+        observe_line(
+            &store,
+            &session_id,
+            &turn_id,
+            backend,
+            &event.line,
+            &log_path,
+        );
+    }
 }
 
 fn observe_line(

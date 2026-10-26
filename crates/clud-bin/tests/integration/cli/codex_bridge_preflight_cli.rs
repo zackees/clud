@@ -58,6 +58,11 @@ fn run(home: &std::path::Path, path: &std::path::Path, args: &[String]) -> (i32,
     let exit = process
         .wait(Some(Duration::from_secs(30)))
         .expect("wait for clud");
+    // `wait` ran the bounded capture drain; keep lines that trailed the exit (#2159).
+    for event in process.drain_combined() {
+        output.push_str(&String::from_utf8_lossy(&event.line));
+        output.push('\n');
+    }
     (exit, output)
 }
 

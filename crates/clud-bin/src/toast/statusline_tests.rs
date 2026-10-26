@@ -506,8 +506,11 @@ fn overlapping_statusline_callbacks_commit_each_response_once() {
     assert_eq!(writer.effective_usage_snapshot().unwrap().request_count, 4);
 }
 
+// The callback runs on a two-second cadence, so it must not rescan the whole
+// transcript each time. Asserted through the persisted cursor, not elapsed
+// time: a wall-clock budget fails on an oversubscribed runner (#2153).
 #[test]
-fn incremental_callback_stays_below_the_two_second_cadence_for_thousands_of_records() {
+fn incremental_callback_resumes_from_its_cursor_for_thousands_of_records() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let _writer = writer_in(dir.path(), 198);
@@ -528,13 +531,27 @@ fn incremental_callback_stays_below_the_two_second_cadence_for_thousands_of_reco
         chain_b64: None,
     };
     let stdin = transcript_stdin(&path);
-    let started = Instant::now();
+    let len = std::fs::metadata(&path).unwrap().len();
+    let ledger = state_path(dir.path(), 198).with_extension("usage.state.json");
+    let cursor = || -> u64 {
+        let state: Value = serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+        let files = state["files"].as_object().unwrap();
+        assert_eq!(files.len(), 1, "{state}");
+        files.values().next().unwrap()["offset"].as_u64().unwrap()
+    };
     render_into(&mut Vec::new(), &args, &stdin, now_ms());
-    assert!(started.elapsed() < Duration::from_secs(2));
-    let started = Instant::now();
+    assert_eq!(
+        cursor(),
+        len,
+        "the first callback consumes the whole transcript"
+    );
     let mut out = Vec::new();
     render_into(&mut out, &args, &stdin, now_ms());
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        cursor(),
+        len,
+        "the next callback resumes at the end, not from zero"
+    );
     assert!(String::from_utf8(out)
         .unwrap()
         .contains("read 6K cached / 3K uncached - write 9K"));

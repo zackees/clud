@@ -54,6 +54,13 @@ fn run_isolated(home: &std::path::Path, args: &[&str]) -> (i32, Vec<u8>) {
     let exit = process
         .wait(Some(Duration::from_secs(30)))
         .expect("wait for clud");
+    // `wait` ran the bounded capture drain; keep lines that trailed the exit (#2159).
+    for event in process.drain_combined() {
+        if event.stream == StreamKind::Stdout {
+            output.extend_from_slice(&event.line);
+            output.push(b'\n');
+        }
+    }
     (exit, output)
 }
 

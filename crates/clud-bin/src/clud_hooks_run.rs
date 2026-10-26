@@ -189,6 +189,17 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
         }
     };
 
+    // Exit is not end of output: the last lines can reach the capture queue
+    // after the exit code on a loaded machine, and `drain` stops at exit.
+    // `wait` ran running-process's bounded capture drain, so the queues are
+    // complete now (#2159).
+    for line in process.drain_stream(running_process::StreamKind::Stdout) {
+        stdout.push_str(&line_of(&line));
+    }
+    for line in process.drain_stream(running_process::StreamKind::Stderr) {
+        stderr.push_str(&line_of(&line));
+    }
+
     let mut log_messages = vec![format!(
         "clud_hook_ran command={:?} exit={exit_code}",
         entry.command

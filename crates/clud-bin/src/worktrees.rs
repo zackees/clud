@@ -1029,9 +1029,16 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
             ReadStatus::Eof => break,
         }
     }
+    // Exit is not end of output: the last lines can reach the capture queue
+    // after the exit code on a loaded machine. `wait` runs running-process's
+    // bounded capture drain, so the queue is complete once it returns (#2159).
     let exit_code = process
         .wait(Some(Duration::from_secs(30)))
         .map_err(|e| format!("waiting for git: {e}"))?;
+    for event in process.drain_combined() {
+        buf.extend_from_slice(&event.line);
+        buf.push(b'\n');
+    }
     let output = String::from_utf8_lossy(&buf).into_owned();
     if exit_code != 0 {
         return Err(format!(
