@@ -82,7 +82,7 @@ pub fn canonical_root(
 /// Split a Windows-host path into its anchor (`C:/` or `//server/share/`)
 /// and the slash-separated remainder.
 fn windows_anchor(raw: &str) -> Result<(String, String), IdentityError> {
-    let slashed = raw.replace('\\', "/");
+    let slashed = crate::path_norm::slash_separators(raw);
     let unverbatim = if let Some(rest) = slashed.strip_prefix("//?/UNC/") {
         format!("//{rest}")
     } else if let Some(rest) = slashed.strip_prefix("//?/") {
