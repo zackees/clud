@@ -162,6 +162,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "code/outline.py",
+        body: include_str!("../assets/tools/code/outline.py"),
+        // Read-only parse (#1339 item 4): definitions and headings with line
+        // ranges. Killing it loses no work.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/review_range.py",
         body: include_str!("../assets/tools/git/review_range.py"),
         // Read-only git/gh query (#1301): pins the diff range a review reads.
@@ -472,6 +482,17 @@ mod tests {
     }
 
     /// Issue #1339: grind roles read a checkout's git state in one call.
+    #[test]
+    fn bundled_includes_code_outline() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "code/outline.py")
+            .expect("BUNDLED_TOOLS must include code/outline.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(tool.body.contains("\"tree-sitter=="));
+    }
+
     #[test]
     fn bundled_includes_git_state() {
         let tool = BUNDLED_TOOLS
