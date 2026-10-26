@@ -6,3 +6,4 @@
 //! names. Nothing here talks to Docker or the filesystem.
 
 pub mod identity;
+pub mod retention;
