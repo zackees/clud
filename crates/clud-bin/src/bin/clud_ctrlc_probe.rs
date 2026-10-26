@@ -39,5 +39,10 @@ fn main() {
         Some(kind) => println!("{kind:?}"),
         None => println!("none"),
     }
+    // #520: who sent it, when the kernel said.
+    match clud::ctrl_c_track::observed_signal_origin() {
+        Some(origin) => println!("sender {}", origin.pid),
+        None => println!("sender none"),
+    }
     let _ = std::io::stdout().flush();
 }

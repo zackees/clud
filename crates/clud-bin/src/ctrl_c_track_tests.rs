@@ -504,3 +504,23 @@ fn double_tap_window_ms_reads_env_var_with_bounds() {
 
 // The host-specific `double_tap_enabled` tests live in
 // `platform/{windows,unix}/ctrl_c_track.rs`.
+
+/// #520: the recorded signal sender round-trips, and clearing it or a
+/// reset leaves none.
+#[test]
+fn signal_origin_round_trips_and_clears() {
+    let _guard = test_state_lock().lock().unwrap_or_else(|e| e.into_inner());
+    reset_for_test();
+    assert_eq!(observed_signal_origin(), None);
+    let origin = SignalOrigin {
+        pid: 4242,
+        uid: 1000,
+    };
+    record_signal_origin(Some(origin));
+    assert_eq!(observed_signal_origin(), Some(origin));
+    record_signal_origin(None);
+    assert_eq!(observed_signal_origin(), None);
+    record_signal_origin(Some(origin));
+    reset_for_test();
+    assert_eq!(observed_signal_origin(), None);
+}

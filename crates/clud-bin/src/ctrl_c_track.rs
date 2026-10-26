@@ -345,6 +345,10 @@ static OBSERVED_UNIX_MS: AtomicU64 = AtomicU64::new(0);
 /// independent locations.
 const KIND_UNRECORDED: u32 = u32::MAX;
 static OBSERVED_EVENT_KIND: AtomicU32 = AtomicU32::new(KIND_UNRECORDED);
+/// Issue #520: sender of the last Unix termination signal, packed as
+/// `pid << 32 | uid`, or [`ORIGIN_UNRECORDED`].
+static OBSERVED_SIGNAL_ORIGIN: AtomicU64 = AtomicU64::new(ORIGIN_UNRECORDED);
+const ORIGIN_UNRECORDED: u64 = u64::MAX;
 
 /// Process-wide most-recent press classification recorded by the
 /// double-Ctrl+C guard. `PRESS_KIND_UNRECORDED` means the guard never
@@ -430,6 +434,31 @@ pub fn observed_event_kind() -> Option<CtrlEventKind> {
     } else {
         Some(CtrlEventKind::from_raw(raw))
     }
+}
+
+/// Who sent a Unix termination signal (#520), from `siginfo_t`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalOrigin {
+    pub pid: u32,
+    pub uid: u32,
+}
+
+/// Record the sender of the signal just observed; `None` clears it (the
+/// kernel reported no sender, e.g. a terminal-generated SIGHUP).
+pub fn record_signal_origin(origin: Option<SignalOrigin>) {
+    let raw = origin.map_or(ORIGIN_UNRECORDED, |o| {
+        (u64::from(o.pid) << 32) | u64::from(o.uid)
+    });
+    OBSERVED_SIGNAL_ORIGIN.store(raw, Ordering::SeqCst);
+}
+
+/// The sender recorded by [`record_signal_origin`], if any.
+pub fn observed_signal_origin() -> Option<SignalOrigin> {
+    let raw = OBSERVED_SIGNAL_ORIGIN.load(Ordering::SeqCst);
+    (raw != ORIGIN_UNRECORDED).then(|| SignalOrigin {
+        pid: (raw >> 32) as u32,
+        uid: raw as u32,
+    })
 }
 
 /// Record the press classification decided by the double-Ctrl+C guard
@@ -671,6 +700,7 @@ pub(crate) fn test_state_lock() -> &'static std::sync::Mutex<()> {
 pub(crate) fn reset_for_test() {
     OBSERVED_UNIX_MS.store(0, Ordering::SeqCst);
     OBSERVED_EVENT_KIND.store(KIND_UNRECORDED, Ordering::SeqCst);
+    OBSERVED_SIGNAL_ORIGIN.store(ORIGIN_UNRECORDED, Ordering::SeqCst);
     OBSERVED_PRESS_KIND.store(PRESS_KIND_UNRECORDED, Ordering::SeqCst);
     OBSERVED_ELAPSED_SINCE_PRIOR_MS.store(0, Ordering::SeqCst);
     if let Ok(mut g) = HANDOFF_OUTCOME.lock() {

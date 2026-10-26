@@ -46,6 +46,10 @@ fn probe_reports(signal: libc::c_int, expected_kind: &str) {
     reader
         .read_line(&mut kind_line)
         .expect("read reported kind from probe");
+    let mut sender_line = String::new();
+    reader
+        .read_line(&mut sender_line)
+        .expect("read reported sender from probe");
     let status = child.wait().expect("wait for probe");
     assert!(status.success(), "probe must exit 0, got {status:?}");
 
@@ -53,6 +57,19 @@ fn probe_reports(signal: libc::c_int, expected_kind: &str) {
         kind_line.trim(),
         expected_kind,
         "signal {signal} must be reported as {expected_kind}"
+    );
+    // #520: a `kill(2)` names its sender, which is this test process. The
+    // SIGINT path goes through `ctrlc`, not the termination probe, and
+    // records no sender.
+    let expected_sender = if expected_kind == "CtrlC" {
+        "sender none".to_string()
+    } else {
+        format!("sender {}", std::process::id())
+    };
+    assert_eq!(
+        sender_line.trim(),
+        expected_sender,
+        "signal {signal} sender"
     );
 }
 
