@@ -108,7 +108,8 @@ def test_the_first_worker_runs_before_the_rest_start(harness: Harness) -> None:
     result = _run(harness)
     first = [r for r in result.requests if r["role"] == "worker:g:t1"]
     others = [r for r in result.requests if r["role"] in ("worker:g:t2", "worker:g:t3")]
-    assert first and others
+    assert first
+    assert others
     assert min(r["t_start"] for r in others) >= max(r["t_end"] for r in first), (
         "the other workers started before the first could write the cache"
     )
