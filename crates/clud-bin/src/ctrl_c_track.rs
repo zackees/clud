@@ -455,7 +455,7 @@ pub fn record_signal_origin(origin: Option<SignalOrigin>) {
 /// The sender recorded by [`record_signal_origin`], if any.
 pub fn observed_signal_origin() -> Option<SignalOrigin> {
     let raw = OBSERVED_SIGNAL_ORIGIN.load(Ordering::SeqCst);
-    (raw != ORIGIN_UNRECORDED).then(|| SignalOrigin {
+    (raw != ORIGIN_UNRECORDED).then_some(SignalOrigin {
         pid: (raw >> 32) as u32,
         uid: raw as u32,
     })
