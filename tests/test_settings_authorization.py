@@ -284,7 +284,7 @@ def test_unsafe_claude_launch_still_delivers_settings_authority(tmp_path: Path) 
     command = json.loads(result.stdout)["command"]
     document = json.loads(command[command.index("--settings") + 1])
     assert document.get("permissions", {}).get("deny") == [
-        "Edit(~/.clud/settings.json)", "Write(~/.clud/settings.json)",
+        "Edit(~/.clud/settings.json)",
     ]
     entries = document["hooks"]["PreToolUse"]
     assert any(

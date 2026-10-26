@@ -76,10 +76,9 @@ pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 /// Claude file-tool denies for the user settings file (#1668, DD-137): it
 /// holds the `safe_rm.extra_roots` override. Raw edits remain refused;
 /// controlled settings proposals require a separate native user decision.
-pub const SETTINGS_FILE_DENIES: &[&str] = &[
-    "Edit(~/.clud/settings.json)",
-    "Write(~/.clud/settings.json)",
-];
+/// Claude Code's `Edit(path)` rule covers every file-editing tool, Write
+/// included; a `Write(path)` rule never matches and draws a startup warning.
+pub const SETTINGS_FILE_DENIES: &[&str] = &["Edit(~/.clud/settings.json)"];
 
 /// Settings consent remains required when session safety policy is disabled.
 #[must_use]
