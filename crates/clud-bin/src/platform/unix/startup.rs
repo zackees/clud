@@ -57,9 +57,13 @@ pub fn try_register_console_drop_target_pty() -> (
 /// process will always respond to a bare SIGTERM.
 pub fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
     use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
-    use signal_hook::iterator::Signals;
+    use signal_hook::iterator::exfiltrator::WithRawSiginfo;
+    use signal_hook::iterator::SignalsInfo;
 
-    let mut signals = match Signals::new([SIGTERM, SIGHUP, SIGQUIT]) {
+    // #520: `WithRawSiginfo` copies `siginfo_t` out of the handler into the
+    // self-pipe, so its sender is read on this ordinary thread with no
+    // async-signal-safety reasoning of our own.
+    let mut signals = match SignalsInfo::<WithRawSiginfo>::new([SIGTERM, SIGHUP, SIGQUIT]) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -72,12 +76,45 @@ pub fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
     let flag = Arc::clone(interrupted);
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
-        for sig in signals.forever() {
+        for info in signals.forever() {
             crate::ctrl_c_track::record_observed();
-            crate::ctrl_c_track::record_event_kind(unix_termination_signal_kind(sig));
+            crate::ctrl_c_track::record_signal_origin(signal_origin(&info));
+            crate::ctrl_c_track::record_event_kind(unix_termination_signal_kind(info.si_signo));
             flag.store(true, Ordering::SeqCst);
         }
     });
+}
+
+// `libc` defines these for Linux but not for Apple targets, whose values
+// differ (`<sys/signal.h>`).
+#[cfg(target_os = "macos")]
+const SI_USER: libc::c_int = 0x10001;
+#[cfg(target_os = "macos")]
+const SI_QUEUE: libc::c_int = 0x10002;
+#[cfg(not(target_os = "macos"))]
+const SI_USER: libc::c_int = libc::SI_USER;
+#[cfg(not(target_os = "macos"))]
+const SI_QUEUE: libc::c_int = libc::SI_QUEUE;
+
+/// The sender `siginfo_t` names (#520). Only a signal sent by a process
+/// (`kill(2)`, `SI_USER`) or `sigqueue(3)` (`SI_QUEUE`) carries one; a
+/// terminal-generated SIGHUP or SIGQUIT does not.
+fn signal_origin(info: &libc::siginfo_t) -> Option<crate::ctrl_c_track::SignalOrigin> {
+    // macOS delivers a `kill(2)` with `si_code` 0, not its `SI_USER`
+    // (0x10001); on Linux `SI_USER` is 0 already.
+    if info.si_code != 0 && info.si_code != SI_USER && info.si_code != SI_QUEUE {
+        return None;
+    }
+    // SAFETY: for these codes the kernel fills the `_kill`/`_rt` member,
+    // whose leading pid/uid fields these accessors read.
+    let (pid, uid) = unsafe { (info.si_pid(), info.si_uid()) };
+    if pid <= 0 {
+        return None;
+    }
+    Some(crate::ctrl_c_track::SignalOrigin {
+        pid: u32::try_from(pid).unwrap_or(0),
+        uid,
+    })
 }
 
 /// Pure `signal number -> CtrlEventKind` mapping for the three signals

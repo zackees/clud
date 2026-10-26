@@ -64,13 +64,21 @@ pub(super) fn log_observed_interrupt_reason(site: &str) {
 /// on another if a second signal landed in between.
 fn log_interrupt_reason(site: &str, reason: Option<CtrlEventKind>) {
     match reason {
-        Some(kind) => {
-            crate::verbose_log::log(format!("[clud] interrupt reason ({site}): {kind:?}"))
-        }
+        Some(kind) => crate::verbose_log::log(format!(
+            "[clud] interrupt reason ({site}): {kind:?}{}",
+            signal_sender_suffix(crate::ctrl_c_track::observed_signal_origin())
+        )),
         None => crate::verbose_log::log(format!(
             "[clud] interrupt reason ({site}): unknown (no probe fired)"
         )),
     }
+}
+
+/// #520: ` from pid P (uid U)` for a signal whose sender the kernel named.
+fn signal_sender_suffix(origin: Option<crate::ctrl_c_track::SignalOrigin>) -> String {
+    origin.map_or_else(String::new, |o| {
+        format!(" from pid {} (uid {})", o.pid, o.uid)
+    })
 }
 
 /// Issue #1208: decides whether an observed interrupt [`CtrlEventKind`]
