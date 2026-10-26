@@ -5,13 +5,15 @@ workflow puts that pack first in every worker's and the reviewer's prompt.
 #1344's premise is that the workers' requests are then byte-identical up to
 the end of the pack. Claude Code puts a git status snapshot ahead of every
 agent's prompt, so this holds only for workers that start against the same
-checkout state; the workflow starts parallel workers together for that
-reason.
+checkout state. The workflow starts parallel workers together, but cannot
+order their startup against each other's writes, so the tests mask that one
+status block and require everything else to match.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from tests.harness.harness import Harness, RunResult
@@ -21,6 +23,9 @@ from tests.harness.test_grind import _after, _goal_roles, _goals, _role, _script
 # so match the marker's text, not its surrounding newlines.
 PACK_END = "--- end of context pack ---"
 TASKS = ("t1", "t2", "t3")
+# Claude Code's git status snapshot, taken when each agent starts. clud cannot
+# order agent startup against other workers' writes, so it is masked.
+STATUS = re.compile(r"Status:\\n.+?\\n\\nRecent commits:")
 EXCERPT = "\n".join(f"line {n}: let shared_context_{n} = {n};" for n in range(1, 160))
 
 
@@ -74,7 +79,7 @@ def _prefix(request: dict[str, Any]) -> str:
     assert marker in whole, "the pack never reached this agent; messages begin:\n" + json.dumps(
         request.get("messages")
     )[:3000]
-    return whole[: whole.index(marker) + len(marker)]
+    return STATUS.sub("Status:<masked>", whole[: whole.index(marker) + len(marker)])
 
 
 def _divergence(prefixes: dict[str, str]) -> str:

@@ -876,11 +876,13 @@ workers' requests are byte-identical up to the pack's end only while they
 start against the same checkout state: a worker started after another has
 written files sees `?? <file>` where the first saw `(clean)`. Parallel
 workers therefore start together (a staggered start, tried first, made the
-first worker's prefix diverge from the rest); sequential workers each see
+first worker's prefix diverge from the rest), but startup order is still not
+guaranteed: a worker that starts after a sibling's first write misses the
+shared prefix at that status line; sequential workers each see
 the previous one's changes and do not share. The reviewer, a different agent
 type, reads the same pack without sharing the workers' cache.
-`tests/harness/test_grind_context_pack.py` asserts the shared prefix on the
-real Claude Code. The real-model cost measurement #1344 calls for stays manual.
+`tests/harness/test_grind_context_pack.py` asserts the prefix on the real
+Claude Code with that status block masked. The real-model cost measurement #1344 calls for stays manual.
 
 ## Tests
 
