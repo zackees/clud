@@ -491,6 +491,17 @@ the default branch, so ancestry-based checks call them live work forever
   entry budget) and writes the three largest to `~/.clud/worktrees-top.json`;
   the banner appends `; largest: <name> (<size>), …`, with `≥` for a child
   the budget cut short (#2101, `gc::worktree_top`).
+- **Warn, then clean (#2101).** While the root is over `worktrees.warn_bytes`,
+  each of those largest worktrees that is idle at least 24 h and not exempt
+  (kept, in use by a session or process, reclaimable by the verdict, a
+  reservation, or unknown to the probe) gets a removal date 7 days out in
+  `~/.clud/worktrees-schedule.json`; the banner names it
+  (`; moves to trash unless \`clud gc keep\`: <name> in <n>d`). The first
+  probe after the date moves it to `clud trash` and registers the trash row,
+  so it stays recoverable for 72 h. Becoming exempt, leaving the top list, or
+  the root dropping under the limit removes it from the schedule. Observe
+  mode only logs; no process snapshot means no scheduling
+  (`gc::worktree_schedule` decides, `gc_service::worktree_schedule_exec` acts).
 - **Keep list (#2101).** `clud gc keep [PATH]` (default `.`; `--remove`,
   `--list`) records a canonical path in `~/.clud/gc-keep.json`, no daemon
   needed. A kept path covers itself and everything below it. The tick skips
