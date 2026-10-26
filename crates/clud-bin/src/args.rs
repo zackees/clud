@@ -1494,6 +1494,19 @@ pub enum GcSubcommand {
     /// Walk `.claude/worktrees/` in the current repo and insert any
     /// previously-untracked worktree directories.
     Reconcile,
+    /// Issue #2101: pin a worktree (default: the current directory) so the
+    /// daemon never reclaims it. Bare `--list` prints the kept paths.
+    Keep {
+        /// Path to keep. Defaults to the current directory.
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+        /// Release a previously kept path instead.
+        #[arg(long = "remove")]
+        remove: bool,
+        /// Print the kept paths.
+        #[arg(long = "list", conflicts_with_all = ["path", "remove"])]
+        list: bool,
+    },
 }
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[

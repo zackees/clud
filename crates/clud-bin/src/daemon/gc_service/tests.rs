@@ -1496,7 +1496,12 @@ fn repo_worktree_rows_surface_in_gc_list_shape() {
 
     let tracked_paths: HashSet<String> = [tracked.to_string_lossy().to_string()].into();
     let live = canonicalize_live_cwds(vec![busy.clone()]);
-    let rows = repo_worktree_list_rows(&cache, &tracked_paths, &live);
+    let rows = repo_worktree_list_rows(
+        &cache,
+        &tracked_paths,
+        &live,
+        &crate::gc::keep_list::KeepList::Paths(Default::default()),
+    );
     assert_eq!(rows.len(), 2, "tracked path must not be listed twice");
 
     let landed_row = &rows[0];
