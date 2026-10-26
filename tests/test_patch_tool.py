@@ -54,7 +54,7 @@ def test_a_file_outside_the_task_refuses_the_whole_patch(tmp_path: Path) -> None
     facts = {"tasks": [{"worktree": str(tmp_path), "files": ["mine.rs"]}]}
     allowed = patch.task_files(facts, tmp_path.resolve())
     text = _block("mine.rs", "a\n", "b\n") + _block("theirs.rs", "a\n", "b\n")
-    with pytest.raises(patch.PatchError, match="theirs.rs: not in this task's files"):
+    with pytest.raises(patch.PatchError, match=r"theirs\.rs: not in this task's files"):
         patch.plan(patch.parse(text), tmp_path, allowed)
 
 
