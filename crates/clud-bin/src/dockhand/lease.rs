@@ -13,7 +13,7 @@ pub const LEASE_TTL_SECS: u64 = 5 * 60;
 /// Floor of the post-start destruction grace window.
 pub const MIN_GRACE_SECS: u64 = 10 * 60;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Lease {
     pub id: String,
     pub workspace_id: String,
