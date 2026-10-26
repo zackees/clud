@@ -169,6 +169,19 @@ def test_harness_suite_runs_in_extended_and_full_mode_and_is_gated():
     assert "if: inputs.suite == 'harness'" in run_tests
 
 
+def test_pinned_claude_code_never_installs_into_the_node_toolcache():
+    # zackees/ci.yml#404: a bare `npm install -g` writes the shared Node
+    # toolcache, which non-root runners do not own (EACCES).
+    run_tests = CI_YML.with_name("_run-tests.yml").read_text(encoding="utf-8")
+    step = run_tests.split("- name: Install pinned Claude Code\n", 1)[1]
+    step = step.split("\n      - name:", 1)[0]
+    assert '--prefix "$prefix"' in step
+    assert 'prefix="$RUNNER_TEMP/' in step
+    assert '"$prefix/bin" >> "$GITHUB_PATH"' in step
+    assert "ACT" not in step
+    assert "RUNNER_ENVIRONMENT" not in step
+
+
 def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     text = CI_YML.read_text(encoding="utf-8")
     gate = text.split("\n  ci-ok:\n", 1)[1]
