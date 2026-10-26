@@ -50,6 +50,7 @@ restoration and count-only status. See
   order, with the compaction advisory when GC cannot cover a deficit.
   `lease.rs` holds the command-scoped lease rules: two-failure expiry, the
   start/resume destruction grace window and the reap deadline.
+  `done.rs` gates derived done signals behind the clean-and-pushed rule.
 - [platform/](platform/README.md) - the host-platform boundary (#1953): the
   only place in this crate that names a host. `mod.rs` selects `windows/` or
   `unix/`, and each area (`platform::subprocess`, `platform::rm_tool`, ...)
