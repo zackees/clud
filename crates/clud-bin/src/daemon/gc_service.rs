@@ -1026,8 +1026,12 @@ fn run_repo_worktree_phase(
     } else {
         spare_reasons.repo_worktrees().0.to_vec()
     };
+    let keep = keep_list_for(config.wt_root.as_deref());
     let mut dispatched = 0usize;
     for row in rows {
+        if keep.keeps(&row.path) {
+            continue;
+        }
         let live_now = entry_path_contains_live_cwd_path(&row.path, &live);
         let in_flight = spare_reasons.repo_reclaim_in_flight(&row.path);
         match reclaim_selection(config.mode, row.verdict.state, live_now, in_flight) {
@@ -1227,10 +1231,20 @@ fn refresh_clud_cache_size_cache() {
 /// live session cwd inside a worktree pins it now, even if the snapshot is
 /// up to a tick old. `id` is 0: no redb row backs these, so no delete path
 /// can select them.
+/// Issue #2101: the `clud gc keep` list beside `wt_root`. Without a root
+/// nothing is reclaimed anyway, so an empty list is correct.
+fn keep_list_for(wt_root: Option<&Path>) -> crate::gc::keep_list::KeepList {
+    match wt_root {
+        Some(root) => crate::gc::keep_list::load(&crate::gc::keep_list::keep_path_for(root)),
+        None => crate::gc::keep_list::KeepList::Paths(Default::default()),
+    }
+}
+
 fn repo_worktree_list_rows(
     spare_reasons: &SpareReasons,
     tracked_paths: &HashSet<String>,
     live_cwds: &[PathBuf],
+    keep: &crate::gc::keep_list::KeepList,
 ) -> Vec<ListRow> {
     let (rows, evaluated_unix) = spare_reasons.repo_worktrees();
     rows.iter()
@@ -1239,6 +1253,8 @@ fn repo_worktree_list_rows(
             let live = entry_path_contains_live_cwd_path(&r.path, live_cwds);
             let (state, reason) = if live {
                 ("pinned", "process inside".to_string())
+            } else if keep.keeps(&r.path) {
+                ("pinned", crate::gc::keep_list::KEPT_REASON.to_string())
             } else {
                 (r.verdict.state.as_str(), r.verdict.reason.clone())
             };
@@ -1581,7 +1597,12 @@ fn process_op(
                             .map(|rows| rows.into_iter().map(|r| r.path).collect())
                             .unwrap_or_default(),
                     };
-                    out.extend(repo_worktree_list_rows(spare_reasons, &tracked, &live_cwds));
+                    out.extend(repo_worktree_list_rows(
+                        spare_reasons,
+                        &tracked,
+                        &live_cwds,
+                        &keep_list_for(production_worktree_root().as_deref()),
+                    ));
                 }
                 GcReply::ListOk { rows: out }
             }

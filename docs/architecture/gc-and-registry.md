@@ -487,6 +487,13 @@ the default branch, so ancestry-based checks call them live work forever
   entry budget (`clud gc list` still reports that case). The decision is the
   pure `banner_decision` table. If the probe never runs (reclaim mode `off`)
   the cache is never written and the banner stays silent.
+- **Keep list (#2101).** `clud gc keep [PATH]` (default `.`; `--remove`,
+  `--list`) records a canonical path in `~/.clud/gc-keep.json`, no daemon
+  needed. A kept path covers itself and everything below it. The tick skips
+  kept rows, the purge pool re-reads the file before gathering facts and
+  again immediately before mutation, and `clud gc list` shows them as
+  `pinned: kept by user (clud gc keep)`. A corrupt file keeps everything and
+  is never rewritten (`gc::keep_list`).
 - **Tests.** Unit tests never read the real root: `production_worktree_root()`
   and `ensure_worktree_root()` return `None` under `cfg(test)`, and tests
   inject a tempdir root.

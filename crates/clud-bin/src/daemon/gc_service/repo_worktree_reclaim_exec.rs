@@ -203,6 +203,13 @@ pub(crate) fn run_reclaim(
 /// `--clean-worktrees` real-git tests (#1606) do not depend on whether the
 /// CI sandbox can read process cwds. Production passes
 /// [`collect_process_cwds`].
+/// Issue #2101: `clud gc keep` may land after the tick dispatched the job.
+fn job_is_kept(job: &ReclaimJob) -> bool {
+    job.wt_root.as_deref().is_some_and(|root| {
+        crate::gc::keep_list::load(&crate::gc::keep_list::keep_path_for(root)).keeps(&job.row.path)
+    })
+}
+
 pub(crate) fn run_reclaim_with(
     job: &ReclaimJob,
     lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
@@ -222,6 +229,9 @@ fn run_reclaim_with_guard(
     collect_procs: &dyn Fn() -> ProcessCwdSnapshot,
     source_probe: &dyn Fn(&Path, &ProcessCwdSnapshot) -> Option<&'static str>,
 ) -> ReclaimOutcome {
+    if job_is_kept(job) {
+        return ReclaimOutcome::Spared(crate::gc::keep_list::KEPT_REASON.to_string());
+    }
     if job.row.reservation {
         return run_reservation_reclaim(job, source_probe);
     }
@@ -260,6 +270,9 @@ fn run_reclaim_with_guard(
     // PR lookup can take seconds: re-sample immediately before mutation.
     if let Some(reason) = source_probe(&worktree, &collect_procs()) {
         return ReclaimOutcome::Spared(reason.to_string());
+    }
+    if job_is_kept(job) {
+        return ReclaimOutcome::Spared(crate::gc::keep_list::KEPT_REASON.to_string());
     }
 
     // 2. Persist the evidence before touching source. Never --force.

@@ -156,6 +156,7 @@ fn normalize(sub: GcSubcommand) -> GcAction {
             older_than,
         },
         GcSubcommand::Reconcile => GcAction::Reconcile,
+        GcSubcommand::Keep { .. } => unreachable!("gc keep is dispatched before normalize"),
     }
 }
 
@@ -165,6 +166,14 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
     let Some(sub) = sub else {
         return print_help_and_exit_zero();
     };
+    if let GcSubcommand::Keep { path, remove, list } = &sub {
+        let path = match (path, list) {
+            (_, true) => None,
+            (Some(p), _) => Some(p.clone()),
+            (None, false) => Some(std::path::PathBuf::from(".")),
+        };
+        return super::keep_list::run_cli(path.as_deref(), *remove, *list);
+    }
     let action = normalize(sub);
 
     if let GcAction::List {

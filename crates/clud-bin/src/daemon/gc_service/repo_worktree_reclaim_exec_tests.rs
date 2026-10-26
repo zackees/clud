@@ -147,3 +147,26 @@ fn shared_cli_and_daemon_executor_spares_container_bound_source() {
     );
     assert!(source.join("precious").exists());
 }
+
+/// Issue #2101: a `clud gc keep` that lands after dispatch still wins: the
+/// pool spares the job before gathering any facts.
+#[test]
+fn a_kept_path_is_spared_on_the_pool_thread() {
+    let home = tempfile::tempdir().unwrap();
+    let wt_root = home.path().join("worktrees");
+    let path = wt_root.join("repo-a").to_string_lossy().to_string();
+    let keep = crate::gc::keep_list::keep_path_for(&wt_root);
+    crate::gc::keep_list::update(&keep, &path, true).unwrap();
+    let mut kept = job("/nonexistent-repo", &path);
+    kept.wt_root = Some(wt_root);
+    let outcome = run_reclaim_with_guard(
+        &kept,
+        &|_| panic!("a kept job must not look up PRs"),
+        &|| panic!("a kept job must not sample processes"),
+        &|_, _| None,
+    );
+    assert_eq!(
+        outcome,
+        ReclaimOutcome::Spared(crate::gc::keep_list::KEPT_REASON.to_string())
+    );
+}

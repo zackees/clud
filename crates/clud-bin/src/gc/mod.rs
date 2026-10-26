@@ -19,6 +19,7 @@
 
 mod cli;
 pub mod delete_audit;
+pub mod keep_list;
 mod reconcile;
 mod registry;
 mod scanner;
