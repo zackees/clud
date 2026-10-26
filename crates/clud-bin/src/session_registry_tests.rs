@@ -6,6 +6,13 @@ use std::sync::Mutex as StdMutex;
 /// process-global state. Test threads otherwise stomp each other.
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
+/// Take [`ENV_LOCK`] even after another test panicked while holding it.
+/// Each test sets every variable it reads, so a poisoned guard protects
+/// nothing, and one failure must not fail every later test (#2181).
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Build a unique DB path inside a TempDir that's intentionally
 /// leaked for the lifetime of the test process. We need the file
 /// alive across reopens (e.g. `register_then_drop_round_trips`),
@@ -174,7 +181,7 @@ fn drop_without_register_does_not_delete_other_rows() {
 
 #[test]
 fn cap_config_from_env_defaults() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     // SAFETY: serialized via ENV_LOCK.
     unsafe {
         std::env::remove_var(ENV_MAX_INSTANCES);
@@ -192,7 +199,7 @@ fn cap_config_from_env_defaults() {
 
 #[test]
 fn cap_config_from_env_custom() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     unsafe {
         std::env::set_var(ENV_MAX_INSTANCES, "10");
         std::env::set_var(ENV_WARN_INSTANCES, "3");
@@ -207,7 +214,7 @@ fn cap_config_from_env_custom() {
 
 #[test]
 fn cap_config_from_env_max_only_redrives_warn() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     unsafe {
         std::env::set_var(ENV_MAX_INSTANCES, "8");
         std::env::remove_var(ENV_WARN_INSTANCES);
@@ -221,7 +228,7 @@ fn cap_config_from_env_max_only_redrives_warn() {
 
 #[test]
 fn cap_config_from_env_clamps_warn_to_max() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     unsafe {
         std::env::set_var(ENV_MAX_INSTANCES, "5");
         std::env::set_var(ENV_WARN_INSTANCES, "999");
@@ -488,7 +495,7 @@ fn now_ms() -> u64 {
 /// scoped to the helper, not the whole `clud` lifetime.
 #[test]
 fn run_startup_under_lock_releases_redb_after_return() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("startup-releases.redb");
     let lock = dir.path().join("startup-releases.lock");
@@ -535,7 +542,7 @@ fn run_startup_under_lock_releases_redb_after_return() {
 /// reports it, instead of blocking the process in `session_guard_drop`.
 #[test]
 fn bounded_shutdown_returns_when_lock_is_held() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("bounded.redb");
     let lock = dir.path().join("bounded.lock");
@@ -566,7 +573,7 @@ fn bounded_shutdown_returns_when_lock_is_held() {
 /// **Issue #1660**: uncontended, the bounded shutdown still removes the row.
 #[test]
 fn bounded_shutdown_removes_row_when_uncontended() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("bounded-ok.redb");
     let lock = dir.path().join("bounded-ok.lock");
@@ -589,7 +596,10 @@ fn bounded_shutdown_removes_row_when_uncontended() {
             .expect("startup")
             .registered
     );
-    run_shutdown_under_lock_bounded(SHUTDOWN_BUDGET).expect("bounded shutdown");
+    // #2181: this test is about the row, not the clock. The production
+    // budget is 2 s, which a loaded host can exceed for the uncontended
+    // path; the held-lock test above covers the timeout.
+    run_shutdown_under_lock_bounded(std::time::Duration::from_secs(60)).expect("bounded shutdown");
     let after = SessionRegistry::open_default().expect("reopen");
     assert_eq!(after.count_live().unwrap(), 0);
     drop(after);
@@ -605,7 +615,7 @@ fn bounded_shutdown_removes_row_when_uncontended() {
 /// `CLUD_SESSION_LOCK` wins when both are set.
 #[test]
 fn default_lock_path_derives_from_db_parent_or_env() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("derives.redb");
     // SAFETY: serialized via ENV_LOCK.
