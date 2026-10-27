@@ -127,7 +127,7 @@ def test_comment_listing_cursor_and_missing_comment(issue_context):
         issue_context.render_snapshot(snapshot, "comment:999")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="private Windows artifacts tracked in #2246")
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="ACL checks pending")
 def test_snapshot_roundtrip_refresh_and_failure(issue_context, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     old = {
@@ -180,7 +180,7 @@ def test_snapshot_roundtrip_refresh_and_failure(issue_context, monkeypatch, tmp_
     assert "private old" not in captured.err
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="private Windows artifacts tracked in #2246")
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="ACL checks pending")
 def test_artifact_symlink_is_rejected(issue_context, monkeypatch, tmp_path):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     snapshot = {
@@ -362,3 +362,19 @@ def test_windows_fails_before_fetch(issue_context, monkeypatch, capsys):
     assert issue_context.main(["--repo", "org/repo", "--issue", "42"]) == 1
     assert calls == []
     assert "privacy" in capsys.readouterr().err
+
+
+def test_macos_fails_closed_before_github_access(issue_context, monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(issue_context.sys, "platform", "darwin")
+    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path / "not-created"))
+
+    def unexpected_fetch(*_args):
+        calls.append(True)
+        raise RuntimeError("unexpected fetch")
+
+    monkeypatch.setattr(issue_context, "fetch_snapshot", unexpected_fetch)
+    assert issue_context.main(["--repo", "org/repo", "--issue", "42"]) == 1
+    assert not calls
+    assert "macOS" in capsys.readouterr().err
+    assert not (tmp_path / "not-created").exists()

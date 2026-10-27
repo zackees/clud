@@ -54,6 +54,7 @@ pub mod shim_telemetry;
 pub mod start_terminal;
 pub mod startup;
 pub mod subprocess;
+pub mod test_capture;
 pub mod trampoline;
 pub mod usage_ledger;
 pub mod video;

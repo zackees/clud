@@ -256,6 +256,8 @@ def check_ancestor(info) -> None:
 
 
 def artifact_root() -> Path:
+    if sys.platform == "darwin":
+        raise ValueError("macOS artifact ACL verification is not available yet")
     if os.name == "nt":
         raise ValueError("Windows artifact privacy verification is not available yet")
     root = Path(os.environ.get("CLUD_TOOL_OUTPUT_DIR") or Path.home() / ".clud/tmp/tool-output")
@@ -400,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.repo or args.run is None or args.job is None:
             raise ValueError("provide --repo, --run, and --job")
+        artifact_root()
         log_path, host = read_job(args.repo, args.run, args.job)
         try:
             artifact = save_artifact(b"")

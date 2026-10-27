@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-POSIX_ARTIFACTS = pytest.mark.skipif(sys.platform == "win32", reason="Windows artifacts: #2246")
+POSIX_ARTIFACTS = pytest.mark.skipif(
+    sys.platform in {"win32", "darwin"}, reason="ACL checks pending"
+)
 
 TOOL = (
     Path(__file__).resolve().parents[1]
@@ -115,15 +117,14 @@ def test_missing_or_empty_log_is_not_success(report, monkeypatch, tmp_path, caps
     assert "empty" in capsys.readouterr().err.lower()
 
 
-def test_incomplete_job_and_wrong_run_are_rejected(report, monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
+def test_incomplete_job_and_wrong_run_are_rejected(report, monkeypatch):
     for metadata, reason in [
         (b'{"run_id": 123, "status": "in_progress", "conclusion": null}', "in_progress"),
         (b'{"run_id": 999, "status": "completed", "conclusion": "failure"}', "run"),
     ]:
         monkeypatch.setattr(report, "github_get", lambda path, metadata=metadata: metadata)
-        assert report.main(["--repo", "owner/repo", "--run", "123", "--job", "456"]) != 0
-        assert reason in capsys.readouterr().err.lower()
+        with pytest.raises(ValueError, match=reason):
+            report.read_job("owner/repo", 123, 456)
 
 
 @POSIX_ARTIFACTS
@@ -361,8 +362,8 @@ def test_nextest_duplicate_name_reports_attribution_uncertainty(report):
 
 
 def test_insecure_output_directory_is_rejected(report, tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        pytest.skip("POSIX mode bits do not control Windows ACLs")
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("private artifact ACL verification is pending")
     root = tmp_path / "shared"
     root.mkdir(mode=0o755)
     private = root / "ci-failure-private"
@@ -394,6 +395,7 @@ def test_default_gh_host_is_consistent_for_both_requests(report, tmp_path, monke
     assert "--hostname" not in calls[1][2 if os.name != "nt" else 4]
 
 
+@POSIX_ARTIFACTS
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixture")
 def test_real_download_preserves_large_binary_output(report, tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
@@ -431,8 +433,8 @@ def test_windows_quoting_rejects_powershell_metacharacters(report):
 
 
 def test_writable_output_parent_is_rejected(report, tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        pytest.skip("POSIX mode bits do not control Windows ACLs")
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("private artifact ACL verification is pending")
     root = tmp_path / "shared"
     root.mkdir(mode=0o700)
     root.chmod(0o777)
@@ -468,3 +470,19 @@ def test_malformed_cli_argument_is_bounded(report, capsys):
     error = capsys.readouterr().err
     assert len(error.encode()) < 1024
     assert "ci_failure_report:" in error
+
+
+def test_macos_fails_closed_before_github_access(report, monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(report.sys, "platform", "darwin")
+    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path / "not-created"))
+
+    def unexpected_fetch(*_args):
+        calls.append(True)
+        raise RuntimeError("unexpected fetch")
+
+    monkeypatch.setattr(report, "read_job", unexpected_fetch)
+    assert report.main(["--repo", "org/repo", "--run", "1", "--job", "2"]) == 1
+    assert not calls
+    assert "macOS" in capsys.readouterr().err
+    assert not (tmp_path / "not-created").exists()

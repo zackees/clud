@@ -20,8 +20,8 @@ It returns a bounded overview and a private snapshot path. Read saved material w
 `--section comment:ID --offset N`; offsets for body and comment text count Unicode
 characters. `--refresh PATH` fetches a new snapshot and reports added, edited,
 and deleted comments. The existing loop issue cache and `/grind` context pack
-remain separate; refresh each explicitly. Windows fails closed until private
-artifact verification is available (#2246).
+remain separate; refresh each explicitly. Windows and macOS fail closed until
+private artifact ACL verification is available (#2246, #2256).
 
 For a failed GitHub Actions job, use
 `clud tool run github/ci_failure_report.py -- --repo OWNER/REPO --run RUN_ID --job JOB_ID`.
@@ -31,8 +31,18 @@ failure diagnostics, and saves the raw log privately. Use its printed
 For a very long line, `--byte-offset N --byte-count 80` returns text and exact
 hexadecimal bytes for bounded continuation.
 Exit 0 means the log was retrieved, not that the job passed. Empty, unfinished,
-unavailable or unsaved logs produce a nonzero exit. Windows currently fails
-closed until its artifact ACL can be verified; no log is downloaded there.
+unavailable or unsaved logs produce a nonzero exit. Windows and macOS currently fail
+closed until artifact ACLs can be verified (#2246, #2256); no log is downloaded there.
+
+For noisy local test runs, `clud tool run diagnostics/test_report.py -- -- python -m unittest`
+returns a bounded failure-first report and saves combined output privately. It preserves
+the command's exit status, marks timeouts and incomplete capture explicitly, and
+prints an artifact path. Inspect raw bytes without rerunning with
+`clud tool run diagnostics/test_report.py -- --artifact PATH --offset 0 --count 80`.
+Routine successful test lines are suppressed; warnings and failure diagnostics are
+retained where recognized. Unfamiliar output is classified as unknown. This path
+currently fails closed on Windows and macOS until private artifact ACL verification is available.
+Interactive `clud test run` is unchanged.
 
 `diagnostics/transcript_report.py` reports repeated tool-call bursts,
 compactions, context jumps and context errors from one Claude transcript.

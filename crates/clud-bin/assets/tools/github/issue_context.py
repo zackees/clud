@@ -104,6 +104,8 @@ def check_ancestor(info) -> None:
 
 
 def artifact_root() -> Path:
+    if sys.platform == "darwin":
+        raise ValueError("macOS artifact ACL verification is not available yet")
     if os.name == "nt":
         raise ValueError("Windows artifact privacy verification is not available yet")
     root = Path(os.environ.get("CLUD_TOOL_OUTPUT_DIR") or Path.home() / ".clud/tmp/tool-output")
