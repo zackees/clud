@@ -79,21 +79,12 @@ pub(crate) const MAX_IDENTIFIER_LEN: usize = 64;
 /// prompt.
 const CLAUDE_ATTRIBUTION_PREFIX: &str = "x-anthropic-billing-header:";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TranslateError {
     /// The request does not satisfy the Messages API's own contract.
+    #[error("invalid Messages request: {0}")]
     Invalid(String),
 }
-
-impl std::fmt::Display for TranslateError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid(what) => write!(formatter, "invalid Messages request: {what}"),
-        }
-    }
-}
-
-impl std::error::Error for TranslateError {}
 
 /// Serialize translated input as opaque Responses items for canonical history.
 ///
@@ -374,30 +365,17 @@ pub struct CompactResponse {
     pub output: Vec<InputItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompactionError {
+    #[error("cannot compact a request without pending input")]
     MissingPendingInput,
+    #[error("compact response contained no output")]
     EmptyOutput,
+    #[error("compact response was malformed")]
     MalformedOutput,
+    #[error("compact response contained unsupported output")]
     UnsupportedOutput,
 }
-
-impl std::fmt::Display for CompactionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingPendingInput => {
-                formatter.write_str("cannot compact a request without pending input")
-            }
-            Self::EmptyOutput => formatter.write_str("compact response contained no output"),
-            Self::MalformedOutput => formatter.write_str("compact response was malformed"),
-            Self::UnsupportedOutput => {
-                formatter.write_str("compact response contained unsupported output")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompactionError {}
 
 impl ResponsesRequest {
     /// Builds a non-streaming compaction payload from the typed request input.

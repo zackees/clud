@@ -319,3 +319,16 @@ fn responsive_sleep_returns_true_for_zero_duration_no_shutdown() {
     let shutdown = RefreshShutdown::new();
     assert!(responsive_sleep(Duration::ZERO, &shutdown));
 }
+
+#[test]
+fn hresult_errors_keep_unsigned_hex_rendering() {
+    let failed = 0x8000_4005_u32 as i32;
+    assert_eq!(
+        RegisterError::OleInitializeFailed(failed).to_string(),
+        "OleInitialize failed (HRESULT 0x80004005)"
+    );
+    assert_eq!(
+        RegisterError::RegisterDragDropFailed(failed).to_string(),
+        "RegisterDragDrop failed (HRESULT 0x80004005)"
+    );
+}

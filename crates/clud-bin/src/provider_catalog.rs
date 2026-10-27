@@ -10,14 +10,30 @@ use crate::backend::ModelProvider;
 
 /// Provider-neutral launch effort. Individual providers decide which values
 /// they accept and how they translate them at their wire boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    #[strum(serialize = "none")]
     None,
+    #[strum(serialize = "low")]
     Low,
+    #[strum(serialize = "medium")]
     Medium,
+    #[strum(serialize = "high")]
     High,
+    #[strum(serialize = "xhigh")]
     XHigh,
+    #[strum(serialize = "max")]
     Max,
 }
 
@@ -31,22 +47,12 @@ impl EffortLevel {
         Self::Max,
     ];
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        let value = value.trim().to_ascii_lowercase();
-        Self::ALL
-            .into_iter()
-            .find(|effort| effort.as_str() == value)
+        value.trim().to_ascii_lowercase().parse().ok()
     }
 
     pub(crate) fn catalog() -> String {
@@ -396,84 +402,37 @@ pub struct ResolvedModelSelection {
     pub context_window_source: Option<SelectionSource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectionError {
+    #[error("unknown model '{0}'")]
     UnknownModel(String),
+    #[error("model '{model}' belongs to provider '{model_provider}', but the explicit provider is '{provider}'")]
     ProviderConflict {
         provider: ModelProvider,
         model: String,
         model_provider: ModelProvider,
     },
+    #[error("invalid reasoning effort '{0}'")]
     InvalidEffort(String),
+    #[error("invalid context window '{0}'; expected auto or 1m")]
     InvalidContextWindow(String),
-    UnsupportedEffort {
-        model: String,
-        effort: String,
-    },
+    #[error("model '{model}' does not support effort '{effort}'")]
+    UnsupportedEffort { model: String, effort: String },
+    #[error("model '{model}' does not support context window '{context_window}'")]
     UnsupportedContextWindow {
         model: String,
         context_window: String,
     },
+    #[error("provider '{provider}' requires --model when --context-window is '{context_window}'")]
     ContextRequiresModel {
         provider: ModelProvider,
         context_window: String,
     },
-    ConflictingEffort {
-        legacy: String,
-        explicit: String,
-    },
-    ConflictingContextWindow {
-        legacy: String,
-        explicit: String,
-    },
+    #[error("model suffix selected effort '{legacy}', but --effort selected '{explicit}'")]
+    ConflictingEffort { legacy: String, explicit: String },
+    #[error("model suffix selected context window '{legacy}', but --context-window selected '{explicit}'")]
+    ConflictingContextWindow { legacy: String, explicit: String },
 }
-
-impl std::fmt::Display for SelectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownModel(model) => write!(f, "unknown model '{model}'"),
-            Self::ProviderConflict {
-                provider,
-                model,
-                model_provider,
-            } => write!(
-                f,
-                "model '{model}' belongs to provider '{model_provider}', but the explicit provider is '{provider}'"
-            ),
-            Self::InvalidEffort(effort) => write!(f, "invalid reasoning effort '{effort}'"),
-            Self::InvalidContextWindow(value) => {
-                write!(f, "invalid context window '{value}'; expected auto or 1m")
-            }
-            Self::UnsupportedEffort { model, effort } => {
-                write!(f, "model '{model}' does not support effort '{effort}'")
-            }
-            Self::UnsupportedContextWindow {
-                model,
-                context_window,
-            } => write!(
-                f,
-                "model '{model}' does not support context window '{context_window}'"
-            ),
-            Self::ContextRequiresModel {
-                provider,
-                context_window,
-            } => write!(
-                f,
-                "provider '{provider}' requires --model when --context-window is '{context_window}'"
-            ),
-            Self::ConflictingEffort { legacy, explicit } => write!(
-                f,
-                "model suffix selected effort '{legacy}', but --effort selected '{explicit}'"
-            ),
-            Self::ConflictingContextWindow { legacy, explicit } => write!(
-                f,
-                "model suffix selected context window '{legacy}', but --context-window selected '{explicit}'"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SelectionError {}
 
 fn catalog_match(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| {
@@ -1336,6 +1295,23 @@ mod reachability_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_names_round_trip_with_existing_case_rules() {
+        for (name, effort) in [
+            ("none", EffortLevel::None),
+            ("low", EffortLevel::Low),
+            ("medium", EffortLevel::Medium),
+            ("high", EffortLevel::High),
+            ("xhigh", EffortLevel::XHigh),
+            ("max", EffortLevel::Max),
+        ] {
+            assert_eq!(effort.as_str(), name);
+            assert_eq!(EffortLevel::parse(name), Some(effort));
+            assert_eq!(EffortLevel::parse(&name.to_ascii_uppercase()), Some(effort));
+        }
+        assert_eq!(EffortLevel::parse("unknown"), None);
+    }
 
     #[test]
     fn sol_6_1_has_its_own_model_and_supported_efforts() {

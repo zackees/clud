@@ -182,24 +182,15 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
     selector::run(out, &mut ScopeSelector::default())
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SetupError {
+    #[error("could not resolve user home directory")]
     NoHomeDir,
+    #[error("{0}")]
     Skills(skills::InstallError),
+    #[error("{0}")]
     Io(io::Error),
 }
-
-impl std::fmt::Display for SetupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SetupError::NoHomeDir => write!(f, "could not resolve user home directory"),
-            SetupError::Skills(error) => write!(f, "{error}"),
-            SetupError::Io(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for SetupError {}
 
 impl From<skills::InstallError> for SetupError {
     fn from(error: skills::InstallError) -> Self {

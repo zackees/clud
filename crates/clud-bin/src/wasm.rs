@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::Path;
 
 use wasmi::{Caller, Engine, Extern, Linker, Module, Store};
@@ -8,16 +7,9 @@ struct HostState {
     stdout: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct WasmRuntimeError(String);
-
-impl fmt::Display for WasmRuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for WasmRuntimeError {}
 
 impl From<std::io::Error> for WasmRuntimeError {
     fn from(value: std::io::Error) -> Self {

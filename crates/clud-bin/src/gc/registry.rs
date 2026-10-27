@@ -37,45 +37,17 @@ pub const SIBLING_CLONE_KIND: &str = "sibling-clone";
 
 /// Errors surfaced by `gc`. Narrow on purpose — the CLI handlers
 /// stringify these and log; nothing branches on the variant.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum GcError {
+    #[error("no default clud data-db path could be resolved")]
     NoDefaultPath,
+    #[error("gc i/o error: {0}")]
     Io(String),
+    #[error("gc db error: {0}")]
     Sql(String),
 }
 
-impl std::fmt::Display for GcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoDefaultPath => write!(f, "no default clud data-db path could be resolved"),
-            Self::Io(m) => write!(f, "gc i/o error: {m}"),
-            Self::Sql(m) => write!(f, "gc db error: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for GcError {}
-
-macro_rules! impl_from_redb {
-    ($($t:ty),* $(,)?) => {
-        $(
-            impl From<$t> for GcError {
-                fn from(e: $t) -> Self {
-                    Self::Sql(e.to_string())
-                }
-            }
-        )*
-    };
-}
-
-impl_from_redb!(
-    redb::Error,
-    redb::DatabaseError,
-    redb::TransactionError,
-    redb::TableError,
-    redb::StorageError,
-    redb::CommitError,
-);
+impl_from_redb!(GcError);
 
 impl From<serde_json::Error> for GcError {
     fn from(e: serde_json::Error) -> Self {

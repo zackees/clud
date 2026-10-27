@@ -161,33 +161,20 @@ pub struct ContinuationInvariantFailure {
     pub source: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PipelineError {
+    #[error("{0}")]
     Translate(TranslateError),
+    #[error("{0}")]
     Compaction(CompactionError),
+    #[error("{0}")]
     Upstream(UpstreamError),
+    #[error("invalid canonical continuation: {} function call(s) have no tool output", .0.unmatched_call_count)]
     ContinuationInvariant(Box<ContinuationInvariantFailure>),
     /// An in-band provider failure, classified rather than flattened.
+    #[error("{}", .0.message)]
     Provider(ProviderFailure),
 }
-
-impl std::fmt::Display for PipelineError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Translate(error) => write!(formatter, "{error}"),
-            Self::Compaction(error) => write!(formatter, "{error}"),
-            Self::Upstream(error) => write!(formatter, "{error}"),
-            Self::ContinuationInvariant(failure) => write!(
-                formatter,
-                "invalid canonical continuation: {} function call(s) have no tool output",
-                failure.unmatched_call_count
-            ),
-            Self::Provider(failure) => write!(formatter, "{}", failure.message),
-        }
-    }
-}
-
-impl std::error::Error for PipelineError {}
 
 impl PipelineError {
     /// Whether the provider supplied the exact context-window error code.

@@ -154,16 +154,9 @@ pub enum RepairAction {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{}: {error}", display_path(.path))]
 pub struct DeterministicRepairError {
     pub(in crate::hook_health) path: PathBuf,
     pub(in crate::hook_health) error: io::Error,
 }
-
-impl fmt::Display for DeterministicRepairError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", display_path(&self.path), self.error)
-    }
-}
-
-impl std::error::Error for DeterministicRepairError {}

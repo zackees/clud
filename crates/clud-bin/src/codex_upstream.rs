@@ -462,51 +462,36 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect::<String>() + "..."
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UpstreamError {
     /// No usable credentials. Deliberately never names the variable's value.
+    #[error("upstream credentials unavailable: {0}")]
     Credentials(&'static str),
     /// Upstream returned a non-2xx status, reduced to a classified summary.
     /// The raw body is never carried: it can contain account identifiers and
     /// key fragments.
+    #[error("upstream returned status {}", .0.status)]
     Status(UpstreamFailure),
     /// Classified transport failure. A fixed string, never the library's
     /// message, which embeds the URL.
+    #[error("upstream transport failure: {0}")]
     Transport(&'static str),
     /// The compact endpoint returned a JSON body that does not match its typed contract.
+    #[error("upstream compact response was malformed")]
     CompactMalformed,
     /// The response exceeded the configured byte budget.
+    #[error("upstream response exceeded the size budget")]
     TooLarge,
     /// The overall deadline elapsed.
+    #[error("upstream request timed out")]
     Timeout,
     /// The caller asked to stop.
+    #[error("upstream request cancelled")]
     Cancelled,
     /// The sink rejected a chunk — normally the downstream client hung up.
+    #[error("downstream sink failed: {0}")]
     Downstream(&'static str),
 }
-
-impl std::fmt::Display for UpstreamError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Credentials(what) => {
-                write!(formatter, "upstream credentials unavailable: {what}")
-            }
-            Self::Status(failure) => {
-                write!(formatter, "upstream returned status {}", failure.status)
-            }
-            Self::Transport(what) => write!(formatter, "upstream transport failure: {what}"),
-            Self::CompactMalformed => {
-                formatter.write_str("upstream compact response was malformed")
-            }
-            Self::TooLarge => formatter.write_str("upstream response exceeded the size budget"),
-            Self::Timeout => formatter.write_str("upstream request timed out"),
-            Self::Cancelled => formatter.write_str("upstream request cancelled"),
-            Self::Downstream(what) => write!(formatter, "downstream sink failed: {what}"),
-        }
-    }
-}
-
-impl std::error::Error for UpstreamError {}
 
 impl UpstreamError {
     /// Whether this is the provider's exact context-window signal. Status

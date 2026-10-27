@@ -68,26 +68,25 @@ impl RegisteredBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum ProcessRole {
+    #[strum(serialize = "backend_root")]
     BackendRoot,
+    #[strum(serialize = "backend_bootstrap")]
     BackendBootstrap,
+    #[strum(serialize = "agent_host")]
     AgentHost,
+    #[strum(serialize = "tool_shell_root")]
     ToolShellRoot,
+    #[strum(serialize = "shell_handoff")]
     ShellHandoff,
+    #[strum(serialize = "client")]
     Client,
 }
 
 impl ProcessRole {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::BackendRoot => "backend_root",
-            Self::BackendBootstrap => "backend_bootstrap",
-            Self::AgentHost => "agent_host",
-            Self::ToolShellRoot => "tool_shell_root",
-            Self::ShellHandoff => "shell_handoff",
-            Self::Client => "client",
-        }
+        self.into()
     }
 }
 
@@ -108,58 +107,57 @@ impl DecisionAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum ReapDecisionReason {
+    #[strum(serialize = "leaked_tool_client")]
     LeakedToolClient,
+    #[strum(serialize = "git_bash_reexec")]
     GitBashReexec,
+    #[strum(serialize = "nested_shell_detach")]
     NestedShellDetach,
     /// Declared itself a daemon via `RUNNING_PROCESS_IS_DAEMON`. **Cooperative**
     /// — see [`ProcessFacts`] for why this is ranked below the OS signals.
+    #[strum(serialize = "declared_daemon")]
     DeclaredDaemon,
+    #[strum(serialize = "console_host_never_targeted")]
     ConsoleHost,
     /// Broke away from the reaper's Job Object, so it is outside our
     /// containment and was never ours to kill.
+    #[strum(serialize = "outside_job_object")]
     OutsideJobObject,
     /// Runs in session 0 — a Windows service, not a session descendant.
+    #[strum(serialize = "service_session")]
     ServiceSession,
     /// Called `setsid()`: it leads its own POSIX session.
+    #[strum(serialize = "session_leader")]
     SessionLeader,
     /// Runs as a different token owner / euid than we do.
+    #[strum(serialize = "foreign_token_owner")]
     ForeignTokenOwner,
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
+    #[strum(serialize = "listening_endpoint")]
     ListeningEndpoint,
     /// Owns the active Windows desktop shell window and must survive a shell
     /// restart requested from a foreground tool call (#746).
+    #[strum(serialize = "active_desktop_shell")]
     ActiveDesktopShell,
+    #[strum(serialize = "docker_desktop_process_family")]
     DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
+    #[strum(serialize = "configured_spare_list")]
     ConfiguredSpareList,
     /// Only the Windows listener produces this.
+    #[strum(serialize = "candidate_identity_changed")]
     CandidateIdentityChanged,
+    #[strum(serialize = "no_live_clients")]
     NoLiveClients,
 }
 
 impl ReapDecisionReason {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::LeakedToolClient => "leaked_tool_client",
-            Self::GitBashReexec => "git_bash_reexec",
-            Self::NestedShellDetach => "nested_shell_detach",
-            Self::DeclaredDaemon => "declared_daemon",
-            Self::ConsoleHost => "console_host_never_targeted",
-            Self::OutsideJobObject => "outside_job_object",
-            Self::ServiceSession => "service_session",
-            Self::SessionLeader => "session_leader",
-            Self::ForeignTokenOwner => "foreign_token_owner",
-            Self::ListeningEndpoint => "listening_endpoint",
-            Self::ActiveDesktopShell => "active_desktop_shell",
-            Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
-            Self::ConfiguredSpareList => "configured_spare_list",
-            Self::CandidateIdentityChanged => "candidate_identity_changed",
-            Self::NoLiveClients => "no_live_clients",
-        }
+        self.into()
     }
 }
 

@@ -592,56 +592,41 @@ impl fmt::Debug for BridgeConfig {
 }
 
 /// Startup/shutdown failures deliberately contain no endpoint or token text.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    #[error("failed to bind loopback bridge: {0}")]
     Bind(io::Error),
+    #[error("failed to create bridge credentials: {0}")]
     Random(String),
+    #[error("failed to start bridge worker: {0}")]
     Spawn(io::Error),
+    #[error("bridge worker panicked during shutdown")]
     Join,
     /// The launch named a model or effort that does not parse. Carries the
     /// selector's own message, which names the valid values.
+    #[error("{0}")]
     Model(String),
     /// The launch supplied Claude settings that could not be composed with
     /// the bridge's session-local lifecycle hooks.
+    #[error("{0}")]
     Settings(String),
     /// Descriptor-backed provider credentials could not be read at the
     /// child-spawn boundary. The error is provider-neutral and secret-free.
+    #[error("provider credentials are unavailable at the child-spawn boundary")]
     AnthropicCompatCredentials,
     /// Direct Codex-via-Claude admission failed before the listener or child
     /// exists. The renderer is shared by foreground and daemon launches.
+    #[error("{0}")]
     CodexBridgeCredentials(crate::codex_upstream::CodexBridgeCredentialError),
     /// The caller has explicitly disabled the discovery request unified mode
     /// needs, so launching would silently present a misleading picker.
+    #[error("this Claude gateway requires model discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled")]
     DiscoveryDisabled,
     /// The launch declared a failover rung the gateway cannot route. Carries
     /// the ladder's own message, which names the offending rung.
+    #[error("--failover: {0}")]
     Failover(String),
 }
-
-impl fmt::Display for BridgeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Bind(error) => write!(formatter, "failed to bind loopback bridge: {error}"),
-            Self::Random(error) => {
-                write!(formatter, "failed to create bridge credentials: {error}")
-            }
-            Self::Spawn(error) => write!(formatter, "failed to start bridge worker: {error}"),
-            Self::Join => formatter.write_str("bridge worker panicked during shutdown"),
-            Self::Model(error) => write!(formatter, "{error}"),
-            Self::Settings(error) => write!(formatter, "{error}"),
-            Self::AnthropicCompatCredentials => formatter.write_str(
-                "provider credentials are unavailable at the child-spawn boundary",
-            ),
-            Self::CodexBridgeCredentials(error) => write!(formatter, "{error}"),
-            Self::DiscoveryDisabled => formatter.write_str(
-                "this Claude gateway requires model discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
-            ),
-            Self::Failover(error) => write!(formatter, "--failover: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for BridgeError {}
 
 /// Owns the listener, bearer, shutdown signal, and join handle for a launch.
 /// Debug output is intentionally structural: even the ephemeral base URL is

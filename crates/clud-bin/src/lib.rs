@@ -4,6 +4,25 @@
 //! modules from this library rather than declaring its own `mod ...` copies,
 //! so there is exactly one instance of each module in the build.
 
+// Both registries expose the same redb conversion set.
+macro_rules! impl_from_redb {
+    ($error:ident) => {
+        impl_from_redb!(@one $error; redb::Error);
+        impl_from_redb!(@one $error; redb::DatabaseError);
+        impl_from_redb!(@one $error; redb::TransactionError);
+        impl_from_redb!(@one $error; redb::TableError);
+        impl_from_redb!(@one $error; redb::StorageError);
+        impl_from_redb!(@one $error; redb::CommitError);
+    };
+    (@one $error:ident; $redb_error:ty) => {
+        impl From<$redb_error> for $error {
+            fn from(error: $redb_error) -> Self {
+                Self::Sql(error.to_string())
+            }
+        }
+    };
+}
+
 pub mod alias_link;
 pub mod anthropic_usage;
 pub mod args;
