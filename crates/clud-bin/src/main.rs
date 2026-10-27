@@ -63,7 +63,7 @@ fn run(mut args: args::Args) {
     // without `--model` still launches with a main model inside its own
     // boundary (#1257).
     args.normalize_model_allowlist();
-    if let Some(code) = dispatch_before_startup(&args) {
+    if let Some(code) = dispatch_before_startup(&mut args) {
         std::process::exit(code);
     }
     // A nested launch makes a fresh policy choice. Never inherit an unsafe
@@ -218,7 +218,7 @@ fn start_checkout_presence(
 
 /// Modes that must run before the crash reporter, the runtime-cache hop and
 /// every other piece of launch machinery. `Some` is the process exit code.
-fn dispatch_before_startup(args: &args::Args) -> Option<i32> {
+fn dispatch_before_startup(args: &mut args::Args) -> Option<i32> {
     if let Some(code) = clud::openrouter_routing::handle_setting(args) {
         return Some(code);
     }

@@ -662,3 +662,119 @@ def browser_user_path_snapshot():
             return winreg.QueryValueEx(key, "Path")
         except FileNotFoundError:
             return None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+def test_interactive_install_offers_provider_setup(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    pid, master = pty.fork()
+    if pid == 0:
+        binary = str(clud_binary())
+        os.execve(binary, [binary, "--installer", "--install-current"], env)
+    output = bytearray()
+    sent = False
+    status = None
+    deadline = time.monotonic() + 45
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            if b"Install clud" in output and b"Not now" in output and not sent:
+                os.write(master, b"\x1b[A\r")
+                sent = True
+            if b"Setup for:" in output and b"Codex" in output:
+                break
+            waited, child_status = os.waitpid(pid, os.WNOHANG)
+            if waited:
+                status = child_status
+                break
+        assert b"Setup for:" in output, output.decode(errors="replace")
+        assert b"OpenRouter" in output
+        assert b"Claude" in output
+        assert b"Codex" in output
+    finally:
+        if status is None:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        os.close(master)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+@pytest.mark.parametrize(
+    ("selection", "model"),
+    [
+        (b"\r", "deepseek/deepseek-v4.1-flash"),
+        (b"\x1b[B\r", "z-ai/glm-5.3-flash"),
+        (b"\x1b[B\x1b[B\r", "example/custom"),
+    ],
+)
+def test_interactive_openrouter_setup_saves_key_and_model(
+    tmp_path: Path, selection: bytes, model: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    vault = tmp_path / "vault"
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    env["CLUD_INTEGRATION_TESTS"] = "1"
+    env["CLUD_TEST_SECRET_STORE_DIR"] = str(vault)
+    pid, master = pty.fork()
+    if pid == 0:
+        binary = str(clud_binary())
+        os.execve(binary, [binary, "--installer", "--install-current"], env)
+    output = bytearray()
+    actions = [
+        (b"Not now", b"\x1b[A\r"),
+        (b"Setup for:", b"\r"),
+        (b"OpenRouter API key:", b"sk-or-test-install-12345\r"),
+        (b"Select a model:", selection),
+    ]
+    if model == "example/custom":
+        actions.append((b"OpenRouter model ID:", b"example/custom\r"))
+    actions.append((b"Start right now?", b"\x1b[B\r"))
+    step = 0
+    status = None
+    deadline = time.monotonic() + 45
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            if step < len(actions) and actions[step][0] in output:
+                os.write(master, actions[step][1])
+                step += 1
+            waited, child_status = os.waitpid(pid, os.WNOHANG)
+            if waited:
+                status = child_status
+                break
+        assert step == len(actions), output.decode(errors="replace")
+        assert status is not None, output.decode(errors="replace")
+        assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
+        assert b"sk-or-test-install-12345" not in output
+        assert b"z-ai/glm-5.3-flash" in output
+        document = json.loads((home / ".clud" / "settings.json").read_text())
+        assert document["providers"]["openrouter"]["model"] == model
+        assert document["backend"]["default"] == "openrouter"
+        assert document["harness"]["default"] == "default"
+        assert [path.read_text() for path in vault.glob("*.secret")] == [
+            "sk-or-test-install-12345"
+        ]
+    finally:
+        if status is None:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        os.close(master)

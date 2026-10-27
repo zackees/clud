@@ -86,7 +86,7 @@ pub fn should_offer(args: &Args, stdin_tty: bool, stderr_tty: bool, path_has_clu
 }
 
 /// Run an explicit installer request before launch setup has side effects.
-pub fn run_explicit(args: &Args) -> Option<i32> {
+pub fn run_explicit(args: &mut Args) -> Option<i32> {
     let outcome = match explicit_request(args) {
         Ok(None) => return None,
         Ok(Some(request)) => run_request(
@@ -103,7 +103,7 @@ pub fn run_explicit(args: &Args) -> Option<i32> {
         }
     };
     if !args.installer_json {
-        return Some(outcome.exit_code());
+        return finish_with_setup(args, outcome);
     }
     match outcome.write_json(io::stdout().lock()) {
         Ok(()) => Some(outcome.exit_code()),
@@ -116,7 +116,7 @@ pub fn run_explicit(args: &Args) -> Option<i32> {
 
 /// Offer installation only for a bare interactive first run with no `clud`
 /// executable resolvable by name on the effective PATH.
-pub fn run_auto_offer(args: &Args) -> Option<i32> {
+pub fn run_auto_offer(args: &mut Args) -> Option<i32> {
     let missing = matches!(
         which::which("clud"),
         Err(which::Error::CannotFindBinaryPath)
@@ -131,12 +131,29 @@ pub fn run_auto_offer(args: &Args) -> Option<i32> {
     }
     match picker::prompt_menu(true) {
         Ok(MenuChoice::NotNow) => None,
-        Ok(choice) => Some(run_menu_choice(choice, InstallOptions::default()).exit_code()),
+        Ok(choice) => {
+            let outcome = run_menu_choice(choice, InstallOptions::default());
+            finish_with_setup(args, outcome)
+        }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Some(130),
         Err(error) => {
             eprintln!("clud installer: {error}");
             Some(1)
         }
+    }
+}
+
+fn finish_with_setup(args: &mut Args, outcome: Outcome) -> Option<i32> {
+    if !outcome.is_complete() || args.yes || !terminal_available() {
+        return Some(outcome.exit_code());
+    }
+    match super::setup::run() {
+        Ok(Some(launch_args)) => {
+            *args = launch_args;
+            None
+        }
+        Ok(None) => Some(0),
+        Err(code) => Some(code),
     }
 }
 
@@ -700,13 +717,13 @@ mod tests {
 
     #[test]
     fn no_tty_without_automation_exits_before_fetch_or_install() {
-        assert_eq!(run_explicit(&parse(&["clud", "--installer"])), Some(2));
+        assert_eq!(run_explicit(&mut parse(&["clud", "--installer"])), Some(2));
         assert_eq!(
-            run_explicit(&parse(&["clud", "--installer", "--install-current"])),
+            run_explicit(&mut parse(&["clud", "--installer", "--install-current"])),
             Some(2)
         );
         assert_eq!(
-            run_explicit(&parse(&[
+            run_explicit(&mut parse(&[
                 "clud",
                 "--installer",
                 "--install-version",

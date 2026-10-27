@@ -20,7 +20,11 @@ change broadcast, and OS-built user-environment proof on Windows.
 reparse-point checks `transaction.rs` applies. A binary commit alone does not
 count as installer success. Explicit `--no-modify-path` instead skips the
 activation plan entirely, preserves profiles/User Path, and reports binary
-installation with activation still required.
+installation with activation still required. After a successful interactive install and verified
+activation, `setup.rs` offers OpenRouter, Claude, or Codex, saves an
+OpenRouter key and model when selected, persists the chosen provider and native
+harness, and offers to launch immediately.
+Scripted installs and structured installer reports do not run this setup.
 
 `result.rs` defines the versioned `clud-installer-result/v1` outcome. Add
 `--installer-json` to an explicit current/version request to emit exactly one
