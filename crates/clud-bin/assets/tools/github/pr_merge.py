@@ -118,7 +118,9 @@ def submit(repo: str, number: int, sha: str) -> str:
     head = pr.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha.lower():
         raise SubmitError("PR head changed; inspect it and use its full current SHA")
-    entry = pr.get("mergeQueueEntry")
+    if "mergeQueueEntry" not in pr:
+        raise SubmitError("GitHub returned no PR merge queue entry state")
+    entry = pr["mergeQueueEntry"]
     if entry is not None:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
             raise SubmitError("GitHub returned an invalid merge queue entry")
