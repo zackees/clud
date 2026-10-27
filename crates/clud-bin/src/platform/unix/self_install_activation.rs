@@ -1,7 +1,7 @@
 //! Unix half of `crate::self_install::activation`: owned Bash, zsh, or fish
 //! startup-file edits and fresh login/interactive shell verification.
 
-use std::ffi::{CStr, OsString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
@@ -461,6 +461,38 @@ fn cleanup_created_dirs(edits: &[ProfileEdit]) {
 }
 
 fn verify(destination: &Path, plan: &ActivationHost, version: &str) -> Result<(), String> {
+    let temp =
+        tempfile::tempdir().map_err(|error| format!("create shell probe directory: {error}"))?;
+    let fifo_path = temp.path().join("output");
+    let fifo_name = CString::new(fifo_path.as_os_str().as_encoded_bytes())
+        .map_err(|_| "shell probe path contains NUL")?;
+    // SAFETY: fifo_name is a valid NUL-terminated path in our private directory.
+    if unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) } != 0 {
+        return Err(format!(
+            "create shell probe pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Holding both ends open avoids blocking shell redirections between commands.
+    let mut fifo = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo_path)
+        .map_err(|error| format!("open shell probe pipe: {error}"))?;
+    let _writer = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo_path)
+        .map_err(|error| format!("open shell probe writer: {error}"))?;
+    let pipe = if plan.shell.file_name().and_then(|name| name.to_str()) == Some("fish") {
+        fish_quote(&fifo_path)?
+    } else {
+        shell_words::quote(fifo_path.to_str().ok_or("shell probe path is not UTF-8")?).into_owned()
+    };
+    let script = format!(
+        "printf '__CLUD_INSTALL_PATH__' > {pipe}; command -v clud > {pipe}; \
+         printf '__CLUD_INSTALL_VERSION__' > {pipe}; clud --version > {pipe}"
+    );
     let expected = format!("clud {version}");
     for mode in ["-lc", "-ic", "-lic"] {
         let mut env: Vec<(String, String)> = std::env::vars_os()
@@ -471,9 +503,9 @@ fn verify(destination: &Path, plan: &ActivationHost, version: &str) -> Result<()
         let command = vec![
             plan.shell.to_string_lossy().to_string(),
             mode.into(),
-            "printf '__CLUD_INSTALL_PATH__'; command -v clud; printf '__CLUD_INSTALL_VERSION__'; clud --version".into(),
+            script.clone(),
         ];
-        let (code, output) = run_shell_probe(command, env, mode)?;
+        let (code, output) = run_shell_probe(command, env, mode, &mut fifo)?;
         let (actual, found_version) = parse_shell_probe(&output);
         if code != 0 || actual != destination.to_string_lossy() || found_version != expected {
             return Err(format!("fresh shell {mode} resolved {actual:?} with {found_version:?}; expected {} and {expected}", destination.display()));
@@ -486,27 +518,34 @@ fn run_shell_probe(
     command: Vec<String>,
     env: Vec<(String, String)>,
     mode: &str,
+    fifo: &mut fs::File,
 ) -> Result<(i32, Vec<u8>), String> {
     let process = NativePtyProcess::new(command, None, Some(env), 24, 80, None)
         .map_err(|error| error.to_string())?;
     process.start_impl().map_err(|error| error.to_string())?;
-    let result = collect_shell_probe(&process, mode);
+    let result = collect_shell_probe(&process, mode, fifo);
     if result.is_err() {
-        let _ = process.kill_impl();
+        let _ = process.kill_tree_impl();
     }
     let _ = process.close_impl();
     result
 }
 
-fn collect_shell_probe(process: &NativePtyProcess, mode: &str) -> Result<(i32, Vec<u8>), String> {
+fn collect_shell_probe(
+    process: &NativePtyProcess,
+    mode: &str,
+    fifo: &mut fs::File,
+) -> Result<(i32, Vec<u8>), String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut output = Vec::new();
+    let mut terminal_bytes = 0;
     let mut queries = crate::terminal_queries::TerminalQueryScanner::default();
     let mut reply_bytes = 0;
     loop {
         if Instant::now() >= deadline {
             return Err(format!("fresh shell {mode} lookup timed out"));
         }
+        drain_probe_pipe(fifo, &mut output)?;
         match process.read_chunk_impl(Some(0.1)) {
             Ok(Some(bytes)) => {
                 let replies = queries.replies(&bytes);
@@ -521,19 +560,35 @@ fn collect_shell_probe(process: &NativePtyProcess, mode: &str) -> Result<(i32, V
                     // A live shell that needs the reply is still bounded by the deadline.
                     let _ = process.write_impl(&replies, false);
                 }
-                output.extend_from_slice(&bytes);
+                terminal_bytes += bytes.len();
             }
             Ok(None) => continue,
             Err(_) => break,
+        }
+        if terminal_bytes > 32 * 1024 {
+            return Err("fresh shell terminal output is too large".into());
+        }
+    }
+    drain_probe_pipe(fifo, &mut output)?;
+    let code = process
+        .wait_impl(Some(1.0))
+        .map_err(|error| error.to_string())?;
+    Ok((code, output))
+}
+
+fn drain_probe_pipe(fifo: &mut fs::File, output: &mut Vec<u8>) -> Result<(), String> {
+    let mut bytes = [0; 4096];
+    loop {
+        match fifo.read(&mut bytes) {
+            Ok(0) => return Ok(()),
+            Ok(n) => output.extend_from_slice(&bytes[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(format!("read shell probe pipe: {error}")),
         }
         if output.len() > 32 * 1024 {
             return Err("fresh shell output is too large".into());
         }
     }
-    let code = process
-        .wait_impl(Some(1.0))
-        .map_err(|error| error.to_string())?;
-    Ok((code, output))
 }
 
 fn parse_shell_probe(output: &[u8]) -> (String, String) {
@@ -552,7 +607,7 @@ fn parse_shell_probe(output: &[u8]) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_shell_probe, terminal_commands};
+    use super::terminal_commands;
     use std::path::Path;
 
     #[test]
@@ -560,13 +615,5 @@ mod tests {
         for destination in ["/tmp/colon:home/bin/clud", "/tmp/line\nhome/bin/clud"] {
             assert!(terminal_commands(Path::new(destination)).is_err());
         }
-    }
-
-    #[test]
-    fn fresh_shell_probe_ignores_interactive_warnings() {
-        let output = b"bash: no job control in this shell\n__CLUD_INSTALL_PATH__/tmp/bin/clud\nbash: warning after path\n__CLUD_INSTALL_VERSION__clud 2.8.16\n";
-        let (path, version) = parse_shell_probe(output);
-        assert_eq!(path, "/tmp/bin/clud");
-        assert_eq!(version, "clud 2.8.16");
     }
 }

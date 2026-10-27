@@ -912,7 +912,7 @@ def test_activation_verifies_shell_with_terminal_stdin(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell startup")
 @pytest.mark.parametrize("flood", [False, True])
 def test_activation_handles_unread_terminal_queries(tmp_path: Path, flood: bool) -> None:
-    home = tmp_path / "home"
+    home = tmp_path / "home^[[1;1R"
     home.mkdir(mode=0o700)
     query = "printf '\\033[6n'"
     (home / ".bashrc").write_text(
@@ -935,3 +935,24 @@ def test_activation_handles_unread_terminal_queries(tmp_path: Path, flood: bool)
         assert b"too many terminal queries" in result.stderr
     else:
         assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell startup")
+def test_activation_bounds_noisy_shell_version_output(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    profile = home / ".bashrc"
+    profile.write_text("clud() { yes excessive-output; }\n")
+    profile.chmod(0o600)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert b"fresh shell output is too large" in result.stderr
