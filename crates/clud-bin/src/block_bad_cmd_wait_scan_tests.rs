@@ -206,8 +206,11 @@ fn python_sleep_counts_as_a_sleep_only_without_its_own_loop() {
 
 #[test]
 fn python_wait_needs_a_loop_and_a_sleep_and_flags_gh_reads() {
-    let poll = "import subprocess,time\nwhile True:\n    subprocess.run(['gh','run','view','1'])\n    time.sleep(30)\n";
+    let poll = "import subprocess,time\nwhile True:\n    subprocess.run(['gh','pr','checks','1'])\n    time.sleep(30)\n";
     assert_eq!(python_wait(poll), Some(true));
+    // DD-189: a run read is a wait, but not a PR poll.
+    let run = "import subprocess,time\nwhile True:\n    subprocess.run(['gh','run','view','1'])\n    time.sleep(30)\n";
+    assert_eq!(python_wait(run), Some(false));
     let local = "import time\nfor i in range(3):\n    time.sleep(1)\n";
     assert_eq!(python_wait(local), Some(false));
     assert_eq!(python_wait("import time\ntime.sleep(1)\n"), None);

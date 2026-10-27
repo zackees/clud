@@ -54,7 +54,7 @@ This skill should not implement fixes or features. If the release is blocked by 
    - Tag pushed: `<tag>` → `<sha>`
    - Workflow run: `<url>` (status: `<queued|in_progress>`)
    - One line on what the workflow will do (build, publish to PyPI/crates.io, attach release artifacts) — pulled from the workflow file's job names, not invented.
-   - Nothing else. Don't follow the run. If the user asked for its result, read it with one `gh run view <id>` in a later turn; never `gh run watch` or a polling loop (for a PR, `"$CLUD_EXE" tool run github/pr_merge_watch.py <PR>` with `run_in_background` is the waiter).
+   - Nothing else. Don't follow the run. If the user asked for its result, start `gh run watch <id> --exit-status` once with `run_in_background` and read the result when it exits; never a polling loop (for a PR, `"$CLUD_EXE" tool run github/pr_merge_watch.py <PR>` with `run_in_background` is the waiter).
 
 ## Failure modes to avoid
 

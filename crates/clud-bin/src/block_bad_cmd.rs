@@ -2283,7 +2283,7 @@ fn blocking_pr_wait_reason(script: &crate::shell_ast::Script, shim_active: bool)
                 .any(|word| word == "--watch" || word.starts_with("--watch="));
         if native_gh_waiter(words) && !canonical_shimmed_watch {
             return Some(format!(
-                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. {WAIT_REPLACEMENT} {PR_WATCH_USAGE}"
+                "Use the canonical gh PR checks watcher inside a clud shim session. An unshimmed `gh pr checks --watch` cannot cancel the matrix on first required failure. {WAIT_REPLACEMENT} {PR_WATCH_USAGE}"
             ));
         }
     }
@@ -2330,16 +2330,17 @@ fn is_unbounded_loop(kind: crate::shell_ast::LoopKind) -> bool {
     )
 }
 
+/// A native PR-check watcher. Only PR waits are routed through the
+/// fail-fast watcher (DD-189): a run watch (`gh run watch <id>`) has its own
+/// end and falls through like any other command.
 fn native_gh_waiter(words: &[String]) -> bool {
     if words.first().is_none_or(|word| program_name(word) != "gh") {
         return false;
     }
-    let positionals = gh_positionals(&words[1..]);
-    (positionals.starts_with(&["pr", "checks"])
+    gh_positionals(&words[1..]).starts_with(&["pr", "checks"])
         && words
             .iter()
-            .any(|word| word == "--watch" || word.starts_with("--watch=")))
-        || positionals.starts_with(&["run", "watch"])
+            .any(|word| word == "--watch" || word.starts_with("--watch="))
     // `gh pr merge --auto` is deliberately allowed (DD-094): it hands the
     // wait to GitHub and returns at once, so nothing blocks locally.
 }
@@ -2348,29 +2349,11 @@ fn gh_poll_target(words: &[String]) -> bool {
     if words.first().is_none_or(|word| program_name(word) != "gh") {
         return false;
     }
+    // PR status reads only (DD-189). Run, job, check and Pages reads are
+    // not PR waits; the general hand-written-wait rule still covers loops.
     let positionals = gh_positionals(&words[1..]);
-    if positionals.starts_with(&["pr", "checks"])
-        || positionals.starts_with(&["run", "view"])
-        || positionals.starts_with(&["run", "list"])
-    {
-        return true;
-    }
-    // #1880 category F: REST reads of run, job, check and Pages build status.
-    if positionals.first() == Some(&"api") {
-        return positionals.iter().skip(1).any(|endpoint| {
-            let endpoint = endpoint.to_ascii_lowercase();
-            [
-                "actions/runs",
-                "actions/jobs",
-                "check-runs",
-                "statuses",
-                "pages/builds",
-            ]
-            .iter()
-            .any(|needle| endpoint.contains(needle))
-        });
-    }
-    positionals.starts_with(&["pr", "view"]) && pr_view_json_polls_status(words)
+    positionals.starts_with(&["pr", "checks"])
+        || (positionals.starts_with(&["pr", "view"]) && pr_view_json_polls_status(words))
 }
 
 /// `gh pr view --json` naming a field agents poll: the check rollup, or
@@ -4658,9 +4641,6 @@ mod tests {
             "gh pr checks --repo zackees/clud 528 --fail-fast --watch",
             "gh --repo zackees/clud pr checks --watch 528",
             "gh pr checks 528 --watch --interval 60",
-            "gh run watch 123456 --exit-status",
-            "gh run --repo zackees/clud watch 123456",
-            "env GH_HOST=github.com gh run watch 123456",
             // Gated sessions wrap the command with the gate prefix; the
             // guard must see through it.
             "tap gh pr checks 528 --watch",
@@ -4718,20 +4698,8 @@ mod tests {
                 ShellDialect::Posix,
             ),
             (
-                "until [ \"$(gh run view 123 --json jobs,status)\" ]; do sleep 30; done",
-                ShellDialect::Posix,
-            ),
-            (
-                "while ($true) { gh run list --branch feat/x; Start-Sleep 30 }",
-                ShellDialect::PowerShell,
-            ),
-            (
                 infinite_for,
                 ShellDialect::Posix,
-            ),
-            (
-                "do { gh run list --branch feat/x; Start-Sleep 30 } while ($true)",
-                ShellDialect::PowerShell,
             ),
             (
                 "while($true) { gh pr checks 528; Start-Sleep 30 }",
@@ -4753,19 +4721,53 @@ mod tests {
         }
     }
 
+    /// DD-189: a run wait is not a PR wait. `gh run watch` ends with its run
+    /// and falls through; a hand-written loop or long sleep around a run read
+    /// is still refused by the general wait rule, without PR advice.
+    #[test]
+    fn run_waits_are_not_pr_waits() {
+        for command in [
+            "gh run watch 123456 --exit-status",
+            "gh run --repo zackees/clud watch 123456",
+            "env GH_HOST=github.com gh run watch 123456",
+            "git push origin feat/x && sleep 25 && gh run list --limit 1 --json status,conclusion",
+        ] {
+            let mut reason = None;
+            temp_env(crate::shim_registry::GH_ACTIVE_KEY, "0", || {
+                reason = evaluate_command(command, None, false, &[]).reason;
+            });
+            assert!(reason.is_none(), "{command}: {reason:?}");
+        }
+        for (command, dialect) in [
+            ("until [ \"$(gh run view 123 --json jobs,status)\" ]; do sleep 30; done", ShellDialect::Posix),
+            ("while ($true) { gh run list --branch feat/x; Start-Sleep 30 }", ShellDialect::PowerShell),
+            ("do { gh run list --branch feat/x; Start-Sleep 30 } while ($true)", ShellDialect::PowerShell),
+            ("sleep 540; gh run view 37858635061 -R o/r --json jobs", ShellDialect::Posix),
+            (r#"for i in $(seq 1 19); do s=$(gh run view 38054481154 --json status,conclusion -q '.status+" "+.conclusion'); case "$s" in completed*) break;; esac; sleep 30; done"#, ShellDialect::Posix),
+            ("for i in $(seq 1 12); do st=$(gh api repos/zackees/clud/pages/builds/latest --jq .status); [ \"$st\" = built ] && break; sleep 20; done", ShellDialect::Posix),
+            ("until [ \"$(gh api repos/zackees/clud/actions/runs/123/jobs --jq '.jobs[0].status')\" = completed ]; do sleep 30; done", ShellDialect::Posix),
+            ("while true; do gh api repos/zackees/clud/commits/abc/check-runs; sleep 30; done", ShellDialect::Posix),
+        ] {
+            let reason = evaluate_command_with_policy_and_dialect(command, None, false, &[], &[], dialect)
+                .reason
+                .unwrap_or_else(|| panic!("{command} should still be a refused wait"));
+            assert!(!reason.contains("For a PR start"), "{command}: {reason}");
+        }
+    }
+
     /// zackees/clud#1880 gap rows: the shapes the transcript analysis found
     /// passing this guard (categories A, C, D, E, F), verbatim.
     #[test]
     fn issue_1894_integrator_sleep_poll_is_refused_and_a_log_read_is_not() {
         // obs-rust/obs-studio#13 item 8: one-shot sleeps across tool calls.
         let reason = evaluate_command(
-            "sleep 540; gh run view 37858635061 -R o/r --json jobs",
+            "sleep 540; gh pr view 1847 -R o/r --json state",
             None,
             false,
             &[],
         )
         .reason
-        .expect("a sleep chained to a run read is a poll");
+        .expect("a sleep chained to a PR read is a poll");
         assert!(reason.contains("pr_merge_watch"), "{reason}");
         let log_read = evaluate_command("gh run view 37858635061 --log-failed", None, false, &[]);
         assert!(log_read.reason.is_none(), "{:?}", log_read.reason);
@@ -4776,16 +4778,11 @@ mod tests {
         for command in [
             // A: bounded `seq` loop around `gh pr checks`.
             r#"for i in $(seq 1 38); do p=$(gh pr checks 1857 | grep -cE "pending|queued"); [ "$p" = 0 ] && break; sleep 14; done"#,
-            // E: bounded loop around a workflow run.
-            r#"for i in $(seq 1 19); do s=$(gh run view 38054481154 --json status,conclusion -q '.status+" "+.conclusion'); case "$s" in completed*) break;; esac; sleep 30; done"#,
-            // F: `gh api` polling of pages builds and run jobs.
-            "for i in $(seq 1 12); do st=$(gh api repos/zackees/clud/pages/builds/latest --jq .status); [ \"$st\" = built ] && break; sleep 20; done",
-            "until [ \"$(gh api repos/zackees/clud/actions/runs/123/jobs --jq '.jobs[0].status')\" = completed ]; do sleep 30; done",
-            "while true; do gh api repos/zackees/clud/commits/abc/check-runs; sleep 30; done",
+            // E and F (run and REST reads) are run waits, not PR waits:
+            // see `run_waits_are_not_pr_waits` (DD-189).
             // D: merge-state polling, then merge.
             "for i in $(seq 1 30); do st=$(gh pr view 515 --json mergeStateStatus -q .mergeStateStatus); [ \"$st\" = CLEAN ] && break; sleep 30; done; gh pr merge 515",
             // C: the loop split across turns, one chained sleep at a time.
-            "git push origin feat/x && sleep 25 && gh run list --limit 1 --json status,conclusion",
             "sleep 30 && gh pr checks 1857",
             "gh pr merge 515 --squash; sleep 10; gh pr view 515 --json state",
         ] {
@@ -4803,7 +4800,7 @@ mod tests {
         // watcher, which follows the merge queue to MERGED or an ejection.
         for command in [
             "sleep 540; gh pr view 1847 --json state",
-            "gh run watch 39887326901 --exit-status",
+            "while true; do gh pr view 1847 --json state; sleep 30; done",
         ] {
             let reason = evaluate_command(command, None, false, &[])
                 .reason
@@ -4899,17 +4896,15 @@ mod tests {
     }
 
     #[test]
-    fn active_gh_shim_allows_canonical_watch_but_not_run_id() {
+    fn active_gh_shim_allows_canonical_watch_and_run_watches_fall_through() {
         let dialect = ShellDialect::Posix;
         assert!(pr_wait_reason_for("gh pr checks 528 --watch", dialect, true).is_none());
         assert!(
             pr_wait_reason_for("gh -R zackees/clud pr checks --watch", dialect, true).is_none()
         );
-        let denied = pr_wait_reason_for("gh run watch 123456", dialect, true)
-            .expect("run-id watch should remain denied");
-        assert!(denied.contains("canonical"), "{denied}");
-        // #1941: the refusal names the non-PR run waiter.
-        assert!(denied.contains("github/run_watch.py"), "{denied}");
+        // DD-189: a run watch is not a PR wait.
+        assert!(pr_wait_reason_for("gh run watch 123456", dialect, true).is_none());
+        assert!(pr_wait_reason_for("gh run watch 123456", dialect, false).is_none());
         assert!(pr_wait_reason_for("gh pr checks --watch", dialect, false).is_some());
     }
 

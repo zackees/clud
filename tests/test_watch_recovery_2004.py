@@ -28,7 +28,8 @@ def scan(
     settings.write_text(json.dumps({"git": {"pr_wait_fail_fast": True}}), encoding="utf-8")
     env = {name: value for name, value in os.environ.items() if not name.startswith("CLUD_")}
     env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path), CLUD_HOOK_HOME=str(tmp_path),
-               CLUD_SKIP_RM_IDENTITY="1", CLUD_NO_UNLOCK="1", CLUD_SERVER_SETTINGS="0")
+               CLUD_SKIP_RM_IDENTITY="1", CLUD_NO_UNLOCK="1", CLUD_SERVER_SETTINGS="0",
+               CLUD_GH_SHIM_ACTIVE="0")
     return process.run(
         [binary, "__cmd-scan", "--event", "PreToolUse"],
         input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool,
@@ -41,7 +42,7 @@ def scan(
 def test_rejected_watch_offers_verified_execution_capabilities(
     tmp_path: Path, tool: str, key: str
 ) -> None:
-    result = scan(tmp_path, tool, key, "gh run watch 123 --exit-status")
+    result = scan(tmp_path, tool, key, "gh pr checks 123 --watch")
     assert result.returncode == 2, result.stdout + result.stderr
     reason = json.loads(result.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     for required in ["exec_command", "write_stdin", "empty input", "same session",
@@ -49,6 +50,13 @@ def test_rejected_watch_offers_verified_execution_capabilities(
                      "capabilities", "tool name", "local process", "Never poll",
                      "pr_merge_watch.py -- <PR>"]:
         assert required in reason, f"missing {required!r}: {reason}"
+
+
+@pytest.mark.parametrize(("tool", "key"), TOOLS)
+def test_a_run_watch_is_not_a_pr_wait(tmp_path: Path, tool: str, key: str) -> None:
+    """DD-189: `gh run watch` ends with its run and falls through."""
+    result = scan(tmp_path, tool, key, "gh run watch 123 --exit-status")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(("tool", "key"), TOOLS)
@@ -93,7 +101,7 @@ def test_recovery_keeps_one_live_process_until_its_real_terminal_result(
     stdin handshake makes the observation deadline deterministic: only the
     fixture controller releases it; the modeled session wait sends no input.
     """
-    denied = scan(tmp_path, "Bash", "command", "gh run watch 123 --exit-status")
+    denied = scan(tmp_path, "Bash", "command", "gh pr checks 123 --watch")
     assert denied.returncode == 2, denied.stderr
     reason = denied.stdout + denied.stderr
     assert "exec_command" in reason
@@ -187,7 +195,7 @@ def test_exec_honors_declared_shell_for_wait_syntax(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("tool", ["exec_command", "functions.exec_command"])
 def test_extra_command_fields_cannot_shadow_the_declared_cmd(tmp_path: Path, tool: str) -> None:
-    result = scan(tmp_path, tool, "cmd", "gh run watch 123 --exit-status",
+    result = scan(tmp_path, tool, "cmd", "gh pr checks 123 --watch",
                   command="echo harmless", script="echo also-ignored")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "watch" in result.stderr.lower()
@@ -195,7 +203,7 @@ def test_extra_command_fields_cannot_shadow_the_declared_cmd(tmp_path: Path, too
 
 def test_declared_background_completion_waits_for_the_existing_process(tmp_path: Path) -> None:
     """A controlled completion future models an exposed background notification."""
-    denied = scan(tmp_path, "Bash", "command", "gh run watch 123")
+    denied = scan(tmp_path, "Bash", "command", "gh pr checks 123 --watch")
     assert "run_in_background" in denied.stderr
     assert "completion notification" in denied.stderr
     child = process.Popen(
@@ -224,7 +232,7 @@ def test_declared_background_completion_waits_for_the_existing_process(tmp_path:
 def test_bounded_foreground_uses_the_waiters_own_terminal_deadline(
     tmp_path: Path, scenario: str, code: int
 ) -> None:
-    denied = scan(tmp_path, "Bash", "command", "gh run watch 123")
+    denied = scan(tmp_path, "Bash", "command", "gh pr checks 123 --watch")
     assert "bounded foreground" in denied.stderr
     result = process.run(
         [sys.executable, str(HARNESS), "--", "123", "--repo", "zackees/clud",
@@ -236,7 +244,7 @@ def test_bounded_foreground_uses_the_waiters_own_terminal_deadline(
 
 
 def test_ambiguous_tool_names_offer_a_local_capability_probe(tmp_path: Path) -> None:
-    denied = scan(tmp_path, "Bash", "command", "gh run watch 123")
+    denied = scan(tmp_path, "Bash", "command", "gh pr checks 123 --watch")
     assert "tool name" in denied.stderr
     assert "harmless local process" in denied.stderr
     probe = process.Popen(

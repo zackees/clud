@@ -202,8 +202,9 @@ fn setting_items() -> Vec<SettingItem> {
         key: "git.pr_wait_fail_fast",
         label: "Fail-fast PR-check watches",
         note: "Routes session PR-check watches through the bundled fail-fast \
-               waiter. Run-id watches and manual polling stay blocked; without \
-               the shim, native watches stay blocked. On by default (DD-116).",
+               waiter. PR polling loops stay blocked; run watches are not PR \
+               waits and fall through (DD-189); without \
+               the shim, native PR-check watches stay blocked. On by default (DD-116).",
         value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true)),
     });
     items.push(SettingItem {
