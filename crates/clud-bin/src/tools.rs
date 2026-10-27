@@ -343,6 +343,15 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: Some(std::time::Duration::from_secs(120)),
         quiet_ok: false,
     },
+    // Capture stays quiet while a local test is running; the helper owns its timeout.
+    BundledTool {
+        rel_path: "diagnostics/test_report.py",
+        body: include_str!("../assets/tools/diagnostics/test_report.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: std::time::Duration::from_secs(86_490),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
     // transcript-report — privacy-preserving analyzer for one Claude session
     // transcript (#1276, DD-138). Read-only and writes no files, so killing
     // it loses no work — `Resumable`.
@@ -666,6 +675,16 @@ mod tests {
             .find(|t| t.rel_path == "github/issue_context.py")
             .expect("issue context tool must be bundled");
         assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
+    #[test]
+    fn bundled_includes_local_test_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/test_report.py")
+            .expect("local test report must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+        assert!(tool.quiet_ok);
     }
 
     #[test]

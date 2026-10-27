@@ -574,6 +574,11 @@ fn dispatch_local_tool_command(args: &args::Args) -> Option<i32> {
                 target,
                 command,
             } => test_runtime::cli::run(bucket, target.clone(), command),
+            args::TestSubcommand::Capture {
+                output_dir,
+                timeout_secs,
+                command,
+            } => test_runtime::capture::run_cli(output_dir, *timeout_secs, command),
             args::TestSubcommand::Stats { bucket, json } => {
                 test_runtime::cli::stats(bucket.as_deref(), *json)
             }

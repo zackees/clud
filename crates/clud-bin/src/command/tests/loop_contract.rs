@@ -127,6 +127,7 @@ fn test_codex_loop_no_done_omits_contract() {
     let prompt = last_arg(&p);
     assert!(prompt.starts_with("task"));
     assert!(prompt.contains("github/issue_context.py"));
+    assert!(prompt.contains("diagnostics/test_report.py"));
     assert!(!prompt.contains(".clud/loop/DONE"));
     assert!(p.loop_markers.is_none());
 }

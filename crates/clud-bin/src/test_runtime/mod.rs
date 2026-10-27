@@ -13,5 +13,6 @@
 //! are #405 Q2/Q3/Q6/Q8/Q9 and are all explicitly deferred. v1 ships the
 //! storage and the dumbest useful read/write surface.
 
+pub mod capture;
 pub mod cli;
 pub mod store;

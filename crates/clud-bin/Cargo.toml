@@ -75,7 +75,7 @@ strum = { version = "0.27.2", features = ["derive"] }
 # the redb-open window to a few milliseconds at startup/shutdown so
 # concurrent launches serialize cleanly.
 fs4 = "0.13"
-running-process = { version = "4.10.15", default-features = false, features = ["telemetry", "client", "originator-scan", "pty"] }
+running-process = { version = "4.10.19", default-features = false, features = ["telemetry", "client", "originator-scan", "pty"] }
 # running-process consumer adoption (upstream #385): the daemon's broker
 # v1 frame lane binds a local-socket endpoint (named pipe on Windows,
 # unix socket elsewhere) alongside the legacy TCP listener. Pinned to
@@ -134,6 +134,7 @@ tree-sitter = "=0.26.13"
 tree-sitter-bash = "=0.25.1"
 tree-sitter-powershell = "=0.26.4"
 tempfile = "3"
+os_pipe = "1.2.3"
 
 [dev-dependencies]
 serde_yaml = "0.9"
@@ -152,7 +153,7 @@ filetime = "0.2"
 # Cargo unifies this dev-dep feature into the test harness but NOT into
 # `cargo build --bin clud`, so the production binary stays seam-free per
 # the upstream rule ("never compiled into production consumers").
-running-process = { version = "4.10.15", default-features = false, features = ["telemetry", "client", "originator-scan", "pty", "test-seams"] }
+running-process = { version = "4.10.19", default-features = false, features = ["telemetry", "client", "originator-scan", "pty", "test-seams"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # #468: ignored Win32 feasibility probe for user-land process/file

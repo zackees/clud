@@ -1237,6 +1237,19 @@ pub enum TestSubcommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Capture test output for the bounded report tool.
+    #[command(hide = true)]
+    Capture {
+        /// Directory verified by the host-specific privacy implementation.
+        #[arg(long)]
+        output_dir: std::path::PathBuf,
+        /// Maximum time to wait for the child and its output writers.
+        #[arg(long, default_value_t = 3600)]
+        timeout_secs: u64,
+        /// Command to execute, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Report per-bucket runtime statistics.
     Stats {
         /// Limit the report to one bucket.

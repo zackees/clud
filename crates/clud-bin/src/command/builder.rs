@@ -781,7 +781,7 @@ fn build_launch_plan_for_target_at(
                     prompt_text
                 };
                 let final_prompt = if matches!(backend, Backend::Codex) {
-                    format!("{final_prompt}\n\nFor large GitHub issue discussions, use `clud tool run github/issue_context.py -- --repo OWNER/REPO --issue N`; follow its snapshot continuation and refresh explicitly. If unavailable, use a bounded read and preserve access to the full issue.")
+                    format!("{final_prompt}\n\nFor large GitHub issue discussions, use `clud tool run github/issue_context.py -- --repo OWNER/REPO --issue N`; follow its snapshot continuation and refresh explicitly. If unavailable, use a bounded read and preserve access to the full issue. For noisy local test runs, use `clud tool run diagnostics/test_report.py -- -- <test command>` to keep a bounded report and private full-output artifact; inspect the artifact with its continuation. If unavailable, retain a bounded failure-focused fallback and preserve the command status.")
                 } else {
                     final_prompt
                 };
