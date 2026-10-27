@@ -551,6 +551,22 @@ def test_resume_mode_rejects_unknown_values() -> None:
     assert "sideways" in result.stderr
 
 
+def test_cliproxyapi_paren_thinking_suffix_is_accepted_on_the_model_id() -> None:
+    """CLIProxyAPI spells a thinking selection ``<model>(<value>)``
+    (internal/thinking/suffix.go). clud accepts it beside its own
+    ``<model>@<effort>``: a numeric budget resolves onto the same effort ladder
+    as a stated ``thinking.budget_tokens`` (16384 -> high)."""
+    result = _run("--dry-run", "--codex", "--model", "terra(16384)", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    selection = data["model_selection"]
+    assert selection["model"] == "codex-terra"
+    assert selection["wire_model"] == "gpt-5.6-terra"
+    assert selection["effort"] == "high"
+    assert selection["effort_source"] == "legacy_model_suffix"
+    assert 'model_reasoning_effort="high"' in data["command"]
+
+
 def test_dry_run_codex() -> None:
     result = _run("--dry-run", "--codex", "-p", "hello")
     assert result.returncode == 0
