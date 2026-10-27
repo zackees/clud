@@ -148,3 +148,16 @@ Script format:
 - **Log:** one JSON line per request, with `n`, `role`, `turn`, `step`,
   `note`, `t_start`, `t_end`, `tools`, `tool_results`, `system` and
   `messages`.
+
+The server's `context_bytes` request-log field measures the received HTTP body
+and compact JSON `system`, `tools`, and `messages` sections, plus system/tools/full-body
+fingerprints for equality within a run. These are byte counts, never estimated
+tokens. The real-harness OpenRouter context audit checks repeated content and
+per-turn growth; see [testing-tiers.md](../../../docs/architecture/testing-tiers.md).
+
+A script may set `audit_http: true` to log method/path/body size for every
+incoming request, `first_response_status: 503` to exercise one transient retry,
+and `forbidden_context_markers` to scan the entire parsed request for fixture
+canaries. Only a boolean result of that scan is logged; headers remain absent.
+The ordinary scripted response behavior is unchanged when these options are
+omitted.

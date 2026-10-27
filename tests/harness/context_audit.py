@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
 from typing import Any
 
 
@@ -13,57 +15,197 @@ def audit_context(
     output_markers: list[str],
     initial_budget: int,
     growth_budget: int,
+    forbidden_markers: tuple[str, ...] = (),
+    history_counts: list[int] | None = None,
+    expected_payloads: list[str] | None = None,
+    extra_context_texts: dict[int, list[tuple[str, str]]] | None = None,
+    expected_tool_calls: list[dict[str, Any]] | None = None,
+    extra_assistant_texts: dict[int, list[str]] | None = None,
+    instruction_sections: list[str] | None = None,
 ) -> dict[str, Any]:
     """Reject duplicates and unaccounted growth, including unchanged-history replay."""
-    assert len(requests) == len(output_markers) + 1, "unexpected model request amplification"
+    expected = (
+        history_counts if history_counts is not None else list(range(len(output_markers) + 1))
+    )
+    assert len(requests) == len(expected), "unexpected model request amplification"
     first = requests[0]["context_bytes"]
     assert first["request"] <= initial_budget, "initial context exceeds its reviewed budget"
     previous_bytes = first["request"]
     previous_results: dict[str, Any] = {}
+    previous_ids: list[str] = []
+    baseline_context = _message_context(requests[0])
     sizes = []
     for turn, request in enumerate(requests):
+        history_count = expected[turn]
         measured = request["context_bytes"]
         assert measured["request"] >= sum(measured[key] for key in ("system", "tools", "messages"))
         assert measured["tools_fingerprint"] == first["tools_fingerprint"], "tool schemas changed"
         assert measured["system"] == first["system"], "system context grew"
+        assert measured["system_fingerprint"] == first["system_fingerprint"], (
+            "system context changed"
+        )
+        expected_context = baseline_context + (extra_context_texts or {}).get(turn, [])
+        assert Counter(_message_context(request)) == Counter(expected_context), (
+            "unexpected, repeated or changed context text"
+        )
         visible = json.dumps([request.get("system"), request.get("messages")])
         assert visible.count(instruction_marker) == 1, "instructions were duplicated or lost"
+        assert not any(marker in visible for marker in forbidden_markers), (
+            "unrelated context leaked"
+        )
+        assert not request["unexpected_context"], "unrelated context leaked outside messages"
         _check_repeated_text(request)
+        _check_instruction_sections(request, instruction_sections or [])
+        if expected_tool_calls is not None:
+            _check_assistant_history(
+                request,
+                expected_tool_calls[:history_count],
+                (extra_assistant_texts or {}).get(turn, []),
+            )
         results = _tool_results(request)
         ids = [block["tool_use_id"] for block in results]
         assert len(ids) == len(set(ids)), "tool-result history was duplicated"
-        assert len(results) == turn, "tool-result history grew unexpectedly"
+        assert ids[: len(previous_ids)] == previous_ids, "historical call/result IDs changed"
+        previous_ids = ids
+        assert len(results) == history_count, "tool-result history grew unexpectedly"
         for block in results:
             identity = block["tool_use_id"]
             if identity in previous_results:
-                assert block.get("content") == previous_results[identity], "historical output changed"
+                assert block.get("content") == previous_results[identity], (
+                    "historical output changed"
+                )
             previous_results[identity] = block.get("content")
-        for index, marker in enumerate(output_markers):
-            count = sum(json.dumps(block.get("content")).count(marker) for block in results)
-            assert count == int(index < turn), "historical tool output was duplicated or lost"
+        _check_outputs(results, output_markers, history_count, expected_payloads)
         if turn:
-            assert measured["request"] - previous_bytes <= growth_budget, "unexplained context growth"
+            assert measured["request"] - previous_bytes <= growth_budget, (
+                "unexplained context growth"
+            )
         previous_bytes = measured["request"]
         sizes.append({key: measured[key] for key in ("request", "system", "tools", "messages")})
-    return {"request_count": len(requests), "cumulative_request_bytes": sum(x["request"] for x in sizes),
-            "initial_request_bytes": sizes[0]["request"], "requests": sizes}
+    return {
+        "request_count": len(requests),
+        "cumulative_request_bytes": sum(x["request"] for x in sizes),
+        "initial_request_bytes": sizes[0]["request"],
+        "requests": sizes,
+    }
 
 
 def _tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
-    return [block for message in request.get("messages", [])
-            if isinstance(message.get("content"), list)
-            for block in message["content"]
-            if isinstance(block, dict) and block.get("type") == "tool_result"]
+    return [
+        block
+        for message in request.get("messages", [])
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+
+
+def _texts(content: Any) -> list[str]:
+    if isinstance(content, str):
+        return [content] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    return [
+        text
+        for block in content
+        for text in _texts(block.get("text") if isinstance(block, dict) else block)
+    ]
+
+
+def _message_context(request: dict[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (message["role"], text)
+        for message in request.get("messages", [])
+        if message.get("role") in {"user", "system"}
+        for text in _texts(message.get("content"))
+    ]
 
 
 def _check_repeated_text(request: dict[str, Any]) -> None:
-    texts = []
-    for message in request.get("messages", []):
+    texts = _texts(request.get("system_blocks", request.get("system")))
+    texts.extend(text for _, text in _message_context(request))
+    assert len(texts) == len(set(texts)), "context block was repeated"
+
+
+def _check_outputs(
+    results: list[dict[str, Any]],
+    markers: list[str],
+    count: int,
+    payloads: list[str] | None,
+) -> None:
+    if payloads is not None:
+        assert all(block.get("content") in payloads[:count] for block in results), (
+            "unexpected or corrupted tool payload"
+        )
+    texts = [json.dumps(block.get("content"), ensure_ascii=False) for block in results]
+    for index, marker in enumerate(markers):
+        assert sum(text.count(marker) for text in texts) == int(index < count), (
+            "historical tool output was duplicated or lost"
+        )
+        if payloads is not None:
+            assert sum(payloads[index] in text for text in texts) == int(index < count), (
+                "unexpected or corrupted tool payload"
+            )
+
+
+def audit_retry(first: dict[str, Any], retry: dict[str, Any]) -> None:
+    assert (
+        first["context_bytes"]["body_fingerprint"] == retry["context_bytes"]["body_fingerprint"]
+    ), "retry changed the received request body"
+    assert first["messages"] == retry["messages"], "retry changed conversation history"
+    assert first["context_bytes"] == retry["context_bytes"], "retry changed context metrics"
+
+
+def _check_instruction_sections(request: dict[str, Any], sections: list[str]) -> None:
+    texts = _texts(request.get("system_blocks", request.get("system")))
+    texts.extend(text for _, text in _message_context(request))
+    for section in sections:
+        assert sum(text.count(section) for text in texts) == 1, (
+            "instruction section repeated or lost"
+        )
+    paragraphs = [
+        paragraph.strip()
+        for text in _texts(request.get("system_blocks"))
+        for paragraph in re.split(r"\n\s*\n", text)
+        if len(paragraph.strip()) >= 32
+    ]
+    assert len(paragraphs) == len(set(paragraphs)), "system instruction paragraph was repeated"
+
+
+def _check_assistant_history(
+    request: dict[str, Any],
+    expected: list[dict[str, Any]],
+    expected_texts: list[str],
+) -> None:
+    messages = [message for message in request["messages"] if message.get("role") == "assistant"]
+    _check_assistant_blocks(messages)
+    texts = [text for message in messages for text in _texts(message.get("content"))]
+    assert texts == expected_texts, "unexpected or repeated assistant context"
+    calls = [
+        block
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    assert len(calls) == len(expected), "unexpected assistant tool calls"
+    assert [{"name": call["name"], "input": call["input"]} for call in calls] == expected, (
+        "assistant tool inputs changed or contain unrelated context"
+    )
+    assert [call["id"] for call in calls] == [
+        result["tool_use_id"] for result in _tool_results(request)
+    ], "tool call and result identities disagree"
+
+
+def _check_assistant_blocks(messages: list[dict[str, Any]]) -> None:
+    fields = {
+        "text": {"type", "text", "cache_control"},
+        "tool_use": {"type", "id", "name", "input", "cache_control"},
+    }
+    for message in messages:
         content = message.get("content")
-        if isinstance(content, str):
-            texts.append(content)
-        elif isinstance(content, list):
-            texts.extend(block["text"] for block in content
-                         if isinstance(block, dict) and isinstance(block.get("text"), str))
-    long_blocks = [text for text in texts if len(text.encode()) >= 512]
-    assert len(long_blocks) == len(set(long_blocks)), "large context block was repeated"
+        assert isinstance(content, list), "unexpected assistant content shape"
+        for block in content:
+            assert isinstance(block, dict), "unexpected assistant block shape"
+            assert block.get("type") in fields, "unexpected assistant block type"
+            assert set(block) <= fields[block["type"]], "unexpected assistant block fields"

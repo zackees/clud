@@ -6,25 +6,42 @@ import copy
 
 import pytest
 
-from tests.harness.context_audit import audit_context
+from tests.harness.context_audit import audit_context, audit_retry
 
 
 def fixture_requests() -> list[dict]:
     rows = []
     for turn in range(3):
-        results = [{"type": "tool_result", "tool_use_id": f"tool-{i}", "content": f"OUTPUT_{i}"}
-                   for i in range(turn)]
-        rows.append({"system": "INSTRUCTION_ONCE", "messages": [{"role": "user", "content": results}],
-                     "context_bytes": {"request": 1000 + 100 * turn, "system": 20,
-                                       "tools": 50, "messages": 50 + 100 * turn,
-                                       "tools_fingerprint": "stable"}})
+        results = [
+            {"type": "tool_result", "tool_use_id": f"tool-{i}", "content": f"OUTPUT_{i}"}
+            for i in range(turn)
+        ]
+        rows.append(
+            {
+                "system": "INSTRUCTION_ONCE",
+                "unexpected_context": False,
+                "messages": [{"role": "user", "content": results}],
+                "context_bytes": {
+                    "request": 1000 + 100 * turn,
+                    "system": 20,
+                    "tools": 50,
+                    "messages": 50 + 100 * turn,
+                    "tools_fingerprint": "stable",
+                    "system_fingerprint": "stable",
+                },
+            }
+        )
     return rows
 
 
 def check(rows: list[dict]) -> dict:
-    return audit_context(rows, instruction_marker="INSTRUCTION_ONCE",
-                         output_markers=["OUTPUT_0", "OUTPUT_1"],
-                         initial_budget=1200, growth_budget=200)
+    return audit_context(
+        rows,
+        instruction_marker="INSTRUCTION_ONCE",
+        output_markers=["OUTPUT_0", "OUTPUT_1"],
+        initial_budget=1200,
+        growth_budget=200,
+    )
 
 
 def test_openrouter_context_audit_accepts_append_only_history() -> None:
@@ -33,7 +50,10 @@ def test_openrouter_context_audit_accepts_append_only_history() -> None:
     assert report["cumulative_request_bytes"] == 3300
 
 
-@pytest.mark.parametrize("mutation", ["instructions", "tool_result", "growth", "request", "schema", "long_text", "history"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["instructions", "tool_result", "growth", "request", "schema", "long_text", "history"],
+)
 def test_openrouter_context_audit_rejects_context_bloat(mutation: str) -> None:
     rows = copy.deepcopy(fixture_requests())
     if mutation == "instructions":
@@ -53,3 +73,12 @@ def test_openrouter_context_audit_rejects_context_bloat(mutation: str) -> None:
     with pytest.raises(AssertionError):
         check(rows)
 
+
+def test_openrouter_context_retry_detects_same_size_body_changes() -> None:
+    first = fixture_requests()[0]
+    first["context_bytes"]["body_fingerprint"] = "original"
+    retry = copy.deepcopy(first)
+    audit_retry(first, retry)
+    retry["context_bytes"]["body_fingerprint"] = "same-size-different-body"
+    with pytest.raises(AssertionError, match="request body"):
+        audit_retry(first, retry)
