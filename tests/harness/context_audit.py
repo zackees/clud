@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from typing import Any
 
 
@@ -33,6 +32,7 @@ def audit_context(
     previous_bytes = first["request"]
     previous_results: dict[str, Any] = {}
     previous_ids: list[str] = []
+    previous_history: list[tuple[str, Any]] = []
     baseline_context = _message_context(requests[0])
     sizes = []
     for turn, request in enumerate(requests):
@@ -45,7 +45,9 @@ def audit_context(
             "system context changed"
         )
         expected_context = baseline_context + (extra_context_texts or {}).get(turn, [])
-        assert Counter(_message_context(request)) == Counter(expected_context), (
+        _check_message_shapes(request)
+        previous_history = _check_history_prefix(request, previous_history)
+        assert _message_context(request) == expected_context, (
             "unexpected, repeated or changed context text"
         )
         visible = json.dumps([request.get("system"), request.get("messages")])
@@ -100,6 +102,26 @@ def _tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _check_history_prefix(
+    request: dict[str, Any], previous: list[tuple[str, Any]]
+) -> list[tuple[str, Any]]:
+    history = []
+    for message in request["messages"]:
+        content = message["content"]
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for block in blocks:
+            history.append(
+                (
+                    message["role"],
+                    {key: value for key, value in block.items() if key != "cache_control"},
+                )
+            )
+    assert history[: len(previous)] == previous, (
+        "complete historical context was reordered or changed"
+    )
+    return history
+
+
 def _texts(content: Any) -> list[str]:
     if isinstance(content, str):
         return [content] if content.strip() else []
@@ -133,19 +155,23 @@ def _check_outputs(
     count: int,
     payloads: list[str] | None,
 ) -> None:
+    assert all(block.get("is_error", False) is False for block in results), (
+        "scripted successful tool result changed to an error"
+    )
     if payloads is not None:
-        assert all(block.get("content") in payloads[:count] for block in results), (
+        assert [block.get("content") for block in results] == payloads[:count], (
             "unexpected or corrupted tool payload"
         )
-    texts = [json.dumps(block.get("content"), ensure_ascii=False) for block in results]
+    texts = [
+        block["content"]
+        if isinstance(block.get("content"), str)
+        else json.dumps(block.get("content"), ensure_ascii=False)
+        for block in results
+    ]
     for index, marker in enumerate(markers):
         assert sum(text.count(marker) for text in texts) == int(index < count), (
             "historical tool output was duplicated or lost"
         )
-        if payloads is not None:
-            assert sum(payloads[index] in text for text in texts) == int(index < count), (
-                "unexpected or corrupted tool payload"
-            )
 
 
 def audit_retry(first: dict[str, Any], retry: dict[str, Any]) -> None:
@@ -195,6 +221,51 @@ def _check_assistant_history(
     assert [call["id"] for call in calls] == [
         result["tool_use_id"] for result in _tool_results(request)
     ], "tool call and result identities disagree"
+    _check_tool_sequence(request, calls)
+
+
+def _check_tool_sequence(request: dict[str, Any], calls: list[dict[str, Any]]) -> None:
+    sequence = [
+        (block["type"], block.get("id", block.get("tool_use_id")))
+        for message in request["messages"]
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") in {"tool_use", "tool_result"}
+    ]
+    assert sequence == [
+        pair for call in calls for pair in (("tool_use", call["id"]), ("tool_result", call["id"]))
+    ], "scripted tool call/result chronology changed"
+
+
+def _check_message_shapes(request: dict[str, Any]) -> None:
+    fields = {
+        "text": {"type", "text", "cache_control"},
+        "tool_use": {"type", "id", "name", "input", "cache_control"},
+        "tool_result": {"type", "tool_use_id", "content", "is_error", "cache_control"},
+    }
+    for message in request["messages"]:
+        assert set(message) <= {"role", "content"}, "unexpected message fields"
+        role = message.get("role")
+        assert role in {"user", "assistant", "system"}, "unexpected message role"
+        content = message.get("content")
+        assert isinstance(content, str | list), "unexpected message content"
+        for block in content if isinstance(content, list) else []:
+            assert isinstance(block, dict), "unexpected block shape"
+            assert block.get("type") in fields, "unexpected block type"
+            kind = block["type"]
+            assert set(block) <= fields[kind], "unexpected context fields"
+            _check_cache_control(block)
+            assert kind != "tool_use" or role == "assistant", "unexpected tool call role"
+            assert kind != "tool_result" or role == "user", "unexpected tool result role"
+
+
+def _check_cache_control(block: dict[str, Any]) -> None:
+    if "cache_control" in block:
+        assert block["cache_control"] in [
+            {"type": "ephemeral"},
+            {"type": "ephemeral", "ttl": "5m"},
+            {"type": "ephemeral", "ttl": "1h"},
+        ], "unexpected cache-control context"
 
 
 def _check_assistant_blocks(messages: list[dict[str, Any]]) -> None:

@@ -464,7 +464,6 @@ fn context_bytes(request: &Value, body: &[u8]) -> Value {
 }
 
 fn has_forbidden_context(script: &Value, request: &Value) -> bool {
-    let encoded = request.to_string();
     script
         .get("forbidden_context_markers")
         .and_then(Value::as_array)
@@ -472,8 +471,21 @@ fn has_forbidden_context(script: &Value, request: &Value) -> bool {
             markers
                 .iter()
                 .filter_map(Value::as_str)
-                .any(|marker| !marker.is_empty() && encoded.contains(marker))
+                .any(|marker| !marker.is_empty() && contains_context_marker(request, marker))
         })
+}
+
+fn contains_context_marker(value: &Value, marker: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(marker),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_context_marker(value, marker)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key.contains(marker) || contains_context_marker(value, marker)),
+        _ => false,
+    }
 }
 
 fn log_request(server: &Server, request: &Value, body: &[u8], mut entry: Value) {
@@ -673,6 +685,19 @@ mod tests {
             json!({"system": [{"metadata": "PRIVATE_CANARY"}]}),
             json!({"tools": [{"description": "PRIVATE_CANARY"}]}),
             json!({"metadata": "PRIVATE_CANARY"}),
+        ] {
+            assert!(has_forbidden_context(&script, &request));
+        }
+        assert!(!has_forbidden_context(&script, &json!({"messages": []})));
+    }
+
+    #[test]
+    fn forbidden_context_detects_escaped_text_and_object_keys() {
+        let marker = "private \"quote\" \\ path\n雪🙂";
+        let script = json!({"forbidden_context_markers": ["", marker]});
+        for request in [
+            json!({"metadata": [null, false, 17, {"text": format!("prefix {marker} suffix")}]}),
+            json!({marker: "unrelated value"}),
         ] {
             assert!(has_forbidden_context(&script, &request));
         }

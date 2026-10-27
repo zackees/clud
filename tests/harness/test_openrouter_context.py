@@ -18,6 +18,7 @@ OUTPUT_BYTES = 4096
 INSTRUCTION = "CONTEXT_AUDIT_PROJECT_INSTRUCTION_ONCE"
 UNRELATED = "CONTEXT_AUDIT_UNRELATED_FILE_MUST_NOT_LEAK"
 MODEL = "deepseek/deepseek-v4.1-flash-1017"
+INITIAL_PROMPT = "Run the scripted read-only context audit and stop at its completion marker."
 RESUME_PROMPT = "Continue the read-only audit and return the resume completion marker."
 
 
@@ -28,16 +29,13 @@ def _prepare(h: Harness) -> tuple[dict, list[str], list[str]]:
     )
     (h.root / "unrelated-private-fixture.txt").write_text(UNRELATED, encoding="utf-8")
     emit = h.root / "emit.py"
-    emit.write_text(
-        "import sys\n"
-        + "print('CONTEXT_AUDIT_RESULT_' + sys.argv[1] + ': ' "
-        + f"+ chr(65 + int(sys.argv[1])) * {OUTPUT_BYTES})\n",
-        encoding="utf-8",
-    )
     markers = [f"CONTEXT_AUDIT_RESULT_{i}:" for i in range(TURNS)]
+    escaped = 'Quotes " and backslash \\; tab\t; newline\nUnicode 雪🙂\n'
     payloads = [
-        f"{marker} " + chr(65 + index) * OUTPUT_BYTES for index, marker in enumerate(markers)
+        f"{marker} " + escaped + chr(65 + index) * (OUTPUT_BYTES - len(escaped.encode("utf-8")))
+        for index, marker in enumerate(markers)
     ]
+    emit.write_text(f"import sys\nprint({payloads!r}[int(sys.argv[1])])\n", encoding="utf-8")
     steps = []
     for index in range(TURNS):
         step = {
@@ -82,7 +80,10 @@ def _check(
         forbidden_markers=(UNRELATED,),
         expected_payloads=payloads,
         expected_tool_calls=calls,
-        instruction_sections=[(Path(__file__).resolve().parents[2] / "CLAUDE.md").read_text()],
+        instruction_sections=[
+            (Path(__file__).resolve().parents[2] / "CLAUDE.md").read_text(encoding="utf-8"),
+            INITIAL_PROMPT,
+        ],
     )
 
 
@@ -125,9 +126,12 @@ def _audit_run(
     report["http_paths"] = sorted({row["path"] for row in http})
     rejected = []
     for name, mutated in adversarial_cases(successful, INSTRUCTION, UNRELATED):
-        with pytest.raises(AssertionError):
+        try:
             _check(mutated, markers, payloads, expected_calls)
-        rejected.append(name)
+        except AssertionError:
+            rejected.append(name)
+        else:
+            pytest.fail(f"context audit accepted adversary: {name}")
     report["rejected_adversaries"] = rejected
     return report
 
@@ -176,7 +180,10 @@ def _audit_resume(
         extra_context_texts={TURNS + 1: [("user", RESUME_PROMPT)]},
         extra_assistant_texts={TURNS + 1: ["CONTEXT_AUDIT_COMPLETE"]},
         expected_tool_calls=expected_calls,
-        instruction_sections=[(Path(__file__).resolve().parents[2] / "CLAUDE.md").read_text()],
+        instruction_sections=[
+            (Path(__file__).resolve().parents[2] / "CLAUDE.md").read_text(encoding="utf-8"),
+            INITIAL_PROMPT,
+        ],
         expected_payloads=payloads,
     )
     report["captured_resume_attempts"] = len(calls)
@@ -200,7 +207,7 @@ def test_openrouter_context_stays_bounded_across_real_tool_turns(harness: Harnes
             h.new_session()
         scenario = {**script, "first_response_status": 503} if profile == "retry" else script
         result = h.run_clud(
-            "Run the scripted read-only context audit and stop at its completion marker.",
+            INITIAL_PROMPT,
             scenario,
             model=MODEL,
             extra_args=extra,

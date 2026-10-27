@@ -82,7 +82,8 @@ def adversarial_cases(requests: list[dict[str, Any]], instruction: str, canary: 
             for block in message["content"]
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
-        results[1]["content"] = results[1]["content"].replace("B" * 4096, "A" * 4096)
+        marker = results[1]["content"].partition(": ")[0]
+        results[1]["content"] = marker + ": " + results[0]["content"].partition(": ")[2]
     yield "copied payload with preserved ID and marker", rows
 
     rows = deepcopy(requests)
@@ -178,3 +179,49 @@ def adversarial_cases(requests: list[dict[str, Any]], instruction: str, canary: 
                 if isinstance(block, dict) and block.get("tool_use_id") == original:
                     block["tool_use_id"] = call["id"]
     yield "paired historical call/result IDs rewritten together", rows
+
+    rows = deepcopy(requests)
+    rows[1]["messages"].append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "data": "unrequested context"}}
+            ],
+        }
+    )
+    yield "unexpected image content", rows
+
+    rows = deepcopy(requests)
+    _result(rows[1])["extra_context"] = "unrequested repeated context"
+    yield "unexpected tool-result metadata", rows
+
+    rows = deepcopy(requests)
+    rows[1]["messages"][0]["extra_context"] = "unrequested repeated context"
+    yield "unexpected message metadata", rows
+
+    rows = deepcopy(requests)
+    messages = rows[1]["messages"]
+    assistant = next(
+        index for index, message in enumerate(messages) if message["role"] == "assistant"
+    )
+    result = messages.index(_result_message(rows[1]))
+    messages[assistant], messages[result] = messages[result], messages[assistant]
+    yield "result precedes its tool call", rows
+
+    rows = deepcopy(requests)
+    _result(rows[-1])["is_error"] = True
+    yield "historical successful result changed to error", rows
+
+    rows = deepcopy(requests)
+    _result(rows[1])["cache_control"] = {"type": "ephemeral", "text": "unrequested context"}
+    yield "unexpected content in cache metadata", rows
+
+    rows = deepcopy(requests)
+    messages = rows[1]["messages"]
+    original = next(index for index, message in enumerate(messages) if message["role"] == "user")
+    prompt = messages.pop(original)
+    assistant = next(
+        index for index, message in enumerate(messages) if message["role"] == "assistant"
+    )
+    messages.insert(assistant + 1, prompt)
+    yield "original prompt moved inside a tool turn", rows
