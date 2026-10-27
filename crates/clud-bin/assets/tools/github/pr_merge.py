@@ -107,6 +107,17 @@ def _has_queue(repo: str, base: str) -> bool:
         raise SubmitError("GitHub returned invalid branch queue state") from exc
 
 
+def _queue_entry(pr: dict) -> object:
+    if "mergeQueueEntry" not in pr:
+        raise SubmitError("GitHub returned no PR merge queue entry state")
+    entry = pr["mergeQueueEntry"]
+    if entry is not None and (
+        not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]
+    ):
+        raise SubmitError("GitHub returned an invalid merge queue entry")
+    return entry
+
+
 def submit(repo: str, number: int, sha: str) -> str:
     """Submit once; fail closed on a stale head or unreadable queue state."""
     if (not _REPO.fullmatch(repo) or any(part in {".", ".."} for part in repo.split("/"))
@@ -118,12 +129,8 @@ def submit(repo: str, number: int, sha: str) -> str:
     head = pr.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha.lower():
         raise SubmitError("PR head changed; inspect it and use its full current SHA")
-    if "mergeQueueEntry" not in pr:
-        raise SubmitError("GitHub returned no PR merge queue entry state")
-    entry = pr["mergeQueueEntry"]
+    entry = _queue_entry(pr)
     if entry is not None:
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
-            raise SubmitError("GitHub returned an invalid merge queue entry")
         return "already queued"
     base = pr.get("baseRefName")
     if not isinstance(base, str) or not base:

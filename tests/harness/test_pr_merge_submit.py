@@ -56,8 +56,10 @@ def test_agent_submits_exact_head(
     if mutations:
         assert f"sha={HEAD}" in mutations[0]
     if merges:
-        assert "--match-head-commit" in merges[0] and HEAD in merges[0]
-        assert "--squash" in merges[0] and "--admin" not in merges[0]
+        assert "--match-head-commit" in merges[0]
+        assert HEAD in merges[0]
+        assert "--squash" in merges[0]
+        assert "--admin" not in merges[0]
 
 
 def test_agent_enqueues_only_the_requested_repository(harness: Harness) -> None:

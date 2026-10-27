@@ -591,8 +591,7 @@ def _detach(state: dict, child: str) -> None:
     issue["parent"] = None
 
 
-def _graphql(path: Path, state: dict, argv: list[str]) -> int:
-    issues = state.setdefault("issues", {})
+def _graphql_merge(path: Path, state: dict, argv: list[str]) -> int | None:
     fields = _api_fields(argv)
     query = str(fields.get("query", ""))
     if "enqueuePullRequest" in query:
@@ -617,6 +616,16 @@ def _graphql(path: Path, state: dict, argv: list[str]) -> int:
     if "mergeQueue(branch:" in query:
         queue = {"id": "queue"} if fields.get("base") in state.get("queue_branches", []) else None
         return _emit(argv, {"data": {"repository": {"mergeQueue": queue}}})
+    return None
+
+
+def _graphql(path: Path, state: dict, argv: list[str]) -> int:
+    result = _graphql_merge(path, state, argv)
+    if result is not None:
+        return result
+    issues = state.setdefault("issues", {})
+    fields = _api_fields(argv)
+    query = str(fields.get("query", ""))
     if "ClosedEvent" not in query and "closer" not in query:
         print(json.dumps({"data": {}}))
         return 0
