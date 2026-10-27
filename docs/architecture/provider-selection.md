@@ -205,6 +205,10 @@ explicit provider flag
 -> Claude built-in default
 ```
 
+A saved direct-provider default also suppresses the bare interactive
+installed-harness picker, so selecting a harness cannot silently replace the
+saved provider. Without a saved provider, the picker retains its normal behavior.
+
 The DeepSeek fallback runs only when no explicit provider/model/harness or
 saved provider/harness overrides routing. It requires a well-formed DeepSeek
 key in clud's native vault, a Claude harness route (bootstrapped if needed), and

@@ -23,7 +23,7 @@ activation plan entirely, preserves profiles/User Path, and reports binary
 installation with activation still required. After a successful interactive install and verified
 activation, `setup.rs` offers OpenRouter, Claude, or Codex, saves an
 OpenRouter key and model when selected, persists the chosen provider and native
-harness, and offers to launch immediately.
+harness, and offers to launch the installed executable immediately.
 Scripted installs and structured installer reports do not run this setup.
 
 `result.rs` defines the versioned `clud-installer-result/v1` outcome. Add

@@ -85,6 +85,10 @@ impl Outcome {
         self.status == Status::Complete
     }
 
+    pub(super) fn destination(&self) -> Option<&str> {
+        self.destination.as_deref()
+    }
+
     pub(super) fn write_json(&self, mut writer: impl Write) -> io::Result<()> {
         serde_json::to_writer(&mut writer, self).map_err(io::Error::other)?;
         writer.write_all(b"\n")

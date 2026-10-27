@@ -86,7 +86,7 @@ pub fn should_offer(args: &Args, stdin_tty: bool, stderr_tty: bool, path_has_clu
 }
 
 /// Run an explicit installer request before launch setup has side effects.
-pub fn run_explicit(args: &mut Args) -> Option<i32> {
+pub fn run_explicit(args: &Args) -> Option<i32> {
     let outcome = match explicit_request(args) {
         Ok(None) => return None,
         Ok(Some(request)) => run_request(
@@ -116,7 +116,7 @@ pub fn run_explicit(args: &mut Args) -> Option<i32> {
 
 /// Offer installation only for a bare interactive first run with no `clud`
 /// executable resolvable by name on the effective PATH.
-pub fn run_auto_offer(args: &mut Args) -> Option<i32> {
+pub fn run_auto_offer(args: &Args) -> Option<i32> {
     let missing = matches!(
         which::which("clud"),
         Err(which::Error::CannotFindBinaryPath)
@@ -143,17 +143,46 @@ pub fn run_auto_offer(args: &mut Args) -> Option<i32> {
     }
 }
 
-fn finish_with_setup(args: &mut Args, outcome: Outcome) -> Option<i32> {
+fn finish_with_setup(args: &Args, outcome: Outcome) -> Option<i32> {
     if !outcome.is_complete() || args.yes || !terminal_available() {
         return Some(outcome.exit_code());
     }
-    match super::setup::run() {
-        Ok(Some(launch_args)) => {
-            *args = launch_args;
-            None
+    Some(match super::setup::run() {
+        Ok(Some(launch_args)) => match outcome.destination() {
+            Some(destination) => launch_installed(destination, launch_args),
+            None => {
+                eprintln!("clud setup: installed path cannot be represented for launch");
+                1
+            }
+        },
+        Ok(None) => 0,
+        Err(code) => code,
+    })
+}
+
+fn launch_installed(destination: &str, args: Args) -> i32 {
+    use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+
+    let mut argv = args.raw_argv;
+    argv[0] = destination.to_owned();
+    let process = NativeProcess::new(ProcessConfig {
+        command: CommandSpec::Argv(argv),
+        cwd: None,
+        env: None,
+        capture: false,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Inherit,
+        nice: None,
+        address_space_limit_bytes: None,
+    });
+    match process.start().and_then(|()| process.wait(None)) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("clud setup: could not start installed clud: {error}");
+            1
         }
-        Ok(None) => Some(0),
-        Err(code) => Some(code),
     }
 }
 
@@ -717,13 +746,13 @@ mod tests {
 
     #[test]
     fn no_tty_without_automation_exits_before_fetch_or_install() {
-        assert_eq!(run_explicit(&mut parse(&["clud", "--installer"])), Some(2));
+        assert_eq!(run_explicit(&parse(&["clud", "--installer"])), Some(2));
         assert_eq!(
-            run_explicit(&mut parse(&["clud", "--installer", "--install-current"])),
+            run_explicit(&parse(&["clud", "--installer", "--install-current"])),
             Some(2)
         );
         assert_eq!(
-            run_explicit(&mut parse(&[
+            run_explicit(&parse(&[
                 "clud",
                 "--installer",
                 "--install-version",

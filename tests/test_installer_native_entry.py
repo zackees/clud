@@ -770,8 +770,76 @@ def test_interactive_openrouter_setup_saves_key_and_model(
         assert document["providers"]["openrouter"]["model"] == model
         assert document["backend"]["default"] == "openrouter"
         assert document["harness"]["default"] == "default"
+        installed = home / ".local" / "bin" / "clud"
+        plan = run_process(
+            [str(installed), "--dry-run", "-p", "hi"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        assert json.loads(plan.stdout)["model_selection"]["wire_model"] == model
         assert [path.read_text() for path in vault.glob("*.secret")] == [
             "sk-or-test-install-12345"
+        ]
+    finally:
+        if status is None:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        os.close(master)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+def test_start_uses_the_installed_executable(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    marker = tmp_path / "launched"
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    env["CLUD_TEST_HANDOFF_MARKER"] = str(marker)
+    destination = home / ".local" / "bin" / "clud"
+    pid, master = pty.fork()
+    if pid == 0:
+        binary = str(clud_binary())
+        os.execve(binary, [binary, "--installer", "--install-current"], env)
+    output = bytearray()
+    step = 0
+    status = None
+    deadline = time.monotonic() + 45
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            if step == 0 and b"Not now" in output:
+                os.write(master, b"\x1b[A\r")
+                step = 1
+            elif step == 1 and b"Setup for:" in output:
+                os.write(master, b"\x1b[B\r")
+                step = 2
+            elif step == 2 and b"Start right now?" in output:
+                # A distinguishable installed executable proves which binary gets launched.
+                destination.write_text(
+                    '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$CLUD_TEST_HANDOFF_MARKER"\n'
+                    'exit 37\n'
+                )
+                destination.chmod(0o755)
+                os.write(master, b"\r")
+                step = 3
+            waited, child_status = os.waitpid(pid, os.WNOHANG)
+            if waited:
+                status = child_status
+                break
+        assert step == 3, output.decode(errors="replace")
+        assert status is not None, output.decode(errors="replace")
+        assert os.waitstatus_to_exitcode(status) == 37, output.decode(errors="replace")
+        assert marker.read_text().splitlines() == [
+            str(destination), "--claude", "--harness", "default"
         ]
     finally:
         if status is None:
