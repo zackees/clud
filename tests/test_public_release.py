@@ -20,7 +20,7 @@ def release(tag: str, *, prerelease: bool, asset_id: int = 17) -> dict:
             "size": 100,
             "digest": "sha256:" + "a" * 64,
             "state": "uploaded",
-            "browser_download_url": f"https://github.com/zackees/clud/releases/download/{tag}/clud-{tag}-x86_64-unknown-linux-musl",
+            "browser_download_url": f"https://github.com/talos-hq/clud/releases/download/{tag}/clud-{tag}-x86_64-unknown-linux-musl",
         }],
     }
 

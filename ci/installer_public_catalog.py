@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from urllib.request import Request, urlopen
 
+from ci.public_release import REPO
 from installer.catalog import ONLINE_URL, VERSION
 
 
@@ -13,7 +14,7 @@ def catalog_url(mode: str, tag: str) -> str:
     if not VERSION.fullmatch(version) or "-" in version or "+" in version:
         raise ValueError("public release tag must be a stable-form version")
     if mode == "candidate":
-        return f"https://github.com/zackees/clud/releases/download/{tag}/installer-candidate-manifest.json"
+        return f"https://github.com/{REPO}/releases/download/{tag}/installer-candidate-manifest.json"
     if mode == "released":
         return ONLINE_URL
     raise ValueError("invalid public installer mode")
@@ -50,7 +51,7 @@ def resolve(mode: str, tag: str, os_name: str, arch: str) -> dict:
         raise ValueError("public catalog lacks one exact native asset")
     asset = matches[0]
     expected_url = (
-        f"https://github.com/zackees/clud/releases/download/{tag}/{asset['filename']}"
+        f"https://github.com/{REPO}/releases/download/{tag}/{asset['filename']}"
     )
     if asset["urls"] != [expected_url]:
         raise ValueError("public native asset URL is not fixed to the release tag")
