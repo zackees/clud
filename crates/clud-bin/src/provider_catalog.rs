@@ -10,14 +10,20 @@ use crate::backend::ModelProvider;
 
 /// Provider-neutral launch effort. Individual providers decide which values
 /// they accept and how they translate them at their wire boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    #[strum(serialize = "none")]
     None,
+    #[strum(serialize = "low")]
     Low,
+    #[strum(serialize = "medium")]
     Medium,
+    #[strum(serialize = "high")]
     High,
+    #[strum(serialize = "xhigh")]
     XHigh,
+    #[strum(serialize = "max")]
     Max,
 }
 
@@ -31,22 +37,12 @@ impl EffortLevel {
         Self::Max,
     ];
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        let value = value.trim().to_ascii_lowercase();
-        Self::ALL
-            .into_iter()
-            .find(|effort| effort.as_str() == value)
+        value.trim().to_ascii_lowercase().parse().ok()
     }
 
     pub(crate) fn catalog() -> String {
@@ -1298,6 +1294,23 @@ mod reachability_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_names_round_trip_with_existing_case_rules() {
+        for (name, effort) in [
+            ("none", EffortLevel::None),
+            ("low", EffortLevel::Low),
+            ("medium", EffortLevel::Medium),
+            ("high", EffortLevel::High),
+            ("xhigh", EffortLevel::XHigh),
+            ("max", EffortLevel::Max),
+        ] {
+            assert_eq!(effort.as_str(), name);
+            assert_eq!(EffortLevel::parse(name), Some(effort));
+            assert_eq!(EffortLevel::parse(&name.to_ascii_uppercase()), Some(effort));
+        }
+        assert_eq!(EffortLevel::parse("unknown"), None);
+    }
 
     #[test]
     fn sol_6_1_has_its_own_model_and_supported_efforts() {
