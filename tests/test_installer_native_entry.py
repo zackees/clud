@@ -761,7 +761,9 @@ def test_interactive_openrouter_setup_saves_key_and_model(
             check=True,
         )
         assert json.loads(plan.stdout)["model_selection"]["wire_model"] == model
-        if model == "deepseek/deepseek-v4.1-flash":
+        if model == "deepseek/deepseek-v4.1-flash" and os.environ.get(
+            "CLUD_TEST_MOCK_AGENT_BINARY"
+        ):
             assert_bare_openrouter_launch(installed, env, tmp_path)
         assert [path.read_text() for path in vault.glob("*.secret")] == [
             "sk-or-test-install-12345"

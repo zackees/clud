@@ -562,6 +562,7 @@ fn collect_shell_probe(
                 }
                 terminal_bytes += bytes.len();
             }
+            Ok(None) if process.wait_impl(Some(0.0)).is_ok() => break,
             Ok(None) => continue,
             Err(_) => break,
         }
