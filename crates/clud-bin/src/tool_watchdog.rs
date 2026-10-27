@@ -327,6 +327,6 @@ mod tests {
         // pr_merge_watch.py is in BUNDLED_TOOLS as Resumable per slice 1.
         let w = Watchdog::for_rel_path("github/pr_merge_watch.py");
         assert_eq!(w.kill_semantics, KillSemantics::Resumable);
-        assert_eq!(w.command_timeout, Duration::from_secs(60 * 20));
+        assert_eq!(w.command_timeout, Duration::from_secs(3660));
     }
 }

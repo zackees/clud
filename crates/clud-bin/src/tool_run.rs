@@ -103,7 +103,22 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     let tool_bytes = fs::read(&tool_path)?;
     let cache_dir = resolved_uv_cache_dir_from(std::env::var_os("UV_CACHE_DIR"));
     let mut env: Vec<(String, String)> = build_child_env(&cache_dir);
-    let watchdog = Watchdog::for_rel_path(rel_path);
+    let mut watchdog = Watchdog::for_rel_path(rel_path);
+    let requested = std::env::var("CLUD_PR_MERGE_WATCH_TIMEOUT").ok();
+    let requested = watcher_deadline(rel_path, args, requested.as_deref())?;
+    // Debug-only integration fixtures deliberately shorten the wrapper cap.
+    #[cfg(debug_assertions)]
+    let test_override = std::env::var("CLUD_TEST_TOOL_COMMAND_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some();
+    #[cfg(not(debug_assertions))]
+    let test_override = false;
+    if !test_override {
+        if let Some(deadline) = requested {
+            watchdog.command_timeout = deadline;
+        }
+    }
     env.push((
         "CLUD_TOOL_COMMAND_TIMEOUT_SECS".to_string(),
         watchdog.command_timeout.as_secs().to_string(),
@@ -133,6 +148,93 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         }
         _ => run_passthrough(rel_path, args, argv, env, run_state),
     }
+}
+
+/// Give the PR watcher time to finish its requested wait and emit a timeout.
+/// Reject oversized requests instead of silently clamping them at the wrapper.
+fn watcher_deadline(
+    rel_path: &str,
+    args: &[String],
+    configured: Option<&str>,
+) -> io::Result<Option<Duration>> {
+    if rel_path != "github/pr_merge_watch.py" {
+        return Ok(None);
+    }
+    const DEFAULT_SECS: u64 = 3600;
+    const MAX_SECS: u64 = 86400;
+    const EXIT_MARGIN_SECS: u64 = 60;
+    let mut value = configured;
+    let mut explicit = false;
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| *arg != "--")
+        .collect();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index];
+        let (option, attached) = argument
+            .split_once('=')
+            .map_or((argument, None), |(option, value)| (option, Some(value)));
+        // argparse allows unambiguous long-option prefixes. `--t` is
+        // ambiguous with --triggers-for-base; `--ti` and longer are unique.
+        if option.len() >= 4 && "--timeout".starts_with(option) {
+            explicit = true;
+            if let Some(attached) = attached {
+                value = Some(attached);
+            } else {
+                value = args.get(index + 1).copied();
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    let seconds = match value {
+        None => DEFAULT_SECS,
+        Some(raw) => {
+            let raw = raw.trim();
+            let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+            let valid_digits = !digits.is_empty()
+                && !digits.starts_with('_')
+                && !digits.ends_with('_')
+                && !digits.contains("__")
+                && digits
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'_');
+            if !valid_digits {
+                if !explicit
+                    && !raw
+                        .chars()
+                        .any(|character| !character.is_ascii() && character.is_numeric())
+                {
+                    return Ok(Some(Duration::from_secs(DEFAULT_SECS + EXIT_MARGIN_SECS)));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid PR watcher timeout",
+                ));
+            }
+            let digits = digits.replace('_', "");
+            if raw.starts_with('-') {
+                0
+            } else {
+                let seconds = digits.parse::<u64>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "PR watcher timeout exceeds 86400 seconds",
+                    )
+                })?;
+                if seconds > MAX_SECS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "PR watcher timeout exceeds 86400 seconds",
+                    ));
+                }
+                seconds
+            }
+        }
+    };
+    Ok(Some(Duration::from_secs(seconds + EXIT_MARGIN_SECS)))
 }
 
 /// Plain passthrough: child stdout/stderr are captured only long enough to
@@ -1192,5 +1294,81 @@ mod secret_tests {
         );
         assert!(!payload.contains(key));
         assert!(payload.contains("****cdef"));
+    }
+}
+
+#[cfg(test)]
+mod watcher_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn watcher_deadlines_honor_requested_duration_with_a_bounded_margin() {
+        let args = vec!["493".into(), "--timeout".into(), "3600".into()];
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &args, None).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], None).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("120")).unwrap(),
+            Some(Duration::from_secs(180))
+        );
+        assert_eq!(
+            watcher_deadline(
+                "github/pr_merge_watch.py",
+                &["--timeout=240".into()],
+                Some("120")
+            )
+            .unwrap(),
+            Some(Duration::from_secs(300))
+        );
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--timeout=86401".into()],
+            None
+        )
+        .is_err());
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some(" 7_200 ")).unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &["--timeo=7_200".into()], None).unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--ti".into(), "86_401".into()],
+            None
+        )
+        .is_err());
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--timeout=7__200".into()],
+            None
+        )
+        .is_err());
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("  ")).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("bad")).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline(
+                "github/pr_merge_watch.py",
+                &["--timeout".into(), "--".into(), "7200".into()],
+                None
+            )
+            .unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert!(watcher_deadline("github/pr_merge_watch.py", &[], Some("٧٢٠٠")).is_err());
+        assert_eq!(watcher_deadline("other.py", &args, None).unwrap(), None);
     }
 }

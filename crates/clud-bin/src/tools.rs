@@ -128,7 +128,9 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         // PR-merge watcher polls GitHub state; the world owns the merge
         // status, so killing this process loses no work — `Resumable`.
         kill_semantics: KillSemantics::Resumable,
-        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        // The default watch is one hour plus 60 seconds to emit its result.
+        // Explicit requests can adjust this per invocation (up to 24 hours).
+        command_timeout: Duration::from_secs(3660),
         progress_timeout: None,
         quiet_ok: false,
     },
