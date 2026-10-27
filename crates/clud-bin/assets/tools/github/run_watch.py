@@ -39,6 +39,7 @@ import json
 import os
 import sys
 import time
+from urllib.parse import urlparse
 
 from running_process import PIPE, RunningProcess, TimeoutExpired
 
@@ -92,9 +93,12 @@ def evaluate(run: dict) -> tuple[str, list[dict]]:
         return "failed", failed
     if run.get("status") != "completed":
         return "pending", []
-    if (run.get("conclusion") or "") in FAILED:
+    conclusion = run.get("conclusion")
+    if not isinstance(conclusion, str):
+        return "pending", []
+    if conclusion in FAILED:
         return "failed", []
-    if run.get("conclusion") in {"success", "neutral", "skipped"}:
+    if conclusion in {"success", "neutral", "skipped"}:
         return "success", []
     return "pending", []
 
@@ -132,13 +136,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def api_get(path: str) -> object | None:
+def api_get(path: str, hostname: str | None = None) -> object | None:
     """Fetch one conditional REST page, using the session broker when present."""
     broker = os.environ.get("CLUD_GH_READ_BROKER") == "1" and bool(
         os.environ.get("CLUD_GH_SHIM_TARGET")
     )
-    cached = _ETAGS.get(path)
+    cache_key = f"{hostname or 'github.com'}:{path}"
+    cached = _ETAGS.get(cache_key)
     args = ["api", path] if broker else ["api", "-i", path]
+    if hostname:
+        args += ["--hostname", hostname]
     if not broker and cached:
         args += ["-H", f"If-None-Match: {cached[0]}"]
     code, out, err = gh(*args)
@@ -165,7 +172,7 @@ def api_get(path: str) -> object | None:
     except json.JSONDecodeError:
         return None
     if etag:
-        _ETAGS[path] = (etag, data)
+        _ETAGS[cache_key] = (etag, data)
     return data
 
 
@@ -194,10 +201,12 @@ def valid_job(job: object, seen: set[int]) -> bool:
     status = job.get("status")
     if not isinstance(status, str):
         return False
-    if status == "completed" and job.get("conclusion") not in (
-        FAILED | {"success", "neutral", "skipped"}
-    ):
-        return False
+    if status == "completed":
+        conclusion = job.get("conclusion")
+        if not isinstance(conclusion, str) or conclusion not in (
+            FAILED | {"success", "neutral", "skipped"}
+        ):
+            return False
     seen.add(job_id)
     return True
 
@@ -222,6 +231,10 @@ def validate_page(data: object, expected: int | None, seen: set[int]) -> tuple[i
 
 def job_pages(repo: str, run_id: int, attempt: int) -> tuple[list[dict] | None, str]:
     """Retrieve every page for one exact attempt; fail closed on partial data."""
+    parts = repo.split("/")
+    hostname = parts[0] if len(parts) == 3 else None
+    if hostname:
+        repo = "/".join(parts[1:])
     jobs: list[dict] = []
     seen: set[int] = set()
     expected: int | None = None
@@ -230,7 +243,8 @@ def job_pages(repo: str, run_id: int, attempt: int) -> tuple[list[dict] | None, 
             f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
             f"?per_page={PAGE_SIZE}&page={page}"
         )
-        result = validate_page(api_get(path), expected, seen)
+        data = api_get(path, hostname) if hostname else api_get(path)
+        result = validate_page(data, expected, seen)
         if result is None:
             return None, f"job page {page} unavailable, invalid, or inconsistent"
         expected, batch = result
@@ -253,15 +267,23 @@ def job_pages(repo: str, run_id: int, attempt: int) -> tuple[list[dict] | None, 
 def fetch(run_id: int, repo: str | None) -> dict | None:
     """Read a complete, internally consistent snapshot of the current attempt."""
     if not repo:
-        code, out, _ = gh("repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
-        if code != 0 or "/" not in out.strip():
+        code, out, _ = gh("repo", "view", "--json", "nameWithOwner,url")
+        try:
+            data = json.loads(out)
+            owner_repo = data["nameWithOwner"]
+            hostname = urlparse(data["url"]).hostname
+            if not isinstance(owner_repo, str) or owner_repo.count("/") != 1 or not hostname:
+                return None
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
-        repo = out.strip()
+        if code != 0:
+            return None
+        repo = owner_repo if hostname == "github.com" else f"{hostname}/{owner_repo}"
     run = run_metadata(run_id, repo)
     if not run or not isinstance(run.get("attempt"), int) or run["attempt"] < 1:
         return None
     valid_statuses = {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
-    if run.get("status") not in valid_statuses:
+    if not isinstance(run.get("status"), str) or run["status"] not in valid_statuses:
         return None
     jobs, reason = job_pages(repo, run_id, run["attempt"])
     if jobs is None:
@@ -274,7 +296,8 @@ def fetch(run_id: int, repo: str | None) -> dict | None:
     if (
         not after
         or after.get("attempt") != run["attempt"]
-        or after.get("status") not in valid_statuses
+        or not isinstance(after.get("status"), str)
+        or after["status"] not in valid_statuses
     ):
         return None
     confirmed_failure = any(

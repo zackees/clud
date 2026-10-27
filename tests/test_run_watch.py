@@ -118,6 +118,17 @@ def test_unknown_run_conclusion_is_not_success() -> None:
     assert run_watch.evaluate(run) == ("pending", [])
 
 
+def test_malformed_conclusions_do_not_crash_or_claim_success(monkeypatch) -> None:
+    for conclusion in ([], {"invalid": True}):
+        run = {"status": "completed", "conclusion": conclusion, "jobs": []}
+        assert run_watch.evaluate(run) == ("pending", [])
+        metadata = {"status": "completed", "conclusion": "success", "attempt": 2}
+        monkeypatch.setattr(run_watch, "run_metadata", lambda *_: metadata.copy())
+        job = {"id": 1, "name": "bad", "status": "completed", "conclusion": conclusion}
+        monkeypatch.setattr(run_watch, "api_get", lambda *_: {"total_count": 1, "jobs": [job]})
+        assert run_watch.fetch(123, "owner/repo") is None
+
+
 def test_fetch_rejects_completed_job_with_unknown_conclusion(monkeypatch) -> None:
     run = {"status": "completed", "conclusion": "success", "attempt": 2}
     monkeypatch.setattr(run_watch, "run_metadata", lambda *_: run.copy())
@@ -321,3 +332,35 @@ def test_confirmed_failure_survives_run_completing_during_read(monkeypatch) -> N
     assert result is not None
     assert result["status"] == "completed"
     assert run_watch.evaluate(result)[0] == "failed"
+
+
+def test_enterprise_repo_host_is_preserved_explicitly_and_when_inferred(monkeypatch) -> None:
+    run = {"status": "completed", "conclusion": "success", "attempt": 2}
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        if args[:2] == ("repo", "view"):
+            return 0, json.dumps({"nameWithOwner": "o/r", "url": "https://ghe.example.com/o/r"}), ""
+        if args[:2] == ("run", "view"):
+            assert "ghe.example.com/o/r" in args
+            return 0, json.dumps(run), ""
+        assert args[0] == "api"
+        assert "--hostname" in args and "ghe.example.com" in args
+        assert "repos/o/r/actions/runs/123/attempts/2/jobs?per_page=30&page=1" in args
+        return 0, json.dumps({"total_count": 0, "jobs": []}), ""
+
+    monkeypatch.delenv("CLUD_GH_READ_BROKER", raising=False)
+    monkeypatch.setattr(run_watch, "gh", fake_gh)
+    for repo in ("ghe.example.com/o/r", None):
+        result = run_watch.fetch(123, repo)
+        assert result is not None
+        assert run_watch.evaluate(result) == ("success", [])
+    assert len([args for args in calls if args[0] == "api"]) == 2
+
+
+def test_fetch_rejects_malformed_status(monkeypatch) -> None:
+    for status in ([], {"bad": True}):
+        run = {"status": status, "conclusion": "success", "attempt": 2}
+        monkeypatch.setattr(run_watch, "run_metadata", lambda *_: run)
+        assert run_watch.fetch(123, "o/r") is None
