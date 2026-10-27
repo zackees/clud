@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows artifacts: #2246")
+POSIX_ARTIFACTS = pytest.mark.skipif(sys.platform == "win32", reason="Windows artifacts: #2246")
 
 TOOL = (
     Path(__file__).resolve().parents[1]
@@ -77,6 +77,7 @@ def mock_download(monkeypatch, report, fetch):
     monkeypatch.setattr(report, "github_download", download)
 
 
+@POSIX_ARTIFACTS
 def test_job_endpoint_works_while_sibling_jobs_run(report, monkeypatch, tmp_path, capsys):
     log = "2026-10-26T16:27:29.9639051Z error[E0308]: mismatched types\n" \
           "2026-10-26T16:27:29.9639051Z  --> src/lib.rs:9:5\n"
@@ -100,6 +101,7 @@ def test_job_endpoint_works_while_sibling_jobs_run(report, monkeypatch, tmp_path
     assert any(p.read_bytes() == log.encode() for p in (tmp_path / "ci-failure-private").iterdir())
 
 
+@POSIX_ARTIFACTS
 def test_missing_or_empty_log_is_not_success(report, monkeypatch, tmp_path, capsys):
     def fetch(path):
         if path.endswith("/logs"):
@@ -124,6 +126,7 @@ def test_incomplete_job_and_wrong_run_are_rejected(report, monkeypatch, tmp_path
         assert reason in capsys.readouterr().err.lower()
 
 
+@POSIX_ARTIFACTS
 def test_artifact_failure_is_not_silent(report, monkeypatch, tmp_path, capsys):
     blocker = tmp_path / "file"
     blocker.write_text("not a directory")
@@ -138,6 +141,7 @@ def test_artifact_failure_is_not_silent(report, monkeypatch, tmp_path, capsys):
     assert "artifact" in capsys.readouterr().err.lower()
 
 
+@POSIX_ARTIFACTS
 def test_saved_log_can_be_inspected_without_github(report, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     artifact = report.save_artifact(b"one\ntwo\nthree\nfour\n")
@@ -172,6 +176,7 @@ def test_malformed_unicode_is_safe_and_bounded(report):
     assert len(summary.encode("utf-8")) <= report.MAX_OUTPUT_BYTES
 
 
+@POSIX_ARTIFACTS
 def test_unavailable_log_fails_without_claiming_success(report, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
 
@@ -211,6 +216,7 @@ def test_broker_stale_response_is_not_accepted(report, monkeypatch):
         report.github_get("repos/o/r/actions/jobs/1/logs")
 
 
+@POSIX_ARTIFACTS
 def test_saved_artifacts_are_unique_and_private(report, tmp_path, monkeypatch):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     first = report.save_artifact(b"first")
@@ -222,6 +228,7 @@ def test_saved_artifacts_are_unique_and_private(report, tmp_path, monkeypatch):
         assert first.stat().st_mode & 0o077 == 0
 
 
+@POSIX_ARTIFACTS
 def test_byte_continuation_reaches_end_of_long_line(report, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     artifact = report.save_artifact(("a" * 7000 + "END").encode())
@@ -247,6 +254,7 @@ def test_github_request_captures_binary_output(report, monkeypatch):
     assert calls[0][1]["timeout"] == 60
 
 
+@POSIX_ARTIFACTS
 def test_line_continuation_does_not_skip_byte_capped_lines(report, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     raw = "".join(f"line-{i:02d} " + "x" * 480 + "\n" for i in range(40))
@@ -262,6 +270,7 @@ def test_line_continuation_does_not_skip_byte_capped_lines(report, tmp_path, mon
     assert f"line-{shown[-1]:02d}" in capsys.readouterr().out
 
 
+@POSIX_ARTIFACTS
 def test_continuation_rejects_outside_files_and_symlinks(report, tmp_path, monkeypatch, capsys):
     root = tmp_path / "output"
     root.mkdir(mode=0o700)
@@ -297,6 +306,7 @@ def test_nextest_caught_panic_is_not_the_cause(report):
     assert "AssertionError: incorrect" in summary
 
 
+@POSIX_ARTIFACTS
 def test_enterprise_host_reaches_metadata_and_log(report, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     calls = []
@@ -317,6 +327,7 @@ def test_enterprise_host_reaches_metadata_and_log(report, monkeypatch, tmp_path,
     assert "compile failed" in capsys.readouterr().out
 
 
+@POSIX_ARTIFACTS
 def test_large_log_stream_retains_late_failure(report, tmp_path, monkeypatch):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     raw = b"ok\n" * 500000 + b"error: late failure\n --> src/lib.rs:2:3\n"
@@ -328,6 +339,7 @@ def test_large_log_stream_retains_late_failure(report, tmp_path, monkeypatch):
     assert len(result.encode()) <= report.MAX_OUTPUT_BYTES
 
 
+@POSIX_ARTIFACTS
 def test_byte_continuation_escapes_c1_control(report, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
     artifact = report.save_artifact("\u009b31m".encode())
@@ -400,6 +412,7 @@ def test_real_download_preserves_large_binary_output(report, tmp_path, monkeypat
         assert stream.read() == b"\xffEND"
 
 
+@POSIX_ARTIFACTS
 def test_existing_shared_output_root_gets_private_child(report, tmp_path, monkeypatch):
     root = tmp_path / "shared"
     root.mkdir(mode=0o755)
