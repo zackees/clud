@@ -387,13 +387,13 @@ jobs:
             **macOS / Linux:**
 
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/zackees/clud/main/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/talos-hq/clud/main/install.sh | sh
             ```
 
             **Windows (PowerShell):**
 
             ```powershell
-            irm https://raw.githubusercontent.com/zackees/clud/main/install.ps1 | iex
+            irm https://raw.githubusercontent.com/talos-hq/clud/main/install.ps1 | iex
             ```
 
             Pin this exact version with `CLUD_VERSION=${{ needs.preflight.outputs.version }}` (POSIX) or `$env:CLUD_VERSION = '${{ needs.preflight.outputs.version }}'` (PowerShell) before piping into `sh` / `iex`.

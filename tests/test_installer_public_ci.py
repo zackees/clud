@@ -168,7 +168,7 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     expected = {}
     rows = []
     for target, (os_name, arch, _kind, _suffix) in TARGETS.items():
-        url = f"https://github.com/zackees/clud/releases/download/{tag}/clud-{tag}-{target}"
+        url = f"https://github.com/talos-hq/clud/releases/download/{tag}/clud-{tag}-{target}"
         digest = "c" * 64 if target == "aarch64-unknown-linux-musl" else "a" * 64
         expected[target] = {"version": tag, "sha256": digest, "size_bytes": 100, "url": url}
         rows.append({
@@ -265,7 +265,7 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
         raise ValueError("invalid public release mode")
     version = tag.removeprefix("v")
     catalog_url = (
-        f"https://github.com/zackees/clud/releases/download/{tag}/installer-candidate-manifest.json"
+        f"https://github.com/talos-hq/clud/releases/download/{tag}/installer-candidate-manifest.json"
         if mode == "candidate"
         else ONLINE_URL
     )
