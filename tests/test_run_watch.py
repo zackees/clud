@@ -359,6 +359,24 @@ def test_enterprise_repo_host_is_preserved_explicitly_and_when_inferred(monkeypa
     assert len([args for args in calls if args[0] == "api"]) == 2
 
 
+
+def test_inferred_enterprise_host_preserves_port(monkeypatch) -> None:
+    run = {"status": "completed", "conclusion": "success", "attempt": 2}
+
+    def fake_gh(*args):
+        if args[:2] == ("repo", "view"):
+            return 0, json.dumps({"nameWithOwner": "o/r", "url": "https://ghe.example.com:8443/o/r"}), ""
+        if args[:2] == ("run", "view"):
+            assert "ghe.example.com:8443/o/r" in args
+            return 0, json.dumps(run), ""
+        assert "--hostname" in args and "ghe.example.com:8443" in args
+        return 0, json.dumps({"total_count": 0, "jobs": []}), ""
+
+    monkeypatch.delenv("CLUD_GH_READ_BROKER", raising=False)
+    monkeypatch.setattr(run_watch, "gh", fake_gh)
+    assert run_watch.fetch(123, None) is not None
+
+
 def test_fetch_rejects_malformed_status(monkeypatch) -> None:
     for status in ([], {"bad": True}):
         run = {"status": status, "conclusion": "success", "attempt": 2}

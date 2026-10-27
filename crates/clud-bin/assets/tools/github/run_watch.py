@@ -271,9 +271,12 @@ def fetch(run_id: int, repo: str | None) -> dict | None:
         try:
             data = json.loads(out)
             owner_repo = data["nameWithOwner"]
-            hostname = urlparse(data["url"]).hostname
+            parsed_url = urlparse(data["url"])
+            hostname = parsed_url.hostname
             if not isinstance(owner_repo, str) or owner_repo.count("/") != 1 or not hostname:
                 return None
+            if parsed_url.port is not None:
+                hostname = f"{hostname}:{parsed_url.port}"
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
         if code != 0:
