@@ -136,10 +136,16 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def _trampoline_env() -> dict[str, str]:
+    """Run installed clud with its Windows exe-unlock path enabled."""
+    env = os.environ.copy()
+    env.pop("CLUD_NO_UNLOCK", None)
+    return env
+
+
 def _isolated_env(home: Path) -> dict[str, str]:
     """Keep installed-binary tests independent of host clud preferences."""
-    env = os.environ.copy()
-    env.pop("CLUD_NO_UNLOCK", None)  # This suite must exercise the trampoline.
+    env = _trampoline_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["LOCALAPPDATA"] = str(home / "local-app-data")
@@ -185,6 +191,7 @@ class TestPipInstallWhileRunning:
             capture_output=True,
             text=True,
             timeout=15,
+            env=_trampoline_env(),
         )
         assert run_result.returncode == 0
         assert "clud" in run_result.stdout
@@ -200,8 +207,7 @@ class TestPipInstallWhileRunning:
         result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0, f"First install failed: {result.stderr}"
 
-        env = os.environ.copy()
-        env.pop("CLUD_NO_UNLOCK", None)  # The integration harness disables it.
+        env = _trampoline_env()
 
         # Step 2: Launch clud in the background (it will fail to find claude,
         # but the trampoline runs before that check)
@@ -236,6 +242,7 @@ class TestPipInstallWhileRunning:
             capture_output=True,
             text=True,
             timeout=15,
+            env=_trampoline_env(),
         )
         assert run_result.returncode == 0
 
@@ -254,6 +261,7 @@ class TestPipInstallWhileRunning:
             capture_output=True,
             text=True,
             timeout=15,
+            env=_trampoline_env(),
         )
 
         # Uninstall
@@ -277,6 +285,7 @@ class TestPipInstallWhileRunning:
                 capture_output=True,
                 text=True,
                 timeout=15,
+                env=_trampoline_env(),
             )
             assert run_result.returncode == 0, f"Run #{i + 1} failed: {run_result.stderr}"
 
@@ -294,6 +303,7 @@ class TestPipInstallWhileRunning:
             [str(clud), "--version"],
             capture_output=True,
             timeout=15,
+            env=_trampoline_env(),
         )
 
         old_file = clud.with_suffix(".exe.old")
@@ -304,6 +314,7 @@ class TestPipInstallWhileRunning:
                 [str(clud), "--version"],
                 capture_output=True,
                 timeout=15,
+                env=_trampoline_env(),
             )
             # After second run, .old should be cleaned up
             # (unless the first process is somehow still alive)
