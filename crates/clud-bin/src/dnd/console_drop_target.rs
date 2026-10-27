@@ -78,24 +78,28 @@ use crate::dnd::normalize_dropped_path;
 pub type DropInjector = Box<dyn Fn(&[String]) + Send + Sync + 'static>;
 
 /// Failure modes for [`register_console_drop_target`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RegisterError {
     /// The Windows OLE wiring is compiled out (e.g. a build whose
     /// `[cfg(windows)]` blocks have been disabled for testing).
     /// Production builds on Windows do not return this variant —
     /// registration either succeeds or returns a more specific error
     /// below.
+    #[error("console IDropTarget COM wiring is not compiled into this build")]
     NotImplemented,
     /// `register_console_drop_target` was called from a non-Windows
     /// build. The whole subsystem is Windows-only by design — POSIX
     /// terminals already deliver drops as stdin bytes that the #63
     /// normalizer handles.
+    #[error("console drop target is Windows-only")]
     UnsupportedPlatform,
     /// `GetConsoleWindow()` returned `NULL` — `clud` is not attached
     /// to a console (e.g. running detached or under a service host).
     /// No drop target is possible.
+    #[error("GetConsoleWindow() returned NULL — no console attached")]
     ConsoleWindowUnavailable,
     /// `OleInitialize` failed with the given `HRESULT`.
+    #[error("OleInitialize failed (HRESULT 0x{0:08x})")]
     OleInitializeFailed(i32),
     /// `RegisterDragDrop` failed with the given `HRESULT`. Common
     /// cause: a different process already owns the drop target, or
@@ -104,37 +108,12 @@ pub enum RegisterError {
     /// Refresh-loop failures *after* a successful initial registration
     /// are not surfaced through this variant — they are silently
     /// retried on the next tick (the whole point of the refresh loop).
+    #[error("RegisterDragDrop failed (HRESULT 0x{0:08x})")]
     RegisterDragDropFailed(i32),
     /// Spawning the refresh worker thread failed.
+    #[error("failed to spawn drag-drop refresh worker thread")]
     WorkerSpawnFailed,
 }
-
-impl std::fmt::Display for RegisterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RegisterError::NotImplemented => {
-                f.write_str("console IDropTarget COM wiring is not compiled into this build")
-            }
-            RegisterError::UnsupportedPlatform => {
-                f.write_str("console drop target is Windows-only")
-            }
-            RegisterError::ConsoleWindowUnavailable => {
-                f.write_str("GetConsoleWindow() returned NULL — no console attached")
-            }
-            RegisterError::OleInitializeFailed(hr) => {
-                write!(f, "OleInitialize failed (HRESULT 0x{:08x})", *hr as u32)
-            }
-            RegisterError::RegisterDragDropFailed(hr) => {
-                write!(f, "RegisterDragDrop failed (HRESULT 0x{:08x})", *hr as u32)
-            }
-            RegisterError::WorkerSpawnFailed => {
-                f.write_str("failed to spawn drag-drop refresh worker thread")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RegisterError {}
 
 /// Tunables for the delay-then-refresh registration strategy.
 ///
