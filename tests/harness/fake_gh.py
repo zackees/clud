@@ -33,6 +33,8 @@ works unchanged:
   "oid": str}``) and ``parent`` (int or None).
 - per PR: ``base``, ``draft``, ``body``, ``merge_method``, ``admin``,
   ``requires_review`` (alias ``reviews_required``) and ``approved``.
+- per PR ``queue_sequence``: queue snapshots consumed by merge-watch GraphQL
+  reads; the last snapshot remains available for subsequent polls.
 - ``repositories`` maps owner/name to independent worlds with their own
   issues, PRs and default branch. Explicit repo flags, issue/PR URLs and REST
   endpoints select one; an unknown repo fails instead of reading the primary.
@@ -594,6 +596,19 @@ def _detach(state: dict, child: str) -> None:
 def _graphql_merge(path: Path, state: dict, argv: list[str]) -> int | None:
     fields = _api_fields(argv)
     query = str(fields.get("query", ""))
+    if "timelineItems(last:" in query and "mergeQueueEntry" in query:
+        pr = _find_pr(state, str(fields.get("number", "")))
+        if pr is None:
+            return _emit(argv, {"data": {"repository": {"pullRequest": None}}})
+        snapshots = pr.get("queue_sequence", [])
+        snapshot = snapshots.pop(0) if len(snapshots) > 1 else (snapshots[0] if snapshots else {})
+        _save(path, state)
+        entry_state = snapshot.get("entry")
+        entry = {"state": entry_state, "position": snapshot.get("position"),
+                 "headCommit": None} if entry_state else None
+        value = {"state": snapshot.get("state", "OPEN"), "baseRefName": pr.get("base", "main"),
+                 "autoMergeRequest": None, "mergeQueueEntry": entry, "timelineItems": {"nodes": []}}
+        return _emit(argv, {"data": {"repository": {"pullRequest": value}}})
     if "enqueuePullRequest" in query:
         pr = next((p for p in state.get("prs", [])
                    if f"{_repo(state)}#{p['number']}" == fields.get("id")), None)
