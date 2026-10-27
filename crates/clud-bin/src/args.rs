@@ -178,6 +178,10 @@ pub struct Args {
     #[arg(long = "context-window")]
     pub context_window: Option<String>,
 
+    /// Disable the launch-level preference to finish work through a PR.
+    #[arg(long = "no-land")]
+    pub no_land: bool,
+
     #[arg(long = "safe", conflicts_with = "unsafe_mode")]
     pub safe: bool,
 
@@ -1812,6 +1816,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--subprocess",
         "--pty",
         "--safe",
+        "--no-land",
         "--unsafe",
         "--unattended",
         "--allow-plan-mode",

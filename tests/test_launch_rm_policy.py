@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from tests import process
 
 
@@ -103,3 +105,67 @@ def test_codex_user_developer_instructions_are_preserved(tmp_path: Path) -> None
     assert len(values) == 1
     assert "INLINE INSTRUCTIONS" in values[0]
     assert "safe-rm" in values[0]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_land_bias_dry_run_and_opt_out(tmp_path: Path, backend: str) -> None:
+    command = plan(tmp_path, backend=backend)
+    assert "Land the work" in " ".join(command)
+    assert "Land the work" not in " ".join(plan(tmp_path, "--no-land", backend=backend))
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_land_bias_saved_setting_and_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    from tests.test_gh_read_broker import _write_clud_settings
+
+    _write_clud_settings(tmp_path / "home", {"launch": {"land_bias": "pr"}})
+    monkeypatch.delenv("CLUD_LAND_BIAS", raising=False)
+    assert "Do not merge unless" in " ".join(plan(tmp_path, backend=backend))
+    monkeypatch.setenv("CLUD_LAND_BIAS", "merge")
+    assert "merged PR" in " ".join(plan(tmp_path, backend=backend))
+    assert "Land the work" not in " ".join(plan(tmp_path, "--no-land", backend=backend))
+    monkeypatch.setenv("CLUD_LAND_BIAS", "off")
+    assert "Land the work" not in " ".join(plan(tmp_path, backend=backend))
+    monkeypatch.setenv("CLUD_LAND_BIAS", "invalid")
+    assert "Land the work" not in " ".join(plan(tmp_path, backend=backend))
+
+
+def test_codex_trusted_project_instructions_survive_land_bias(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
+        f"[projects.'{tmp_path}']\ntrust_level = 'trusted'\n", encoding="utf-8"
+    )
+    (tmp_path / ".git").mkdir()
+    project_config = tmp_path / ".codex"
+    project_config.mkdir()
+    (project_config / "config.toml").write_text(
+        'developer_instructions = "PROJECT INSTRUCTIONS"\n', encoding="utf-8"
+    )
+    command = plan(tmp_path, "--unsafe", backend="codex")
+    instructions = [v for v in codex_overrides(command) if v.startswith("developer_instructions=")]
+    assert len(instructions) == 1
+    assert "PROJECT INSTRUCTIONS" in instructions[0]
+    assert "Land the work" in instructions[0]
+
+
+def test_codex_untrusted_project_instructions_are_not_imported(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
+        'developer_instructions = "USER INSTRUCTIONS"\n', encoding="utf-8"
+    )
+    (tmp_path / ".git").mkdir()
+    project_config = tmp_path / ".codex"
+    project_config.mkdir()
+    (project_config / "config.toml").write_text(
+        'developer_instructions = "UNTRUSTED INSTRUCTIONS"\n', encoding="utf-8"
+    )
+    command = plan(tmp_path, "--unsafe", backend="codex")
+    instructions = " ".join(codex_overrides(command))
+    assert "USER INSTRUCTIONS" in instructions
+    assert "UNTRUSTED INSTRUCTIONS" not in instructions

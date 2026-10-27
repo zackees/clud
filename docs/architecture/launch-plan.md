@@ -170,6 +170,20 @@ clud-launched backend agent has permissions bypassed unless the user
 explicitly asked otherwise. There is no per-subcommand override; the
 decision is a single branch at the top of plan construction.
 
+## Landing preference
+
+Claude and Codex launches append a landing preference to their system or
+developer instructions. By default it asks the agent to validate, push and
+merge a PR when appropriate. `launch.land_bias` in the user settings accepts
+`merge` (default), `pr` (stop after a validated PR), or `off`. The
+`CLUD_LAND_BIAS` environment variable overrides the saved setting, and
+`--no-land` overrides both. Unrecognized values and unreadable settings
+disable the preference. `--dry-run` exposes the resulting instructions in
+the command. This is guidance, not permission: user instructions, `--safe`,
+repository rules, required reviews and branch protection still apply. The
+instructions are appended to existing user instructions. DeepSeek Harness
+does not currently expose an equivalent instruction channel.
+
 ## Unknown-flag passthrough
 
 `args.passthrough` holds backend arguments the pre-split did not claim. In the

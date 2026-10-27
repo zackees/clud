@@ -98,7 +98,7 @@ mod tests {
         let mut command = plan.command.clone();
         if command[0] == "claude" {
             assert_eq!(command[1], "--append-system-prompt");
-            assert_eq!(command[2], crate::deletion_rules::generated().instructions);
+            assert!(command[2].contains(&crate::deletion_rules::generated().instructions));
             command.drain(1..3);
         } else {
             for prefix in [

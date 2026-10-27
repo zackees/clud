@@ -356,6 +356,48 @@ pub(crate) fn build_launch_plan_at(
     build_launch_plan_for_target_at(args, target, backend_path, cwd)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LandBias {
+    Merge,
+    Pr,
+    Off,
+}
+
+fn resolve_land_bias(no_land: bool, env: Option<&str>, setting: Option<&str>) -> LandBias {
+    if no_land {
+        return LandBias::Off;
+    }
+    match env.or(setting).unwrap_or("merge") {
+        "merge" => LandBias::Merge,
+        "pr" => LandBias::Pr,
+        _ => LandBias::Off,
+    }
+}
+
+fn land_instructions(args: &Args) -> &'static str {
+    let setting = crate::home::user_home()
+        .map(|home| crate::clud_settings::load_land_bias_at(&home))
+        .unwrap_or(Ok(None))
+        .unwrap_or_else(|_| Some(String::new()));
+    let env =
+        std::env::var_os("CLUD_LAND_BIAS").map(|value| value.into_string().unwrap_or_default());
+    match resolve_land_bias(args.no_land, env.as_deref(), setting.as_deref()) {
+        LandBias::Merge => "Land the work: when a requested code change belongs in a git repository with a remote, aim to deliver a validated, pushed and merged PR. When appropriate branch from the default branch, commit the changes, and run the repository validation. Follow repository instructions and required reviews; use the merge queue when required, wait for checks with pr_merge_watch when available, fix failures, and report the merged PR URL. Reference the issue when applicable. Honor the user's explicit instructions, approval requirements, branch protection and --safe; never bypass them. If review or approval prevents merging, report what remains.",
+        LandBias::Pr => "Land the work: when a requested code change belongs in a git repository with a remote, aim to deliver a validated and pushed PR and report its URL. When appropriate branch from the default branch, commit the changes, and run the repository validation. Reference the issue when applicable. Honor the user's explicit instructions, approval requirements, repository rules, branch protection and --safe. Do not merge unless the user requests it.",
+        LandBias::Off => "",
+    }
+}
+
+fn append_instructions(target: &mut String, text: &str) {
+    if !text.is_empty() {
+        if !target.is_empty() {
+            // Literal newlines break argv forwarding through Windows .cmd wrappers.
+            target.push(' ');
+        }
+        target.push_str(text);
+    }
+}
+
 fn merge_claude_append_prompt(passthrough: &[String], unsafe_mode: bool) -> (String, Vec<String>) {
     let mut prompt = if unsafe_mode {
         String::new()
@@ -435,11 +477,15 @@ fn build_launch_plan_for_target_at(
 ) -> LaunchPlan {
     let backend = target.effective_harness;
     let mut cmd = vec![backend_path.to_string()];
-    let (deletion_instructions, mut passthrough) = if backend == Backend::Claude {
+    let (mut deletion_instructions, mut passthrough) = if backend == Backend::Claude {
         merge_claude_append_prompt(&args.passthrough, args.unsafe_mode)
     } else {
         (String::new(), args.passthrough.clone())
     };
+    let land = land_instructions(args);
+    if backend == Backend::Claude {
+        append_instructions(&mut deletion_instructions, land);
+    }
     let codex_passthrough_instructions = (backend == Backend::Codex)
         .then(|| take_codex_developer_instructions(&mut passthrough))
         .flatten();
@@ -550,7 +596,7 @@ fn build_launch_plan_for_target_at(
         let existing_instructions = if has_passthrough_instructions {
             None
         } else {
-            existing_codex_instructions(args)
+            existing_codex_instructions(args, cwd)
         };
         let has_user_instructions = has_passthrough_instructions || existing_instructions.is_some();
         let mut instructions = codex_passthrough_instructions
@@ -562,6 +608,7 @@ fn build_launch_plan_for_target_at(
             }
             instructions.push_str(&crate::deletion_rules::generated().instructions);
         }
+        append_instructions(&mut instructions, land);
         if !instructions.is_empty() || has_user_instructions {
             cmd.extend([
                 "-c".into(),
@@ -981,30 +1028,52 @@ fn codex_hook_hash(command: &str) -> String {
     crate::codex_cmd_scan_install::codex_hook_trust_hash(CODEX_HOOK_MATCHER, command, 600)
 }
 
-fn existing_codex_instructions(args: &Args) -> Option<String> {
-    args.codex_config_overrides
-        .iter()
-        .rev()
-        .find_map(|value| {
-            let raw = value.strip_prefix("developer_instructions=")?;
-            parse_codex_instruction_override(raw)
-        })
-        .or_else(|| {
-            let config_dir = std::env::var_os("CODEX_HOME")
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .map(|home| std::path::PathBuf::from(home).join(".codex"))
+fn existing_codex_instructions(args: &Args, cwd: &Path) -> Option<String> {
+    if let Some(value) = args.codex_config_overrides.iter().rev().find_map(|value| {
+        let raw = value.strip_prefix("developer_instructions=")?;
+        parse_codex_instruction_override(raw)
+    }) {
+        return Some(value);
+    }
+    let config_dir = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))?;
+    let user_config = std::fs::read_to_string(config_dir.join("config.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok());
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let root = git_root_from(&cwd);
+    let trusted =
+        crate::hook_health::codex_project_trusted_in_config(&root, &config_dir.join("config.toml"));
+    if trusted {
+        let mut directory = cwd.as_path();
+        loop {
+            let project_config = directory.join(".codex").join("config.toml");
+            if let Some(instructions) = std::fs::read_to_string(project_config)
+                .ok()
+                .and_then(|text| text.parse::<toml::Value>().ok())
+                .and_then(|config| {
+                    config
+                        .get("developer_instructions")?
+                        .as_str()
+                        .map(str::to_string)
                 })
-                .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))?;
-            let path = config_dir.join("config.toml");
-            let text = std::fs::read_to_string(path).ok()?;
-            text.parse::<toml::Value>()
-                .ok()?
-                .get("developer_instructions")?
-                .as_str()
-                .map(str::to_string)
-        })
+            {
+                return Some(instructions);
+            }
+            if directory == root {
+                break;
+            }
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            directory = parent;
+        }
+    }
+    user_config?
+        .get("developer_instructions")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Canonicalize `--model` for a Codex-provider / Claude-harness launch.
@@ -1212,6 +1281,33 @@ mod codex_hook_hash_tests {
         assert_eq!(
             codex_hook_hash("/tmp/clud cmd-scan --event PreToolUse"),
             "sha256:f1e8926650feac924e61dd910ad96a3fc22466eedd26e245743f739989ca27b5"
+        );
+    }
+}
+
+#[cfg(test)]
+mod land_bias_tests {
+    use super::{resolve_land_bias, LandBias};
+
+    #[test]
+    fn preference_precedence_and_invalid_values() {
+        assert_eq!(resolve_land_bias(false, None, None), LandBias::Merge);
+        assert_eq!(resolve_land_bias(false, None, Some("pr")), LandBias::Pr);
+        assert_eq!(
+            resolve_land_bias(false, Some("merge"), Some("pr")),
+            LandBias::Merge
+        );
+        assert_eq!(
+            resolve_land_bias(false, Some("off"), Some("merge")),
+            LandBias::Off
+        );
+        assert_eq!(
+            resolve_land_bias(true, Some("merge"), Some("merge")),
+            LandBias::Off
+        );
+        assert_eq!(
+            resolve_land_bias(false, Some("invalid"), None),
+            LandBias::Off
         );
     }
 }
