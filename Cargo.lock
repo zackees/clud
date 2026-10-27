@@ -760,6 +760,7 @@ dependencies = [
  "sysinfo 0.37.2",
  "tempfile",
  "terminal_size",
+ "thiserror 2.0.18",
  "tiny_http",
  "toml",
  "toml_edit 0.25.11+spec-1.1.0",
