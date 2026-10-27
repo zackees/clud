@@ -543,7 +543,11 @@ fn collect_shell_probe(
     let mut reply_bytes = 0;
     loop {
         if Instant::now() >= deadline {
-            return Err(format!("fresh shell {mode} lookup timed out"));
+            let exited = process.wait_impl(Some(0.0)).is_ok();
+            return Err(format!(
+                "fresh shell {mode} lookup timed out (exited: {exited}, pipe bytes: {}, terminal bytes: {terminal_bytes}, reply bytes: {reply_bytes})",
+                output.len()
+            ));
         }
         drain_probe_pipe(fifo, &mut output)?;
         match process.read_chunk_impl(Some(0.1)) {
