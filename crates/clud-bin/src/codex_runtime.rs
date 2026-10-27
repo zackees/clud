@@ -2,6 +2,8 @@
 
 pub const FALLBACK_SOL: &str = "gpt-6-sol";
 pub const FALLBACK_LUNA: &str = "gpt-6-luna";
+pub const FALLBACK_TERRA: &str = "gpt-5.6-terra";
+const BUNDLED_MODELS: &str = include_str!("../assets/codex-models.json");
 pub const MANIFEST_URL: &str = "https://talos-hq.github.io/clud/models/manifest.json";
 const CACHE_PATH: &str = ".clud/cache/models/manifest.json";
 const LAST_GOOD_PATH: &str = ".clud/cache/models/last-good.json";
@@ -92,6 +94,7 @@ struct LastGood {
     schema_version: u64,
     sol: Option<String>,
     luna: Option<String>,
+    terra: Option<String>,
 }
 
 impl LastGood {
@@ -100,6 +103,7 @@ impl LastGood {
             schema_version: 1,
             sol: Some(manifest.families.sol.clone()),
             luna: Some(manifest.families.luna.clone()),
+            terra: manifest.families.terra.clone(),
         }
     }
 
@@ -112,6 +116,10 @@ impl LastGood {
                 .luna
                 .as_deref()
                 .is_some_and(|id| !stable_id(id, "luna"))
+            || state
+                .terra
+                .as_deref()
+                .is_some_and(|id| !stable_id(id, "terra"))
         {
             return Err("invalid last-good Codex models".to_string());
         }
@@ -133,6 +141,7 @@ fn read_last_good(path: &Path) -> Option<LastGood> {
 pub struct Families {
     pub sol: String,
     pub luna: String,
+    pub terra: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -229,7 +238,13 @@ impl Manifest {
         if !valid_checked_at(&document.checked_at) {
             return Err("invalid model manifest timestamp".to_string());
         }
-        if !stable_id(&document.families.sol, "sol") || !stable_id(&document.families.luna, "luna")
+        if !stable_id(&document.families.sol, "sol")
+            || !stable_id(&document.families.luna, "luna")
+            || document
+                .families
+                .terra
+                .as_deref()
+                .is_some_and(|id| !stable_id(id, "terra"))
         {
             return Err("invalid stable Sol or Luna model ID".to_string());
         }
@@ -399,8 +414,10 @@ impl Source {
 pub struct Choice {
     pub sol: String,
     pub luna: String,
+    pub terra: String,
     pub sol_source: Source,
     pub luna_source: Source,
+    pub terra_source: Source,
 }
 
 impl Choice {
@@ -408,6 +425,7 @@ impl Choice {
         match cli_id {
             "codex-sol" => Some(self.sol_source),
             "codex-luna" => Some(self.luna_source),
+            "codex-terra" => Some(self.terra_source),
             _ => None,
         }
     }
@@ -428,6 +446,34 @@ fn choose_family(
     (built_in.to_string(), Source::BuiltIn)
 }
 
+fn stable_version(id: &str, family: &str) -> Option<(u64, u64)> {
+    if !stable_id(id, family) {
+        return None;
+    }
+    let version = id
+        .strip_prefix("gpt-")?
+        .strip_suffix(&format!("-{family}"))?;
+    let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn bundled_model(
+    family: &str,
+    published: Option<&Manifest>,
+    available: &[String],
+) -> Option<String> {
+    let document: Value = serde_json::from_str(BUNDLED_MODELS).ok()?;
+    let checked_at = document.get("checked_at")?.as_str()?;
+    if !valid_checked_at(checked_at)
+        || published.is_some_and(|manifest| manifest.checked_at.as_str() >= checked_at)
+    {
+        return None;
+    }
+    let model = document.get("families")?.get(family)?.as_str()?;
+    (stable_id(model, family) && available.iter().any(|item| item == model))
+        .then(|| model.to_string())
+}
+
 fn choose(
     published: Option<&Manifest>,
     last_good: Option<&LastGood>,
@@ -445,11 +491,28 @@ fn choose(
         available,
         FALLBACK_LUNA,
     );
+    let (terra, terra_source) = choose_family(
+        published.and_then(|value| value.families.terra.as_deref()),
+        last_good.and_then(|value| value.terra.as_deref()),
+        available,
+        FALLBACK_TERRA,
+    );
+    let (sol, sol_source) = bundled_model("sol", published, available)
+        .filter(|model| stable_version(model, "sol") > stable_version(&sol, "sol"))
+        .map_or((sol, sol_source), |model| (model, Source::BuiltIn));
+    let (luna, luna_source) = bundled_model("luna", published, available)
+        .filter(|model| stable_version(model, "luna") > stable_version(&luna, "luna"))
+        .map_or((luna, luna_source), |model| (model, Source::BuiltIn));
+    let (terra, terra_source) = bundled_model("terra", published, available)
+        .filter(|model| stable_version(model, "terra") > stable_version(&terra, "terra"))
+        .map_or((terra, terra_source), |model| (model, Source::BuiltIn));
     Choice {
         sol,
         luna,
+        terra,
         sol_source,
         luna_source,
+        terra_source,
     }
 }
 
@@ -458,6 +521,7 @@ fn updated_last_good(previous: Option<&LastGood>, choice: &Choice) -> LastGood {
         schema_version: 1,
         sol: None,
         luna: None,
+        terra: None,
     });
     if choice.sol_source == Source::Published {
         state.sol = Some(choice.sol.clone());
@@ -468,6 +532,11 @@ fn updated_last_good(previous: Option<&LastGood>, choice: &Choice) -> LastGood {
         state.luna = Some(choice.luna.clone());
     } else if choice.luna_source == Source::LastGood {
         state.luna.get_or_insert_with(|| choice.luna.clone());
+    }
+    if choice.terra_source == Source::Published {
+        state.terra = Some(choice.terra.clone());
+    } else if choice.terra_source == Source::LastGood {
+        state.terra.get_or_insert_with(|| choice.terra.clone());
     }
     state
 }
@@ -519,7 +588,7 @@ pub fn active_choice() -> &'static Choice {
 
 /// Resolve a stable catalog row to its current account-checked wire ID.
 pub fn wire_id(cli_id: &str, built_in: &str) -> String {
-    if matches!(cli_id, "codex-sol" | "codex-luna") {
+    if matches!(cli_id, "codex-sol" | "codex-luna" | "codex-terra") {
         wire_id_for_choice(cli_id, built_in, active_choice())
     } else {
         built_in.to_string()
@@ -530,7 +599,21 @@ fn wire_id_for_choice(cli_id: &str, built_in: &str, choice: &Choice) -> String {
     match cli_id {
         "codex-sol" => choice.sol.clone(),
         "codex-luna" => choice.luna.clone(),
+        "codex-terra" => choice.terra.clone(),
         _ => built_in.to_string(),
+    }
+}
+
+fn manifest_or_cached(
+    result: Result<Manifest, String>,
+    cached: Option<&Manifest>,
+) -> Option<Manifest> {
+    match result {
+        Ok(manifest) => Some(manifest),
+        Err(error) => {
+            eprintln!("[clud] model manifest unavailable ({error}); checking cached models");
+            cached.cloned()
+        }
     }
 }
 
@@ -560,13 +643,7 @@ fn load_choice() -> Choice {
             record_attempt(path);
         }
         let url = url_override.unwrap_or_else(|| MANIFEST_URL.to_string());
-        match fetch_manifest(&url) {
-            Ok(manifest) => Some(manifest),
-            Err(error) => {
-                eprintln!("[clud] model manifest unavailable ({error}); checking cached models");
-                None
-            }
-        }
+        manifest_or_cached(fetch_manifest(&url), cached.as_ref())
     };
     let available = match local_low_effort_models() {
         Ok(models) => models,
@@ -608,7 +685,7 @@ mod tests {
             "source": "openrouter+models.dev-merge",
             "checked_at": "2026-09-26T21:00:00Z",
             "trigger": "manual",
-            "families": {"sol": sol, "luna": luna},
+            "families": {"sol": sol, "luna": luna, "terra": "gpt-5.6-terra"},
             "defaults": {"codex": {"model": sol, "effort": "low"}}
         });
         Manifest::parse(document.to_string().as_bytes()).unwrap()
@@ -673,6 +750,66 @@ mod tests {
         let fallback = choose(Some(&latest), Some(&previous), &[]);
         assert_eq!(fallback.sol_source, Source::BuiltIn);
         assert_eq!(fallback.sol, "gpt-6-sol");
+    }
+
+    #[test]
+    fn bundled_sol_and_terra_are_selected_when_locally_available() {
+        let available = ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"].map(str::to_string);
+        let choice = choose(None, None, &available);
+        assert_eq!(choice.sol, "gpt-6.1-sol");
+        assert_eq!(choice.terra, "gpt-6.1-terra");
+        assert_eq!(choice.sol_source, Source::BuiltIn);
+        assert_eq!(choice.terra_source, Source::BuiltIn);
+        assert_eq!(
+            wire_id_for_choice("codex-terra", FALLBACK_TERRA, &choice),
+            "gpt-6.1-terra"
+        );
+    }
+
+    #[test]
+    fn newer_bundled_models_supersede_stale_publication_but_not_newer_rollback() {
+        let available = ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"].map(str::to_string);
+        let mut published = manifest("gpt-6-sol", "gpt-6-luna");
+        let choice = choose(Some(&published), None, &available);
+        assert_eq!(choice.sol, "gpt-6.1-sol");
+        assert_eq!(choice.terra, "gpt-6.1-terra");
+        published.checked_at = "2099-01-01T00:00:00Z".to_string();
+        let rollback = choose(Some(&published), None, &available);
+        assert_eq!(rollback.sol, "gpt-6-sol");
+        assert_eq!(rollback.sol_source, Source::Published);
+        published.checked_at = "2026-09-26T21:00:00Z".to_string();
+        published.families.sol = "gpt-7-sol".to_string();
+        let mut newer_available = available.to_vec();
+        newer_available.push("gpt-7-sol".to_string());
+        let newer = choose(Some(&published), None, &newer_available);
+        assert_eq!(newer.sol, "gpt-7-sol");
+    }
+
+    #[test]
+    fn failed_refresh_retains_newer_cached_rollback() {
+        let mut rollback = manifest("gpt-6-sol", "gpt-6-luna");
+        rollback.checked_at = "2099-01-01T00:00:00Z".to_string();
+        let served = manifest_or_cached(Err("offline".to_string()), Some(&rollback));
+        let available = ["gpt-6-sol", "gpt-6.1-sol"].map(str::to_string);
+        let choice = choose(served.as_ref(), None, &available);
+        assert_eq!(choice.sol, "gpt-6-sol");
+        assert_eq!(choice.sol_source, Source::Published);
+    }
+
+    #[test]
+    fn bundled_luna_advances_an_older_available_publication() {
+        let published = manifest("gpt-6-sol", "gpt-5.6-luna");
+        let available = ["gpt-5.6-luna", "gpt-6-luna"].map(str::to_string);
+        let choice = choose(Some(&published), None, &available);
+        assert_eq!(choice.luna, "gpt-6-luna");
+        assert_eq!(choice.luna_source, Source::BuiltIn);
+    }
+
+    #[test]
+    fn terra_falls_back_when_not_locally_available() {
+        let available = ["gpt-6.1-sol", "gpt-6-luna"].map(str::to_string);
+        let choice = choose(None, None, &available);
+        assert_eq!(choice.terra, FALLBACK_TERRA);
     }
 
     #[test]

@@ -178,6 +178,8 @@ fn dynamic_codex_context_window(
         "codex-sol"
     } else if wire_id == choice.luna {
         "codex-luna"
+    } else if wire_id == choice.terra {
+        "codex-terra"
     } else {
         return None;
     };
@@ -234,14 +236,20 @@ mod tests {
         let choice = crate::codex_runtime::Choice {
             sol: "gpt-7-sol".to_string(),
             luna: "gpt-7-luna".to_string(),
+            terra: "gpt-7-terra".to_string(),
             sol_source: crate::codex_runtime::Source::Published,
             luna_source: crate::codex_runtime::Source::Published,
+            terra_source: crate::codex_runtime::Source::Published,
         };
         assert_eq!(
             dynamic_codex_context_window("gpt-7-sol", &choice),
             Some(1_050_000)
         );
         assert_eq!(dynamic_codex_context_window("gpt-7-sol-pro", &choice), None);
+        assert_eq!(
+            dynamic_codex_context_window("gpt-7-terra", &choice),
+            Some(1_050_000)
+        );
     }
 
     fn deepseek_section(default_model: &str, subagent_model: &str) -> Result<(), String> {

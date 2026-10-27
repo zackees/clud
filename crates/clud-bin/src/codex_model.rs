@@ -30,7 +30,7 @@ pub fn model_by_id(id: &str) -> Option<CatalogModel> {
         .find(|model| model.wire_id == id)
         .or_else(|| {
             codex_models().find(|model| {
-                matches!(model.cli_id, "codex-sol" | "codex-luna")
+                matches!(model.cli_id, "codex-sol" | "codex-luna" | "codex-terra")
                     && crate::codex_runtime::wire_id(model.cli_id, model.wire_id) == id
             })
         })

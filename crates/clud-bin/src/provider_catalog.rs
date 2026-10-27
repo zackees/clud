@@ -202,6 +202,22 @@ pub const MODELS: &[CatalogModel] = &[
         supports_images: true,
     },
     CatalogModel {
+        cli_id: "codex-terra-6.1",
+        provider: ModelProvider::Codex,
+        wire_id: "gpt-6.1-terra",
+        discovery_id: Some("clud-claude-codex-terra-6-1"),
+        display_name: "Codex Terra 6.1 (OpenAI)",
+        legacy_aliases: &["terra-6.1"],
+        supported_efforts: SOL_6_1_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Medium),
+        default_context_window: None,
+        provider_default: false,
+        claude_max_context_tokens: Some(1_050_000),
+        claude_compact_window: None,
+        supports_images: true,
+    },
+    CatalogModel {
         cli_id: "deepseek-v4-pro",
         provider: ModelProvider::DeepSeek,
         wire_id: "deepseek-v4-pro[1m]",
@@ -822,6 +838,19 @@ pub fn resolve(
             }
         },
     );
+    // Dynamic Codex aliases may resolve to a versioned row with narrower
+    // capabilities than the alias's older fallback.
+    if model_provider == ModelProvider::Codex {
+        if let Some(entry) = model_by_wire_id(&wire_model) {
+            validate_capabilities(
+                entry.cli_id,
+                entry.supported_efforts,
+                entry.supported_context_windows,
+                effective_effort,
+                effective_context.as_deref(),
+            )?;
+        }
+    }
     // "This model has a 1m context tier" rather than `model_provider ==
     // ModelProvider::DeepSeek`: `contexts` is already the resolved model's
     // (or, for an uncataloged wire ID, the provider's fallback) supported

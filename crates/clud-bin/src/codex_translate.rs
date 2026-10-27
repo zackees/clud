@@ -710,30 +710,36 @@ fn effort_from_thinking(thinking: Option<&Thinking>) -> Option<Effort> {
 /// that is the harness declining to send the field rather than the user
 /// naming a value.
 fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Result<Effort, TranslateError> {
-    if let Some(effort) = spec.effort {
-        return Ok(effort);
-    }
-
     let stated = request
         .output_config
         .as_ref()
         .and_then(|config| config.effort.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(value) = stated {
-        // Same wording as the `@effort` suffix path, so the two channels
-        // cannot describe the same mistake differently.
-        return Effort::parse(value).ok_or_else(|| {
+    let effort = if let Some(effort) = spec.effort {
+        effort
+    } else if let Some(value) = stated {
+        Effort::parse(value).ok_or_else(|| {
             invalid(
                 SelectionError::UnknownEffort {
                     given: value.to_string(),
                 }
                 .to_string(),
             )
-        });
+        })?
+    } else {
+        effort_from_thinking(request.thinking.as_ref()).unwrap_or_else(|| spec.effective_effort())
+    };
+    if let Some(model) = crate::codex_model::model_by_id(&spec.model) {
+        if !model.supported_efforts.contains(&effort) {
+            return Err(invalid(format!(
+                "unsupported effort '{}' for model '{}'",
+                effort.as_str(),
+                spec.model
+            )));
+        }
     }
-
-    Ok(effort_from_thinking(request.thinking.as_ref()).unwrap_or_else(|| spec.effective_effort()))
+    Ok(effort)
 }
 
 // ---------------------------------------------------------------------------

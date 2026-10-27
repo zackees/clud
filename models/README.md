@@ -13,3 +13,11 @@ previously published manifest. This lets an operator roll back the server
 default without requiring existing clud clients to upgrade, and prevents the
 next nightly publication from undoing the rollback. Remove an ID only after a
 live ChatGPT backend probe succeeds.
+
+`crates/clud-bin/assets/codex-models.json` is the bundled stable-slug snapshot. Refresh it with
+`python -m models.refresh_openrouter`; the command reads OpenRouter’s public
+`/api/v1/models` endpoint and requires Sol, Terra, and Luna rows.
+
+The Sol 6.1 block was removed after `codex-cli 0.164.0` successfully completed
+an authenticated ChatGPT Codex request with `gpt-6.1-sol` at low effort on
+2026-10-27 UTC. The same probe succeeded for `gpt-6.1-terra`.
