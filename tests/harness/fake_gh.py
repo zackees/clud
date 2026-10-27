@@ -45,8 +45,8 @@ Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``defaultBranchRef``), ``auth status``, ``label create`` (a no-op) and
 ``api``: issue GET/PATCH, issue comments GET/POST, comment GET/PATCH/DELETE,
 sub-issue GET, POST (``replace_parent``) and DELETE with GitHub's one-parent /
-100-children / 8-levels rules, ``.../parent`` GET, and a ``graphql``
-ClosedEvent closer stub. ``api`` takes ``-X/--method``, ``-f/-F field=value``
+100-children / 8-levels rules, ``.../parent`` GET, and ``graphql``
+stubs for issue closers and PR merge queues. ``api`` takes ``-X/--method``, ``-f/-F field=value``
 and ``--input file``; with no method it is POST when fields are given, else
 GET. ``{owner}``/``{repo}`` placeholders are filled from ``repo``. REST issue
 objects carry ``id == number``, so ``sub_issue_id=<number>`` works.
@@ -591,10 +591,29 @@ def _detach(state: dict, child: str) -> None:
     issue["parent"] = None
 
 
-def _graphql(state: dict, argv: list[str]) -> int:
+def _graphql(path: Path, state: dict, argv: list[str]) -> int:
     issues = state.setdefault("issues", {})
     fields = _api_fields(argv)
     query = str(fields.get("query", ""))
+    if "enqueuePullRequest" in query:
+        pr = next((p for p in state.get("prs", []) if str(p["number"]) == fields.get("id")), None)
+        if pr is None or pr.get("head_oid") != fields.get("sha"):
+            return _emit(argv, {"errors": [{"message": "head changed"}]})
+        pr["queued"] = True
+        _save(path, state)
+        return _emit(argv, {"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": "entry"}}}})
+    if "pullRequest(number:" in query and "headRefOid" in query:
+        pr = _find_pr(state, str(fields.get("number", "")))
+        value = None if pr is None else {
+            "id": str(pr["number"]), "state": pr.get("state", "OPEN"),
+            "isDraft": pr.get("draft", False), "headRefOid": pr.get("head_oid"),
+            "baseRefName": pr.get("base", "main"),
+            "mergeQueueEntry": {"id": "entry"} if pr.get("queued") else None,
+        }
+        return _emit(argv, {"data": {"repository": {"pullRequest": value}}})
+    if "mergeQueue(branch:" in query:
+        queue = {"id": "queue"} if fields.get("base") in state.get("queue_branches", []) else None
+        return _emit(argv, {"data": {"repository": {"mergeQueue": queue}}})
     if "ClosedEvent" not in query and "closer" not in query:
         print(json.dumps({"data": {}}))
         return 0
@@ -627,7 +646,7 @@ def _graphql(state: dict, argv: list[str]) -> int:
 def _api(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     issues = state.setdefault("issues", {})
     if _api_endpoint(argv) == "graphql":
-        return _graphql(state, argv)
+        return _graphql(path, state, argv)
 
     method = _api_method(argv)
     owner, _, name = _repo(state).partition("/")
