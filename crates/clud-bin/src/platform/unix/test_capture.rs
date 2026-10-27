@@ -193,3 +193,33 @@ mod macos_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     }
 }
+
+#[cfg(test)]
+mod reader_tests {
+    use crate::test_runtime::capture::{capture_reader, Event};
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn reader_stops_and_joins_while_writer_remains_open() {
+        let (reader, mut writer) = os_pipe::pipe().unwrap();
+        let (receiver, stop, handle) = capture_reader(reader).unwrap();
+        writer.write_all(b"ready").unwrap();
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(2)), Ok(Event::Data(data)) if data == b"ready")
+        );
+        stop.store(true, Ordering::Release);
+        drop(receiver);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        drop(writer);
+    }
+}

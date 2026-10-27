@@ -16,7 +16,7 @@ use serde::Serialize;
 const MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 const CHUNK_BYTES: usize = 8192;
 
-enum Event {
+pub(crate) enum Event {
     Data(Vec<u8>),
     Eof,
     Error,
@@ -179,9 +179,9 @@ fn create_artifact(root: &Path) -> io::Result<(File, PathBuf)> {
     Ok((artifact, path))
 }
 
-type CaptureReader = (mpsc::Receiver<Event>, Arc<AtomicBool>, JoinHandle<()>);
+pub(crate) type CaptureReader = (mpsc::Receiver<Event>, Arc<AtomicBool>, JoinHandle<()>);
 
-fn capture_reader(mut reader: os_pipe::PipeReader) -> io::Result<CaptureReader> {
+pub(crate) fn capture_reader(mut reader: os_pipe::PipeReader) -> io::Result<CaptureReader> {
     let (tx, rx) = mpsc::sync_channel::<Event>(4);
     let stop = Arc::new(AtomicBool::new(false));
     let reader_stop = Arc::clone(&stop);
@@ -266,32 +266,5 @@ pub fn run_cli(root: &Path, timeout_secs: u64, command: &[String]) -> i32 {
             eprintln!("clud test capture: unable to capture command safely");
             1
         }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod reader_tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-
-    #[test]
-    fn reader_stops_and_joins_while_writer_remains_open() {
-        let (reader, mut writer) = os_pipe::pipe().unwrap();
-        let (receiver, stop, handle) = capture_reader(reader).unwrap();
-        writer.write_all(b"ready").unwrap();
-        assert!(
-            matches!(receiver.recv_timeout(Duration::from_secs(2)), Ok(Event::Data(data)) if data == b"ready")
-        );
-        stop.store(true, Ordering::Release);
-        drop(receiver);
-        let (done_tx, done_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = done_tx.send(handle.join());
-        });
-        assert!(done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .is_ok());
-        drop(writer);
     }
 }
