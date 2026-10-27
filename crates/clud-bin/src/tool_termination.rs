@@ -25,7 +25,7 @@ use serde_json::json;
 use crate::session_index::LongFormId;
 use crate::tool_watchdog::AbortReason;
 
-/// Discriminates the four exit shapes the wrapper can report.
+/// Discriminates the exit shapes the wrapper can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
     /// Normal exit with zero exit code.
@@ -36,9 +36,11 @@ pub enum ExitKind {
     /// the process tree was killed and the wrapper exits 124.
     Aborted(AbortReason),
     /// Watchdog fired on a resumable tool; the process keeps running
-    /// from the world's perspective, the wrapper exits 0 with the
+    /// from the world's perspective, the wrapper exits 124 with the
     /// in-progress JSON so the caller re-invokes to resume.
     InProgress(AbortReason),
+    /// The child exited, but the observer resumed after a deadline.
+    ObservationDelayed(AbortReason),
 }
 
 impl ExitKind {
@@ -48,6 +50,7 @@ impl ExitKind {
             ExitKind::Failed => "failed",
             ExitKind::Aborted(_) => "aborted",
             ExitKind::InProgress(_) => "in-progress",
+            ExitKind::ObservationDelayed(_) => "observation-delayed",
         }
     }
 
@@ -77,10 +80,12 @@ pub fn render_structured_payload(
     }
     .format();
     let reason = match exit_kind {
-        ExitKind::Aborted(r) | ExitKind::InProgress(r) => Some(r.label()),
+        ExitKind::Aborted(r) | ExitKind::InProgress(r) | ExitKind::ObservationDelayed(r) => {
+            Some(r.label())
+        }
         _ => None,
     };
-    let value = json!({
+    let mut value = json!({
         "v": 1,
         "tool_id": tool_id,
         "long_id": long,
@@ -93,6 +98,9 @@ pub fn render_structured_payload(
         "reason": reason,
         "exit_code": exit_code,
     });
+    if matches!(exit_kind, ExitKind::ObservationDelayed(_)) {
+        value["deadline_outcome"] = json!("unknown");
+    }
     value.to_string()
 }
 
@@ -123,6 +131,13 @@ pub fn render_pointer_block(
             format_elapsed(elapsed),
             tool,
             tool_id
+        ),
+        ExitKind::ObservationDelayed(reason) => format!(
+            "OBSERVATION DELAYED on {} (tool #{}) after {}; {} outcome is unknown.",
+            tool,
+            tool_id,
+            format_elapsed(elapsed),
+            reason.label()
         ),
         ExitKind::InProgress(reason) => format!(
             "{} on {} (tool #{}) after {} — RESUMABLE.",
@@ -230,6 +245,19 @@ mod tests {
             exit_code,
         );
         serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn delayed_observation_reports_unknown_and_retains_child_exit() {
+        let v = payload_value(
+            47180,
+            3,
+            ExitKind::ObservationDelayed(AbortReason::CommandTimeout),
+            Some(0),
+        );
+        assert_eq!(v["status"], "observation-delayed");
+        assert_eq!(v["deadline_outcome"], "unknown");
+        assert_eq!(v["exit_code"], 0);
     }
 
     #[test]

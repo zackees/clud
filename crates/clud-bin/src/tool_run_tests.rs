@@ -102,6 +102,171 @@ fn resumable_watchdog_fixture_child() {
 }
 
 #[test]
+fn delayed_exit_observation_is_not_reported_as_success() {
+    let executable = std::env::current_exe().unwrap();
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        fixture_filter("immediate_exit_fixture_child"),
+        "--nocapture".to_string(),
+    ];
+    for with_session in [false, true] {
+        let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
+        watchdog.command_timeout = Duration::from_millis(100);
+        watchdog.started_at = std::time::Instant::now() - Duration::from_secs(2);
+        let state = ToolRunState {
+            telemetry: ToolTelemetry {
+                server: None,
+                token: None,
+                id: "test-late-observation".to_string(),
+                name: "github/pr_merge_watch.py".to_string(),
+                start_time_ms: 0,
+            },
+            watchdog,
+        };
+        let env = std::env::vars().collect::<Vec<_>>();
+        let result = if with_session {
+            let root = TempDir::new().unwrap();
+            let ctx = SessionContext::from_state_root(root.path(), 4242, 1);
+            run_with_session(
+                &ctx,
+                1,
+                "__test_delayed_observer",
+                &[],
+                argv.clone(),
+                env,
+                state,
+            )
+        } else {
+            run_passthrough("__test_delayed_observer", &[], argv.clone(), env, state)
+        };
+        assert_eq!(result.unwrap(), WATCHDOG_EXIT_CODE);
+    }
+}
+
+#[test]
+fn delayed_observation_preserves_failures_and_marks_progress_uncertain() {
+    let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
+    watchdog.command_timeout = Duration::from_secs(60);
+    watchdog.progress_timeout = Some(Duration::from_millis(100));
+    watchdog.quiet_ok = false;
+    watchdog.last_output_at = std::time::Instant::now() - Duration::from_secs(1);
+    assert_eq!(
+        delayed_observation(&watchdog),
+        Some(AbortReason::ProgressTimeout)
+    );
+    assert_eq!(uncertain_exit_code(7, delayed_observation(&watchdog)), 7);
+    assert_eq!(
+        uncertain_exit_code(0, delayed_observation(&watchdog)),
+        WATCHDOG_EXIT_CODE
+    );
+    watchdog.quiet_ok = true;
+    assert_eq!(delayed_observation(&watchdog), None);
+    assert_eq!(uncertain_exit_code(0, None), 0);
+}
+
+#[test]
+fn delayed_buffered_progress_remains_uncertain_after_timer_reset() {
+    let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
+    watchdog.command_timeout = Duration::from_secs(60);
+    watchdog.progress_timeout = Some(Duration::from_millis(100));
+    watchdog.quiet_ok = false;
+    watchdog.last_output_at = std::time::Instant::now() - Duration::from_secs(1);
+    let mut uncertain = false;
+    note_observed_progress(&mut watchdog, &mut uncertain);
+    assert!(uncertain);
+    assert_eq!(delayed_observation(&watchdog), None);
+}
+
+#[test]
+fn buffered_progress_after_delayed_observation_is_uncertain_in_both_runners() {
+    let executable = std::env::current_exe().unwrap();
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        fixture_filter("buffered_progress_fixture_child"),
+        "--nocapture".to_string(),
+    ];
+    for with_session in [false, true] {
+        let root = TempDir::new().unwrap();
+        let release = root.path().join("release");
+        let _release_on_drop = FixtureRelease(release.clone());
+        let args = vec![release.to_string_lossy().into_owned()];
+        let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
+        watchdog.command_timeout = Duration::from_secs(60);
+        watchdog.progress_timeout = Some(Duration::from_secs(30));
+        watchdog.quiet_ok = false;
+        watchdog.last_output_at = std::time::Instant::now() - Duration::from_secs(31);
+        let state = ToolRunState {
+            telemetry: ToolTelemetry {
+                server: None,
+                token: None,
+                id: "test-buffered-progress".to_string(),
+                name: "github/pr_merge_watch.py".to_string(),
+                start_time_ms: 0,
+            },
+            watchdog,
+        };
+        let mut env = std::env::vars()
+            .filter(|(key, _)| key != "CLUD_TEST_PROGRESS_RELEASE")
+            .collect::<Vec<_>>();
+        env.push(("CLUD_TEST_PROGRESS_RELEASE".to_string(), args[0].clone()));
+        let result = if with_session {
+            let ctx = SessionContext::from_state_root(root.path(), 4242, 1);
+            let code = run_with_session(
+                &ctx,
+                1,
+                "__test_buffered_progress",
+                &args,
+                argv.clone(),
+                env,
+                state,
+            );
+            let records = crate::tool_query::read_invocations(&ctx).unwrap();
+            assert_eq!(
+                records[0].state,
+                crate::tool_query::InvocationState::ObservationDelayed
+            );
+            assert_eq!(records[0].reason.as_deref(), Some("progress_timeout"));
+            assert_eq!(records[0].exit_code, Some(0));
+            code
+        } else {
+            run_passthrough("__test_buffered_progress", &args, argv.clone(), env, state)
+        };
+        assert_eq!(result.unwrap(), WATCHDOG_EXIT_CODE);
+    }
+}
+
+#[test]
+#[ignore]
+fn buffered_progress_fixture_child() {
+    let release = std::env::var_os("CLUD_TEST_PROGRESS_RELEASE").expect("release path");
+    println!("buffered progress fixture");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !std::path::Path::new(&release).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture release timed out"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct FixtureRelease(std::path::PathBuf);
+
+impl Drop for FixtureRelease {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"release");
+    }
+}
+
+#[test]
+#[ignore]
+fn immediate_exit_fixture_child() {}
+
+#[test]
 fn captured_subprocess_output_is_forwardable_before_exit() {
     let executable = std::env::current_exe().unwrap();
     let mut env = std::env::vars().collect::<Vec<_>>();

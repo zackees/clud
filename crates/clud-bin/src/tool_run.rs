@@ -163,15 +163,35 @@ fn run_passthrough(
         address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
+    #[cfg(test)]
+    prepare_fixture_observer(&process, rel_path);
     let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
-    let exit_code = loop {
-        match process.wait(Some(DRAIN_POLL_INTERVAL)) {
-            Ok(code) => break code,
+    let mut progress_uncertain = false;
+    #[cfg(test)]
+    let mut fixture_timeout_forced = false;
+    let (exit_code, delayed) = loop {
+        #[cfg(test)]
+        let wait_result = fixture_wait(&process, rel_path, &mut fixture_timeout_forced);
+        #[cfg(not(test))]
+        let wait_result = process.wait(Some(DRAIN_POLL_INTERVAL));
+        match wait_result {
+            Ok(code) => {
+                #[cfg(test)]
+                if rel_path == "__test_buffered_progress" {
+                    assert!(progress_uncertain, "the buffered-progress path must run");
+                    assert_eq!(code, 0, "fixture must finish successfully");
+                }
+                let delayed = delayed_observation(&watchdog)
+                    .or(progress_uncertain.then_some(AbortReason::ProgressTimeout));
+                break (code, delayed);
+            }
             Err(ProcessError::Timeout) => {
                 emitted = drain_passthrough_output(&process, emitted);
                 if emitted > last_drain_count {
-                    watchdog.note_output();
+                    note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {
@@ -208,11 +228,109 @@ fn run_passthrough(
         }
     };
     let _ = drain_passthrough_output(&process, emitted);
+    let reported_code = uncertain_exit_code(exit_code, delayed);
+    if let Some(reason) = delayed {
+        let payload = serde_json::json!({
+            "v": 1,
+            "status": "observation-delayed",
+            "reason": reason.label(),
+            "deadline_outcome": "unknown",
+            "exit_code": exit_code,
+        });
+        let _ = writeln!(io::stderr().lock(), "{payload}");
+    }
     telemetry.finish(
-        exit_code,
+        reported_code,
         stderr_tail_200(&process.captured_stderr().concat()),
     );
-    Ok(exit_code)
+    Ok(reported_code)
+}
+
+#[cfg(test)]
+fn release_buffered_fixture(rel_path: &str, args: &[String], progress_uncertain: bool) {
+    if rel_path == "__test_buffered_progress" && progress_uncertain {
+        std::fs::write(&args[0], b"release").expect("release fixture child");
+    }
+}
+
+#[cfg(test)]
+fn prepare_fixture_observer(process: &NativeProcess, rel_path: &str) {
+    if rel_path == "__test_delayed_observer" {
+        process
+            .wait(Some(Duration::from_secs(10)))
+            .expect("fixture must exit");
+    } else if rel_path == "__test_buffered_progress" {
+        wait_for_buffered_fixture_output(process);
+    }
+}
+
+#[cfg(test)]
+fn fixture_wait(
+    process: &NativeProcess,
+    rel_path: &str,
+    forced: &mut bool,
+) -> Result<i32, ProcessError> {
+    if rel_path == "__test_buffered_progress" && !*forced {
+        assert!(
+            process.returncode().is_none(),
+            "fixture must still be running"
+        );
+        *forced = true;
+        Err(ProcessError::Timeout)
+    } else {
+        process.wait(Some(DRAIN_POLL_INTERVAL))
+    }
+}
+
+#[cfg(test)]
+fn wait_for_buffered_fixture_output(process: &NativeProcess) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let marker = b"buffered progress fixture";
+    let has_marker = || {
+        process.captured_combined().iter().any(|event| {
+            event
+                .line
+                .windows(marker.len())
+                .any(|window| window == marker)
+        })
+    };
+    while !has_marker() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(has_marker(), "fixture marker must be buffered");
+    assert!(
+        process.returncode().is_none(),
+        "fixture must still be running"
+    );
+}
+
+/// A late observation cannot establish when the child exited or last wrote output.
+fn delayed_observation(watchdog: &Watchdog) -> Option<AbortReason> {
+    match watchdog.check() {
+        WatchdogDecision::Continue => None,
+        WatchdogDecision::KillAndAbort(reason) | WatchdogDecision::ResumeLater(reason) => {
+            Some(reason)
+        }
+    }
+}
+
+/// Buffered output has no producer timestamp; a late drain cannot prove when it arrived.
+fn note_observed_progress(watchdog: &mut Watchdog, uncertain: &mut bool) {
+    if matches!(
+        delayed_observation(watchdog),
+        Some(AbortReason::ProgressTimeout)
+    ) {
+        *uncertain = true;
+    }
+    watchdog.note_output();
+}
+
+fn uncertain_exit_code(exit_code: i32, delayed: Option<AbortReason>) -> i32 {
+    if exit_code == 0 && delayed.is_some() {
+        WATCHDOG_EXIT_CODE
+    } else {
+        exit_code
+    }
 }
 
 fn render_passthrough_abort_payload(
@@ -307,6 +425,8 @@ fn run_with_session(
         address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
+    #[cfg(test)]
+    prepare_fixture_observer(&process, rel_path);
 
     // #1204: record the child's real OS PID and its start time so
     // `clud tool log --pid` / `clud tool info --pid` can match this
@@ -349,13 +469,31 @@ fn run_with_session(
     // terminal (resumable) and break out.
     let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
-    let exit_code = loop {
-        match process.wait(Some(DRAIN_POLL_INTERVAL)) {
-            Ok(code) => break code,
+    let mut progress_uncertain = false;
+    #[cfg(test)]
+    let mut fixture_timeout_forced = false;
+    let (exit_code, delayed) = loop {
+        #[cfg(test)]
+        let wait_result = fixture_wait(&process, rel_path, &mut fixture_timeout_forced);
+        #[cfg(not(test))]
+        let wait_result = process.wait(Some(DRAIN_POLL_INTERVAL));
+        match wait_result {
+            Ok(code) => {
+                #[cfg(test)]
+                if rel_path == "__test_buffered_progress" {
+                    assert!(progress_uncertain, "the buffered-progress path must run");
+                    assert_eq!(code, 0, "fixture must finish successfully");
+                }
+                let delayed = delayed_observation(&watchdog)
+                    .or(progress_uncertain.then_some(AbortReason::ProgressTimeout));
+                break (code, delayed);
+            }
             Err(ProcessError::Timeout) => {
                 emitted = drain_into_tee(&process, &mut tee, emitted);
                 if emitted > last_drain_count {
-                    watchdog.note_output();
+                    note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {
@@ -432,20 +570,30 @@ fn run_with_session(
     let _ = tee.flush();
 
     let ended_at_ms = unix_millis_now();
-    let _ = append_event(
-        ctx,
-        &IndexEvent::Finished {
+    let event = if let Some(reason) = delayed {
+        IndexEvent::ObservationDelayed {
+            tool_id,
+            reason: reason.label().to_string(),
+            exit_code,
+            ended_at_ms,
+        }
+    } else {
+        IndexEvent::Finished {
             tool_id,
             exit_code,
             ended_at_ms,
-        },
-    );
+        }
+    };
+    let _ = append_event(ctx, &event);
 
     // Slice 6: emit the structured payload + pointer block on every
     // non-zero exit so the agent always sees how to find the log.
     // We deliberately skip emission for the zero-exit happy path —
     // pointers there would be noise after a successful run.
-    if exit_code != 0 {
+    let exit_kind = delayed
+        .map(ExitKind::ObservationDelayed)
+        .or_else(|| (exit_code != 0).then_some(ExitKind::Failed));
+    if let Some(kind) = exit_kind {
         let _ = emit_termination(
             ctx.session_pid,
             tool_id,
@@ -454,16 +602,17 @@ fn run_with_session(
             started_at_ms,
             ended_at_ms,
             watchdog.started_at.elapsed(),
-            ExitKind::Failed,
+            kind,
             Some(exit_code),
         );
     }
 
+    let reported_code = uncertain_exit_code(exit_code, delayed);
     telemetry.finish(
-        exit_code,
+        reported_code,
         stderr_tail_200(&process.captured_stderr().concat()),
     );
-    Ok(exit_code)
+    Ok(reported_code)
 }
 
 fn drain_passthrough_output(process: &NativeProcess, emitted: usize) -> usize {

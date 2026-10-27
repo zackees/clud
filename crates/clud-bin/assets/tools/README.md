@@ -6,8 +6,12 @@
 The runner returns the tool's own exit code when the tool finishes. Its
 watchdog returns `124` when a time limit fires. A resumable tool gets a JSON
 line on stderr with `status: in-progress`; run it again with the same args.
-A killable tool gets `status: aborted`. Exit `0` means the tool itself
-finished successfully. The watchdog passes its command cap to children as
+A killable tool gets `status: aborted`. If an observer resumes too late to
+determine whether a deadline was met, the runner reports `status:
+observation-delayed` and `deadline_outcome: unknown`, with the observed child
+exit code. A zero child exit then returns wrapper code `124` rather than
+claiming a verified success; a nonzero child exit is preserved. Exit `0` means
+the tool finished successfully within what the observer could verify. The watchdog passes its command cap to children as
 `CLUD_TOOL_COMMAND_TIMEOUT_SECS`; `github/pr_merge_watch.py` uses that value
 to finish its own timeout and cleanup before the wrapper's cap.
 
