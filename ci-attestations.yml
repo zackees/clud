@@ -1,16 +1,16 @@
 # ci-attestations (zackees/ci.yml GATE-010). See
 # docs/architecture/ci.md#attested-skip-gate-008010.
 #
+# Optional local diagnostic mappings. Hosted CI does not consume local
+# receipts or waive PR jobs; every selected hosted PR check executes.
 # Each gate is one check a routine PR lane runs, named
 # <ecosystem>/<platform>/<check>. `lane` is the local-gate.toml lane whose
 # pass proves it: `ci-lint local-gate run` writes one `Ci-Attestation:`
 # trailer per gate into the commit message (never into the tree). A gate
-# with no trailer was not run locally, so CI runs it.
+# with no trailer was not run locally.
 #
-# `jobs` maps each remote job to its gates. On a PR, the static job skips a
-# job only when every one of its gates is attested and stamp-valid AND the
-# head passes [gate.trust]. This file is read from the PR's base and is a
-# trust surface. Pushes to main always run every job.
+# `jobs` maps hosted jobs to optional local checks. These declarations do
+# not grant a hosted skip. Main-push reuse uses separate verified CI evidence.
 version: 1
 gates:
   general/all/static: {lane: static}                       # ci/lint.py --static-only

@@ -7308,3 +7308,17 @@ is a role policy and still names run watches.
 
 **Consequences:** an agent may block on `gh run watch` for a whole run. That
 is the cost of the run itself, not a matrix it no longer cares about.
+
+## DD-190: Hosted PR validation does not require a local Bosn receipt
+
+**Decision (2026-10-27):** Bosn execution and local gate receipts are optional.
+PRs and merge groups run every selected hosted check. `CI OK` continues to
+verify actual job results and reject missing, failed or unjustifiably skipped
+required jobs; local receipts cannot waive those checks.
+
+The mandatory prerequisite blocked a PR whose separate full hosted run had
+passed. The owner requested that the requirement be disabled in code. Remove
+the PR attestation step, its job-skip outputs and the final verifier's local
+attestation input. Keep optional local declarations in shadow mode and retain
+independently verified reuse on main pushes. Native coverage selection and
+full release validation are unchanged.

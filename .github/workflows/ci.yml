@@ -100,10 +100,9 @@ jobs:
   # ---------------------------------------------------------------- static --
   # The mode job every other job needs. It installs nothing beyond the
   # runner's cached Python (zackees/ci.yml GEN-018): it pins the source SHA,
-  # resolves the CI mode and decides attested skips, in about 10 s. The lint
+  # resolves the CI mode and verified main-push reuse, in about 10 s. The lint
   # itself is `static-checks` below, which runs beside the builds instead of
-  # ahead of them. The job id stays `static` so every `needs.static.outputs`
-  # consumer (and local-gate.toml's `verify`) is unchanged.
+  # ahead of them. PRs run the hosted checks without a local Bosn prerequisite.
   static:
     name: CI mode
     runs-on: ubuntu-24.04
@@ -122,16 +121,11 @@ jobs:
       reuse_pr: ${{ steps.reuse.outputs.pr }}
       reuse_run_url: ${{ steps.reuse.outputs.run_url }}
       reuse_tree: ${{ steps.reuse.outputs.tree }}
-      # zackees/ci.yml GATE-008/010: 'true' only on a PR whose head carries a
-      # stamp-valid `Ci-Attestation:` for every gate ci-attestations.yml maps
-      # to the job, inside local-gate.toml's [gate.trust] policy as committed
-      # on the base. Never 'true' on push or dispatch. See
-      # docs/architecture/ci.md#attested-skip-gate-008010.
-      skip_dylint: ${{ steps.gate.outputs.skip_dylint }}
-      skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 || steps.reuse_skip.outputs.skip_lint-linux-x64 }}
-      skip_build-linux-x64: ${{ steps.gate.outputs.skip_build-linux-x64 }}
-      skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit || steps.reuse_skip.outputs.skip_test-linux-x64-unit }}
-      skip_static-checks: ${{ steps.gate.outputs.skip_static-checks || steps.reuse_skip.outputs.skip_static-checks }}
+      # Only a verified byte-identical main push may reuse validation.
+      # PRs and merge groups execute every selected hosted check.
+      skip_lint-linux-x64: ${{ steps.reuse_skip.outputs.skip_lint-linux-x64 }}
+      skip_test-linux-x64-unit: ${{ steps.reuse_skip.outputs.skip_test-linux-x64-unit }}
+      skip_static-checks: ${{ steps.reuse_skip.outputs.skip_static-checks }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -172,23 +166,17 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PROVENANCE_VERIFIED: ${{ env.PROVENANCE_VERIFIED }}
         run: python -m ci.ci_matrix
-      # Pinned like local-gate.toml's uvx command. Stdlib only: nothing to
-      # install, and it reads the base commit's policy from the full history
-      # checked out above. It fails closed (every skip_* stays unset) on any
-      # reason code but `trusted`.
+      # Pinned shared verifier for default-branch reuse. No local receipt is
+      # required or accepted to skip a pull-request job.
       - name: Checkout ci-lint
         uses: actions/checkout@v4
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           repository: zackees/ci.yml
           ref: 839c8f6b03c08a94977d57eb339740407424a434
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
-      - name: Local gate attestation
-        id: gate
-        if: github.event_name == 'pull_request'
-        run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
       # zackees/ci.yml#157 (GEN-021): byte-identical merged-tree reuse.
       # zackees/ci.yml#310 + owner directive 2026-10-04: promote immediately.
       # The shadow quota (100 decisive runs, 30 for low-volume) bought
@@ -251,13 +239,13 @@ jobs:
           done
           echo "skipping validation jobs on a verified byte-identical merge"
       # The nightly run exists to execute every lane. The steps above only
-      # compute skips on pull_request/push, so nothing is set here today;
+      # compute skips on main pushes, so nothing is set here today;
       # this makes a future change that waives a lane on schedule fail loudly
       # instead of quietly turning the backstop into a no-op (#1849).
       - name: Nightly runs skip nothing
         if: github.event_name == 'schedule'
         env:
-          SKIPS: ${{ steps.gate.outputs.skip_dylint }}${{ steps.gate.outputs.skip_lint-linux-x64 }}${{ steps.gate.outputs.skip_build-linux-x64 }}${{ steps.gate.outputs.skip_test-linux-x64-unit }}${{ steps.gate.outputs.skip_static-checks }}${{ steps.reuse_skip.outputs.skip_lint-linux-x64 }}${{ steps.reuse_skip.outputs.skip_test-linux-x64-unit }}${{ steps.reuse_skip.outputs.skip_static-checks }}${{ steps.reuse.outputs.reuse }}
+          SKIPS: ${{ steps.reuse_skip.outputs.skip_lint-linux-x64 }}${{ steps.reuse_skip.outputs.skip_test-linux-x64-unit }}${{ steps.reuse_skip.outputs.skip_static-checks }}${{ steps.reuse.outputs.reuse }}
           MODE: ${{ steps.mode.outputs.tier }}
         run: |
           set -euo pipefail
@@ -391,8 +379,7 @@ jobs:
     if: >-
       ${{ always() && !cancelled()
           && needs.static.result == 'success'
-          && (needs.cache-maint.result == 'success' || needs.cache-maint.result == 'skipped')
-          && needs.static.outputs.skip_dylint != 'true' }}
+          && (needs.cache-maint.result == 'success' || needs.cache-maint.result == 'skipped') }}
     uses: ./.github/workflows/_dylint.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -443,8 +430,7 @@ jobs:
       ${{ always() && !cancelled()
           && needs.static.result == 'success'
           && (needs.cache-maint.result == 'success' || needs.cache-maint.result == 'skipped')
-          && needs.static.outputs.mode != ''
-          && needs.static.outputs.skip_build-linux-x64 != 'true' }}
+          && needs.static.outputs.mode != '' }}
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -734,7 +720,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       # The shared verifier derives required jobs from this workflow and
-      # independently verifies local attestations and default-branch reuse.
+      # independently verifies hosted results and default-branch reuse.
       - name: Check results
         env:
           RESULTS: ${{ toJSON(needs) }}
@@ -744,7 +730,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$RESULTS" >needs.json
           printf '%s\n' "${REUSE_EVIDENCE:-null}" >reuse-check.json
-          uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --attested-workflow ci.yml --event "$GITHUB_EVENT_PATH"
+          uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --event "$GITHUB_EVENT_PATH"
 
   # ---------------------------------------------------------- nightly-report --
   # Turns the nightly run's verdict into one tracking issue (#1849): opened

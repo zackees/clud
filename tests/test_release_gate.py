@@ -15,10 +15,7 @@ def test_ci_is_callable_with_a_candidate_that_resolves_the_full_tier() -> None:
     assert "required: true" in call
     # A call arrives as the caller's tag push; the candidate makes it a
     # dispatch for provenance and mode resolution, which selects full.
-    mapping = (
-        "EVENT_NAME: ${{ inputs.candidate_sha && 'workflow_dispatch' "
-        "|| github.event_name }}"
-    )
+    mapping = "EVENT_NAME: ${{ inputs.candidate_sha && 'workflow_dispatch' || github.event_name }}"
     assert text.count(mapping) == 2
     assert "github.event_name == 'workflow_dispatch'" not in text.split("\njobs:", 1)[1]
 
@@ -28,16 +25,15 @@ def test_a_release_run_consults_no_attestation_or_reuse() -> None:
     # a job keys on a PR or a main push, which a tag-push call never is.
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     for step in (
-        "Local gate attestation",
         "Default-branch reuse (enforce)",
         "Select jobs to skip on a verified reuse",
     ):
         body = text.split(f"- name: {step}\n", 1)[1].split("\n      - ", 1)[0]
         condition = body.split("if: ", 1)[1].split("\n", 1)[0]
-        assert condition in (
-            "github.event_name == 'pull_request'",
-            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
-        ), (step, condition)
+        assert condition in ("github.event_name == 'push' && github.ref == 'refs/heads/main'",), (
+            step,
+            condition,
+        )
 
 
 def test_release_workflow_gates_every_publish_path() -> None:
@@ -119,7 +115,7 @@ def test_tag_push_runs_public_reusable_jobs_and_fails_if_they_skip() -> None:
         assert match is not None
         block = match.group(1)
         assert "if: always()" in block
-        assert "run: test \"$RESULT\" = success" in block
+        assert 'run: test "$RESULT" = success' in block
 
 
 def test_public_guest_evidence_capture_uses_runner_tools() -> None:

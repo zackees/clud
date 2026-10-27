@@ -36,9 +36,9 @@ def test_final_gate_uses_shared_source_and_independent_skip_proofs() -> None:
     gate = text.split("\n  ci-ok:\n", 1)[1]
     assert "ci-lint gate" in gate
     assert "--workflow-plan ci.yml" in gate
-    assert "--attested-workflow ci.yml" in gate
+    assert "--attested-workflow" not in gate
     assert "--default-branch-reuse reuse-check.json" in gate
-    assert "--event \"$GITHUB_EVENT_PATH\"" in gate
+    assert '--event "$GITHUB_EVENT_PATH"' in gate
     assert "REUSE_EVIDENCE: ${{ needs.static.outputs.reuse_evidence }}" in gate
     assert "reuse_evidence: ${{ steps.reuse.outputs.evidence_json }}" in text
     assert "MINIMAL:" not in gate
@@ -602,7 +602,7 @@ def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None
     assert offenders == [], offenders
 
 
-ATTESTED_SKIP_JOBS = (
+ROUTINE_PR_JOBS = (
     "static-checks",
     "dylint",
     "lint-linux-x64",
@@ -623,44 +623,30 @@ REUSE_SKIP_JOBS = (
 WRITER_JOBS = ("dylint", "build-linux-x64")
 
 
-def test_attested_skip_is_wired_to_the_shared_verifier() -> None:
-    """zackees/ci.yml GATE-008/010: an attested PR head skips exactly the
-    routine Linux lanes the local bosn plan runs. Each skip job consumes its
-    static `skip_<job>` output. `CI OK` independently verifies the proof
-    through the same pinned shared tool."""
+def test_hosted_pr_checks_do_not_require_local_bosn_receipts() -> None:
+    """A stamp-free PR runs real hosted checks; local receipts cannot waive them."""
     root = CI_YML.parent.parent.parent
     text = CI_YML.read_text(encoding="utf-8")
-    trust = (root / "local-gate.toml").read_text(encoding="utf-8")
-    attestations = (root / "ci-attestations.yml").read_text(encoding="utf-8")
+    config = (root / "local-gate.toml").read_text(encoding="utf-8")
     static = text.split("\n  static:\n", 1)[1].split("\n  static-checks:\n", 1)[0]
-    assert "python -m ci_lint local-gate verify --repo . --trust --github-output" in static
-    # The verifier and the documented gate command run the same ci_lint.
-    pin = re.search(r"repository: zackees/ci\.yml\n\s+ref: ([0-9a-f]{40})", static)
-    assert pin, "ci_lint checkout must be pinned to a commit"
-    assert f"zackees/ci.yml@{pin.group(1)} ci-lint local-gate run" in trust
-    gate = text.split("\n  ci-ok:\n", 1)[1]
-    assert f"zackees/ci.yml@{pin.group(1)} ci-lint gate" in gate
-    assert "--attested-workflow ci.yml" in gate
-    for job in ATTESTED_SKIP_JOBS:
+    assert "local-gate verify" not in text
+    assert "steps.gate.outputs" not in text
+    for section in ("gate", "gate.trust"):
+        body = config.split(f"[{section}]\n", 1)[1].split("\n[", 1)[0]
+        assert re.findall(r'^mode\s*=\s*"([^"]+)"', body, re.MULTILINE) == ["shadow"]
+    gate = text.split("\n  ci-ok:\n", 1)[1].split("\n  nightly-report:\n", 1)[0]
+    assert "--attested-workflow" not in gate
+    assert "--workflow-plan ci.yml --needs needs.json" in gate
+    assert "continue-on-error" not in static + gate
+    assert "|| true" not in static + gate
+    for job in ROUTINE_PR_JOBS:
         if job in REUSE_SKIP_JOBS:
-            # Attestation OR a verified default-branch reuse.
-            output = (
-                f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} "
-                f"|| steps.reuse_skip.outputs.skip_{job} }}}}"
-            )
+            output = f"skip_{job}: ${{{{ steps.reuse_skip.outputs.skip_{job} }}}}"
+            assert output in static, job
         else:
-            # A cache writer: attestation only, never reuse.
-            output = f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} }}}}"
-        assert output in static, job
-        block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n  ", 1)[0]
-        assert f"needs.static.outputs.skip_{job} != 'true'" in block, job
-        assert f'"ci.yml:{job}"' in trust, job
-        assert f"ci.yml:{job}:" in attestations, job
+            assert f"skip_{job}" not in text, job
         assert f"- {job}" in gate, job
         assert f"skip_{job}" not in gate, job
-    # A label that selects lanes the local plan does not run must never trust.
-    for label in ("ci-test", "ci-windows", "ci-macos", "ci-full", "ci:full"):
-        assert f'"{label}"' in trust.split("full-labels", 1)[1].split("\n", 1)[0], label
 
 
 def test_default_branch_reuse_skips_validation_but_never_the_cache_writers() -> None:
@@ -690,7 +676,7 @@ def test_default_branch_reuse_skips_validation_but_never_the_cache_writers() -> 
 
     # And the step is fail-closed: it emits nothing unless the decision said so.
     assert 'if [ "$REUSE" != "true" ]; then' in step
-    assert 'if: github.event_name == \'push\' && github.ref == \'refs/heads/main\'' in step
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in step
     # Enforcement, not shadow, or the skips would never happen.
     assert "--mode enforce" in static
     assert "--mode shadow" not in static

@@ -8,10 +8,9 @@ Guidance for Claude Code when working in this repository.
 
 ### Essential Commands
 
-The commands below describe what the CI jobs execute. Agents must run local
-lint and tests only through `bosn ci run --workspace . --trigger pr`
-(`--job static-checks` for formatting/Ruff/guards, `--job lint-linux-x64`
-for Clippy/doc-tests); never invoke these commands on the host.
+The commands below describe what the CI jobs execute. Run focused checks
+locally when useful, then push and require the selected GitHub Actions jobs
+to pass before merging. Bosn is optional; no local receipt is required.
 Changes to Windows platform implementations or native runtime contracts
 require `ci-windows`, including the relevant PTY tests. Shared business logic
 calling unchanged Windows APIs stays on routine CI; inspect the changed code
@@ -28,41 +27,22 @@ All `cargo` / `rustc` / `rustfmt` calls **must go through [soldr](https://github
 
 Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
 
-### Local validation before GitHub Actions
+### Validation before merging
 
-**Mandatory for agents: run all local tests and lint through `bosn ci`**
-(`bosn ci run --workspace . --trigger pr --wait`, or `clud ci [JOB] [--filter RE]`
-for the verdict plus only the failing steps' diagnostics), which replays the workflow
-under act2 in an isolated engine. Do not run tests or lint on the host or in a
-direct Bosn build task: those paths can interfere with the system `clud`. If
-act cannot represent an affected job (notably native Windows or macOS
-execution), use the relevant GitHub Actions lane for that validation and
-report the local coverage gap; never claim a local pass proves native
-behavior. This needs bosn 0.1.10 or newer (`bosn --version`), the first release
-whose act2 runs every lane documented in ci.md. If bosn or Docker is unavailable or too old, report the
-blocker rather than falling back to host testing. The workflows carry no
-act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
-zackees/ci.yml, not patched here. The commands and limits are in
-[`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
-**Run the pre-push full PR pass through the local gate**, which wraps that
-same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
-Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
-commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint local-gate run`
-then publish the exact stamped head with
-`uvx --from git+https://github.com/zackees/ci.yml@839c8f6b03c08a94977d57eb339740407424a434 ci-lint local-gate push --sha <stamped-head>`.
-Use Bosn 0.1.18 with act2.15 and its verified execution pins. Ordinary PRs
-require proof under the base policy; do not amend or rebase after stamping.
-A changed tree requires another gate run. Plain `bosn ci run`
-stays valid for `--job static-checks` and focused jobs.
+GitHub Actions is the CI of record. Push the change and require `CI OK`
+before merging. PRs execute every selected hosted check; neither publication
+nor CI requires a Bosn run or a `Local-Gate`/`Ci-Attestation` trailer.
 
-**Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
-local CI is a pre-push check, not the edit loop. Run the full PR plan at most
-once per change. The PR's GitHub CI is the CI of record. Don't wait in a busy
-bosn queue: cancel your own queued run (`bosn ci cancel RUN`) and wait for
-capacity before qualifying the head. Publish only a valid stamped head. Never
-`pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
-runs.
+Use targeted local tests and lint for the edit loop. Rust commands still go
+through soldr. An optional `bosn ci run --workspace . --trigger pr` or
+`clud ci [JOB] [--filter RE]` can replay supported jobs in an isolated engine.
+If Bosn is unavailable or busy, use hosted CI. Stop only your own Bosn run;
+never kill other sessions' processes. Native Windows/macOS behavior needs the
+relevant native CI lane; a local run on another OS cannot prove it.
+
+See [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci)
+for optional replay commands and coverage limits. Do not weaken a test or
+waive a hosted job to obtain a green result.
 
 ## Repository Map
 
@@ -177,9 +157,11 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 For agents, the full PR plan fulfills the lint requirement below. Focused
 `--job static-checks` runs formatting/Ruff/guards, `--job lint-linux-x64`
 runs Clippy/doc-tests, and `--job dylint` runs Dylint. `--job static` only
-probes CI mode and attestations. Direct host execution is prohibited.
+resolves CI mode. Local checks are optional; the selected hosted jobs must pass.
 
-After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
+After any code edit, the relevant lint checks must pass. The hosted Static
+checks, Clippy and Dylint jobs fulfill this requirement. For local feedback,
+`bash lint` runs formatting, Clippy, Ruff and the host Dylint pass.
 
 ### Function-complexity ratchet
 
