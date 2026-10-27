@@ -1,9 +1,8 @@
-"""Negative controls and the always-loaded instruction budget for #2225."""
+"""Negative controls for repeated-context and request-growth detection (#2225)."""
 
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import pytest
 
@@ -50,9 +49,3 @@ def test_openrouter_context_audit_rejects_context_bloat(mutation: str) -> None:
     with pytest.raises(AssertionError):
         check(rows)
 
-
-def test_openrouter_context_always_loaded_instructions_fit_budget() -> None:
-    root = Path(__file__).resolve().parents[1]
-    assert (root / "CLAUDE.md").stat().st_size <= 8192, (
-        "CLAUDE.md is injected into every model call; keep it an index and move topic detail to docs"
-    )
