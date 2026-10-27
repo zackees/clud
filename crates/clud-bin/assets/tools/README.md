@@ -14,6 +14,14 @@ to finish its own timeout and cleanup before the wrapper's cap.
 Stdout over 32 KB truncates visibly with an artifact path; see
 [bounded-output.md](../../../../docs/architecture/bounded-output.md).
 
+For a failed GitHub Actions job, use
+`clud tool run github/ci_failure_report.py -- --repo OWNER/REPO --run RUN_ID --job JOB_ID`.
+It reads the completed job even while siblings run, prints bounded possible
+failure diagnostics, and saves the raw log privately. Use its printed
+`--artifact` continuation to inspect a line range without another GitHub call.
+Exit 0 means the log was retrieved, not that the job passed. Empty, unfinished,
+unavailable or unsaved logs produce a nonzero exit.
+
 `diagnostics/transcript_report.py` reports repeated tool-call bursts,
 compactions, context jumps and context errors from one Claude transcript.
 It joins clud's launch-context record by hashed session id to report the

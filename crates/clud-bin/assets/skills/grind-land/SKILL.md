@@ -44,7 +44,8 @@ server and merge.
      `completed`, `rate_limited`, `skipped`, `pending`, `timeout`) is still
      `0`: merge.
    - `1` (a required check failed): `gh pr checks --repo <github-repo> <n>` and
-     `gh run view --repo <github-repo> <run> --log-failed` for the failing job. Return
+     `"$CLUD_EXE" tool run github/ci_failure_report.py -- --repo <github-repo> --run <run> --job <job>`
+     for the failing job. Use the returned artifact and line-range continuation to inspect more. Return
      `status=needs_fix` with the failing job and the relevant log lines in
      `failure_log`.
    - `2` (new review activity): read the unresolved comments with
