@@ -63,6 +63,28 @@ def test_prior_discovery_version_ignores_binaries_that_cannot_reach_the_catalog(
     assert prior_discovery_version(catalog, "2.8.31") is None
 
 
+def test_older_installer_discovery_records_an_unreachable_prior(tmp_path: Path) -> None:
+    # A skipped test produces no evidence row, and the acceptance aggregate then
+    # rejects the whole release with "missing public host evidence". Record the
+    # gap in the row instead so every host still reports.
+    catalog = {"releases": [{"version": "2.8.31"}]}
+    evidence = assert_older_installer_discovery(
+        catalog,
+        "linux",
+        "x86_64",
+        {},
+        tmp_path / "clud",
+        "2.8.37",
+        "0" * 64,
+        tmp_path,
+    )
+    assert evidence == {
+        "unavailable": "no catalog-aware prior release",
+        "catalog_move_version": "2.8.35",
+        "legacy_host": LEGACY_ONLINE_HOST,
+    }
+
+
 def public_executable_flavor(row: dict) -> str | None:
     return row.get("variant", {}).get("flavor")
 
@@ -161,12 +183,16 @@ def assert_older_installer_discovery(
     """A fixed older public executable must discover and install today's stable."""
     prior_version = prior_discovery_version(catalog, version)
     if prior_version is None:
-        pytest.skip(
-            f"no public release between {CATALOG_MOVE_VERSION} (the catalog move) and "
-            f"{version}: every older binary hardcodes the retired "
-            f"{LEGACY_ONLINE_HOST} catalog URL, so cross-version discovery has "
-            "nothing it can download from"
-        )
+        # No stable-catalog release is both new enough to reach today's catalog
+        # URL and older than this release, so cross-version discovery has nothing
+        # it can download from. Record that gap in the evidence instead of
+        # skipping: the acceptance aggregate requires one row per host, and a
+        # skipped test would silently drop this host from it.
+        return {
+            "unavailable": "no catalog-aware prior release",
+            "catalog_move_version": CATALOG_MOVE_VERSION,
+            "legacy_host": LEGACY_ONLINE_HOST,
+        }
     assert version_key(prior_version) < version_key(version)
     release = next(row for row in catalog["releases"] if row["version"] == prior_version)
     matches = [
