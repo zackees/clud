@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -100,7 +101,10 @@ def test_transient_unmergeable_does_not_end_the_wait(merge_watcher, monkeypatch)
 
 def test_dequeue_is_ejection_even_when_auto_merge_remains_enabled(merge_watcher, monkeypatch):
     watcher = merge_watcher
-    states = [_queue(watcher), _queue(watcher, entry=None, auto=True)]
+    removed = _queue(
+        watcher, entry=None, auto=True, reason="MANUAL", removed=STARTED + timedelta(seconds=5)
+    )
+    states = [_queue(watcher), removed, removed]
     assert _follow(watcher, monkeypatch, states) == watcher.EXIT_EJECTED
 
 
@@ -174,3 +178,22 @@ def test_interval_is_bounded_by_deadline(merge_watcher, monkeypatch):
         watcher.follow_merge(42, "o/r", None)
     assert result.value.code == watcher.EXIT_TIMEOUT
     assert sleeps == [1.0]
+
+
+def test_unreadable_sample_breaks_removal_confirmation(merge_watcher, monkeypatch):
+    watcher = merge_watcher
+    removed = _queue(
+        watcher, entry=None, auto=True, reason="MANUAL", removed=STARTED + timedelta(seconds=5)
+    )
+    states = [_queue(watcher), removed, None, removed, _queue(watcher, state="MERGED", entry=None)]
+    assert _follow(watcher, monkeypatch, states) == watcher.EXIT_GREEN
+
+
+@pytest.mark.parametrize("reason", [True, 42, {"unexpected": "value"}])
+def test_non_string_removal_reason_is_unreadable(merge_watcher, reason):
+    data = {"data": {"repository": {"pullRequest": {
+        "state": "OPEN", "baseRefName": "main", "autoMergeRequest": None,
+        "mergeQueueEntry": None,
+        "timelineItems": {"nodes": [{"createdAt": "2026-10-22T12:00:05Z", "reason": reason}]},
+    }}}}
+    assert merge_watcher.parse_queue_state(data) is None
