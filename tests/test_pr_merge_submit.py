@@ -75,6 +75,22 @@ def test_matching_already_queued_does_not_mutate(submitter, monkeypatch):
     assert len(calls) == 1
 
 
+def test_missing_pr_queue_entry_fails_without_mutation(submitter, monkeypatch):
+    calls = fake_gh(monkeypatch, submitter)
+    original = submitter.gh_json
+
+    def absent(*args):
+        payload = original(*args)
+        if "pullRequest" in payload.get("data", {}).get("repository", {}):
+            payload["data"]["repository"]["pullRequest"].pop("mergeQueueEntry")
+        return payload
+
+    monkeypatch.setattr(submitter, "gh_json", absent)
+    with pytest.raises(submitter.SubmitError, match="queue entry"):
+        submitter.submit("talos-hq/clud", 2226, SHA)
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("kwargs", [{"head": "2" * 40}, {"state": "CLOSED"}, {"draft": True}])
 def test_unacceptable_pr_never_mutates(submitter, monkeypatch, kwargs):
     calls = fake_gh(monkeypatch, submitter, **kwargs)

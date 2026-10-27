@@ -596,16 +596,19 @@ def _graphql(path: Path, state: dict, argv: list[str]) -> int:
     fields = _api_fields(argv)
     query = str(fields.get("query", ""))
     if "enqueuePullRequest" in query:
-        pr = next((p for p in state.get("prs", []) if str(p["number"]) == fields.get("id")), None)
+        pr = next((p for p in state.get("prs", [])
+                   if f"{_repo(state)}#{p['number']}" == fields.get("id")), None)
         if pr is None or pr.get("head_oid") != fields.get("sha"):
             return _emit(argv, {"errors": [{"message": "head changed"}]})
+        if _needs_review(state, pr) and not pr.get("approved"):
+            return _emit(argv, {"errors": [{"message": "review required"}]})
         pr["queued"] = True
         _save(path, state)
         return _emit(argv, {"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": "entry"}}}})
     if "pullRequest(number:" in query and "headRefOid" in query:
         pr = _find_pr(state, str(fields.get("number", "")))
         value = None if pr is None else {
-            "id": str(pr["number"]), "state": pr.get("state", "OPEN"),
+            "id": f"{_repo(state)}#{pr['number']}", "state": pr.get("state", "OPEN"),
             "isDraft": pr.get("draft", False), "headRefOid": pr.get("head_oid"),
             "baseRefName": pr.get("base", "main"),
             "mergeQueueEntry": {"id": "entry"} if pr.get("queued") else None,
@@ -1241,7 +1244,16 @@ def _requested_repository(state: dict, argv: list[str]) -> str:
         return joined
     args = _without_repo_prefix(argv)
     if args[:1] == ["api"]:
-        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", _api_endpoint(args))
+        endpoint = _api_endpoint(args)
+        if endpoint == "graphql":
+            fields = _api_fields(args)
+            if fields.get("owner") and fields.get("name"):
+                return f"{fields['owner']}/{fields['name']}"
+            if "enqueuePullRequest" in str(fields.get("query", "")):
+                node = str(fields.get("id", ""))
+                if "#" in node:
+                    return node.rsplit("#", 1)[0]
+        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", endpoint)
         if match and "{" not in match[1]:
             return match[1]
     target = args[2] if len(args) > 2 else ""
