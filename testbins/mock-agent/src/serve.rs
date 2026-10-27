@@ -399,6 +399,25 @@ fn resolve_tool_input(mut step: Value) -> Result<Value, String> {
     Ok(step)
 }
 
+fn log_request(server: &Server, request: &Value, mut entry: Value) {
+    let messages = request.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
+    let tools: Vec<Value> = request.get("tools").and_then(Value::as_array)
+        .map(|tools| tools.iter().filter_map(|tool| tool.get("name").cloned()).collect())
+        .unwrap_or_default();
+    entry["stream"] = request["stream"].clone();
+    entry["tools"] = json!(tools);
+    entry["provider"] = request["provider"].clone();
+    entry["orchestration_tools"] = json!(orchestration_tool_schemas(request));
+    entry["tool_results"] = json!(recent_tool_results(&messages));
+    entry["system"] = json!(system_text(request));
+    entry["messages"] = json!(messages);
+    if let Ok(mut guard) = server.log.lock() {
+        if let Some(file) = guard.as_mut() {
+            let _ = writeln!(file, "{entry}");
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -420,31 +439,10 @@ fn respond_messages(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("claude");
-    let messages = request
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if let Ok(mut guard) = server.log.lock() {
-        if let Some(file) = guard.as_mut() {
-            let tools: Vec<Value> = request
-                .get("tools")
-                .and_then(Value::as_array)
-                .map(|t| t.iter().filter_map(|t| t.get("name").cloned()).collect())
-                .unwrap_or_default();
-            let entry = json!({
-                "n": n, "role": role, "turn": turn, "step": step, "note": note,
-                "t_start": t_start, "t_end": now_ms(),
-                "stream": request.get("stream"), "tools": tools,
-                "provider": request.get("provider"),
-                "orchestration_tools": orchestration_tool_schemas(request),
-                "tool_results": recent_tool_results(&messages),
-                "system": system_text(request),
-                "messages": messages,
-            });
-            let _ = writeln!(file, "{entry}");
-        }
-    }
+    log_request(server, request, json!({
+        "n": n, "role": role, "turn": turn, "step": step, "note": note,
+        "t_start": t_start, "t_end": now_ms(),
+    }));
 
     if let Some(error) = step.get("error") {
         let status = error.get("status").and_then(Value::as_u64).unwrap_or(500) as u16;
