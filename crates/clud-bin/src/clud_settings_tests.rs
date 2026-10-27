@@ -1482,3 +1482,20 @@ fn block_cd_defaults_to_auto_when_the_settings_file_says_nothing() {
         crate::repo_clud_config::BlockCd::Auto
     );
 }
+
+#[test]
+fn land_bias_reads_saved_preference() {
+    let home = tempdir().unwrap();
+    assert_eq!(load_land_bias_at(home.path()).unwrap(), None);
+    let path = settings_path_at(home.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, r#"{"launch":{"land_bias":"pr"}}"#).unwrap();
+    assert_eq!(
+        load_land_bias_at(home.path()).unwrap().as_deref(),
+        Some("pr")
+    );
+    fs::write(&path, r#"{"launch":null}"#).unwrap();
+    assert_eq!(load_land_bias_at(home.path()).unwrap().as_deref(), Some(""));
+    fs::write(&path, r#"{"launch":{"land_bias":42}}"#).unwrap();
+    assert_eq!(load_land_bias_at(home.path()).unwrap().as_deref(), Some(""));
+}

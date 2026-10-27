@@ -129,9 +129,13 @@ pub(in crate::hook_health) fn is_extended_key_for(key: &str, canonical_key: &str
 /// repo's hooks until the project is trusted here, and clud does not go
 /// around codex's model.
 pub fn codex_project_trusted(repo_root: &Path, home: &Path) -> bool {
-    let config_path = home.join(".codex").join("config.toml");
+    codex_project_trusted_in_config(repo_root, &home.join(".codex").join("config.toml"))
+}
+
+/// Check project trust in a specific Codex config, including CODEX_HOME overrides.
+pub fn codex_project_trusted_in_config(repo_root: &Path, config_path: &Path) -> bool {
     let canonical_key = codex_project_key(repo_root);
-    let Ok(text) = fs::read_to_string(&config_path) else {
+    let Ok(text) = fs::read_to_string(config_path) else {
         return false;
     };
     let Ok(document) = text.parse::<DocumentMut>() else {
@@ -148,7 +152,9 @@ pub fn codex_project_trusted(repo_root: &Path, home: &Path) -> bool {
             .and_then(Item::as_str)
             .map(|level| level.eq_ignore_ascii_case("trusted"))
             .unwrap_or(false);
-        trusted && (key == canonical_key || is_extended_key_for(key, &canonical_key))
+        trusted
+            && (normalize_project_path_key(key) == canonical_key
+                || is_extended_key_for(key, &canonical_key))
     });
     trusted
 }

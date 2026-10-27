@@ -7322,3 +7322,19 @@ the PR attestation step, its job-skip outputs and the final verifier's local
 attestation input. Keep optional local declarations in shadow mode and retain
 independently verified reuse on main pushes. Native coverage selection and
 full release validation are unchanged.
+
+
+## DD-191: Launches prefer delivering completed PRs
+
+**Decision:** Claude and Codex sessions receive a landing preference by
+default so code work tends to reach a validated, pushed and merged PR instead
+of stopping locally. Users can choose `launch.land_bias` as `merge`, `pr` or
+`off`, override it with `CLUD_LAND_BIAS`, or disable it for one launch with
+`--no-land`. Invalid preferences fail closed. Existing user instructions are
+preserved.
+
+This preference does not grant permissions or override explicit user requests,
+repository policies, review requirements or branch protection. DD-002's
+`--safe` continues to disable permission bypasses; it is independent of the
+landing preference. LaunchPlan and `--dry-run` expose the injected instructions
+under DD-005.

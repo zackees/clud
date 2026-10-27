@@ -1749,3 +1749,22 @@ class TestLargeFileWarningStartup:
         # criterion: normal startup must not silently drop what dry-run shows.
         assert name in dry.stderr, f"dry-run missing entry:\n{dry.stderr}"
         assert name in normal.stderr, f"normal startup missing entry:\n{normal.stderr}"
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("bias", ["merge", "pr", "off"])
+def test_land_bias_reaches_mock_agent(
+    clud_binary: Path, mock_env: dict[str, str], backend: str, bias: str
+) -> None:
+    mock_env["CLUD_LAND_BIAS"] = bias
+    result = _run(clud_binary, f"--{backend}", "--safe", "-p", "hello", env=mock_env)
+    assert result.returncode == 0, result.stderr
+    report = _parse_agent_report(result)
+    argv = " ".join(report["args"])
+    assert ("Land the work" in argv) == (bias != "off")
+    if bias == "pr":
+        assert "Do not merge unless" in argv
+    if bias == "merge":
+        assert "merged PR" in argv
+    assert "--dangerously-skip-permissions" not in report["args"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in report["args"]

@@ -16,7 +16,7 @@ use crate::args::{Args, Command as CliCommand};
 use crate::backend::{Backend, ResolvedLaunchTarget};
 use std::io::Write;
 
-pub use codex_trust::{codex_project_key, codex_project_trusted};
+pub use codex_trust::{codex_project_key, codex_project_trusted, codex_project_trusted_in_config};
 pub use inspect::{hook_home_dir, inspect_current, inspect_paths};
 pub use repairs::plan_repairs;
 pub use types::{
