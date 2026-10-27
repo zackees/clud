@@ -387,3 +387,29 @@ def test_macos_fails_closed_before_command(report, monkeypatch, tmp_path, capsys
     assert not calls
     assert "not-created" not in capsys.readouterr().err
     assert not (tmp_path / "not-created").exists()
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform in {"win32", "darwin"}, reason="ACL checks pending"
+)
+def test_redirected_stdin_reaches_test_command(monkeypatch, tmp_path):
+    import json
+    import sys
+
+    from running_process import RunningProcess
+
+    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path))
+    program = (
+        "import sys; data=sys.stdin.buffer.read(); "
+        "sys.stdout.buffer.write(b'error: ' + data); sys.exit(7)"
+    )
+    result = RunningProcess.run(
+        [sys.executable, str(TOOL), "--", sys.executable, "-c", program],
+        input=b"redirected-input",
+        capture_output=True,
+        text=False,
+        timeout=10,
+    )
+    assert result.returncode == 7
+    summary = json.loads(result.stdout.splitlines()[0])
+    assert any("redirected-input" in line for line in summary["diagnostics"])

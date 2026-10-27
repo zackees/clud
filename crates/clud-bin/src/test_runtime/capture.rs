@@ -59,6 +59,7 @@ pub(crate) fn capture_with_limit(
     let writer = crate::platform::test_capture::pipe_writer_file(writer);
     let argv: Vec<OsString> = command.iter().map(OsString::from).collect();
     let stdio = SpawnStdio {
+        stdin: StdioSource::Parent,
         stdout: StdioSource::File(&writer),
         stderr: StdioSource::File(&writer),
         ..SpawnStdio::default()
