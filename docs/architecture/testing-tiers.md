@@ -189,5 +189,15 @@ isolated fixture world; headers/credentials are never logged. Optional
 
 Passing this suite establishes the bounded scripted launcher/harness contract,
 not whether each real model tool choice is useful, live billing correctness,
-parallel tool batches, tool-failure recovery, automatic compaction behavior, or the absence of every possible future context
-regression. The real provider capture in #2225 complements the mock audit.
+parallel tool batches, tool-failure recovery, automatic compaction behavior,
+or the absence of every possible future context regression. The real provider
+capture in #2225 complements the mock audit.
+
+`tests/harness/test_openrouter_inventory.py` compares the compact bundled
+descriptions of seven workflow-internal agents with their frozen verbose
+descriptions. Full role prompts, tools, agent names, the orchestrator description
+and project guidance stay intact. The A/B control owns its fixture copies so
+startup refresh cannot erase it; the captured messages must be identical after
+normalizing exactly those descriptions. It measures received-byte savings,
+checks unchanged tool schemas/system content/catalog entries, and launches
+`grind-worker` by name to verify that its full role instructions still load.

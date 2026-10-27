@@ -1,6 +1,6 @@
 ---
 name: grind-reviewer
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind reviewer. Reviews and corrects worker output against the goal by reading and editing; may investigate with read-only gh and web search. Cannot build, lint or test.
+description: Internal grind-run reviewer (direct delegation blocked by default).
 tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->

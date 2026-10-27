@@ -1,6 +1,6 @@
 ---
 name: grind-prework
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind prework. Records (does not make) the run's plan by posting the workflow's pre-built plan comment(s) on the meta issue. Read-only git/gh shell plus `gh issue comment` on the meta issue. Never edits a comment.
+description: Internal grind-run prework (direct delegation blocked by default).
 tools: Bash, Read, Grep, Glob
 ---
 <!-- managed-by: clud -->

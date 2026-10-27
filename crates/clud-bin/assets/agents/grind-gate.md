@@ -1,6 +1,6 @@
 ---
 name: grind-gate
-description: Internal publication-check role for an approved grind dependency gate. Executes only its exact assigned check and reports the observed result; never implements work or changes a repository.
+description: Internal grind-run gate (direct delegation blocked by default).
 tools: Bash
 model: haiku
 ---

@@ -1,6 +1,6 @@
 ---
 name: grind-worker
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind worker. Reads and writes only the files it is assigned; may investigate with read-only gh and web search. Cannot build, lint or test.
+description: Internal grind-run worker (direct delegation blocked by default).
 tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->
