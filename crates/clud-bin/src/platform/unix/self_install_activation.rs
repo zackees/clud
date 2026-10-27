@@ -562,12 +562,14 @@ fn collect_shell_probe(
                 }
                 terminal_bytes += bytes.len();
             }
-            Ok(None) if process.wait_impl(Some(0.0)).is_ok() => break,
-            Ok(None) => continue,
+            Ok(None) => {}
             Err(_) => break,
         }
         if terminal_bytes > 32 * 1024 {
             return Err("fresh shell terminal output is too large".into());
+        }
+        if process.wait_impl(Some(0.0)).is_ok() {
+            break;
         }
     }
     drain_probe_pipe(fifo, &mut output)?;
@@ -608,8 +610,19 @@ fn parse_shell_probe(output: &[u8]) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_commands;
+    use super::{run_shell_probe, terminal_commands};
     use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn probe_finishes_when_a_descendant_keeps_the_terminal_open() {
+        let mut output = tempfile::tempfile().unwrap();
+        let command = vec!["/bin/sh".into(), "-c".into(), "(/bin/sleep 10) & exit 0".into()];
+        let started = Instant::now();
+        let (code, _) = run_shell_probe(command, Vec::new(), "test", &mut output).unwrap();
+        assert_eq!(code, 0);
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
 
     #[test]
     fn terminal_commands_refuse_unrepresentable_path_entries() {
