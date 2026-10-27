@@ -178,7 +178,7 @@ fn launch_installed(destination: &str, args: Args) -> i32 {
         address_space_limit_bytes: None,
     });
     match process.start().and_then(|()| process.wait(None)) {
-        Ok(code) => crate::runner::runner_exit::normalize_exit_code(code),
+        Ok(code) => crate::platform::subprocess::shell_exit_code(code),
         Err(error) => {
             eprintln!("clud setup: could not start installed clud: {error}");
             1

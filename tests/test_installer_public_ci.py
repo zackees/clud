@@ -87,6 +87,15 @@ def assert_public_latest_install(
         process.write("\r")
         process.expect(f"Install clud {version} at this destination?", timeout=30)
         process.write("\x1b[A\r")
+        try:
+            process.expect("Setup for:", timeout=120)
+        except EOFError:
+            # Older public installers exit after activation and have no setup flow.
+            pass
+        else:
+            process.write("\x1b[B\r")
+            process.expect("Start right now?", timeout=30)
+            process.write("\x1b[B\r")
         assert process.wait(timeout=120) == 0, process.output_text
         assert "verified fresh name-based lookup" in process.output_text
     finally:

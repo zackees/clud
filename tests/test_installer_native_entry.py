@@ -821,7 +821,7 @@ def assert_bare_openrouter_launch(installed: Path, env: dict[str, str], tmp_path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
-@pytest.mark.parametrize(("child_exit", "expected"), [("exit 37", 37), ("kill -INT $$", 130)])
+@pytest.mark.parametrize(("child_exit", "expected"), [("exit 37", 37), ("kill -INT $$", 130), ("ulimit -c 0; kill -ABRT $$", 134)])
 def test_start_uses_the_installed_executable(
     tmp_path: Path, child_exit: str, expected: int
 ) -> None:

@@ -106,6 +106,11 @@ def test_activation_repair_requires_separate_bounded_consent(
             profile.write_text(changed)
         os.write(terminal.master, b"\r" if decision == "decline" else b"\x1b[A\r")
         expected = 0 if decision == "approve" else 1
+        if decision == "approve" and not structured:
+            terminal.expect(b"Setup for:")
+            os.write(terminal.master, b"\x1b[B\r")
+            terminal.expect(b"Start right now?")
+            os.write(terminal.master, b"\x1b[B\r")
         assert terminal.finish() == expected, terminal.output.decode(errors="replace")
         assert terminal.output.count(b"Additional activation repair plan:") == 1
         if structured:
