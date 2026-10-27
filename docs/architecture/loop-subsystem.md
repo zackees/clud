@@ -112,6 +112,8 @@ file paths are also mirrored under the loop dir by
 `<original-filename>`), with skip-if-exists semantics so user edits
 survive across iterations.
 
+For large issue discussions, loop agents can use `clud tool run github/issue_context.py -- --repo OWNER/REPO --issue N` for a bounded overview and private, explicitly continuable snapshot. This tool is separate from the loop issue cache and `/grind` context pack; refreshing one does not update the others. See the [bundled tool guide](../../crates/clud-bin/assets/tools/README.md) for continuation and refresh.
+
 ## DONE/BLOCKED contract
 
 `loop_spec::done_marker_contract(done_abs, blocked_abs)` returns a fixed

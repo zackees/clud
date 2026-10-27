@@ -14,6 +14,15 @@ to finish its own timeout and cleanup before the wrapper's cap.
 Stdout over 32 KB truncates visibly with an artifact path; see
 [bounded-output.md](../../../../docs/architecture/bounded-output.md).
 
+For a large issue, use `clud tool run github/issue_context.py -- --repo OWNER/REPO --issue N`.
+It returns a bounded overview and a private snapshot path. Read saved material with
+`--artifact PATH --section body`, `--section comments --offset N`, or
+`--section comment:ID --offset N`; offsets for body and comment text count Unicode
+characters. `--refresh PATH` fetches a new snapshot and reports added, edited,
+and deleted comments. The existing loop issue cache and `/grind` context pack
+remain separate; refresh each explicitly. Windows fails closed until private
+artifact verification is available (#2246).
+
 For a failed GitHub Actions job, use
 `clud tool run github/ci_failure_report.py -- --repo OWNER/REPO --run RUN_ID --job JOB_ID`.
 It reads the completed job even while siblings run, prints bounded possible

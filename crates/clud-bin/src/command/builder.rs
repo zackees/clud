@@ -733,6 +733,11 @@ fn build_launch_plan_for_target_at(
                 } else {
                     prompt_text
                 };
+                let final_prompt = if matches!(backend, Backend::Codex) {
+                    format!("{final_prompt}\n\nFor large GitHub issue discussions, use `clud tool run github/issue_context.py -- --repo OWNER/REPO --issue N`; follow its snapshot continuation and refresh explicitly. If unavailable, use a bounded read and preserve access to the full issue.")
+                } else {
+                    final_prompt
+                };
                 push_prompt(&mut cmd, backend, final_prompt);
             }
             if let Some(markers) = marker_paths {
