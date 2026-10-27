@@ -143,6 +143,18 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: true,
     },
     BundledTool {
+        rel_path: "github/issue_context.py",
+        body: include_str!("../assets/tools/github/issue_context.py"),
+        // Read-only bounded issue reader (#2229): fetches an issue and its
+        // comments once, prints a byte-bounded view, and keeps the full
+        // snapshot outside the checkout. Sends only `gh api` GETs; killing it
+        // loses no work — `Resumable`.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "github/is_meta_issue.py",
         body: include_str!("../assets/tools/github/is_meta_issue.py"),
         // Read-only GitHub query (#1404): classifies an issue as meta or

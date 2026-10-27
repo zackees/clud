@@ -40,3 +40,15 @@ queue, or performs a normal squash merge when no queue applies. It requires
 `--repo OWNER/REPO` and `--match-head-commit` with the full head SHA; it never
 uses admin bypass. A successful enqueue is not a merged PR: follow it with
 `github/pr_merge_watch.py`. See [CI merge queue](../../../../docs/architecture/ci.md#merge-queue-2048-decided).
+
+`github/issue_context.py` is the bounded, read-only issue reader (#2229). It
+fetches an issue and its comments once over `gh api` GETs, saves the complete
+snapshot under `~/.clud/logs/issue-context/<owner>__<repo>/` (never in the
+checkout), and prints a byte-bounded view: metadata, a body excerpt, one
+excerpt per comment, and explicit omission counts with continuation
+instructions. `--comment <id>` prints one comment in full; `--refresh`
+re-fetches and reports new/edited comments against the snapshot; `--json`
+emits the same summary as JSON. It is the sanctioned path for issue
+investigations, in place of `gh issue view --json body,comments` and hand
+slicing each comment with `--jq`. See
+[bounded-output.md](../../../../docs/architecture/bounded-output.md).
