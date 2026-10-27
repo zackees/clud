@@ -490,10 +490,20 @@ def _drop_scrub_lists(value: object) -> object:
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
 
-    @pytest.mark.parametrize("model", ["codex-sol-6.1", "gpt-6.1-sol", "sol-6.1"])
-    def test_sol_6_1_launch_reaches_the_selected_wire_model(
+    @pytest.mark.parametrize(
+        ("model", "wire", "discovery"),
+        [
+            ("codex-sol-6.1", "gpt-6.1-sol", "clud-claude-codex-sol-6-1"),
+            ("sol-6.1", "gpt-6.1-sol", "clud-claude-codex-sol-6-1"),
+            ("gpt-6.1-sol", "gpt-6.1-sol", "clud-claude-codex-sol-6-1"),
+            ("codex-terra-6.1", "gpt-6.1-terra", "clud-claude-codex-terra-6-1"),
+            ("terra-6.1", "gpt-6.1-terra", "clud-claude-codex-terra-6-1"),
+            ("gpt-6.1-terra", "gpt-6.1-terra", "clud-claude-codex-terra-6-1"),
+        ],
+    )
+    def test_6_1_launch_reaches_the_selected_wire_model(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path,
-        fake_responses: _FakeResponsesServer, model: str,
+        fake_responses: _FakeResponsesServer, model: str, wire: str, discovery: str,
     ) -> None:
         env = mock_env.copy()
         env["CLUD_INTEGRATION_TESTS"] = "1"
@@ -505,7 +515,7 @@ class TestCodexBridgeForeground:
         assert dry.returncode == 0, dry.stderr
         plan = json.loads(dry.stdout)
         model_index = plan["command"].index("--model")
-        assert plan["command"][model_index + 1] == "clud-claude-codex-sol-6-1"
+        assert plan["command"][model_index + 1] == discovery
         result = _run(
             clud_binary, "--codex", "--harness", "claude", "--subprocess",
             "--model", model, "--effort", "high", "-p", "hello", "--",
@@ -515,7 +525,7 @@ class TestCodexBridgeForeground:
         assert len(fake_responses.requests) == 1
         _, _, body = fake_responses.requests[0].partition(b"\r\n\r\n")
         sent = json.loads(body)
-        assert sent["model"] == "gpt-6.1-sol"
+        assert sent["model"] == wire
         assert sent["reasoning"]["effort"] == "high"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="fixture uses a POSIX executable script")
@@ -524,6 +534,7 @@ class TestCodexBridgeForeground:
         [
             (["gpt-7-sol", "gpt-7-luna"], "gpt-7-sol", "published", False),
             (["gpt-6-sol", "gpt-6-luna"], "gpt-6-sol", "built_in", False),
+            (["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"], "gpt-6.1-sol", "built_in", False),
             (["gpt-7-sol", "gpt-6-luna"], "gpt-7-sol", "published", True),
         ],
     )
@@ -589,6 +600,13 @@ class TestCodexBridgeForeground:
             assert plan["model_selection"]["wire_model"] == expected
             assert plan["model_selection"]["effort"] == "low"
             assert plan["codex_model_source"] == source
+            if expected == "gpt-6.1-sol":
+                invalid = _run(
+                    clud_binary, "--dry-run", "--codex", "--harness", "claude",
+                    "--effort", "none", "-p", "hello", env=env,
+                )
+                assert invalid.returncode != 0
+                assert "none" in invalid.stderr
             native = _run(clud_binary, "--dry-run", "--codex", "-p", "hello", env=env)
             assert native.returncode == 0, native.stderr
             native_plan = json.loads(native.stdout)

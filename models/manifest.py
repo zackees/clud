@@ -5,13 +5,28 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 from typing import Any
 
-_MODEL_ID = re.compile(r"^gpt-([1-9][0-9]*)(?:\.([0-9]+))?-(sol|luna)$")
+_MODEL_ID = re.compile(r"^gpt-([1-9][0-9]*)(?:\.([0-9]+))?-(sol|luna|terra)$")
 SCHEMA_VERSION = 1
 SOURCE = "openrouter+models.dev-merge"
 LEGACY_SOURCE = "openai-models+openrouter-cross-check"
-BUILT_IN_FAMILIES = {"sol": "gpt-6-sol", "luna": "gpt-6-luna"}
+BUILT_IN_FAMILIES = {"sol": "gpt-6-sol", "luna": "gpt-6-luna", "terra": "gpt-5.6-terra"}
+OPENROUTER_SNAPSHOT = Path(__file__).resolve().parent.parent / "crates/clud-bin/assets/codex-models.json"
+
+
+def snapshot_families() -> dict[str, str]:
+    """Return the reviewed public OpenRouter snapshot bundled with this release."""
+    document = json.loads(OPENROUTER_SNAPSHOT.read_text(encoding="utf-8"))
+    if document.get("source") != "https://openrouter.ai/api/v1/models":
+        raise ValueError("untrusted OpenRouter snapshot")
+    families = document["families"]
+    for family in ("sol", "luna", "terra"):
+        if not _MODEL_ID.fullmatch(families[family]) or not families[family].endswith(f"-{family}"):
+            raise ValueError(f"invalid bundled {family} model")
+    return families
 
 
 def _timestamp(value: str) -> datetime:
@@ -28,7 +43,7 @@ def build_manifest(
     trigger: str = "manual",
     source: str = SOURCE,
 ) -> dict[str, Any]:
-    """Select the highest stable Sol and Luna IDs from a verified catalog."""
+    """Select the highest stable Sol, Luna, and Terra IDs from a verified catalog."""
     if trigger not in {"manual", "nightly"}:
         raise ValueError("trigger must be manual or nightly")
     _timestamp(checked_at)
@@ -44,7 +59,7 @@ def build_manifest(
     missing = {"sol", "luna"} - candidates.keys()
     if missing:
         raise ValueError(f"missing stable model family: {', '.join(sorted(missing))}")
-    families = {family: candidates[family][1] for family in ("sol", "luna")}
+    families = {family: candidates[family][1] for family in ("sol", "luna", "terra") if family in candidates}
     return {
         "schema_version": SCHEMA_VERSION,
         "source": source,
@@ -53,6 +68,18 @@ def build_manifest(
         "families": families,
         "defaults": {"codex": {"model": families["sol"], "effort": "low"}},
     }
+
+
+
+def _validate_families(families: dict[str, Any]) -> None:
+    for family in ("sol", "luna", "terra"):
+        if family not in families:
+            continue
+        model_id = families[family]
+        if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
+            raise ValueError(f"invalid {family} model ID")
+        if not model_id.endswith(f"-{family}"):
+            raise ValueError(f"mismatched {family} model ID")
 
 
 def validate_manifest(document: dict[str, Any]) -> None:
@@ -72,12 +99,7 @@ def validate_manifest(document: dict[str, Any]) -> None:
     families = document["families"]
     if not isinstance(families, dict) or not {"sol", "luna"}.issubset(families):
         raise ValueError("invalid model families")
-    for family in ("sol", "luna"):
-        model_id = families[family]
-        if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
-            raise ValueError(f"invalid {family} model ID")
-        if not model_id.endswith(f"-{family}"):
-            raise ValueError(f"mismatched {family} model ID")
+    _validate_families(families)
     defaults = document["defaults"]
     if not isinstance(defaults, dict) or not isinstance(defaults.get("codex"), dict):
         raise ValueError("invalid Codex default")
@@ -100,7 +122,7 @@ def merge_manifest(
     return build_manifest(
         [
             model_id
-            for model_id in [*BUILT_IN_FAMILIES.values(), *baseline.values(), *observed_ids]
+            for model_id in [*BUILT_IN_FAMILIES.values(), *snapshot_families().values(), *baseline.values(), *observed_ids]
             if model_id not in blocked
         ],
         checked_at=checked_at,

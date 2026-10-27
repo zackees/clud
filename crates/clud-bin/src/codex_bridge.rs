@@ -6565,6 +6565,7 @@ Connection: close
                 "clud-claude-codex-terra",
                 "clud-claude-codex-luna",
                 "clud-claude-codex-sol-6-1",
+                "clud-claude-codex-terra-6-1",
                 "clud-claude-deepseek-v4-pro-0813",
                 "clud-claude-deepseek-flash",
             ],
@@ -6579,6 +6580,7 @@ Connection: close
                 "Codex Terra (OpenAI)",
                 "Codex Luna (OpenAI)",
                 "Codex Sol 6.1 (OpenAI)",
+                "Codex Terra 6.1 (OpenAI)",
                 "DeepSeek V4 Pro 0813",
                 "DeepSeek V4.1 Flash",
             ]
@@ -7806,7 +7808,7 @@ Connection: close
         let mut expected = Vec::new();
         for (model_index, model) in models.iter().enumerate() {
             let discovery = model.discovery_id.expect("Codex discovery id");
-            for (effort_index, effort) in model.supported_efforts.iter().enumerate() {
+            for effort in model.supported_efforts {
                 let body = serde_json::json!({
                     "model": discovery,
                     "messages": [{"role": "user", "content": "route matrix"}],
@@ -7815,7 +7817,7 @@ Connection: close
                     "stream": false,
                 })
                 .to_string();
-                let session = format!("codex-{model_index}-{effort_index}");
+                let session = format!("codex-{model_index}");
                 let response = unified_request(&bridge, &body, &session, None);
                 assert_eq!(status(&response), 200, "{discovery} {effort}: {response}");
                 expected.push((model.wire_id, effort.as_str()));
@@ -9960,6 +9962,27 @@ Connection: close
             upstream.requests().is_empty(),
             "a rejected effort must not be billed upstream"
         );
+    }
+
+    #[test]
+    fn six_one_rejects_unsupported_effort_before_upstream() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        for model in ["clud-claude-codex-sol-6-1", "clud-claude-codex-terra-6-1"] {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_config": {"effort": "none"},
+                "stream": false,
+            })
+            .to_string();
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+            );
+            assert_eq!(status(&response), 400, "{model}: {response}");
+        }
+        assert!(upstream.requests().is_empty());
     }
 
     /// A launch-time `--model` selection is the default for requests that do

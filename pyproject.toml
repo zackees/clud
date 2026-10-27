@@ -108,6 +108,7 @@ cache-keys = [
     { file = "src/**/*.py" },
     { file = "crates/**/*.rs" },
     { file = "crates/**/*.toml" },
+    { file = "crates/clud-bin/assets/codex-models.json" },
 ]
 
 [tool.pytest.ini_options]

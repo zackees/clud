@@ -1,0 +1,9 @@
+{
+  "source": "https://openrouter.ai/api/v1/models",
+  "checked_at": "2026-10-27T02:35:59Z",
+  "families": {
+    "sol": "gpt-6.1-sol",
+    "terra": "gpt-6.1-terra",
+    "luna": "gpt-6-luna"
+  }
+}
