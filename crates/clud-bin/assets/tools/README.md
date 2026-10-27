@@ -48,6 +48,17 @@ retained where recognized. Unfamiliar output is classified as unknown. This path
 currently fails closed on Windows and macOS until private artifact ACL verification is available.
 Interactive `clud test run` is unchanged.
 
+`clud tool run diagnostics/codex_audit.py -- TRANSCRIPT.jsonl` reports a bounded,
+privacy-preserving count of Codex/default-harness and Claude tool activity across
+turns. It counts text result bytes once per known result event; missing event
+identities and excluded binary-containing blocks are reported as uncertainty, so
+byte counts can be incomplete or include replayed text. Repeated
+reads compare observed output, which does not prove a reread was unnecessary.
+Nested JavaScript tool calls are static mentions, not proof of execution. Wait
+states are observations from output, not judgments of whether polling was needed.
+The report contains no commands, paths, transcript contents, or session IDs;
+byte counts are not provider token counts.
+
 `diagnostics/transcript_report.py` reports repeated tool-call bursts,
 compactions, context jumps and context errors from one Claude transcript.
 It joins clud's launch-context record by hashed session id to report the

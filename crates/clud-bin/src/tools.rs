@@ -352,6 +352,15 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: true,
     },
+    // Cross-turn audit reads transcript data without emitting its contents.
+    BundledTool {
+        rel_path: "diagnostics/codex_audit.py",
+        body: include_str!("../assets/tools/diagnostics/codex_audit.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
     // transcript-report — privacy-preserving analyzer for one Claude session
     // transcript (#1276, DD-138). Read-only and writes no files, so killing
     // it loses no work — `Resumable`.
@@ -685,6 +694,15 @@ mod tests {
             .expect("local test report must be bundled");
         assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
         assert!(tool.quiet_ok);
+    }
+
+    #[test]
+    fn bundled_includes_codex_audit() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/codex_audit.py")
+            .expect("Codex audit must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
     }
 
     #[test]
