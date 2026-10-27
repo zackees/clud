@@ -3781,11 +3781,13 @@ def _removal(pr: dict) -> tuple[str | None, datetime | None]:
     stamp = node.get("createdAt")
     when = datetime.fromisoformat(stamp.replace("Z", "+00:00")) if isinstance(stamp, str) else None
     reason = node.get("reason")
-    return (str(reason) if reason else None), when
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("invalid queue removal reason")
+    return (reason.strip() or None) if reason is not None else None, when
 
 
 def parse_queue_state(data: object) -> QueueState | None:
-    if EXPLICIT_MERGE_WAIT and (not isinstance(data, dict) or data.get("errors")):
+    if not isinstance(data, dict) or data.get("errors"):
         return None
     try:
         pr = data["data"]["repository"]["pullRequest"]  # type: ignore[index]
@@ -3793,17 +3795,15 @@ def parse_queue_state(data: object) -> QueueState | None:
         return None
     if not isinstance(pr, dict):
         return None
-    if EXPLICIT_MERGE_WAIT and not _complete_queue_response(pr):
+    if not _complete_queue_response(pr):
         return None
     entry = pr.get("mergeQueueEntry") or {}
     try:
         reason, removed_at = _removal(pr)
-        if EXPLICIT_MERGE_WAIT and removed_at is not None and removed_at.utcoffset() is None:
+        if removed_at is not None and removed_at.utcoffset() is None:
             return None
     except (ValueError, TypeError, AttributeError):
-        if EXPLICIT_MERGE_WAIT:
-            return None
-        raise
+        return None
     return QueueState(
         state=str(pr.get("state") or ""),
         base_ref=str(pr.get("baseRefName") or ""),
@@ -3817,20 +3817,29 @@ def parse_queue_state(data: object) -> QueueState | None:
 
 
 def _complete_queue_response(pr: dict) -> bool:
-    if not isinstance(pr.get("state"), str) or not isinstance(pr.get("baseRefName"), str):
+    state = pr.get("state")
+    if not isinstance(state, str) or state not in {"OPEN", "CLOSED", "MERGED"}:
+        return False
+    if not isinstance(pr.get("baseRefName"), str) or not pr["baseRefName"]:
         return False
     if "autoMergeRequest" not in pr or "mergeQueueEntry" not in pr:
+        return False
+    auto = pr["autoMergeRequest"]
+    if (auto is not None
+            and (not isinstance(auto, dict) or not isinstance(auto.get("enabledAt"), str))):
         return False
     timeline = pr.get("timelineItems")
     if not isinstance(timeline, dict) or not isinstance(timeline.get("nodes"), list):
         return False
     nodes = timeline["nodes"]
-    if nodes and (not isinstance(nodes[-1], dict) or not isinstance(nodes[-1].get("createdAt"), str)):
+    if nodes and (not isinstance(nodes[-1], dict) or "reason" not in nodes[-1]
+                  or not isinstance(nodes[-1].get("createdAt"), str)):
         return False
     entry = pr["mergeQueueEntry"]
     if entry is None:
         return True
     if (not isinstance(entry, dict) or not isinstance(entry.get("state"), str)
+            or isinstance(entry.get("position"), bool)
             or not isinstance(entry.get("position"), int) or "headCommit" not in entry):
         return False
     head = entry["headCommit"]
@@ -3881,6 +3890,7 @@ class MergeFollow:
     api_failures: int = 0
     last_queue: tuple[int | None, str] | None = None
     unmergeable_polls: int = 0
+    removal_candidate: tuple[datetime, str] | None = None
 
 
 def _queue_verdict(q: QueueState, seen: MergeFollow) -> tuple[int, str] | None:
@@ -3892,9 +3902,19 @@ def _queue_verdict(q: QueueState, seen: MergeFollow) -> tuple[int, str] | None:
     removed_now = q.removed_at is not None and q.removed_at >= seen.started
     if (q.entry_state is None and (seen.enqueued or removed_now)
             and (EXPLICIT_MERGE_WAIT or not q.auto_merge)):
-        return EXIT_EJECTED, f"removed from the merge queue: {q.removal_reason or 'reason not reported'}"
+        reason = (q.removal_reason or "").strip()
+        if removed_now and q.removed_at is not None and reason and reason.casefold() != "merged":
+            candidate = (q.removed_at, reason)
+            if seen.removal_candidate == candidate:
+                return EXIT_EJECTED, f"removed from the merge queue: {reason}"
+            seen.removal_candidate = candidate
+        else:
+            seen.removal_candidate = None
+        # A missing entry or a "merged" removal is not an authoritative PR state.
+        return None
+    seen.removal_candidate = None
     if (not EXPLICIT_MERGE_WAIT and q.entry_state is None and not q.auto_merge
-            and seen.polls >= ENQUEUE_GRACE_POLLS):
+            and not seen.enqueued and seen.polls >= ENQUEUE_GRACE_POLLS):
         return EXIT_NOT_ENQUEUED, "open, not in the merge queue and not set to auto-merge"
     return None
 
@@ -3923,6 +3943,7 @@ def _poll_queue(repo: str, pr: int, seen: MergeFollow, log: WatchLog | None) -> 
     if q is None:
         seen.api_failures += 1
         seen.unmergeable_polls = 0
+        seen.removal_candidate = None
         if seen.api_failures >= MAX_CONSECUTIVE_API_FAILURES:
             _exit_unreachable("merge queue state unreadable", log)
         return None
@@ -3966,9 +3987,12 @@ def follow_merge(pr: int, repo: str | None, log: WatchLog | None) -> int:
             code, why = verdict
             print(f"{_UNTIL_MERGED_LABELS[code]}  #{pr} {why}")
             _finish_exit(code, why.split(":")[0], log)
-        wait_interval = min(interval, max(0.0, deadline - started)) if EXPLICIT_MERGE_WAIT else interval
+        wait_interval = min(interval, max(0.0, deadline - started))
         _sleep_remaining_interval(started, wait_interval)
-    print(f"TIMEOUT  #{pr} not merged yet (queued={seen.enqueued})")
+    if seen.enqueued and seen.last_queue is None:
+        print(f"TIMEOUT  #{pr} queue state unconfirmed; merge or removal not established")
+    else:
+        print(f"TIMEOUT  #{pr} not merged yet (queued={seen.enqueued})")
     _finish_exit(EXIT_TIMEOUT, "timeout", log)
     return EXIT_TIMEOUT
 

@@ -93,7 +93,10 @@ def test_removal_from_the_queue_names_the_reason(watcher, monkeypatch, capsys) -
     removed = _queue(
         watcher, entry=None, reason="FAILED_CHECKS", removed=STARTED + timedelta(seconds=5)
     )
-    assert _follow(watcher, monkeypatch, [_queue(watcher), removed]) == watcher.EXIT_EJECTED
+    assert (
+        _follow(watcher, monkeypatch, [_queue(watcher), removed, removed])
+        == watcher.EXIT_EJECTED
+    )
     assert "FAILED_CHECKS" in capsys.readouterr().out
 
 
@@ -173,3 +176,101 @@ def test_green_on_a_queued_pr_follows_the_merge(watcher, monkeypatch, capsys) ->
         watcher._exit_green(1847, "o/r", "sha", opts, None, [], {}, merge_pending=True)
     assert followed == [(1847, "o/r")]
     assert "FOLLOWING  #1847" in capsys.readouterr().out
+
+
+def test_queue_disappearance_before_merged_is_not_ejection(watcher, monkeypatch):
+    states = [
+        _queue(watcher),
+        _queue(watcher, state="OPEN", entry=None),
+        _queue(watcher, state="MERGED", entry=None),
+    ]
+    assert _follow(watcher, monkeypatch, states) == watcher.EXIT_GREEN
+
+
+def test_merged_removal_event_waits_for_authoritative_merged_state(watcher, monkeypatch):
+    removed = _queue(watcher, entry=None, reason="merged", removed=STARTED + timedelta(seconds=5))
+    states = [_queue(watcher), removed, removed, _queue(watcher, state="MERGED", entry=None)]
+    assert _follow(watcher, monkeypatch, states) == watcher.EXIT_GREEN
+
+
+def test_transient_explicit_removal_does_not_override_merged_state(watcher, monkeypatch):
+    removed = _queue(
+        watcher, entry=None, reason="FAILED_CHECKS", removed=STARTED + timedelta(seconds=5)
+    )
+    states = [_queue(watcher), removed, _queue(watcher, state="MERGED", entry=None)]
+    assert _follow(watcher, monkeypatch, states) == watcher.EXIT_GREEN
+
+
+def test_ambiguous_disappearance_stays_pending(watcher):
+    seen = watcher.MergeFollow(started=STARTED, enqueued=True, polls=20)
+    missing = _queue(watcher, entry=None)
+    assert watcher._queue_verdict(missing, seen) is None
+    assert watcher._queue_verdict(missing, seen) is None
+
+
+def test_ambiguous_disappearance_times_out_without_claiming_ejection(watcher, monkeypatch, capsys):
+    ticks = iter([0, 0, 1, 1, 2, 2, 3])
+    monkeypatch.setattr(watcher.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(watcher, "_sleep_remaining_interval", lambda *_: None)
+    states = iter([_queue(watcher), _queue(watcher, entry=None), _queue(watcher, entry=None)])
+    monkeypatch.setattr(watcher, "fetch_queue_state", lambda *_: next(states))
+    monkeypatch.setattr(watcher, "fetch_merge_group_jobs", lambda *_: [])
+    monkeypatch.setattr(watcher, "fetch_required_check_names", lambda *_: None)
+    watcher.FOLLOW = (0, 3)
+    with pytest.raises(SystemExit) as result:
+        watcher.follow_merge(1847, "obs-rust/obs-studio", None)
+    assert result.value.code == watcher.EXIT_TIMEOUT
+    output = capsys.readouterr().out
+    assert "queue state unconfirmed" in output
+    assert "EJECTED" not in output
+
+
+def test_default_follow_rejects_partial_queue_data_and_graphql_errors(watcher):
+    partial = {"data": {"repository": {"pullRequest": {
+        "state": "OPEN", "baseRefName": "main", "timelineItems": {"nodes": []},
+    }}}}
+    assert watcher.parse_queue_state(partial) is None
+    complete = {"data": {"repository": {"pullRequest": {
+        "state": "OPEN", "baseRefName": "main", "autoMergeRequest": None,
+        "mergeQueueEntry": None, "timelineItems": {"nodes": []},
+    }}}, "errors": [{"message": "partial result"}]}
+    assert watcher.parse_queue_state(complete) is None
+
+
+def test_default_follow_rejects_naive_removal_timestamp(watcher):
+    data = {"data": {"repository": {"pullRequest": {
+        "state": "OPEN", "baseRefName": "main", "autoMergeRequest": None,
+        "mergeQueueEntry": None,
+        "timelineItems": {"nodes": [{"createdAt": "2026-10-22T12:00:05", "reason": "MANUAL"}]},
+    }}}}
+    assert watcher.parse_queue_state(data) is None
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("state", "UNKNOWN"),
+    ("autoMergeRequest", False),
+    ("autoMergeRequest", {}),
+])
+def test_default_follow_rejects_malformed_pr_state(watcher, field, value):
+    pr = {"state": "OPEN", "baseRefName": "main", "autoMergeRequest": None,
+          "mergeQueueEntry": None, "timelineItems": {"nodes": []}}
+    pr[field] = value
+    assert watcher.parse_queue_state({"data": {"repository": {"pullRequest": pr}}}) is None
+
+
+def test_default_follow_caps_poll_sleep_to_remaining_deadline(watcher, monkeypatch):
+    clock = {"now": 0.0}
+    sleeps = []
+    monkeypatch.setattr(watcher.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(watcher, "_poll_queue", lambda *_: None)
+
+    def advance(_started, interval):
+        sleeps.append(interval)
+        clock["now"] += interval
+
+    monkeypatch.setattr(watcher, "_sleep_remaining_interval", advance)
+    watcher.FOLLOW = (3600, 5.0)
+    with pytest.raises(SystemExit) as result:
+        watcher.follow_merge(1847, "obs-rust/obs-studio", None)
+    assert result.value.code == watcher.EXIT_TIMEOUT
+    assert sleeps == [5.0]
