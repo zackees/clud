@@ -10,7 +10,17 @@ use crate::backend::ModelProvider;
 
 /// Provider-neutral launch effort. Individual providers decide which values
 /// they accept and how they translate them at their wire boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
     #[strum(serialize = "none")]
@@ -407,10 +417,7 @@ pub enum SelectionError {
     #[error("invalid context window '{0}'; expected auto or 1m")]
     InvalidContextWindow(String),
     #[error("model '{model}' does not support effort '{effort}'")]
-    UnsupportedEffort {
-        model: String,
-        effort: String,
-    },
+    UnsupportedEffort { model: String, effort: String },
     #[error("model '{model}' does not support context window '{context_window}'")]
     UnsupportedContextWindow {
         model: String,
@@ -422,15 +429,9 @@ pub enum SelectionError {
         context_window: String,
     },
     #[error("model suffix selected effort '{legacy}', but --effort selected '{explicit}'")]
-    ConflictingEffort {
-        legacy: String,
-        explicit: String,
-    },
+    ConflictingEffort { legacy: String, explicit: String },
     #[error("model suffix selected context window '{legacy}', but --context-window selected '{explicit}'")]
-    ConflictingContextWindow {
-        legacy: String,
-        explicit: String,
-    },
+    ConflictingContextWindow { legacy: String, explicit: String },
 }
 
 fn catalog_match(value: &str) -> Option<CatalogModel> {

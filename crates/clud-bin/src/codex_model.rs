@@ -11,7 +11,6 @@
 //! the model's own catalog default. Most specific wins, and the two explicit
 //! channels beat the two inferred ones.
 
-
 pub use crate::provider_catalog::EffortLevel as Effort;
 use crate::provider_catalog::{CatalogModel, MODELS};
 
@@ -154,7 +153,10 @@ pub enum SelectionError {
     // Naming valid values prevents a typo from selecting the wrong model.
     #[error("unknown Codex model '{given}' — valid short names are {} (or pass a full model id such as gpt-5.6-terra)", alias_catalog())]
     UnknownAlias { given: String },
-    #[error("unknown reasoning effort '{given}' — valid efforts are {}", Effort::catalog())]
+    #[error(
+        "unknown reasoning effort '{given}' — valid efforts are {}",
+        Effort::catalog()
+    )]
     UnknownEffort { given: String },
 }
 

@@ -1,12 +1,10 @@
-use super::ENV_DAEMON_WIRE;
-
 #[derive(Debug, thiserror::Error)]
 pub(in crate::daemon) enum WireError {
     #[error("missing {0} prost payload")]
     MissingPayload(&'static str),
     #[error("unsupported clud payload_protocol 0x{0:08x}")]
     UnknownPayloadProtocol(u32),
-    #[error("unsupported {} value {0:?}; expected json or prost", ENV_DAEMON_WIRE)]
+    #[error("unsupported {name} value {0:?}; expected json or prost", name = super::ENV_DAEMON_WIRE)]
     InvalidDaemonWire(String),
     #[error("invalid clud daemon frame line: {0}")]
     InvalidFrameLine(String),

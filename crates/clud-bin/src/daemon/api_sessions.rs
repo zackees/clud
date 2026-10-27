@@ -188,21 +188,18 @@ pub enum ApiSessionStoreError {
     #[error("API session '{0}' not found")]
     NotFound(String),
     #[error("API session '{session_id}' is corrupt: {message}")]
-    Corrupt {
-        session_id: String,
-        message: String,
-    },
+    Corrupt { session_id: String, message: String },
     #[error("invalid cwd '{}': {message}", path.display())]
-    InvalidCwd {
-        path: PathBuf,
-        message: String,
-    },
+    InvalidCwd { path: PathBuf, message: String },
     #[error("cannot {operation} API session in {state:?} state")]
     InvalidTransition {
         state: ApiSessionState,
         operation: &'static str,
     },
-    #[error("API session event is {bytes} bytes; limit is {}", MAX_EVENT_DATA_BYTES)]
+    #[error(
+        "API session event is {bytes} bytes; limit is {}",
+        MAX_EVENT_DATA_BYTES
+    )]
     EventTooLarge { bytes: usize },
     #[error("idempotency key '{key}' was reused for a different request")]
     IdempotencyConflict { key: String },

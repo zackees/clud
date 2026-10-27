@@ -179,10 +179,7 @@ pub enum SettingsError {
     #[error("{0}")]
     Io(io::Error),
     #[error("malformed settings in {}: {error}", path.display())]
-    Parse {
-        path: PathBuf,
-        error: String,
-    },
+    Parse { path: PathBuf, error: String },
     #[error("invalid launch preferences: {0}")]
     InvalidLaunchTarget(LaunchTargetError),
     #[error("invalid providers.{provider} settings: {error}")]
