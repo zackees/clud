@@ -85,6 +85,52 @@ def test_older_installer_discovery_records_an_unreachable_prior(tmp_path: Path) 
     }
 
 
+def require_evidence_lane_input(input_var: str, output_var: str, skip_reason: str) -> str:
+    """Refuse to let a lane that owes an evidence row vanish.
+
+    A lane whose workflow declared an evidence *output* (`output_var` is set)
+    must always emit its row: a skip produces no row, and the acceptance
+    aggregate rejects the whole release with "missing public host evidence"
+    (run 40478241694 rolled 2.8.37 back to 2.8.31 for exactly that). A missing
+    input in such a lane is a workflow defect, so this raises. With no evidence
+    output at all there is no row to emit and a skip stays honest.
+    """
+    value = os.environ.get(input_var)
+    if value:
+        return value
+    if os.environ.get(output_var):
+        raise RuntimeError(
+            f"{output_var} is set but {input_var} is not: this lane was asked for a host "
+            "evidence row and cannot produce one"
+        )
+    # Raised rather than called: `pytest.skip()` only raises this exception, and
+    # a bare call would leave the declared return type unsatisfied.
+    raise pytest.skip.Exception(f"no {output_var}: {skip_reason}")
+
+
+def test_public_release_probe_refuses_to_skip_when_the_lane_owes_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The workflow declares the evidence row it expects from this host. With that
+    # row owed but no input to build it, the lane must fail loudly rather than
+    # skip: a skip emits no row and the aggregate rejects a healthy release.
+    monkeypatch.setenv(
+        "CLUD_PUBLIC_EVIDENCE", "public-evidence/x86_64-unknown-linux-musl.json"
+    )
+    monkeypatch.delenv("CLUD_PUBLIC_RELEASE_TAG", raising=False)
+    with pytest.raises(RuntimeError, match="CLUD_PUBLIC_RELEASE_TAG"):
+        test_public_release_installs_by_name(None, tmp_path)  # type: ignore[arg-type]
+
+
+def test_public_release_probe_still_skips_a_local_run_that_owes_no_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("CLUD_PUBLIC_EVIDENCE", raising=False)
+    monkeypatch.delenv("CLUD_PUBLIC_RELEASE_TAG", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        test_public_release_installs_by_name(None, tmp_path)  # type: ignore[arg-type]
+
+
 def public_executable_flavor(row: dict) -> str | None:
     return row.get("variant", {}).get("flavor")
 
@@ -322,9 +368,11 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
 
 
 def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> None:  # noqa: F811
-    tag = os.environ.get("CLUD_PUBLIC_RELEASE_TAG")
-    if not tag:
-        pytest.skip("public release tag is provided by the release workflow")
+    tag = require_evidence_lane_input(
+        "CLUD_PUBLIC_RELEASE_TAG",
+        "CLUD_PUBLIC_EVIDENCE",
+        "public release tag is provided by the release workflow",
+    )
     mode = os.environ["CLUD_PUBLIC_MODE"]
     if mode not in {"candidate", "released"}:
         raise ValueError("invalid public release mode")
