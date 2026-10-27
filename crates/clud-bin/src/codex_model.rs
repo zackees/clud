@@ -11,7 +11,6 @@
 //! the model's own catalog default. Most specific wins, and the two explicit
 //! channels beat the two inferred ones.
 
-use std::fmt;
 
 pub use crate::provider_catalog::EffortLevel as Effort;
 use crate::provider_catalog::{CatalogModel, MODELS};
@@ -148,36 +147,16 @@ fn looks_like_full_id(value: &str) -> bool {
     value.contains('-') || value.contains('.')
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectionError {
+    #[error("model selection is empty")]
     EmptyModel,
+    // Naming valid values prevents a typo from selecting the wrong model.
+    #[error("unknown Codex model '{given}' — valid short names are {} (or pass a full model id such as gpt-5.6-terra)", alias_catalog())]
     UnknownAlias { given: String },
+    #[error("unknown reasoning effort '{given}' — valid efforts are {}", Effort::catalog())]
     UnknownEffort { given: String },
 }
-
-impl fmt::Display for SelectionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyModel => write!(formatter, "model selection is empty"),
-            // Naming the valid values is the whole point: the failure mode
-            // being prevented is a typo that would otherwise be billed
-            // against the wrong model or rejected upstream with no hint.
-            Self::UnknownAlias { given } => write!(
-                formatter,
-                "unknown Codex model '{given}' — valid short names are {} \
-                 (or pass a full model id such as gpt-5.6-terra)",
-                alias_catalog()
-            ),
-            Self::UnknownEffort { given } => write!(
-                formatter,
-                "unknown reasoning effort '{given}' — valid efforts are {}",
-                Effort::catalog()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SelectionError {}
 
 #[cfg(test)]
 mod tests {

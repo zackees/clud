@@ -189,48 +189,21 @@ pub struct ResolvedLaunchTarget {
     pub harness_source: PreferenceSource,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LaunchTargetError {
+    #[error("unsupported launch target: Claude provider cannot use the Codex harness")]
     ClaudeViaCodexUnsupported,
+    #[error("unsupported launch target: DeepSeek provider cannot use the Codex harness")]
     DeepSeekViaCodexUnsupported,
+    #[error("unsupported launch target: Kimi provider cannot use the Codex harness")]
     KimiViaCodexUnsupported,
+    #[error("unsupported launch target: OpenRouter provider cannot use the Codex harness")]
     OpenRouterViaCodexUnsupported,
+    #[error("unsupported launch target: unified routing requires the Claude harness")]
     UnifiedViaCodexUnsupported,
+    #[error("unsupported launch target: unified routing requires the Claude harness")]
     UnifiedViaDeepSeekUnsupported,
 }
-
-impl std::fmt::Display for LaunchTargetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ClaudeViaCodexUnsupported => write!(
-                f,
-                "unsupported launch target: Claude provider cannot use the Codex harness"
-            ),
-            Self::DeepSeekViaCodexUnsupported => write!(
-                f,
-                "unsupported launch target: DeepSeek provider cannot use the Codex harness"
-            ),
-            Self::KimiViaCodexUnsupported => write!(
-                f,
-                "unsupported launch target: Kimi provider cannot use the Codex harness"
-            ),
-            Self::OpenRouterViaCodexUnsupported => write!(
-                f,
-                "unsupported launch target: OpenRouter provider cannot use the Codex harness"
-            ),
-            Self::UnifiedViaCodexUnsupported => write!(
-                f,
-                "unsupported launch target: unified routing requires the Claude harness"
-            ),
-            Self::UnifiedViaDeepSeekUnsupported => write!(
-                f,
-                "unsupported launch target: unified routing requires the Claude harness"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for LaunchTargetError {}
 
 /// A harness's argument surface for launch-scoped configuration (#977).
 ///

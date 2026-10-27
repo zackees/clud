@@ -181,60 +181,32 @@ impl ApiSessionRecord {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiSessionStoreError {
+    #[error("{0}")]
     Io(io::Error),
+    #[error("API session '{0}' not found")]
     NotFound(String),
+    #[error("API session '{session_id}' is corrupt: {message}")]
     Corrupt {
         session_id: String,
         message: String,
     },
+    #[error("invalid cwd '{}': {message}", path.display())]
     InvalidCwd {
         path: PathBuf,
         message: String,
     },
+    #[error("cannot {operation} API session in {state:?} state")]
     InvalidTransition {
         state: ApiSessionState,
         operation: &'static str,
     },
-    EventTooLarge {
-        bytes: usize,
-    },
-    IdempotencyConflict {
-        key: String,
-    },
+    #[error("API session event is {bytes} bytes; limit is {}", MAX_EVENT_DATA_BYTES)]
+    EventTooLarge { bytes: usize },
+    #[error("idempotency key '{key}' was reused for a different request")]
+    IdempotencyConflict { key: String },
 }
-
-impl std::fmt::Display for ApiSessionStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "{error}"),
-            Self::NotFound(id) => write!(f, "API session '{id}' not found"),
-            Self::Corrupt {
-                session_id,
-                message,
-            } => {
-                write!(f, "API session '{session_id}' is corrupt: {message}")
-            }
-            Self::InvalidCwd { path, message } => {
-                write!(f, "invalid cwd '{}': {message}", path.display())
-            }
-            Self::InvalidTransition { state, operation } => {
-                write!(f, "cannot {operation} API session in {state:?} state")
-            }
-            Self::EventTooLarge { bytes } => write!(
-                f,
-                "API session event is {bytes} bytes; limit is {MAX_EVENT_DATA_BYTES}"
-            ),
-            Self::IdempotencyConflict { key } => write!(
-                f,
-                "idempotency key '{key}' was reused for a different request"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ApiSessionStoreError {}
 
 impl From<io::Error> for ApiSessionStoreError {
     fn from(error: io::Error) -> Self {

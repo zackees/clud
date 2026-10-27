@@ -172,40 +172,25 @@ impl Default for RustOptimizeSettings {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
+    #[error("could not resolve user home directory")]
     NoHomeDir,
+    #[error("{0}")]
     Io(io::Error),
+    #[error("malformed settings in {}: {error}", path.display())]
     Parse {
         path: PathBuf,
         error: String,
     },
+    #[error("invalid launch preferences: {0}")]
     InvalidLaunchTarget(LaunchTargetError),
+    #[error("invalid providers.{provider} settings: {error}")]
     InvalidProviderProfile {
         provider: ModelProvider,
         error: String,
     },
 }
-
-impl std::fmt::Display for SettingsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SettingsError::NoHomeDir => write!(f, "could not resolve user home directory"),
-            SettingsError::Io(error) => write!(f, "{error}"),
-            SettingsError::Parse { path, error } => {
-                write!(f, "malformed settings in {}: {error}", path.display())
-            }
-            SettingsError::InvalidLaunchTarget(error) => {
-                write!(f, "invalid launch preferences: {error}")
-            }
-            SettingsError::InvalidProviderProfile { provider, error } => {
-                write!(f, "invalid providers.{provider} settings: {error}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SettingsError {}
 
 impl From<io::Error> for SettingsError {
     fn from(error: io::Error) -> Self {

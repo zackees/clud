@@ -396,84 +396,46 @@ pub struct ResolvedModelSelection {
     pub context_window_source: Option<SelectionSource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectionError {
+    #[error("unknown model '{0}'")]
     UnknownModel(String),
+    #[error("model '{model}' belongs to provider '{model_provider}', but the explicit provider is '{provider}'")]
     ProviderConflict {
         provider: ModelProvider,
         model: String,
         model_provider: ModelProvider,
     },
+    #[error("invalid reasoning effort '{0}'")]
     InvalidEffort(String),
+    #[error("invalid context window '{0}'; expected auto or 1m")]
     InvalidContextWindow(String),
+    #[error("model '{model}' does not support effort '{effort}'")]
     UnsupportedEffort {
         model: String,
         effort: String,
     },
+    #[error("model '{model}' does not support context window '{context_window}'")]
     UnsupportedContextWindow {
         model: String,
         context_window: String,
     },
+    #[error("provider '{provider}' requires --model when --context-window is '{context_window}'")]
     ContextRequiresModel {
         provider: ModelProvider,
         context_window: String,
     },
+    #[error("model suffix selected effort '{legacy}', but --effort selected '{explicit}'")]
     ConflictingEffort {
         legacy: String,
         explicit: String,
     },
+    #[error("model suffix selected context window '{legacy}', but --context-window selected '{explicit}'")]
     ConflictingContextWindow {
         legacy: String,
         explicit: String,
     },
 }
-
-impl std::fmt::Display for SelectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownModel(model) => write!(f, "unknown model '{model}'"),
-            Self::ProviderConflict {
-                provider,
-                model,
-                model_provider,
-            } => write!(
-                f,
-                "model '{model}' belongs to provider '{model_provider}', but the explicit provider is '{provider}'"
-            ),
-            Self::InvalidEffort(effort) => write!(f, "invalid reasoning effort '{effort}'"),
-            Self::InvalidContextWindow(value) => {
-                write!(f, "invalid context window '{value}'; expected auto or 1m")
-            }
-            Self::UnsupportedEffort { model, effort } => {
-                write!(f, "model '{model}' does not support effort '{effort}'")
-            }
-            Self::UnsupportedContextWindow {
-                model,
-                context_window,
-            } => write!(
-                f,
-                "model '{model}' does not support context window '{context_window}'"
-            ),
-            Self::ContextRequiresModel {
-                provider,
-                context_window,
-            } => write!(
-                f,
-                "provider '{provider}' requires --model when --context-window is '{context_window}'"
-            ),
-            Self::ConflictingEffort { legacy, explicit } => write!(
-                f,
-                "model suffix selected effort '{legacy}', but --effort selected '{explicit}'"
-            ),
-            Self::ConflictingContextWindow { legacy, explicit } => write!(
-                f,
-                "model suffix selected context window '{legacy}', but --context-window selected '{explicit}'"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SelectionError {}
 
 fn catalog_match(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| {

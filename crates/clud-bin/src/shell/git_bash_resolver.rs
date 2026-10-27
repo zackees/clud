@@ -172,61 +172,26 @@ impl ArchiveFetcher for UreqFetcher {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FetchError {
-    Manifest {
-        message: String,
-    },
-    Network {
-        url: String,
-        message: String,
-    },
+    #[error("{message}")]
+    Manifest { message: String },
+    #[error("fetch {url}: {message}")]
+    Network { url: String, message: String },
+    #[error("{0}")]
     Io(io::Error),
+    #[error("zip: {0}")]
     Zip(String),
-    SizeMismatch {
-        expected: u64,
-        observed: u64,
-    },
-    ChecksumMismatch {
-        expected: String,
-        observed: String,
-    },
+    #[error("git-bash-bin.zip size mismatch: expected {expected} bytes, observed {observed}")]
+    SizeMismatch { expected: u64, observed: u64 },
+    #[error("git-bash-bin.zip sha256 mismatch: expected {expected}, observed {observed}")]
+    ChecksumMismatch { expected: String, observed: String },
+    #[error("extracted git-bash-bin.zip is missing {relative} (looked under {})", extraction_root.display())]
     EntryPointMissing {
         relative: String,
         extraction_root: PathBuf,
     },
 }
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FetchError::Manifest { message } => write!(f, "{message}"),
-            FetchError::Network { url, message } => {
-                write!(f, "fetch {url}: {message}")
-            }
-            FetchError::Io(error) => write!(f, "{error}"),
-            FetchError::Zip(message) => write!(f, "zip: {message}"),
-            FetchError::SizeMismatch { expected, observed } => write!(
-                f,
-                "git-bash-bin.zip size mismatch: expected {expected} bytes, observed {observed}"
-            ),
-            FetchError::ChecksumMismatch { expected, observed } => write!(
-                f,
-                "git-bash-bin.zip sha256 mismatch: expected {expected}, observed {observed}"
-            ),
-            FetchError::EntryPointMissing {
-                relative,
-                extraction_root,
-            } => write!(
-                f,
-                "extracted git-bash-bin.zip is missing {relative} (looked under {})",
-                extraction_root.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FetchError {}
 
 impl From<io::Error> for FetchError {
     fn from(error: io::Error) -> Self {
