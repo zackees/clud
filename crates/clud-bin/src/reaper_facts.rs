@@ -40,47 +40,46 @@ pub const SPARE_IMAGES_ENV: &str = "CLUD_REAPER_SPARE_IMAGES";
 /// Only OS-signal reasons live here. A reaper with additional, local reasons
 /// (the Windows tool-shell reaper has several) converts these into its own
 /// richer enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum SpareReason {
     /// Broke away from the reaper's Job Object, so it is outside our
     /// containment and was never ours to kill.
+    #[strum(serialize = "outside_job_object")]
     OutsideJobObject,
     /// Runs in session 0 — a Windows service, not a session descendant.
+    #[strum(serialize = "service_session")]
     ServiceSession,
     /// Called `setsid()`: it leads its own POSIX session.
+    #[strum(serialize = "session_leader")]
     SessionLeader,
     /// Runs as a different token owner / euid than we do.
+    #[strum(serialize = "foreign_token_owner")]
     ForeignTokenOwner,
     /// Declared itself a daemon via `RUNNING_PROCESS_IS_DAEMON`. **Cooperative**
     /// — see [`ProcessFacts`] for why this is ranked below the OS signals.
+    #[strum(serialize = "declared_daemon")]
     DeclaredDaemon,
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
+    #[strum(serialize = "listening_endpoint")]
     ListeningEndpoint,
     /// Owns the active Windows desktop shell window. This narrowly protects an
     /// Explorer process intentionally restarted to restore the taskbar (#746).
+    #[strum(serialize = "active_desktop_shell")]
     ActiveDesktopShell,
     /// Docker Desktop's interactive UI/backend root. Its WSL runtime children
     /// inherit this protection through the reaper's subtree pruning.
+    #[strum(serialize = "docker_desktop_process_family")]
     DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
+    #[strum(serialize = "configured_spare_list")]
     ConfiguredSpareList,
 }
 
 impl SpareReason {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OutsideJobObject => "outside_job_object",
-            Self::ServiceSession => "service_session",
-            Self::SessionLeader => "session_leader",
-            Self::ForeignTokenOwner => "foreign_token_owner",
-            Self::DeclaredDaemon => "declared_daemon",
-            Self::ListeningEndpoint => "listening_endpoint",
-            Self::ActiveDesktopShell => "active_desktop_shell",
-            Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
-            Self::ConfiguredSpareList => "configured_spare_list",
-        }
+        self.into()
     }
 }
 

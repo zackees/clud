@@ -33,37 +33,36 @@ pub const DEFAULT_TTL_MS: u64 = 60_000;
 /// Bodies above this are served but not cached.
 const MAX_CACHED_BODY: usize = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum Outcome {
     /// Served from the store within its TTL, or by joining another
     /// request's upstream fetch: no upstream request of its own.
+    #[strum(serialize = "cache")]
     Cache,
     /// Revalidated with `If-None-Match` / `If-Modified-Since`; `304`.
+    #[strum(serialize = "304")]
     NotModified,
     /// A merged collection where at least one page was re-sent (`200`);
     /// the ledger records the objects it added or changed and removed.
+    #[strum(serialize = "incremental")]
     Incremental,
+    #[strum(serialize = "full")]
     Full,
     /// Upstream answered non-2xx; the shim reruns the call on the real
     /// `gh` so its error output is `gh`'s own.
+    #[strum(serialize = "passthrough")]
     Passthrough,
     /// Below the rate-limit floor and not interactive: no upstream
     /// request; served a stored copy marked stale, or sent to the real `gh`.
+    #[strum(serialize = "deferred")]
     Deferred,
+    #[strum(serialize = "error")]
     Error,
 }
 
 impl Outcome {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Outcome::Cache => "cache",
-            Outcome::NotModified => "304",
-            Outcome::Incremental => "incremental",
-            Outcome::Full => "full",
-            Outcome::Passthrough => "passthrough",
-            Outcome::Deferred => "deferred",
-            Outcome::Error => "error",
-        }
+        self.into()
     }
 }
 
