@@ -9,7 +9,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use running_process::ReadStatus;
+use running_process::pty::NativePtyProcess;
 
 /// The Unix activation plan: the managed startup-file edits for the login
 /// shell, or a manual instruction when the shell is not Bash, zsh, or fish.
@@ -473,38 +473,65 @@ fn verify(destination: &Path, plan: &ActivationHost, version: &str) -> Result<()
             mode.into(),
             "printf '__CLUD_INSTALL_PATH__'; command -v clud; printf '__CLUD_INSTALL_VERSION__'; clud --version".into(),
         ];
-        let process = crate::subprocess::ManagedSubprocess::start(command, None, env, true, None)?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut output = Vec::new();
-        loop {
-            if Instant::now() >= deadline {
-                let _ = process.kill();
-                return Err(format!("fresh shell {mode} lookup timed out"));
-            }
-            match process.read_stdout(Some(Duration::from_millis(100))) {
-                ReadStatus::Line(line) => {
-                    output.extend_from_slice(&line);
-                    output.push(b'\n');
-                }
-                ReadStatus::Timeout => {
-                    let _ = process.poll();
-                }
-                ReadStatus::Eof => break,
-            }
-            if output.len() > 32 * 1024 {
-                let _ = process.kill();
-                return Err("fresh shell output is too large".into());
-            }
-        }
-        let code = process
-            .wait(Some(Duration::from_secs(1)))
-            .map_err(|error| error.to_string())?;
+        let (code, output) = run_shell_probe(command, env, mode)?;
         let (actual, found_version) = parse_shell_probe(&output);
         if code != 0 || actual != destination.to_string_lossy() || found_version != expected {
             return Err(format!("fresh shell {mode} resolved {actual:?} with {found_version:?}; expected {} and {expected}", destination.display()));
         }
     }
     Ok(())
+}
+
+fn run_shell_probe(
+    command: Vec<String>,
+    env: Vec<(String, String)>,
+    mode: &str,
+) -> Result<(i32, Vec<u8>), String> {
+    let process = NativePtyProcess::new(command, None, Some(env), 24, 80, None)
+        .map_err(|error| error.to_string())?;
+    process.start_impl().map_err(|error| error.to_string())?;
+    let result = collect_shell_probe(&process, mode);
+    if result.is_err() {
+        let _ = process.kill_impl();
+    }
+    let _ = process.close_impl();
+    result
+}
+
+fn collect_shell_probe(process: &NativePtyProcess, mode: &str) -> Result<(i32, Vec<u8>), String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut output = Vec::new();
+    let mut queries = crate::terminal_queries::TerminalQueryScanner::default();
+    let mut reply_bytes = 0;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!("fresh shell {mode} lookup timed out"));
+        }
+        match process.read_chunk_impl(Some(0.1)) {
+            Ok(Some(bytes)) => {
+                let replies = queries.replies(&bytes);
+                reply_bytes += replies.len();
+                // The probe never sends keyboard input. Stay far below a PTY's
+                // canonical input capacity even if startup never reads replies.
+                if reply_bytes > 64 {
+                    return Err("fresh shell sent too many terminal queries".into());
+                }
+                if !replies.is_empty() {
+                    // The shell may exit before its final reply is delivered.
+                    // A live shell that needs the reply is still bounded by the deadline.
+                    let _ = process.write_impl(&replies, false);
+                }
+                output.extend_from_slice(&bytes);
+            }
+            Ok(None) => continue,
+            Err(_) => break,
+        }
+        if output.len() > 32 * 1024 {
+            return Err("fresh shell output is too large".into());
+        }
+    }
+    let code = process.wait_impl(Some(1.0)).map_err(|error| error.to_string())?;
+    Ok((code, output))
 }
 
 fn parse_shell_probe(output: &[u8]) -> (String, String) {

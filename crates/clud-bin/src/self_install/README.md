@@ -10,7 +10,9 @@ menu defaults to **Not now**; the explicit menu defaults to **Install this
 version**. `transaction.rs` builds the read-only plan, verifies the selected
 source, and commits one executable. `activation.rs` builds the read-only
 shell plan shown before consent, updates owned Bash, zsh, or fish startup
-files, and proves fresh login and interactive name-based lookup.
+files, and proves fresh login and interactive name-based lookup. The shell
+probes use isolated PTYs so they exercise terminal-dependent startup without
+taking over the user's terminal before setup resumes.
 The host halves live behind the platform boundary (#1953):
 `platform/unix/self_install_activation.rs` owns the Bash, zsh, and fish
 startup-file edits and fresh-shell proof, and
