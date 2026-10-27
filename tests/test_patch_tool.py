@@ -26,7 +26,9 @@ def _block(path: str, search: str, replace: str) -> str:
 
 
 def test_applies_blocks_across_files_in_order(tmp_path: Path) -> None:
-    (tmp_path / "a.rs").write_text("fn a() {}\nfn b() {}\n", encoding="utf-8")
+    # Bytes, not write_text: the fixture must stay LF on every host so the
+    # SEARCH strings below exercise content matching, not newline translation.
+    (tmp_path / "a.rs").write_bytes(b"fn a() {}\nfn b() {}\n")
     text = (
         _block("a.rs", "fn a() {}\n", "fn a2() {}\n")
         + _block("a.rs", "fn a2() {}\n", "fn a3() {}\n")
@@ -42,20 +44,34 @@ def test_applies_blocks_across_files_in_order(tmp_path: Path) -> None:
     [("x\nx\n", "2 matches"), ("y\n", "0 matches")],
 )
 def test_a_search_must_match_exactly_once(tmp_path: Path, content: str, found: str) -> None:
-    (tmp_path / "f.txt").write_text(content, encoding="utf-8")
+    (tmp_path / "f.txt").write_bytes(content.encode("utf-8"))
     with pytest.raises(patch.PatchError, match=found) as err:
         patch.plan(patch.parse(_block("f.txt", "x\n", "z\n")), tmp_path, None)
     assert err.value.code == 2
 
 
 def test_a_file_outside_the_task_refuses_the_whole_patch(tmp_path: Path) -> None:
-    (tmp_path / "mine.rs").write_text("a\n", encoding="utf-8")
-    (tmp_path / "theirs.rs").write_text("a\n", encoding="utf-8")
+    (tmp_path / "mine.rs").write_bytes(b"a\n")
+    (tmp_path / "theirs.rs").write_bytes(b"a\n")
     facts = {"tasks": [{"worktree": str(tmp_path), "files": ["mine.rs"]}]}
     allowed = patch.task_files(facts, tmp_path.resolve())
     text = _block("mine.rs", "a\n", "b\n") + _block("theirs.rs", "a\n", "b\n")
     with pytest.raises(patch.PatchError, match=r"theirs\.rs: not in this task's files"):
         patch.plan(patch.parse(text), tmp_path, allowed)
+
+
+def test_a_line_feed_patch_applies_to_a_crlf_file(tmp_path: Path) -> None:
+    """A patch written with LF must land in a CRLF working tree, keeping CRLF."""
+    (tmp_path / "crlf.txt").write_bytes(b"keep\r\nold\r\n")
+    result = patch.plan(patch.parse(_block("crlf.txt", "old\n", "new\n")), tmp_path, None)
+    assert result[(tmp_path / "crlf.txt").resolve()] == "keep\r\nnew\r\n"
+
+
+def test_a_line_feed_search_still_must_match_once_in_a_crlf_file(tmp_path: Path) -> None:
+    (tmp_path / "crlf.txt").write_bytes(b"old\r\nold\r\n")
+    with pytest.raises(patch.PatchError, match="2 matches") as err:
+        patch.plan(patch.parse(_block("crlf.txt", "old\n", "new\n")), tmp_path, None)
+    assert err.value.code == 2
 
 
 def test_tasks_in_other_checkouts_do_not_restrict(tmp_path: Path) -> None:

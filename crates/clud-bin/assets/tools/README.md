@@ -26,8 +26,9 @@ Its output holds counts and salted fingerprints, never raw content (#1276,
 via pinned tree-sitter wheels) and Markdown headings with line ranges, so
 `/grind` agents read one range instead of paging through a file (#1339). `code/patch.py` applies
 search/replace blocks across files all-or-nothing, each block matching
-exactly once; in a `/grind` run it refuses files outside the run facts'
-task list for the checkout (#1339). `code/ast_grep.py` runs a pinned
+exactly once in the file's own line endings (an LF block matches a CRLF
+working tree and keeps CRLF); in a `/grind` run it refuses files outside the
+run facts' task list for the checkout (#1339). `code/ast_grep.py` runs a pinned
 ast-grep for structural search and rewrite (#1339).
 
 PR watcher callers select a declared session/background/foreground wait and
