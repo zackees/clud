@@ -139,6 +139,7 @@ def _venv_python(venv_dir: Path) -> Path:
 def _isolated_env(home: Path) -> dict[str, str]:
     """Keep installed-binary tests independent of host clud preferences."""
     env = os.environ.copy()
+    env.pop("CLUD_NO_UNLOCK", None)  # This suite must exercise the trampoline.
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["LOCALAPPDATA"] = str(home / "local-app-data")
@@ -199,6 +200,9 @@ class TestPipInstallWhileRunning:
         result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0, f"First install failed: {result.stderr}"
 
+        env = os.environ.copy()
+        env.pop("CLUD_NO_UNLOCK", None)  # The integration harness disables it.
+
         # Step 2: Launch clud in the background (it will fail to find claude,
         # but the trampoline runs before that check)
         # Use a subprocess that stays alive briefly
@@ -207,6 +211,7 @@ class TestPipInstallWhileRunning:
             stdout=process.PIPE,
             stderr=process.PIPE,
             text=True,
+            env=env,
         )
 
         # Give the trampoline time to rename+copy
