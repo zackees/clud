@@ -94,3 +94,20 @@ def test_a_toolchain_on_path_satisfies_it(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert cross_toolchain_preflight("aarch64-unknown-linux-gnu") is None
+
+
+def test_host_triple_uses_soldr_rustc_when_available(monkeypatch):
+    from types import SimpleNamespace
+
+    from ci import xbuild
+
+    calls = []
+    monkeypatch.setattr("ci.env.soldr_path", lambda: "/opt/soldr")
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(stdout="host: x86_64-unknown-linux-gnu\n")
+
+    monkeypatch.setattr(xbuild.process, "run", run)
+    assert xbuild._host_triple() == "x86_64-unknown-linux-gnu"
+    assert calls == [["/opt/soldr", "rustc", "-vV"]]

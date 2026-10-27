@@ -597,7 +597,11 @@ def cmd_wheel(args: argparse.Namespace) -> int:  # noqa: C901
 def _host_triple() -> str | None:
     """This machine's Rust target triple, via rustc. `None` if unavailable."""
     try:
-        result = process.run(["rustc", "-vV"], capture_output=True, text=True, check=False)
+        from ci.env import soldr_path
+
+        soldr = soldr_path()
+        argv = [soldr, "rustc", "-vV"] if soldr else ["rustc", "-vV"]
+        result = process.run(argv, capture_output=True, text=True, check=False)
     except OSError:
         return None
     for line in (result.stdout or "").splitlines():

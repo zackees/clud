@@ -32,19 +32,16 @@ def test_cargo_argv_prefers_explicit_cargo_without_soldr(monkeypatch) -> None:
     ]
 
 
-def test_cargo_argv_uses_path_when_soldr_shims_requested(monkeypatch) -> None:
-    """A CI lane keeps exactly the argv it has today: the shim check runs
-    before the soldr rung, so a soldr on PATH cannot change it."""
+def test_cargo_argv_prefers_soldr_even_with_shims(monkeypatch) -> None:
     monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "/opt/soldr")
-
     assert ci_env.cargo_argv(
-        ["check"],
-        env={"CARGO": r"C:\rust\bin\cargo.exe", "CLUD_USE_SOLDR_SHIMS": "1"},
-    ) == ["cargo", "check"]
-    assert ci_env.cargo_argv(["check"], env={"CLUD_USE_SOLDR_SHIMS": "1"}) == [
-        "cargo",
-        "check",
-    ]
+        ["check"], env={"CARGO": r"C:\rust\bin\cargo.exe", "CLUD_USE_SOLDR_SHIMS": "1"}
+    ) == ["/opt/soldr", "cargo", "check"]
+
+
+def test_cargo_argv_uses_shim_when_driver_missing(monkeypatch) -> None:
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: None)
+    assert ci_env.cargo_argv(["check"], env={"CLUD_USE_SOLDR_SHIMS": "1"}) == ["cargo", "check"]
 
 
 def test_activate_preserves_soldr_shims_ahead_of_cargo_bin(monkeypatch, tmp_path) -> None:
@@ -106,3 +103,18 @@ def test_clean_env_never_auto_configures_sccache(monkeypatch) -> None:
     )
 
     assert "RUSTC_WRAPPER" not in ci_env.clean_env()
+
+
+def test_host_triple_uses_soldr_when_available(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "/opt/soldr")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="host: x86_64-unknown-linux-gnu\n")
+
+    monkeypatch.setattr(ci_env.process, "run", run)
+    assert ci_env._cargo_host_triple() == "x86_64-unknown-linux-gnu"
+    assert calls == [["/opt/soldr", "cargo", "-Vv"]]

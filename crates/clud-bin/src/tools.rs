@@ -133,6 +133,14 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "github/issue_context.py",
+        body: include_str!("../assets/tools/github/issue_context.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "github/ci_failure_report.py",
         body: include_str!("../assets/tools/github/ci_failure_report.py"),
         kill_semantics: KillSemantics::Resumable,
@@ -651,6 +659,15 @@ mod tests {
     }
 
     /// Issue #2228: loop agents need a bundled bounded CI diagnostic tool.
+    #[test]
+    fn bundled_includes_issue_context() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/issue_context.py")
+            .expect("issue context tool must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
     #[test]
     fn bundled_includes_ci_failure_report() {
         let tool = BUNDLED_TOOLS
