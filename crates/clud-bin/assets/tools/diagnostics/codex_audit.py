@@ -229,6 +229,11 @@ def analyze(rows, *, salt=None):
         "conflicting_or_unknown_duplicate_results": 0,
         "unmatched_results": 0,
         "repeated_calls": 0,
+        "repeated_call_pairs": 0,
+        "repeated_pairs_by_category": {
+            name: 0 for name in ("wait", "read", "state_probe", "validation", "other")
+        },
+        "pair_interpretation": "consecutive accepted call shapes; necessity unverified",
         "repeated_by_category": {
             name: 0 for name in ("wait", "read", "state_probe", "validation", "other")
         },
@@ -278,6 +283,8 @@ def analyze(rows, *, salt=None):
     command_shapes = set()
     read_targets = set()
     uncertain_calls = set()
+    seen_pairs = set()
+    previous_shape = None
     for row in rows:
         for event in events(row):
             kind = event[0]
@@ -288,6 +295,7 @@ def analyze(rows, *, salt=None):
                     ]
                 ] += 1
             elif kind == "call":
+                before = result["tool_calls"]
                 record_call(
                     event,
                     salt,
@@ -298,10 +306,29 @@ def analyze(rows, *, salt=None):
                     read_targets,
                     uncertain_calls,
                 )
+                if result["tool_calls"] > before:
+                    shape, call_category = calls[fingerprint(salt, event[1])]
+                    observe_pair(previous_shape, shape, call_category, seen_pairs, result)
+                    previous_shape = shape
+                elif result["tracking_truncated"]:
+                    previous_shape = None
             elif kind == "result":
                 record_result(event, salt, result, calls, seen_results, read_states)
     finalize_reads(calls, read_states, result, uncertain_calls)
     return result
+
+
+def observe_pair(previous, shape, call_category, seen_pairs, result):
+    if previous is None:
+        return
+    pair = (previous, shape)
+    if pair in seen_pairs:
+        result["repeated_call_pairs"] += 1
+        result["repeated_pairs_by_category"][call_category] += 1
+    elif len(seen_pairs) < MAX_TRACKED:
+        seen_pairs.add(pair)
+    else:
+        result["tracking_truncated"] = True
 
 
 def record_call(

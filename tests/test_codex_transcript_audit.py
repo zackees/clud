@@ -378,3 +378,17 @@ def test_github_command_markers_are_classified(audit):
     report = audit.analyze(rows, salt=b"x" * 32)
     assert report["output_classes"]["failure"] == 1
     assert report["output_classes"]["warning"] == 1
+
+
+def test_repeated_call_pairs_cross_turns_without_disclosing_arguments(audit):
+    rows = [
+        codex("custom_tool_call", call_id="a1", name="Bash", input="cat /private/a"),
+        codex("custom_tool_call", call_id="b1", name="Bash", input="git status"),
+        {"type": "turn_context", "payload": {}},
+        codex("custom_tool_call", call_id="a2", name="Bash", input="cat /private/a"),
+        codex("custom_tool_call", call_id="b2", name="Bash", input="git status"),
+    ]
+    result = audit.analyze(rows, salt=b"x" * 32)
+    assert result["repeated_call_pairs"] == 1
+    assert result["repeated_pairs_by_category"]["state_probe"] == 1
+    assert "/private/a" not in json.dumps(result)

@@ -54,6 +54,8 @@ turns. It counts text result bytes once per known result event; missing event
 identities and excluded binary-containing blocks are reported as uncertainty, so
 byte counts can be incomplete or include replayed text. Repeated
 reads compare observed output, which does not prove a reread was unnecessary.
+Repeated consecutive call pairs can span turns; they identify matching call shapes,
+not whether repeating them was unnecessary.
 Nested JavaScript tool calls are static mentions, not proof of execution. Wait
 states are observations from output, not judgments of whether polling was needed.
 The report contains no commands, paths, transcript contents, or session IDs;
