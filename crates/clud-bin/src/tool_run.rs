@@ -190,6 +190,8 @@ fn run_passthrough(
                 emitted = drain_passthrough_output(&process, emitted);
                 if emitted > last_drain_count {
                     note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {
@@ -245,6 +247,13 @@ fn run_passthrough(
 }
 
 #[cfg(test)]
+fn release_buffered_fixture(rel_path: &str, args: &[String], progress_uncertain: bool) {
+    if rel_path == "__test_buffered_progress" && progress_uncertain {
+        std::fs::write(&args[0], b"release").expect("release fixture child");
+    }
+}
+
+#[cfg(test)]
 fn prepare_fixture_observer(process: &NativeProcess, rel_path: &str) {
     if rel_path == "__test_delayed_observer" {
         process
@@ -276,13 +285,19 @@ fn fixture_wait(
 #[cfg(test)]
 fn wait_for_buffered_fixture_output(process: &NativeProcess) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while process.captured_combined().is_empty() && std::time::Instant::now() < deadline {
+    let marker = b"buffered progress fixture";
+    let has_marker = || {
+        process.captured_combined().iter().any(|event| {
+            event
+                .line
+                .windows(marker.len())
+                .any(|window| window == marker)
+        })
+    };
+    while !has_marker() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        !process.captured_combined().is_empty(),
-        "fixture output must be buffered"
-    );
+    assert!(has_marker(), "fixture marker must be buffered");
     assert!(
         process.returncode().is_none(),
         "fixture must still be running"
@@ -477,6 +492,8 @@ fn run_with_session(
                 emitted = drain_into_tee(&process, &mut tee, emitted);
                 if emitted > last_drain_count {
                     note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {

@@ -190,11 +190,15 @@ fn buffered_progress_after_delayed_observation_is_uncertain_in_both_runners() {
         "--nocapture".to_string(),
     ];
     for with_session in [false, true] {
+        let root = TempDir::new().unwrap();
+        let release = root.path().join("release");
+        let _release_on_drop = FixtureRelease(release.clone());
+        let args = vec![release.to_string_lossy().into_owned()];
         let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
         watchdog.command_timeout = Duration::from_secs(60);
-        watchdog.progress_timeout = Some(Duration::from_secs(2));
+        watchdog.progress_timeout = Some(Duration::from_secs(30));
         watchdog.quiet_ok = false;
-        watchdog.last_output_at = std::time::Instant::now() - Duration::from_secs(3);
+        watchdog.last_output_at = std::time::Instant::now() - Duration::from_secs(31);
         let state = ToolRunState {
             telemetry: ToolTelemetry {
                 server: None,
@@ -205,15 +209,17 @@ fn buffered_progress_after_delayed_observation_is_uncertain_in_both_runners() {
             },
             watchdog,
         };
-        let env = std::env::vars().collect::<Vec<_>>();
+        let mut env = std::env::vars()
+            .filter(|(key, _)| key != "CLUD_TEST_PROGRESS_RELEASE")
+            .collect::<Vec<_>>();
+        env.push(("CLUD_TEST_PROGRESS_RELEASE".to_string(), args[0].clone()));
         let result = if with_session {
-            let root = TempDir::new().unwrap();
             let ctx = SessionContext::from_state_root(root.path(), 4242, 1);
             let code = run_with_session(
                 &ctx,
                 1,
                 "__test_buffered_progress",
-                &[],
+                &args,
                 argv.clone(),
                 env,
                 state,
@@ -227,7 +233,7 @@ fn buffered_progress_after_delayed_observation_is_uncertain_in_both_runners() {
             assert_eq!(records[0].exit_code, Some(0));
             code
         } else {
-            run_passthrough("__test_buffered_progress", &[], argv.clone(), env, state)
+            run_passthrough("__test_buffered_progress", &args, argv.clone(), env, state)
         };
         assert_eq!(result.unwrap(), WATCHDOG_EXIT_CODE);
     }
@@ -236,8 +242,24 @@ fn buffered_progress_after_delayed_observation_is_uncertain_in_both_runners() {
 #[test]
 #[ignore]
 fn buffered_progress_fixture_child() {
+    let release = std::env::var_os("CLUD_TEST_PROGRESS_RELEASE").expect("release path");
     println!("buffered progress fixture");
-    thread::sleep(Duration::from_secs(1));
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !std::path::Path::new(&release).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture release timed out"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct FixtureRelease(std::path::PathBuf);
+
+impl Drop for FixtureRelease {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"release");
+    }
 }
 
 #[test]
