@@ -26,7 +26,7 @@ def _block(path: str, search: str, replace: str) -> str:
 
 
 def test_applies_blocks_across_files_in_order(tmp_path: Path) -> None:
-    (tmp_path / "a.rs").write_text("fn a() {}\nfn b() {}\n", encoding="utf-8")
+    (tmp_path / "a.rs").write_bytes(b"fn a() {}\nfn b() {}\n")
     text = (
         _block("a.rs", "fn a() {}\n", "fn a2() {}\n")
         + _block("a.rs", "fn a2() {}\n", "fn a3() {}\n")
@@ -42,15 +42,15 @@ def test_applies_blocks_across_files_in_order(tmp_path: Path) -> None:
     [("x\nx\n", "2 matches"), ("y\n", "0 matches")],
 )
 def test_a_search_must_match_exactly_once(tmp_path: Path, content: str, found: str) -> None:
-    (tmp_path / "f.txt").write_text(content, encoding="utf-8")
+    (tmp_path / "f.txt").write_bytes(content.encode("utf-8"))
     with pytest.raises(patch.PatchError, match=found) as err:
         patch.plan(patch.parse(_block("f.txt", "x\n", "z\n")), tmp_path, None)
     assert err.value.code == 2
 
 
 def test_a_file_outside_the_task_refuses_the_whole_patch(tmp_path: Path) -> None:
-    (tmp_path / "mine.rs").write_text("a\n", encoding="utf-8")
-    (tmp_path / "theirs.rs").write_text("a\n", encoding="utf-8")
+    (tmp_path / "mine.rs").write_bytes(b"a\n")
+    (tmp_path / "theirs.rs").write_bytes(b"a\n")
     facts = {"tasks": [{"worktree": str(tmp_path), "files": ["mine.rs"]}]}
     allowed = patch.task_files(facts, tmp_path.resolve())
     text = _block("mine.rs", "a\n", "b\n") + _block("theirs.rs", "a\n", "b\n")
