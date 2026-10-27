@@ -596,7 +596,9 @@ fn run_early_fixture(args: &[String]) -> bool {
         println!("handoff-ready");
         io::stdout().flush().expect("flush handoff prompt");
         let mut input = String::new();
-        io::stdin().read_line(&mut input).expect("read handoff input");
+        io::stdin()
+            .read_line(&mut input)
+            .expect("read handoff input");
         let payload = serde_json::json!({"args": &args[1..], "input": input});
         std::fs::write(path, payload.to_string()).expect("write handoff report");
         std::process::exit(37);

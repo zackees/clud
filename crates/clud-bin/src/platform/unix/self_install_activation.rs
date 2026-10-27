@@ -530,7 +530,9 @@ fn collect_shell_probe(process: &NativePtyProcess, mode: &str) -> Result<(i32, V
             return Err("fresh shell output is too large".into());
         }
     }
-    let code = process.wait_impl(Some(1.0)).map_err(|error| error.to_string())?;
+    let code = process
+        .wait_impl(Some(1.0))
+        .map_err(|error| error.to_string())?;
     Ok((code, output))
 }
 

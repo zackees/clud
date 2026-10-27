@@ -547,12 +547,24 @@ mod tests {
             vec!["clud", "--experimental-daemon-centralized"],
             vec!["clud", "loop", "task"],
         ] {
-            assert!(!should_select(&parse(&argv), true, true, None), "argv={argv:?}");
+            assert!(
+                !should_select(&parse(&argv), true, true, None),
+                "argv={argv:?}"
+            );
         }
         assert!(!should_select(&parse(&["clud"]), false, true, None));
         assert!(!should_select(&parse(&["clud"]), true, false, None));
-        for provider in [ModelProvider::OpenRouter, ModelProvider::Claude, ModelProvider::Codex] {
-            assert!(!should_select(&parse(&["clud"]), true, true, Some(provider)));
+        for provider in [
+            ModelProvider::OpenRouter,
+            ModelProvider::Claude,
+            ModelProvider::Codex,
+        ] {
+            assert!(!should_select(
+                &parse(&["clud"]),
+                true,
+                true,
+                Some(provider)
+            ));
         }
     }
 
