@@ -816,11 +816,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
             if is_clud(&words[0])
                 && words.get(1).is_some_and(|w| w == "tool")
                 && words.get(2).is_some_and(|w| w == "run")
-                && words
-                    .get(3)
-                    .is_some_and(|w| {
-                        w.starts_with("github/pr_merge_watch") || w == "github/ci_failure_report.py"
-                    })
+                && words.get(3).is_some_and(|w| {
+                    w.starts_with("github/pr_merge_watch") || w == "github/ci_failure_report.py"
+                })
             {
                 return None;
             }
