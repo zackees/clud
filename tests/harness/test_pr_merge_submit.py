@@ -62,9 +62,10 @@ def test_agent_submits_exact_head(
         assert "--admin" not in merges[0]
 
 
-def test_agent_enqueues_only_the_requested_repository(harness: Harness) -> None:
+@pytest.mark.parametrize("queue", [True, False])
+def test_agent_enqueues_only_the_requested_repository(harness: Harness, queue: bool) -> None:
     def repository() -> dict:
-        return {"issues": {}, "queue_branches": ["main"], "prs": [
+        return {"issues": {}, "queue_branches": ["main"] if queue else [], "prs": [
             {"number": 101, "state": "OPEN", "head_oid": HEAD, "queued": False},
         ]}
 
@@ -81,7 +82,10 @@ def test_agent_enqueues_only_the_requested_repository(harness: Harness) -> None:
     result = harness.run("Submit the specified pull request.", script)
     assert result.returncode == 0, result.stderr
     results = [item for request in result.requests for item in request.get("tool_results", [])]
-    assert any("enqueued" in str(item.get("content", "")) for item in results), results
+    expected = "enqueued" if queue else "submitted"
+    assert any(expected in str(item.get("content", "")) for item in results), results
     repositories = harness.read_gh_state()["repositories"]
-    assert repositories["o/sister"]["prs"][0]["queued"] is True
+    assert repositories["o/sister"]["prs"][0]["queued"] is queue
+    assert (repositories["o/sister"]["prs"][0]["state"] == "MERGED") is not queue
     assert repositories["o/primary"]["prs"][0]["queued"] is False
+    assert repositories["o/primary"]["prs"][0]["state"] == "OPEN"

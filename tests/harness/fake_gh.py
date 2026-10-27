@@ -1247,7 +1247,7 @@ def _without_repo_prefix(argv: list[str]) -> list[str]:
 def _requested_repository(state: dict, argv: list[str]) -> str:
     explicit = _flag(argv, "--repo") or _flag(argv, "-R")
     if explicit:
-        return explicit
+        return explicit.removeprefix("github.com/")
     joined = next((arg[2:] for arg in argv if arg.startswith("-R") and len(arg) > 2), None)
     if joined:
         return joined
