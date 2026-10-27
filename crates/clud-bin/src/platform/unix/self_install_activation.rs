@@ -621,7 +621,11 @@ mod tests {
     #[test]
     fn probe_finishes_when_a_descendant_keeps_the_terminal_open() {
         let mut output = tempfile::tempfile().unwrap();
-        let command = vec!["/bin/sh".into(), "-c".into(), "(/bin/sleep 10) & exit 0".into()];
+        let command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "(/bin/sleep 10) & exit 0".into(),
+        ];
         let started = Instant::now();
         let (code, _) = run_shell_probe(command, Vec::new(), "test", &mut output).unwrap();
         assert_eq!(code, 0);
