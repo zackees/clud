@@ -282,22 +282,13 @@ pub const SKILL_BACKENDS: &[SkillBackend] = &[
     // },
 ];
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum InstallError {
+    #[error("could not resolve user home directory")]
     NoHomeDir,
+    #[error("io error: {0}")]
     Io(io::Error),
 }
-
-impl std::fmt::Display for InstallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InstallError::NoHomeDir => write!(f, "could not resolve user home directory"),
-            InstallError::Io(e) => write!(f, "io error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for InstallError {}
 
 impl From<io::Error> for InstallError {
     fn from(e: io::Error) -> Self {

@@ -143,26 +143,17 @@ impl Default for HistoryLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HistoryError {
+    #[error("invalid bridge conversation id")]
     InvalidConversationId,
+    #[error("bridge conversation capacity reached")]
     ConversationLimit,
+    #[error("Responses history item exceeds capacity")]
     ItemTooLarge,
+    #[error("Responses history capacity reached")]
     HistoryLimit,
 }
-
-impl std::fmt::Display for HistoryError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidConversationId => formatter.write_str("invalid bridge conversation id"),
-            Self::ConversationLimit => formatter.write_str("bridge conversation capacity reached"),
-            Self::ItemTooLarge => formatter.write_str("Responses history item exceeds capacity"),
-            Self::HistoryLimit => formatter.write_str("Responses history capacity reached"),
-        }
-    }
-}
-
-impl std::error::Error for HistoryError {}
 
 /// Thread-safe collection of per-conversation transcripts.
 ///

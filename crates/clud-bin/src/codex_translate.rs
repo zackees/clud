@@ -79,21 +79,12 @@ pub(crate) const MAX_IDENTIFIER_LEN: usize = 64;
 /// prompt.
 const CLAUDE_ATTRIBUTION_PREFIX: &str = "x-anthropic-billing-header:";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TranslateError {
     /// The request does not satisfy the Messages API's own contract.
+    #[error("invalid Messages request: {0}")]
     Invalid(String),
 }
-
-impl std::fmt::Display for TranslateError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid(what) => write!(formatter, "invalid Messages request: {what}"),
-        }
-    }
-}
-
-impl std::error::Error for TranslateError {}
 
 /// Serialize translated input as opaque Responses items for canonical history.
 ///

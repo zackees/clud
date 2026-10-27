@@ -110,55 +110,27 @@ struct SessionRow {
 /// Errors surfaced by the registry. Kept narrow on purpose — callers in
 /// `main.rs` either log and continue (for "couldn't open the DB") or log
 /// and exit (for "cap exceeded"), so a rich error enum buys nothing here.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     /// Could not figure out the default DB path (no `LOCALAPPDATA` /
     /// `XDG_STATE_HOME` / `HOME`). Caller should log and skip the cap
     /// check rather than refusing to launch.
+    #[error("no default session-db path could be resolved")]
     NoDefaultPath,
     /// Filesystem or DB open/IO failure.
+    #[error("session-db I/O error: {0}")]
     Io(String),
     /// DB error (table open, transaction, query, commit, value
     /// serialization).
+    #[error("session-db error: {0}")]
     Sql(String),
 }
-
-impl std::fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoDefaultPath => write!(f, "no default session-db path could be resolved"),
-            Self::Io(msg) => write!(f, "session-db I/O error: {msg}"),
-            Self::Sql(msg) => write!(f, "session-db error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
 
 // `redb` errors come in several flavors depending on which phase of the
 // txn lifecycle they originate from. The umbrella `redb::Error` covers
 // all of them, but every concrete call site returns its own type. Map
 // each into `Sql(string)` so the public surface stays variant-light.
-macro_rules! impl_from_redb {
-    ($($t:ty),* $(,)?) => {
-        $(
-            impl From<$t> for RegistryError {
-                fn from(e: $t) -> Self {
-                    Self::Sql(e.to_string())
-                }
-            }
-        )*
-    };
-}
-
-impl_from_redb!(
-    redb::Error,
-    redb::DatabaseError,
-    redb::TransactionError,
-    redb::TableError,
-    redb::StorageError,
-    redb::CommitError,
-);
+impl_from_redb!(RegistryError);
 
 impl From<serde_json::Error> for RegistryError {
     fn from(e: serde_json::Error) -> Self {

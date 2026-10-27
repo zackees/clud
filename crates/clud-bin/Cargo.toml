@@ -65,6 +65,7 @@ url = "2"
 # previous `rusqlite` (bundled SQLite) dependency to cut cold-build time
 # and drop the C-toolchain pressure on CI.
 redb = "2"
+thiserror = "2"
 # Issue #138: cross-platform advisory file lock used to serialize concurrent
 # redb opens of the session registry, and to serialize gc-daemon bringup.
 # redb itself takes an exclusive per-process file lock — two `clud`

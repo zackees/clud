@@ -70,10 +70,13 @@ fn turn_process_config(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiTurnLaunchError {
+    #[error("{0}")]
     Store(ApiSessionStoreError),
+    #[error("{0}")]
     Io(io::Error),
+    #[error("{0}")]
     InvalidPlan(String),
 }
 
@@ -87,17 +90,6 @@ impl From<io::Error> for ApiTurnLaunchError {
         Self::Io(value)
     }
 }
-impl std::fmt::Display for ApiTurnLaunchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Store(e) => write!(f, "{e}"),
-            Self::Io(e) => write!(f, "{e}"),
-            Self::InvalidPlan(e) => write!(f, "{e}"),
-        }
-    }
-}
-impl std::error::Error for ApiTurnLaunchError {}
-
 /// Starts a subprocess-only API turn. `plan` must be produced by the typed
 /// headless adapter; this boundary rejects a missing or mismatched cwd rather
 /// than inheriting the daemon's working directory.

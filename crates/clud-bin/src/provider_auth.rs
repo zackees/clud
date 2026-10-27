@@ -4,7 +4,6 @@
 //! command line. Production uses the operating system credential vault; tests
 //! inject an in-memory [`SecretStore`] fake instead.
 
-use std::fmt;
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
@@ -49,34 +48,19 @@ pub fn vault_target(service: &str, account: &str) -> String {
 }
 
 /// A non-secret classification of a credential-vault failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SecretStoreError {
+    #[error("the native credential vault is unavailable")]
     Unavailable,
+    #[error("API key is malformed; re-enter a key without whitespace")]
     Malformed,
     /// The fallback credential file is readable by other users (#1891).
+    #[error("the credential file must be a regular file owned by you with owner-only access")]
     InsecureFile,
     /// A fallback credential copy could not be removed.
+    #[error("an old fallback credential could not be removed; credential cleanup is incomplete")]
     CleanupFailed,
 }
-
-impl fmt::Display for SecretStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unavailable => formatter.write_str("the native credential vault is unavailable"),
-            Self::Malformed => {
-                formatter.write_str("API key is malformed; re-enter a key without whitespace")
-            }
-            Self::CleanupFailed => formatter.write_str(
-                "an old fallback credential could not be removed; credential cleanup is incomplete",
-            ),
-            Self::InsecureFile => formatter.write_str(
-                "the credential file must be a regular file owned by you with owner-only access",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SecretStoreError {}
 
 /// Minimal secret-store boundary. It intentionally exposes no enumeration,
 /// serialization, or debug surface for secret values.
