@@ -44,6 +44,10 @@ See [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-
 for optional replay commands and coverage limits. Do not weaken a test or
 waive a hosted job to obtain a green result.
 
+Optional replay needs bosn 0.1.10 or newer. Run its full plan at most once per change;
+see the [local CI budget](docs/architecture/ci.md#local-ci-budget). Never use
+`pkill` or `pgrep -f` against Bosn runs; cancel only your own run.
+
 ## Repository Map
 
 This is a Rust CLI (`clud`) distributed as a Python wheel via maturin (`bindings = "bin"`). The Rust source lives under `crates/` and is mirrored by a progressive-disclosure README tree:
