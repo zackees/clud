@@ -21,6 +21,14 @@ pub fn verify_file(_file: &File) -> io::Result<()> {
     ))
 }
 
+/// Windows capture is disabled until a cancellable private implementation exists.
+pub fn read_pipe(_reader: &mut os_pipe::PipeReader, _data: &mut [u8]) -> io::Result<Option<usize>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Windows capture is unavailable",
+    ))
+}
+
 /// Convert the writer to the file type accepted by running-process.
 pub fn pipe_writer_file(writer: os_pipe::PipeWriter) -> File {
     let handle: OwnedHandle = writer.into();

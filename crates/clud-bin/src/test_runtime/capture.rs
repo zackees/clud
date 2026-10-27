@@ -2,9 +2,12 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use running_process::{spawn_argv_with_stdio, SpawnStdio, SpawnedChild, StdioSource};
@@ -54,22 +57,11 @@ pub(crate) fn capture_with_limit(
             "missing command",
         ));
     }
-    let (mut artifact, path) = create_artifact(root)?;
-    let (reader, writer) = os_pipe::pipe()?;
-    let writer = crate::platform::test_capture::pipe_writer_file(writer);
-    let argv: Vec<OsString> = command.iter().map(OsString::from).collect();
-    let stdio = SpawnStdio {
-        stdin: StdioSource::Parent,
-        stdout: StdioSource::File(&writer),
-        stderr: StdioSource::File(&writer),
-        ..SpawnStdio::default()
-    };
-    let mut child = spawn_argv_with_stdio(&argv, None, None, stdio)?;
-    drop(writer);
-    let rx = capture_reader(reader);
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let (mut artifact, path) = create_artifact(root)?;
+    let (mut child, (rx, stop, reader_handle)) = spawn_capture(command)?;
     let mut exit_code = None;
     let mut eof = false;
     let mut bytes = 0u64;
@@ -133,7 +125,11 @@ pub(crate) fn capture_with_limit(
     } else {
         Some(stop_incomplete(&mut child, &rx, &mut exit_code, &mut eof))
     };
+    stop.store(true, Ordering::Release);
     drop(rx);
+    if reader_handle.join().is_err() && state == "complete" {
+        state = "read_error";
+    }
     Ok(CaptureResult {
         schema_version: 1,
         artifact: path,
@@ -147,6 +143,31 @@ pub(crate) fn capture_with_limit(
     })
 }
 
+fn spawn_capture(command: &[String]) -> io::Result<(SpawnedChild, CaptureReader)> {
+    let (reader, writer) = os_pipe::pipe()?;
+    let writer = crate::platform::test_capture::pipe_writer_file(writer);
+    let argv: Vec<OsString> = command.iter().map(OsString::from).collect();
+    let stdio = SpawnStdio {
+        stdin: StdioSource::Parent,
+        stdout: StdioSource::File(&writer),
+        stderr: StdioSource::File(&writer),
+        ..SpawnStdio::default()
+    };
+    let (rx, stop, reader_handle) = capture_reader(reader)?;
+    let child = match spawn_argv_with_stdio(&argv, None, None, stdio) {
+        Ok(child) => child,
+        Err(error) => {
+            stop.store(true, Ordering::Release);
+            drop(writer);
+            drop(rx);
+            let _ = reader_handle.join();
+            return Err(error);
+        }
+    };
+    drop(writer);
+    Ok((child, (rx, stop, reader_handle)))
+}
+
 fn create_artifact(root: &Path) -> io::Result<(File, PathBuf)> {
     crate::platform::test_capture::verify_root(root)?;
     let temporary = tempfile::Builder::new()
@@ -158,29 +179,38 @@ fn create_artifact(root: &Path) -> io::Result<(File, PathBuf)> {
     Ok((artifact, path))
 }
 
-fn capture_reader(mut reader: os_pipe::PipeReader) -> mpsc::Receiver<Event> {
+type CaptureReader = (mpsc::Receiver<Event>, Arc<AtomicBool>, JoinHandle<()>);
+
+fn capture_reader(mut reader: os_pipe::PipeReader) -> io::Result<CaptureReader> {
     let (tx, rx) = mpsc::sync_channel::<Event>(4);
-    std::thread::spawn(move || loop {
-        let mut data = vec![0; CHUNK_BYTES];
-        match reader.read(&mut data) {
-            Ok(0) => {
-                let _ = tx.send(Event::Eof);
-                break;
-            }
-            Ok(n) => {
-                data.truncate(n);
-                if tx.send(Event::Data(data)).is_err() {
-                    break;
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_stop = Arc::clone(&stop);
+    let handle = std::thread::Builder::new()
+        .name("clud-test-capture".into())
+        .spawn(move || {
+            while !reader_stop.load(Ordering::Acquire) {
+                let mut data = vec![0; CHUNK_BYTES];
+                match crate::platform::test_capture::read_pipe(&mut reader, &mut data) {
+                    Ok(None) => continue,
+                    Ok(Some(0)) => {
+                        let _ = tx.send(Event::Eof);
+                        break;
+                    }
+                    Ok(Some(n)) => {
+                        data.truncate(n);
+                        if tx.send(Event::Data(data)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        let _ = tx.send(Event::Error);
+                        break;
+                    }
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => {
-                let _ = tx.send(Event::Error);
-                break;
-            }
-        }
-    });
-    rx
+        })?;
+    Ok((rx, stop, handle))
 }
 
 fn stop_incomplete(
@@ -236,5 +266,32 @@ pub fn run_cli(root: &Path, timeout_secs: u64, command: &[String]) -> i32 {
             eprintln!("clud test capture: unable to capture command safely");
             1
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reader_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn reader_stops_and_joins_while_writer_remains_open() {
+        let (reader, mut writer) = os_pipe::pipe().unwrap();
+        let (receiver, stop, handle) = capture_reader(reader).unwrap();
+        writer.write_all(b"ready").unwrap();
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(2)), Ok(Event::Data(data)) if data == b"ready")
+        );
+        stop.store(true, Ordering::Release);
+        drop(receiver);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        drop(writer);
     }
 }

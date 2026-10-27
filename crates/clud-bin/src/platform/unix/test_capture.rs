@@ -3,8 +3,8 @@
 #[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::fs::File;
-use std::io;
-use std::os::fd::OwnedFd;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(not(target_os = "macos"))]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -77,6 +77,27 @@ pub fn verify_file(_file: &File) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "macOS private artifact ACLs are unavailable",
     ))
+}
+
+/// Poll the capture pipe so a retained writer cannot prevent reader shutdown.
+pub fn read_pipe(reader: &mut os_pipe::PipeReader, data: &mut [u8]) -> io::Result<Option<usize>> {
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: descriptor points to one initialized pollfd for the duration of poll.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ready == 0 {
+        return Ok(None);
+    }
+    if descriptor.revents & libc::POLLNVAL != 0 {
+        return Err(io::Error::other("invalid capture pipe"));
+    }
+    reader.read(data).map(Some)
 }
 
 /// Convert the writer to the file type accepted by running-process.
