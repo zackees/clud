@@ -33,7 +33,7 @@ def test_openrouter_context_audit_accepts_append_only_history() -> None:
     assert report["cumulative_request_bytes"] == 3300
 
 
-@pytest.mark.parametrize("mutation", ["instructions", "tool_result", "growth", "request", "schema"])
+@pytest.mark.parametrize("mutation", ["instructions", "tool_result", "growth", "request", "schema", "long_text", "history"])
 def test_openrouter_context_audit_rejects_context_bloat(mutation: str) -> None:
     rows = copy.deepcopy(fixture_requests())
     if mutation == "instructions":
@@ -44,8 +44,12 @@ def test_openrouter_context_audit_rejects_context_bloat(mutation: str) -> None:
         rows[1]["context_bytes"]["request"] += 1000
     elif mutation == "request":
         rows.append(copy.deepcopy(rows[-1]))
-    else:
+    elif mutation == "schema":
         rows[1]["context_bytes"]["tools_fingerprint"] = "changed"
+    elif mutation == "long_text":
+        rows[1]["messages"].extend([{"role": "user", "content": "repeated notice " * 100}] * 2)
+    else:
+        rows[2]["messages"][0]["content"][0]["content"] += "changed"
     with pytest.raises(AssertionError):
         check(rows)
 
