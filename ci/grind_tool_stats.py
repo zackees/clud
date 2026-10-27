@@ -27,10 +27,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 WAIT = re.compile(r"\bsleep\s+\d|\b(until|while)\b[^;]*;\s*do\b")
-PY_EDIT = re.compile(r"\bpython3?\s+(-c\b|-\s*<<|<<)")
+PY_EDIT = re.compile(r"\bpython(?:3)?\s+(-c\b|-\s*<<|<<)")
 GIT_PROBE = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(log|status|diff|fetch|branch)\b")
-CI_POLL = re.compile(r"\bgh\s+(?:-R\s+\S+\s+|--repo\s+\S+\s+)?(pr\s+checks|run\s+view|run\s+list)\b")
-ISSUE_VIEW = re.compile(r"\bgh\s+issue\s+view\s+(?:-R\s+\S+\s+|--repo\s+\S+\s+)?#?(\d+)")
+REPO = r"(?:-R\s+\S+\s+|--repo\s+\S+\s+)?"
+CI_POLL = re.compile(r"\bgh\s+" + REPO + r"(pr\s+checks|run\s+view|run\s+list)\b")
+ISSUE_VIEW = re.compile(r"\bgh\s+issue\s+view\s+" + REPO + r"#?(\d+)")
 SHELL_SEARCH = re.compile(r"(?:^|[;&|(]\s*)(grep|ls)\b")
 BUNDLED = ("git/state.py", "code/outline.py", "code/patch.py", "code/ast_grep.py", "pr_merge_watch")
 
