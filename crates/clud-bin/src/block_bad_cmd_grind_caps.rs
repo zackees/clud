@@ -816,9 +816,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
             if is_clud(&words[0])
                 && words.get(1).is_some_and(|w| w == "tool")
                 && words.get(2).is_some_and(|w| w == "run")
-                && words
-                    .get(3)
-                    .is_some_and(|w| w.starts_with("github/pr_merge_watch"))
+                && words.get(3).is_some_and(|w| {
+                    w.starts_with("github/pr_merge_watch") || w == "github/ci_failure_report.py"
+                })
             {
                 return None;
             }
@@ -2248,6 +2248,21 @@ mod tests {
         }
         assert!(allowed(LANDER, "gh pr checks 5", &facts));
         assert!(allowed(LANDER, "gh run view 99 --log-failed", &facts));
+    }
+
+    #[test]
+    fn lander_can_read_bounded_ci_failure_report() {
+        let facts = run(true, false);
+        assert!(allowed(
+            LANDER,
+            "clud tool run github/ci_failure_report.py -- --repo owner/repo --run 123 --job 456",
+            &facts
+        ));
+        assert!(!allowed(
+            LANDER,
+            "clud tool run github/ci_failure_report.py.untrusted -- --repo owner/repo --run 123 --job 456",
+            &facts
+        ));
     }
 
     #[test]

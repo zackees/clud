@@ -133,6 +133,14 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "github/ci_failure_report.py",
+        body: include_str!("../assets/tools/github/ci_failure_report.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "github/run_watch.py",
         body: include_str!("../assets/tools/github/run_watch.py"),
         // Waits on one Actions run with no PR (#1941); GitHub owns the run,
@@ -640,6 +648,16 @@ mod tests {
             "BUNDLED_TOOLS must include github/pr_merge_watch.py; \
              got {names:?}",
         );
+    }
+
+    /// Issue #2228: loop agents need a bundled bounded CI diagnostic tool.
+    #[test]
+    fn bundled_includes_ci_failure_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/ci_failure_report.py")
+            .expect("BUNDLED_TOOLS must include github/ci_failure_report.py");
+        assert!(tool.body.contains("managed-by: clud"));
     }
 
     /// Issue #1941: non-PR Actions runs have a sanctioned waiter.
