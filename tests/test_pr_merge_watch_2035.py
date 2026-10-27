@@ -246,7 +246,7 @@ def test_default_follow_rejects_naive_removal_timestamp(watcher):
     assert watcher.parse_queue_state(data) is None
 
 
-@pytest.mark.parametrize("field,value", [
+@pytest.mark.parametrize(("field", "value"), [
     ("state", "UNKNOWN"),
     ("autoMergeRequest", False),
     ("autoMergeRequest", {}),
