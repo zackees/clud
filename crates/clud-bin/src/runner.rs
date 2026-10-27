@@ -30,7 +30,7 @@ use crate::wedge_watchdog;
 use crate::win_creation_flags;
 
 #[path = "runner_exit.rs"]
-mod runner_exit;
+pub(crate) mod runner_exit;
 #[path = "runner_terminal.rs"]
 mod runner_terminal;
 pub use runner_execution::run_plan_pty;

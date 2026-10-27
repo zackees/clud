@@ -30,6 +30,9 @@ before exiting with the test-requested code.
 
 ## Behavior
 
+- `CLUD_TEST_HANDOFF_MARKER` selects an installer-handoff fixture: it prints
+  `handoff-ready`, reads one terminal line, records the line and argv as JSON
+  at the named path, and exits 37. This tests inherited console I/O.
 - Reads argv. Recognized `--mock-*` flags are consumed; everything else is
   echoed back in the report's `args` field exactly as `clud` forwarded it.
 - A leading `--version` arg short-circuits to a Claude Code version line

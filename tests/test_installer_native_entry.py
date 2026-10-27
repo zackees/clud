@@ -779,6 +779,8 @@ def test_interactive_openrouter_setup_saves_key_and_model(
             check=True,
         )
         assert json.loads(plan.stdout)["model_selection"]["wire_model"] == model
+        if model == "deepseek/deepseek-v4.1-flash":
+            assert_bare_openrouter_launch(installed, env, tmp_path)
         assert [path.read_text() for path in vault.glob("*.secret")] == [
             "sk-or-test-install-12345"
         ]
@@ -789,8 +791,40 @@ def test_interactive_openrouter_setup_saves_key_and_model(
         os.close(master)
 
 
+def assert_bare_openrouter_launch(installed: Path, env: dict[str, str], tmp_path: Path) -> None:
+    mock = os.environ.get("CLUD_TEST_MOCK_AGENT_BINARY")
+    assert mock, "compiled mock-agent bundle is required"
+    mock_dir = tmp_path / "mock-harnesses"
+    mock_dir.mkdir()
+    for name in ("claude", "codex"):
+        target = mock_dir / name
+        shutil.copyfile(mock, target)
+        target.chmod(0o755)
+    bare_env = env.copy()
+    bare_env["PATH"] = str(mock_dir) + os.pathsep + bare_env["PATH"]
+    bare_env["CLUD_TEST_SECRET_STORE_DIR"] = str(tmp_path / "empty-vault")
+    bare_env["CLUD_TEST_CREDENTIAL_PROBE_URL"] = "http://127.0.0.1:1"
+    bare_env["CLUD_DAEMON_TEST_MODE"] = "1"
+    bare_env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "daemon")
+    process = PseudoTerminalProcess([str(installed)], env=bare_env, capture=True)
+    try:
+        process.expect("OpenRouter API key:", timeout=60)
+        process.write("\x1b")
+        try:
+            process.wait(timeout=30)
+        except KeyboardInterrupt:
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
-def test_start_uses_the_installed_executable(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("child_exit", "expected"), [("exit 37", 37), ("kill -INT $$", 130)])
+def test_start_uses_the_installed_executable(
+    tmp_path: Path, child_exit: str, expected: int
+) -> None:
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     marker = tmp_path / "launched"
@@ -826,7 +860,7 @@ def test_start_uses_the_installed_executable(tmp_path: Path) -> None:
                 # A distinguishable installed executable proves which binary gets launched.
                 destination.write_text(
                     '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$CLUD_TEST_HANDOFF_MARKER"\n'
-                    'exit 37\n'
+                    f'{child_exit}\n'
                 )
                 destination.chmod(0o755)
                 os.write(master, b"\r")
@@ -837,7 +871,7 @@ def test_start_uses_the_installed_executable(tmp_path: Path) -> None:
                 break
         assert step == 3, output.decode(errors="replace")
         assert status is not None, output.decode(errors="replace")
-        assert os.waitstatus_to_exitcode(status) == 37, output.decode(errors="replace")
+        assert os.waitstatus_to_exitcode(status) == expected, output.decode(errors="replace")
         assert marker.read_text().splitlines() == [
             str(destination), "--claude", "--harness", "default"
         ]
@@ -846,3 +880,34 @@ def test_start_uses_the_installed_executable(tmp_path: Path) -> None:
             os.kill(pid, 9)
             os.waitpid(pid, 0)
         os.close(master)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ConPTY")
+def test_start_handoff_inherits_windows_console(installer_target, tmp_path: Path) -> None:
+    env, destination = installer_target
+    mock = os.environ.get("CLUD_TEST_MOCK_AGENT_BINARY")
+    if not mock:
+        pytest.skip("compiled mock-agent bundle is required")
+    marker = tmp_path / "handoff.json"
+    env["CLUD_TEST_HANDOFF_MARKER"] = str(marker)
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer", "--install-current"], env=env, capture=True
+    )
+    try:
+        process.expect("Not now", timeout=30)
+        process.write("\x1b[A\r")
+        process.expect("Setup for:", timeout=60)
+        process.write("\x1b[B\r")
+        process.expect("Start right now?", timeout=30)
+        shutil.copyfile(mock, destination)
+        process.write("\r")
+        process.expect("handoff-ready", timeout=30)
+        process.write("hello from terminal\r")
+        assert process.wait(timeout=30) == 37, process.output_text
+        report = json.loads(marker.read_text())
+        assert report["args"] == ["--claude", "--harness", "default"]
+        assert report["input"].strip() == "hello from terminal"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
