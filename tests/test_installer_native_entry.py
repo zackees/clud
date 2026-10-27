@@ -782,14 +782,17 @@ def assert_bare_openrouter_launch(installed: Path, env: dict[str, str], tmp_path
         shutil.copyfile(mock, target)
         target.chmod(0o755)
     bare_env = env.copy()
-    bare_env["PATH"] = str(mock_dir) + os.pathsep + bare_env["PATH"]
+    bare_env["PATH"] = os.pathsep.join([str(mock_dir), str(installed.parent), bare_env["PATH"]])
     bare_env["CLUD_TEST_SECRET_STORE_DIR"] = str(tmp_path / "empty-vault")
     bare_env["CLUD_TEST_CREDENTIAL_PROBE_URL"] = "http://127.0.0.1:1"
     bare_env["CLUD_DAEMON_TEST_MODE"] = "1"
     bare_env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "daemon")
     process = PseudoTerminalProcess([str(installed)], env=bare_env, capture=True)
     try:
-        process.expect("OpenRouter API key:", timeout=60)
+        try:
+            process.expect("OpenRouter API key:", timeout=60)
+        except (EOFError, TimeoutError):
+            pytest.fail(f"bare launch did not reach OpenRouter preflight: {process.output_text}")
         process.write("\x1b")
         try:
             process.wait(timeout=30)
@@ -891,6 +894,7 @@ def test_activation_verifies_shell_with_terminal_stdin(tmp_path: Path) -> None:
         "clud() { printf '%s\\n' wrong; }; fi\n"
         "printf '\\n'\n"
     )
+    (home / ".bashrc").chmod(0o600)
     env = isolated_env(home)
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
     env["PATH"] = "/usr/bin:/bin"
@@ -915,6 +919,7 @@ def test_activation_handles_unread_terminal_queries(tmp_path: Path, flood: bool)
         ("for i in {1..20}; do " + query + "; done\n" if flood else query + "\n")
         + "printf '\\n'\n"
     )
+    (home / ".bashrc").chmod(0o600)
     env = isolated_env(home)
     env["SHELL"] = shutil.which("bash") or "/bin/bash"
     env["PATH"] = "/usr/bin:/bin"
