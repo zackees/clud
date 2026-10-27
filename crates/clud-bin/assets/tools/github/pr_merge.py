@@ -6,13 +6,13 @@
 # managed-by: clud
 """Submit an exact GitHub PR head for merge, including protected merge queues.
 
-Usage: clud tool run github/pr_merge.py -- PR --repo OWNER/REPO --match-head-commit SHA
+Arguments: PR --repo OWNER/REPO --match-head-commit SHA
 
 The repository and full head SHA are required. The base branch's merge queue
 selects GitHub's enqueuePullRequest mutation, or `gh pr merge
 --squash` for an ordinary branch. The tool never uses admin bypass. A zero
 exit reports submission or an existing queue entry, not a completed merge;
-follow it with `clud tool run github/pr_merge_watch.py -- PR --repo OWNER/REPO`.
+follow it with the bundled github/pr_merge_watch.py tool.
 An API or timeout error can leave the mutation outcome unknown: check the PR
 before retrying. The command never retries mutations itself.
 """
