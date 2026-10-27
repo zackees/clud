@@ -264,24 +264,30 @@ def job_pages(repo: str, run_id: int, attempt: int) -> tuple[list[dict] | None, 
     return None, "job page limit exceeded"
 
 
+def resolve_repo() -> str | None:
+    """Discover the repository and retain its GitHub Enterprise authority."""
+    code, out, _ = gh("repo", "view", "--json", "nameWithOwner,url")
+    if code != 0:
+        return None
+    try:
+        data = json.loads(out)
+        owner_repo = data["nameWithOwner"]
+        parsed_url = urlparse(data["url"])
+        hostname = parsed_url.hostname
+        if not isinstance(owner_repo, str) or owner_repo.count("/") != 1 or not hostname:
+            return None
+        if parsed_url.port is not None:
+            hostname = f"{hostname}:{parsed_url.port}"
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return owner_repo if hostname == "github.com" else f"{hostname}/{owner_repo}"
+
+
 def fetch(run_id: int, repo: str | None) -> dict | None:
     """Read a complete, internally consistent snapshot of the current attempt."""
+    repo = repo or resolve_repo()
     if not repo:
-        code, out, _ = gh("repo", "view", "--json", "nameWithOwner,url")
-        try:
-            data = json.loads(out)
-            owner_repo = data["nameWithOwner"]
-            parsed_url = urlparse(data["url"])
-            hostname = parsed_url.hostname
-            if not isinstance(owner_repo, str) or owner_repo.count("/") != 1 or not hostname:
-                return None
-            if parsed_url.port is not None:
-                hostname = f"{hostname}:{parsed_url.port}"
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            return None
-        if code != 0:
-            return None
-        repo = owner_repo if hostname == "github.com" else f"{hostname}/{owner_repo}"
+        return None
     run = run_metadata(run_id, repo)
     if not run or not isinstance(run.get("attempt"), int) or run["attempt"] < 1:
         return None
