@@ -313,7 +313,9 @@ def analyze(rows, *, salt=None):
                 elif result["tracking_truncated"]:
                     previous_shape = None
             elif kind == "result":
-                record_result(event, salt, result, calls, seen_results, read_states)
+                record_result(
+                    event, salt, result, calls, seen_results, read_states, uncertain_calls
+                )
     finalize_reads(calls, read_states, result, uncertain_calls)
     return result
 
@@ -384,18 +386,25 @@ def count_nested_mentions(arguments, result):
         result["nested_tool_mentions"][bucket] += 1
 
 
-def is_replayed_result(result_id, digest, incomplete, salt, result, seen_results):
+def is_replayed_result(
+    result_id, call_identity, digest, incomplete, salt, result, seen_results, uncertain_calls, calls
+):
     if isinstance(result_id, str) and result_id:
         result_identity = fingerprint(salt, result_id)
         if result_identity in seen_results:
             result["duplicate_results"] += 1
-            old_digest, old_incomplete = seen_results[result_identity]
-            result["conflicting_or_unknown_duplicate_results"] += int(
-                incomplete or old_incomplete or old_digest != digest
+            old_call, old_digest, old_incomplete = seen_results[result_identity]
+            conflict = (
+                call_identity != old_call or incomplete or old_incomplete or old_digest != digest
             )
+            result["conflicting_or_unknown_duplicate_results"] += int(conflict)
+            if conflict:
+                uncertain_calls.update(
+                    identity for identity in (old_call, call_identity) if identity in calls
+                )
             return True
         if len(seen_results) < MAX_TRACKED:
-            seen_results[result_identity] = (digest, incomplete)
+            seen_results[result_identity] = (call_identity, digest, incomplete)
         else:
             result["tracking_truncated"] = True
     else:
@@ -405,7 +414,7 @@ def is_replayed_result(result_id, digest, incomplete, salt, result, seen_results
     return False
 
 
-def record_result(event, salt, result, calls, seen_results, read_states):
+def record_result(event, salt, result, calls, seen_results, read_states, uncertain_calls):
     _, call_id, raw, result_id = event
     if not isinstance(call_id, str):
         result["malformed_rows"] += 1
@@ -414,7 +423,17 @@ def record_result(event, salt, result, calls, seen_results, read_states):
     text, incomplete = text_output(raw)
     digest = fingerprint(salt, text)
     conflicts_before = result["conflicting_or_unknown_duplicate_results"]
-    if is_replayed_result(result_id, digest, incomplete, salt, result, seen_results):
+    if is_replayed_result(
+        result_id,
+        call_identity,
+        digest,
+        incomplete,
+        salt,
+        result,
+        seen_results,
+        uncertain_calls,
+        calls,
+    ):
         if result["conflicting_or_unknown_duplicate_results"] > conflicts_before:
             state = read_states.get(call_identity)
             if state is not None:

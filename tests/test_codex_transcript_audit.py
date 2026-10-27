@@ -392,3 +392,37 @@ def test_repeated_call_pairs_cross_turns_without_disclosing_arguments(audit):
     assert result["repeated_call_pairs"] == 1
     assert result["repeated_pairs_by_category"]["state_probe"] == 1
     assert "/private/a" not in json.dumps(result)
+
+
+def test_result_id_reused_for_different_calls_is_uncertain(audit):
+    rows = [
+        codex("custom_tool_call", call_id="a", name="Bash", input="cat /private/a"),
+        codex("custom_tool_call_output", call_id="a", id="same", output="same text"),
+        codex("custom_tool_call", call_id="b", name="Bash", input="cat /private/a"),
+        codex("custom_tool_call_output", call_id="b", id="same", output="same text"),
+    ]
+    result = audit.analyze(rows, salt=b"x" * 32)
+    assert result["conflicting_or_unknown_duplicate_results"] == 1
+    assert result["repeated_read_observations"]["unknown"] == 1
+    assert "/private/a" not in json.dumps(result)
+
+
+def test_conflicting_unknown_call_ids_do_not_expand_uncertainty_tracking(audit):
+    result = {
+        "duplicate_results": 0,
+        "conflicting_or_unknown_duplicate_results": 0,
+        "tracking_truncated": False,
+        "result_identity_unknown": 0,
+    }
+    seen = {}
+    uncertain = set()
+    salt = b"x" * 32
+    known = {b"known": (b"shape", "read")}
+    audit.is_replayed_result(
+        "event", b"known", b"text", False, salt, result, seen, uncertain, known
+    )
+    for index in range(100):
+        audit.is_replayed_result(
+            "event", str(index).encode(), b"text", False, salt, result, seen, uncertain, known
+        )
+    assert uncertain == {b"known"}
