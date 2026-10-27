@@ -1,6 +1,6 @@
 ---
 name: grind-lander
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind lander. Watches a PR with pr_merge_watch, admin-merges it when green, or diagnoses the failure and hands it back to the integrator. Cannot edit files or build.
+description: Internal grind-run lander (direct delegation blocked by default).
 tools: Read, Grep, Glob, Bash, Skill
 ---
 <!-- managed-by: clud -->

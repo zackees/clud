@@ -1,6 +1,6 @@
 ---
 name: grind-planner
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind planner. Splits one goal into worker tasks with disjoint files, names its dependencies and verify commands. Read-only git/gh shell; creates a worktree only in parallel mode. Never builds.
+description: Internal grind-run planner (direct delegation blocked by default).
 tools: Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->

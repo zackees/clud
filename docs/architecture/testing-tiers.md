@@ -149,3 +149,55 @@ pins how Claude Code treats it:
   `test_grind_reconcile.py`, `test_grind_scripts.py`,
   `test_grind_tracks.py`, `test_grind_review_gate.py` and the end-to-end
   scenarios in `test_grind_e2e.py`.
+
+### OpenRouter context audit (#2225)
+
+`tests/harness/test_openrouter_context.py` launches real `clud --openrouter`
+with the DeepSeek wire ID and real Claude Code against `mock-agent serve`.
+Eight scripted fixed-size tool outputs (including quotes, backslashes, tabs,
+newlines and multibyte Unicode) must produce exactly nine requests.
+Default and restricted-control profiles, a single injected HTTP 503 retry,
+and native resume are audited without paid requests or ambient credentials.
+Production tool access and project instructions are unchanged.
+
+The audit validates exactly-once instructions, exact expected tool payloads,
+assistant tool inputs/block types, serial call/result chronology, ordered user
+text, exact output-to-call pairing, stable historical call/result identities,
+unchanged schemas/system content, bounded per-turn growth, expected HTTP paths,
+and absence of unrelated fixture canaries across the full request. Resume must
+add one request and only the explicit new prompt/previous final answer. A retry
+must have an identical received request-body fingerprint. The mock fingerprints
+are equality checks within a run, not cryptographic security boundaries.
+
+Copies of actual captures are corrupted adversarially: duplicate short/long
+reminders or system sections, altered/lost/copied/padded output, extra model
+calls, schema churn, unexpected assistant text/thinking/inputs, rewritten IDs,
+extra message/result/cache metadata, unexpected images, changed result error
+flags and unrelated context. The audit must reject every corruption. Unit controls
+also verify received-byte measurement, UTF-8 handling, and canary detection in
+system metadata, tool descriptions and other request fields, including escaped
+string values and object keys. Positive controls preserve legitimate repeated
+lines and escaped Unicode output rather than treating repetition itself as a bug.
+
+`logs/context-audit.json` contains numeric request-section and cumulative body
+byte counts. `context_bytes.request` measures the received HTTP body; section
+sizes describe compact JSON. These are not provider token counts. Normal
+append-only conversation history is resent by the Messages API, so cumulative
+bytes differ from the size of a single request. Raw logs contain only the
+isolated fixture world; headers/credentials are never logged. Optional
+`audit_http` script logging records method, path and body size for all calls.
+
+Passing this suite establishes the bounded scripted launcher/harness contract,
+not whether each real model tool choice is useful, live billing correctness,
+parallel tool batches, tool-failure recovery, automatic compaction behavior,
+or the absence of every possible future context regression. The real provider
+capture in #2225 complements the mock audit.
+
+`tests/harness/test_openrouter_inventory.py` compares the compact bundled
+descriptions of seven workflow-internal agents with their frozen verbose
+descriptions. Full role prompts, tools, agent names, the orchestrator description
+and project guidance stay intact. The A/B control owns its fixture copies so
+startup refresh cannot erase it; the captured messages must be identical after
+normalizing exactly those descriptions. It measures received-byte savings,
+checks unchanged tool schemas/system content/catalog entries, and launches
+`grind-worker` by name to verify that its full role instructions still load.

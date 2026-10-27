@@ -1,6 +1,6 @@
 ---
 name: grind-integrator
-description: Internal to the grind-run workflow; do not delegate to it (clud's hook refuses). /grind integrator. The only role that builds. Runs one at a time; rebases, lints, builds, tests, fixes until green, then pushes and opens the PR. No bosn, no direct containers, no new worktrees.
+description: Internal grind-run integrator (direct delegation blocked by default).
 tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill
 ---
 <!-- managed-by: clud -->

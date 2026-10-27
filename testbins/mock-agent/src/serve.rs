@@ -128,10 +128,11 @@ fn handle(server: &Server, stream: TcpStream) -> std::io::Result<()> {
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body)?;
         let route = path.split('?').next().unwrap_or("");
+        log_http_request(server, &method, route, body.len());
         match (method.as_str(), route) {
             ("POST", p) if p.ends_with("/v1/messages") => {
                 let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                respond_messages(server, &mut stream, &request)?;
+                respond_messages(server, &mut stream, &request, &body)?;
             }
             ("POST", p) if p.ends_with("/count_tokens") => {
                 write_json(&mut stream, 200, &json!({"input_tokens": 1}))?;
@@ -146,6 +147,38 @@ fn handle(server: &Server, stream: TcpStream) -> std::io::Result<()> {
             )?,
         }
     }
+}
+
+fn log_http_request(server: &Server, method: &str, path: &str, body_bytes: usize) {
+    if server.script.get("audit_http").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    if let Ok(mut guard) = server.log.lock() {
+        if let Some(file) = guard.as_mut() {
+            let entry = json!({
+                "kind": "http_audit", "method": method, "path": path, "body_bytes": body_bytes,
+            });
+            let _ = writeln!(file, "{entry}");
+        }
+    }
+}
+
+fn response_status(server: &Server, step: &Value, n: u64) -> u16 {
+    let status = step
+        .get("error")
+        .map(|error| error.get("status").and_then(Value::as_u64).unwrap_or(500))
+        .or_else(|| {
+            (n == 1)
+                .then(|| {
+                    server
+                        .script
+                        .get("first_response_status")
+                        .and_then(Value::as_u64)
+                })
+                .flatten()
+        })
+        .unwrap_or(200);
+    u16::try_from(status).unwrap_or(500)
 }
 
 fn now_ms() -> u64 {
@@ -399,6 +432,96 @@ fn resolve_tool_input(mut step: Value) -> Result<Value, String> {
     Ok(step)
 }
 
+/// Counts from the received HTTP body. Section sizes are compact JSON bytes,
+/// not provider tokens; the fingerprint compares schemas without logging them.
+fn context_bytes(request: &Value, body: &[u8]) -> Value {
+    use std::hash::{Hash, Hasher};
+
+    let section = |name: &str| {
+        request
+            .get(name)
+            .map(|value| serde_json::to_vec(value).expect("serialize parsed JSON"))
+            .unwrap_or_default()
+    };
+    let tools = section("tools");
+    let system = section("system");
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    tools.hash(&mut fingerprint);
+    let hash = |bytes: &[u8]| {
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut state);
+        format!("{:016x}", state.finish())
+    };
+    json!({
+        "request": body.len(),
+        "body_fingerprint": hash(body),
+        "system": system.len(),
+        "system_fingerprint": hash(&system),
+        "tools": tools.len(),
+        "messages": section("messages").len(),
+        "tools_fingerprint": format!("{:016x}", fingerprint.finish()),
+    })
+}
+
+fn has_forbidden_context(script: &Value, request: &Value) -> bool {
+    script
+        .get("forbidden_context_markers")
+        .and_then(Value::as_array)
+        .is_some_and(|markers| {
+            markers
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|marker| !marker.is_empty() && contains_context_marker(request, marker))
+        })
+}
+
+fn contains_context_marker(value: &Value, marker: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(marker),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_context_marker(value, marker)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key.contains(marker) || contains_context_marker(value, marker)),
+        _ => false,
+    }
+}
+
+fn log_request(server: &Server, request: &Value, body: &[u8], mut entry: Value) {
+    let messages = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let tools: Vec<Value> = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    entry["unexpected_context"] = json!(has_forbidden_context(&server.script, request));
+    entry["context_bytes"] = context_bytes(request, body);
+    entry["system_blocks"] = request["system"].clone();
+    entry["model"] = request["model"].clone();
+    entry["stream"] = request["stream"].clone();
+    entry["tools"] = json!(tools);
+    entry["provider"] = request["provider"].clone();
+    entry["orchestration_tools"] = json!(orchestration_tool_schemas(request));
+    entry["tool_results"] = json!(recent_tool_results(&messages));
+    entry["system"] = json!(system_text(request));
+    entry["messages"] = json!(messages);
+    if let Ok(mut guard) = server.log.lock() {
+        if let Some(file) = guard.as_mut() {
+            let _ = writeln!(file, "{entry}");
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -407,10 +530,12 @@ fn respond_messages(
     server: &Server,
     stream: &mut TcpStream,
     request: &Value,
+    received_body: &[u8],
 ) -> std::io::Result<()> {
     let (role, turn, step, note) = plan(&server.script, request);
     let n = server.counter.fetch_add(1, Ordering::SeqCst) + 1;
     let t_start = now_ms();
+    let status = response_status(server, &step, n);
     // `delay_ms` holds the reply open, so concurrent agents visibly overlap
     // in the log's `t_start`/`t_end` (the /grind concurrency tests).
     if let Some(ms) = step.get("delay_ms").and_then(Value::as_u64) {
@@ -420,34 +545,17 @@ fn respond_messages(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("claude");
-    let messages = request
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if let Ok(mut guard) = server.log.lock() {
-        if let Some(file) = guard.as_mut() {
-            let tools: Vec<Value> = request
-                .get("tools")
-                .and_then(Value::as_array)
-                .map(|t| t.iter().filter_map(|t| t.get("name").cloned()).collect())
-                .unwrap_or_default();
-            let entry = json!({
-                "n": n, "role": role, "turn": turn, "step": step, "note": note,
-                "t_start": t_start, "t_end": now_ms(),
-                "stream": request.get("stream"), "tools": tools,
-                "provider": request.get("provider"),
-                "orchestration_tools": orchestration_tool_schemas(request),
-                "tool_results": recent_tool_results(&messages),
-                "system": system_text(request),
-                "messages": messages,
-            });
-            let _ = writeln!(file, "{entry}");
-        }
-    }
+    log_request(
+        server,
+        request,
+        received_body,
+        json!({
+            "n": n, "role": role, "turn": turn, "step": step, "note": note,
+            "t_start": t_start, "t_end": now_ms(), "response_status": status,
+        }),
+    );
 
-    if let Some(error) = step.get("error") {
-        let status = error.get("status").and_then(Value::as_u64).unwrap_or(500) as u16;
+    if step.get("error").is_some() || status >= 400 {
         return write_json(
             stream,
             status,
@@ -538,6 +646,73 @@ fn respond_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_metrics_measure_received_bytes_without_retaining_content() {
+        let raw = br#"{ "system": "private", "tools": [{"name":"Bash"}], "messages": [] }"#;
+        let request: Value = serde_json::from_slice(raw).unwrap();
+        let metrics = context_bytes(&request, raw);
+        assert_eq!(metrics["request"], raw.len());
+        assert_eq!(metrics["system"], 9);
+        assert_eq!(metrics["messages"], 2);
+        assert!(!metrics.to_string().contains("private"));
+        assert_eq!(
+            metrics["tools_fingerprint"],
+            context_bytes(&request, b"")["tools_fingerprint"]
+        );
+        let changed = json!({"tools": [{"name": "Read"}]});
+        assert_ne!(
+            metrics["tools_fingerprint"],
+            context_bytes(&changed, b"")["tools_fingerprint"]
+        );
+        assert_eq!(context_bytes(&json!({}), b"{}")["tools"], 0);
+        let changed_body = raw
+            .iter()
+            .map(|byte| if *byte == b'v' { b'w' } else { *byte })
+            .collect::<Vec<_>>();
+        assert_eq!(raw.len(), changed_body.len());
+        assert_ne!(
+            metrics["body_fingerprint"],
+            context_bytes(&request, &changed_body)["body_fingerprint"]
+        );
+    }
+
+    #[test]
+    fn forbidden_context_checks_every_request_field() {
+        let script = json!({"forbidden_context_markers": ["PRIVATE_CANARY"]});
+        for request in [
+            json!({"system": [{"text": "PRIVATE_CANARY"}]}),
+            json!({"system": [{"metadata": "PRIVATE_CANARY"}]}),
+            json!({"tools": [{"description": "PRIVATE_CANARY"}]}),
+            json!({"metadata": "PRIVATE_CANARY"}),
+        ] {
+            assert!(has_forbidden_context(&script, &request));
+        }
+        assert!(!has_forbidden_context(&script, &json!({"messages": []})));
+    }
+
+    #[test]
+    fn forbidden_context_detects_escaped_text_and_object_keys() {
+        let marker = "private \"quote\" \\ path\n雪🙂";
+        let script = json!({"forbidden_context_markers": ["", marker]});
+        for request in [
+            json!({"metadata": [null, false, 17, {"text": format!("prefix {marker} suffix")}]}),
+            json!({marker: "unrelated value"}),
+        ] {
+            assert!(has_forbidden_context(&script, &request));
+        }
+        assert!(!has_forbidden_context(&script, &json!({"messages": []})));
+    }
+
+    #[test]
+    fn context_metrics_use_utf8_bytes_instead_of_character_counts() {
+        let request = json!({"system": "é漢", "messages": [], "tools": []});
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let metrics = context_bytes(&request, &bytes);
+        assert_eq!(metrics["request"], bytes.len());
+        assert_eq!(metrics["system"], 7);
+        assert_eq!(metrics["messages"], 2);
+    }
 
     #[test]
     fn dynamic_tool_input_is_a_bounded_json_object() {
