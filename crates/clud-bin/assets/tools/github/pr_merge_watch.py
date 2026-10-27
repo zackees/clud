@@ -75,8 +75,9 @@ at green on the PR's own checks and only reports that the merge is pending.
 position and state changes and a persistent UNMERGEABLE entry distinctly. It
 only observes the queue and never cancels workflow runs.
 
-A watch under the tool runner clamps its own timeout to at least 60 seconds
-below the wrapper's command cap, so it can exit 4 and finish cancellation.
+The tool runner allows requested waits up to 86400 seconds and reserves 60
+seconds for the watcher to exit and finish cancellation. It rejects longer
+requests. The watcher still clamps to the wrapper cap if necessary.
 If the wrapper stops first, exit 124 means watch again; it is never green.
 
 A watch only ever cancels runs on the head SHA it started on (#1418): when the
@@ -4070,7 +4071,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=_env_int("CLUD_PR_MERGE_WATCH_TIMEOUT", DEFAULT_TIMEOUT_SEC),
         help="overall wait cap in seconds (default $CLUD_PR_MERGE_WATCH_TIMEOUT, else "
-        "3600); clamped below the tool runner's command cap when present",
+        "3600); the tool runner accepts at most 86400 seconds",
     )
     merge_mode = p.add_mutually_exclusive_group()
     merge_mode.add_argument(
