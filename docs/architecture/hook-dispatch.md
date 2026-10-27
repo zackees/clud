@@ -327,6 +327,14 @@ job (`--cancel` also cancels the run), and exits 124 on a resumable timeout:
 clud tool run github/run_watch.py -- <RUN_ID> --repo OWNER/NAME --timeout 540
 ```
 
+The waiter reads the current run attempt in bounded 30-job pages and verifies
+that the attempt did not change. A confirmed failed job can end the wait
+immediately, while a green result requires complete, consistent job pages. If
+three observations are unavailable or incomplete, exit 3 reports the last
+known run state when available; re-run the same command to resume observation.
+A watch timeout is an observation deadline, not evidence that the run stopped.
+The terminal summary omits passing-job lines and points to the run for details.
+
 Classify **declared execution capabilities**, independently of the tool name
 in the hook payload. A normalized `Bash` call can originate from Codex; it
 does not establish that Claude background-task flags exist.
