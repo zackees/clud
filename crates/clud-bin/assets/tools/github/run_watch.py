@@ -326,7 +326,9 @@ def report_terminal(run_id: int, repo: str | None, cancel_requested: bool, run: 
         print(f"GREEN  run {run_id} succeeded")
         return EXIT_OK
     reason = (
-        f"{len(failed)} failed jobs" if failed else f"run conclusion {run.get('conclusion', 'unknown')}"
+        f"{len(failed)} failed jobs"
+        if failed
+        else f"run conclusion {run.get('conclusion', 'unknown')}"
     )
     print(f"RED    run {run_id}: {reason}; inspect run URL")
     if cancel_requested and run.get("status") != "completed":
@@ -349,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     misses = 0
     while True:
         if time.monotonic() >= deadline:
-            print(f"TIMEOUT run {ns.run_id}: watch deadline reached; re-run with the same arguments")
+            print(f"TIMEOUT run {ns.run_id}: watch deadline reached; "
+                  "re-run with the same arguments")
             return EXIT_TIMEOUT
         run = fetch(ns.run_id, ns.repo)
         if run is None:
@@ -365,7 +368,8 @@ def main(argv: list[str] | None = None) -> int:
             if verdict is not None:
                 return verdict
         if time.monotonic() >= deadline:
-            print(f"TIMEOUT run {ns.run_id}: watch deadline reached; re-run with the same arguments")
+            print(f"TIMEOUT run {ns.run_id}: watch deadline reached; "
+                  "re-run with the same arguments")
             return EXIT_TIMEOUT
         time.sleep(min(ns.interval, max(1.0, deadline - time.monotonic())))
 

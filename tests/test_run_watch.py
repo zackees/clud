@@ -365,7 +365,8 @@ def test_inferred_enterprise_host_preserves_port(monkeypatch) -> None:
 
     def fake_gh(*args):
         if args[:2] == ("repo", "view"):
-            return 0, json.dumps({"nameWithOwner": "o/r", "url": "https://ghe.example.com:8443/o/r"}), ""
+            data = {"nameWithOwner": "o/r", "url": "https://ghe.example.com:8443/o/r"}
+            return 0, json.dumps(data), ""
         if args[:2] == ("run", "view"):
             assert "ghe.example.com:8443/o/r" in args
             return 0, json.dumps(run), ""
