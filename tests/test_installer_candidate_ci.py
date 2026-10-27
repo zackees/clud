@@ -24,7 +24,10 @@ from ci.installer_candidate import (
 from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
-from tests.test_installer_public_ci import assert_public_latest_install
+from tests.test_installer_public_ci import (
+    assert_public_latest_install,
+    require_evidence_lane_input,
+)
 from tests.test_installer_verify_native_assets import native_payload
 
 SOURCE_SHA = "a" * 40
@@ -248,12 +251,27 @@ def test_nixos_matrix_requires_both_loader_states_on_both_architectures(job: str
     assert '--arg nixLd "${{ matrix.nix_ld' in block.group(1)
 
 
+def test_candidate_probe_refuses_to_skip_when_the_lane_owes_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A lane the workflow asked for a row must never vanish; a skip emits no row
+    # and the acceptance aggregate then rejects a healthy release.
+    monkeypatch.setenv(
+        "CLUD_CANDIDATE_EVIDENCE", "candidate-evidence/x86_64-unknown-linux-musl.json"
+    )
+    monkeypatch.delenv("CLUD_CANDIDATE_ARTIFACT", raising=False)
+    with pytest.raises(RuntimeError, match="CLUD_CANDIDATE_ARTIFACT"):
+        test_native_candidate_installs_by_name_and_writes_host_evidence(None)  # type: ignore[arg-type]
+
+
 def test_native_candidate_installs_by_name_and_writes_host_evidence(
     installer_target,  # noqa: F811
 ) -> None:
-    artifact_dir = os.environ.get("CLUD_CANDIDATE_ARTIFACT")
-    if not artifact_dir:
-        pytest.skip("native candidate artifact is provided by its host workflow")
+    artifact_dir = require_evidence_lane_input(
+        "CLUD_CANDIDATE_ARTIFACT",
+        "CLUD_CANDIDATE_EVIDENCE",
+        "native candidate artifact is provided by its host workflow",
+    )
     target = os.environ["CLUD_CANDIDATE_TARGET"]
     source_sha = os.environ["CLUD_CANDIDATE_SHA"]
     version = os.environ["CLUD_CANDIDATE_VERSION"]
