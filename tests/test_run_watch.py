@@ -123,9 +123,13 @@ def test_malformed_conclusions_do_not_crash_or_claim_success(monkeypatch) -> Non
         run = {"status": "completed", "conclusion": conclusion, "jobs": []}
         assert run_watch.evaluate(run) == ("pending", [])
         metadata = {"status": "completed", "conclusion": "success", "attempt": 2}
-        monkeypatch.setattr(run_watch, "run_metadata", lambda *_, metadata=metadata: metadata.copy())
+        monkeypatch.setattr(
+            run_watch, "run_metadata", lambda *_, metadata=metadata: metadata.copy()
+        )
         job = {"id": 1, "name": "bad", "status": "completed", "conclusion": conclusion}
-        monkeypatch.setattr(run_watch, "api_get", lambda *_, job=job: {"total_count": 1, "jobs": [job]})
+        monkeypatch.setattr(
+            run_watch, "api_get", lambda *_, job=job: {"total_count": 1, "jobs": [job]}
+        )
         assert run_watch.fetch(123, "owner/repo") is None
 
 
