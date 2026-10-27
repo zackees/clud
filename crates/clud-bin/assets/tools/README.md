@@ -34,3 +34,9 @@ ast-grep for structural search and rewrite (#1339).
 PR watcher callers select a declared session/background/foreground wait and
 required-check or all-check completion scope; see
 [watch recovery](../../../../docs/architecture/hook-dispatch.md#watch-recovery-and-continuation-2004).
+
+`github/pr_merge.py` submits an exact GitHub PR head to an enforced merge
+queue, or performs a normal squash merge when no queue applies. It requires
+`--repo OWNER/REPO` and `--match-head-commit` with the full head SHA; it never
+uses admin bypass. A successful enqueue is not a merged PR: follow it with
+`github/pr_merge_watch.py`. See [CI merge queue](../../../../docs/architecture/ci.md#merge-queue-2048-decided).

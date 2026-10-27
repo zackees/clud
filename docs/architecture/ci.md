@@ -523,6 +523,15 @@ offers merge queues only on organization-owned repositories. The queue is
 the only thing that tests the merged tree rather than the head SHA
 ([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected)).
 
+For a GitHub PR, `clud tool run github/pr_merge.py -- <PR> --repo <OWNER/REPO>
+--match-head-commit <full-head-SHA>` reads GitHub's merge queue for the actual base branch. It enqueues a queue-protected PR using the GitHub GraphQL
+`enqueuePullRequest` mutation, which works even when repository auto-merge is
+disabled; otherwise it invokes a normal squash merge. It checks the live head
+against the required SHA and never uses admin bypass. A successful enqueue is
+not a merge: follow it with `clud tool run github/pr_merge_watch.py -- <PR>
+--repo <OWNER/REPO>` and verify the MERGED verdict. On timeout or API failure,
+inspect the PR and queue state before retrying the mutation (#2235).
+
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old
 `MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS

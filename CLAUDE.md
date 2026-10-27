@@ -336,7 +336,10 @@ lanes plus the Windows x64 build and suites for fast Windows iteration;
 `ci-macos` does the same with both macOS triples instead. `CI OK` gates on
 all of them (#1652). `main` has a **merge queue** (#2048): PR CI tests the head SHA, and the
 queue's `merge_group` run tests the merged tree with the routine `minimal`
-lanes (#2125). Manual full CI pins every job to a verified
+lanes (#2125). To submit a reviewed PR use `clud tool run github/pr_merge.py --
+<PR> --repo <OWNER/REPO> --match-head-commit <full-head-SHA>`; it selects the
+queue mutation when the base requires a queue and never bypasses protections.
+Then use `github/pr_merge_watch.py` to wait for the actual merge. Manual full CI pins every job to a verified
 candidate SHA. See
 [`ci.md`](docs/architecture/ci.md#current-ci-selection).
 
