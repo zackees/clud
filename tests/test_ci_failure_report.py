@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Windows artifacts: #2246")
+
 TOOL = (
     Path(__file__).resolve().parents[1]
     / "crates/clud-bin/assets/tools/github/ci_failure_report.py"
