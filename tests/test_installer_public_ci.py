@@ -15,7 +15,12 @@ from running_process import PseudoTerminalProcess
 
 from ci.installer_candidate import TARGETS
 from ci.installer_public_evidence import require_evidence, require_guest_evidence
-from installer.catalog import ONLINE_URL, verify_direct_executable, version_key
+from installer.catalog import (
+    ACCEPTED_ONLINE_URLS,
+    ONLINE_URL,
+    verify_direct_executable,
+    version_key,
+)
 from tests.installer_windows_shells import assert_windows_shell_activation
 from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
@@ -40,6 +45,22 @@ def test_public_windows_lookup_accepts_mixed_path_separators() -> None:
     assert_public_lookup([found, "clud 2.8.19"], destination, "2.8.19", "windows")
     with pytest.raises(AssertionError):
         assert_public_lookup([found, "clud 2.8.18"], destination, "2.8.19", "windows")
+
+
+def test_prior_discovery_version_ignores_binaries_that_cannot_reach_the_catalog() -> None:
+    catalog = {
+        "releases": [
+            {"version": "2.8.29"},
+            {"version": "2.8.31"},
+            {"version": "2.8.34"},
+            {"version": "2.8.36"},
+        ]
+    }
+    assert prior_discovery_version(catalog, "2.8.37") == "2.8.36"
+    # The first release that knows the new catalog URL has nothing it can reach
+    # behind it, so discovery is unprovable rather than broken.
+    assert prior_discovery_version(catalog, "2.8.36") is None
+    assert prior_discovery_version(catalog, "2.8.31") is None
 
 
 def public_executable_flavor(row: dict) -> str | None:
@@ -107,6 +128,26 @@ def assert_public_latest_install(
     assert installed.stdout.strip() == f"clud {version}".encode()
 
 
+# The public catalog moved from zackees.github.io/clud to talos-hq.github.io/clud
+# in 2.8.35 (#2217). A binary released before that hardcodes the retired host,
+# answers `catalog fetch failed: ... 404`, and exits, so it can never discover a
+# newer release -- not because discovery broke, but because its URL did.
+CATALOG_MOVE_VERSION = "2.8.35"
+LEGACY_ONLINE_HOST = next(
+    url for url in ACCEPTED_ONLINE_URLS if url != ONLINE_URL
+).split("/")[2]
+
+
+def prior_discovery_version(catalog: dict, version: str) -> str | None:
+    """Newest public release old enough to be older, new enough to reach today's catalog."""
+    eligible = [
+        row["version"]
+        for row in catalog["releases"]
+        if version_key(CATALOG_MOVE_VERSION) <= version_key(row["version"]) < version_key(version)
+    ]
+    return max(eligible, key=version_key, default=None)
+
+
 def assert_older_installer_discovery(
     catalog: dict,
     os_name: str,
@@ -118,7 +159,14 @@ def assert_older_installer_discovery(
     directory: Path,
 ) -> dict:
     """A fixed older public executable must discover and install today's stable."""
-    prior_version = "2.8.30"
+    prior_version = prior_discovery_version(catalog, version)
+    if prior_version is None:
+        pytest.skip(
+            f"no public release between {CATALOG_MOVE_VERSION} (the catalog move) and "
+            f"{version}: every older binary hardcodes the retired "
+            f"{LEGACY_ONLINE_HOST} catalog URL, so cross-version discovery has "
+            "nothing it can download from"
+        )
     assert version_key(prior_version) < version_key(version)
     release = next(row for row in catalog["releases"] if row["version"] == prior_version)
     matches = [
