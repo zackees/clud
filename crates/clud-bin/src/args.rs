@@ -595,12 +595,39 @@ impl Args {
     }
 }
 
+/// Options for `clud serve`: a durable, independently-runnable Anthropic
+/// Messages API gateway (#2218). It does not launch a harness.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ServeOptions {
+    /// Serve native Claude. Not yet available: clud does not own a Claude
+    /// credential (see the open question on issue #2218).
+    #[arg(long = "claude")]
+    pub claude: bool,
+    /// Serve the vault-backed DeepSeek route.
+    #[arg(long = "deepseek")]
+    pub deepseek: bool,
+    /// Serve the vault-backed Kimi route.
+    #[arg(long = "kimi")]
+    pub kimi: bool,
+    /// Serve the vault-backed OpenRouter route.
+    #[arg(long = "openrouter")]
+    pub openrouter: bool,
+    /// Loopback address to bind. Coarser than `0.0.0.0` or `::` is refused.
+    #[arg(long = "bind", default_value = "127.0.0.1", value_name = "ADDR")]
+    pub bind: String,
+    /// TCP port to bind. `0` selects an ephemeral port, printed at startup.
+    #[arg(long = "port", default_value_t = 0, value_name = "PORT")]
+    pub port: u16,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Acquire a credential in a masked window and deliver it directly to a sink.
     Secret(crate::secret_prompt::Options),
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
+    /// Serve a durable local Anthropic Messages API gateway (#2218).
+    Serve(ServeOptions),
     /// Query clud's cached OpenRouter model and pricing catalog.
     Models {
         #[command(subcommand)]
@@ -1545,6 +1572,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "auth",
     "secret",
     "models",
+    "serve",
     "codex-update",
     "dsh-update",
     "doctor",

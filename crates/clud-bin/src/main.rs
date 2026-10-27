@@ -317,6 +317,10 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
         args::Command::Claim { action } => daemon::run_claim_command(action),
         args::Command::SafeRm { args } => clud::rm_tool::run(args),
         args::Command::InstallAssets { home } => install_assets(home.as_deref()),
+        // #2218: `clud serve` is a self-contained API server. Like the other
+        // fast-path utilities it must not touch the daemon or resolve a launch
+        // backend; it owns its own durable lifecycle.
+        args::Command::Serve(options) => clud::serve_runtime::run(options),
         args::Command::Tool { subcommand } => {
             unsafe {
                 std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());

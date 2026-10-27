@@ -839,6 +839,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Extern { .. })
         | Some(Command::Daemon { .. })
         | Some(Command::InternalStartCmd)
+        | Some(Command::Serve(_))
         | Some(Command::InternalDaemon { .. })
         | Some(Command::Statusline { .. })
         | Some(Command::Session { .. })

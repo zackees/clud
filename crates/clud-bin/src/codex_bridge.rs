@@ -646,6 +646,14 @@ pub struct BridgeHandle {
     join: Option<JoinHandle<()>>,
 }
 
+/// A fresh 256-bit client bearer, base64url-encoded. Shared by the launch
+/// bridge and the standalone `clud serve` listener.
+fn generate_bearer_token() -> Result<String, BridgeError> {
+    let mut token_bytes = [0_u8; 32];
+    getrandom::fill(&mut token_bytes).map_err(|error| BridgeError::Random(error.to_string()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes))
+}
+
 impl BridgeHandle {
     pub fn start(config: BridgeConfig) -> Result<Self, BridgeError> {
         // Resolve the bounded remote/local model checks before the listener is
@@ -656,11 +664,34 @@ impl BridgeHandle {
         listener.set_nonblocking(true).map_err(BridgeError::Bind)?;
         let socket_addr = listener.local_addr().map_err(BridgeError::Bind)?;
         debug_assert_eq!(socket_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        Self::start_on_listener(config, listener, generate_bearer_token()?, socket_addr)
+    }
 
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| BridgeError::Random(error.to_string()))?;
-        let bearer_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
+    /// Start a durable, independently-runnable listener (#2218 `clud serve`).
+    ///
+    /// Unlike [`BridgeHandle::start`], the caller chooses the bind address and
+    /// supplies the client token, so a long-lived API server has a stable,
+    /// holdable credential instead of the ephemeral per-launch one. The
+    /// launch-scoped `start` contract is untouched; this is an additive
+    /// sibling for the standalone server lifecycle.
+    pub fn start_serving(
+        config: BridgeConfig,
+        bind: std::net::SocketAddr,
+        bearer_token: String,
+    ) -> Result<Self, BridgeError> {
+        let _ = crate::codex_runtime::active_choice();
+        let listener = TcpListener::bind(bind).map_err(BridgeError::Bind)?;
+        listener.set_nonblocking(true).map_err(BridgeError::Bind)?;
+        let socket_addr = listener.local_addr().map_err(BridgeError::Bind)?;
+        Self::start_on_listener(config, listener, bearer_token, socket_addr)
+    }
+
+    fn start_on_listener(
+        config: BridgeConfig,
+        listener: TcpListener,
+        bearer_token: String,
+        socket_addr: std::net::SocketAddr,
+    ) -> Result<Self, BridgeError> {
         let mut fallback_bytes = [0_u8; 16];
         getrandom::fill(&mut fallback_bytes)
             .map_err(|error| BridgeError::Random(error.to_string()))?;
