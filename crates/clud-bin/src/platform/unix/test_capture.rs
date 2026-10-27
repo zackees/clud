@@ -3,8 +3,8 @@
 #[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::fs::File;
-use std::io;
-use std::os::fd::OwnedFd;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(not(target_os = "macos"))]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -77,6 +77,27 @@ pub fn verify_file(_file: &File) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "macOS private artifact ACLs are unavailable",
     ))
+}
+
+/// Poll the capture pipe so a retained writer cannot prevent reader shutdown.
+pub fn read_pipe(reader: &mut os_pipe::PipeReader, data: &mut [u8]) -> io::Result<Option<usize>> {
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: descriptor points to one initialized pollfd for the duration of poll.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ready == 0 {
+        return Ok(None);
+    }
+    if descriptor.revents & libc::POLLNVAL != 0 {
+        return Err(io::Error::other("invalid capture pipe"));
+    }
+    reader.read(data).map(Some)
 }
 
 /// Convert the writer to the file type accepted by running-process.
@@ -170,5 +191,35 @@ mod macos_tests {
         let root = tempfile::tempdir().expect("temporary root");
         let error = super::verify_root(root.path()).expect_err("ACL verification is unavailable");
         assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use crate::test_runtime::capture::{capture_reader, Event};
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn reader_stops_and_joins_while_writer_remains_open() {
+        let (reader, mut writer) = os_pipe::pipe().unwrap();
+        let (receiver, stop, handle) = capture_reader(reader).unwrap();
+        writer.write_all(b"ready").unwrap();
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(2)), Ok(Event::Data(data)) if data == b"ready")
+        );
+        stop.store(true, Ordering::Release);
+        drop(receiver);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        drop(writer);
     }
 }
