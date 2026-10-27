@@ -167,6 +167,24 @@ def read(path: Path) -> str:
         return src.read()
 
 
+def with_crlf(text: str) -> str:
+    """`text` in CRLF form, whatever endings it arrived with."""
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def crlf_variant(search: str, current: str) -> str | None:
+    """`search` rewritten to CRLF when the file stores CRLF and the literal form misses.
+
+    A patch arrives with whatever endings its writer used -- typically LF, even
+    on Windows -- while the working tree may hold CRLF. Exact text always wins;
+    this is only consulted after the literal SEARCH fails to match.
+    """
+    if "\r\n" not in current or "\n" not in search:
+        return None
+    candidate = with_crlf(search)
+    return candidate if candidate in current else None
+
+
 def plan(blocks: list[Block], cwd: Path, allowed: set[Path] | None) -> dict[Path, str]:
     """The new content of every touched file; raises before anything is written."""
     contents: dict[Path, str | None] = {}
@@ -183,13 +201,19 @@ def plan(blocks: list[Block], cwd: Path, allowed: set[Path] | None) -> dict[Path
             contents[target] = block.replace
             continue
         count = current.count(block.search) if block.search else 0
+        search, replace = block.search, block.replace
+        if count != 1 and search:
+            variant = crlf_variant(search, current)
+            if variant is not None:
+                search, replace = variant, with_crlf(replace)
+                count = current.count(search)
         if count != 1:
             found = "an empty SEARCH on an existing file" if not block.search else f"{count} matches"
             raise PatchError(
                 f"{block.path} (block at line {block.line}): SEARCH must match exactly once, found {found}",
                 2,
             )
-        contents[target] = current.replace(block.search, block.replace, 1)
+        contents[target] = current.replace(search, replace, 1)
     return {path: text for path, text in contents.items() if text is not None}
 
 
