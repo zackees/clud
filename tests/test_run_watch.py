@@ -123,9 +123,9 @@ def test_malformed_conclusions_do_not_crash_or_claim_success(monkeypatch) -> Non
         run = {"status": "completed", "conclusion": conclusion, "jobs": []}
         assert run_watch.evaluate(run) == ("pending", [])
         metadata = {"status": "completed", "conclusion": "success", "attempt": 2}
-        monkeypatch.setattr(run_watch, "run_metadata", lambda *_: metadata.copy())
+        monkeypatch.setattr(run_watch, "run_metadata", lambda *_, metadata=metadata: metadata.copy())
         job = {"id": 1, "name": "bad", "status": "completed", "conclusion": conclusion}
-        monkeypatch.setattr(run_watch, "api_get", lambda *_: {"total_count": 1, "jobs": [job]})
+        monkeypatch.setattr(run_watch, "api_get", lambda *_, job=job: {"total_count": 1, "jobs": [job]})
         assert run_watch.fetch(123, "owner/repo") is None
 
 
@@ -346,7 +346,8 @@ def test_enterprise_repo_host_is_preserved_explicitly_and_when_inferred(monkeypa
             assert "ghe.example.com/o/r" in args
             return 0, json.dumps(run), ""
         assert args[0] == "api"
-        assert "--hostname" in args and "ghe.example.com" in args
+        assert "--hostname" in args
+        assert "ghe.example.com" in args
         assert "repos/o/r/actions/runs/123/attempts/2/jobs?per_page=30&page=1" in args
         return 0, json.dumps({"total_count": 0, "jobs": []}), ""
 
@@ -370,7 +371,8 @@ def test_inferred_enterprise_host_preserves_port(monkeypatch) -> None:
         if args[:2] == ("run", "view"):
             assert "ghe.example.com:8443/o/r" in args
             return 0, json.dumps(run), ""
-        assert "--hostname" in args and "ghe.example.com:8443" in args
+        assert "--hostname" in args
+        assert "ghe.example.com:8443" in args
         return 0, json.dumps({"total_count": 0, "jobs": []}), ""
 
     monkeypatch.delenv("CLUD_GH_READ_BROKER", raising=False)
@@ -381,5 +383,5 @@ def test_inferred_enterprise_host_preserves_port(monkeypatch) -> None:
 def test_fetch_rejects_malformed_status(monkeypatch) -> None:
     for status in ([], {"bad": True}):
         run = {"status": status, "conclusion": "success", "attempt": 2}
-        monkeypatch.setattr(run_watch, "run_metadata", lambda *_: run)
+        monkeypatch.setattr(run_watch, "run_metadata", lambda *_, run=run: run)
         assert run_watch.fetch(123, "o/r") is None
