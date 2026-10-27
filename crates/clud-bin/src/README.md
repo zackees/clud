@@ -692,7 +692,7 @@ Skills and hooks:
   backend's skills dir. See
   [DD-039](../../../docs/DESIGN_DECISIONS.md#dd-039-single-skill-installer-over-a-single-source-tree).
 - `tools.rs` - `BUNDLED_TOOLS` registry of `assets/tools/` scripts, including
-  `github/pr_merge_watch.py` and `github/is_meta_issue.py` (prints JSON
+  `github/pr_merge.py`, `github/pr_merge_watch.py`, and `github/is_meta_issue.py` (prints JSON
   `{meta, sub_issues, task_list_refs}`; errors on `gh` failure, never reports
   "not meta"; #1404), and `diagnostics/transcript_report.py` (#1276,
   [DD-138](../../../docs/DESIGN_DECISIONS.md#dd-138-the-first-1276-slice-is-a-read-only-transcript-analyzer-not-a-repeated-call-guard)).

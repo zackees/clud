@@ -45,8 +45,8 @@ Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``defaultBranchRef``), ``auth status``, ``label create`` (a no-op) and
 ``api``: issue GET/PATCH, issue comments GET/POST, comment GET/PATCH/DELETE,
 sub-issue GET, POST (``replace_parent``) and DELETE with GitHub's one-parent /
-100-children / 8-levels rules, ``.../parent`` GET, and a ``graphql``
-ClosedEvent closer stub. ``api`` takes ``-X/--method``, ``-f/-F field=value``
+100-children / 8-levels rules, ``.../parent`` GET, and ``graphql``
+stubs for issue closers and PR merge queues. ``api`` takes ``-X/--method``, ``-f/-F field=value``
 and ``--input file``; with no method it is POST when fields are given, else
 GET. ``{owner}``/``{repo}`` placeholders are filled from ``repo``. REST issue
 objects carry ``id == number``, so ``sub_issue_id=<number>`` works.
@@ -591,7 +591,38 @@ def _detach(state: dict, child: str) -> None:
     issue["parent"] = None
 
 
-def _graphql(state: dict, argv: list[str]) -> int:
+def _graphql_merge(path: Path, state: dict, argv: list[str]) -> int | None:
+    fields = _api_fields(argv)
+    query = str(fields.get("query", ""))
+    if "enqueuePullRequest" in query:
+        pr = next((p for p in state.get("prs", [])
+                   if f"{_repo(state)}#{p['number']}" == fields.get("id")), None)
+        if pr is None or pr.get("head_oid") != fields.get("sha"):
+            return _emit(argv, {"errors": [{"message": "head changed"}]})
+        if _needs_review(state, pr) and not pr.get("approved"):
+            return _emit(argv, {"errors": [{"message": "review required"}]})
+        pr["queued"] = True
+        _save(path, state)
+        return _emit(argv, {"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": "entry"}}}})
+    if "pullRequest(number:" in query and "headRefOid" in query:
+        pr = _find_pr(state, str(fields.get("number", "")))
+        value = None if pr is None else {
+            "id": f"{_repo(state)}#{pr['number']}", "state": pr.get("state", "OPEN"),
+            "isDraft": pr.get("draft", False), "headRefOid": pr.get("head_oid"),
+            "baseRefName": pr.get("base", "main"),
+            "mergeQueueEntry": {"id": "entry"} if pr.get("queued") else None,
+        }
+        return _emit(argv, {"data": {"repository": {"pullRequest": value}}})
+    if "mergeQueue(branch:" in query:
+        queue = {"id": "queue"} if fields.get("base") in state.get("queue_branches", []) else None
+        return _emit(argv, {"data": {"repository": {"mergeQueue": queue}}})
+    return None
+
+
+def _graphql(path: Path, state: dict, argv: list[str]) -> int:
+    result = _graphql_merge(path, state, argv)
+    if result is not None:
+        return result
     issues = state.setdefault("issues", {})
     fields = _api_fields(argv)
     query = str(fields.get("query", ""))
@@ -627,7 +658,7 @@ def _graphql(state: dict, argv: list[str]) -> int:
 def _api(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     issues = state.setdefault("issues", {})
     if _api_endpoint(argv) == "graphql":
-        return _graphql(state, argv)
+        return _graphql(path, state, argv)
 
     method = _api_method(argv)
     owner, _, name = _repo(state).partition("/")
@@ -1216,13 +1247,22 @@ def _without_repo_prefix(argv: list[str]) -> list[str]:
 def _requested_repository(state: dict, argv: list[str]) -> str:
     explicit = _flag(argv, "--repo") or _flag(argv, "-R")
     if explicit:
-        return explicit
+        return explicit.removeprefix("github.com/")
     joined = next((arg[2:] for arg in argv if arg.startswith("-R") and len(arg) > 2), None)
     if joined:
         return joined
     args = _without_repo_prefix(argv)
     if args[:1] == ["api"]:
-        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", _api_endpoint(args))
+        endpoint = _api_endpoint(args)
+        if endpoint == "graphql":
+            fields = _api_fields(args)
+            if fields.get("owner") and fields.get("name"):
+                return f"{fields['owner']}/{fields['name']}"
+            if "enqueuePullRequest" in str(fields.get("query", "")):
+                node = str(fields.get("id", ""))
+                if "#" in node:
+                    return node.rsplit("#", 1)[0]
+        match = re.match(r"/?repos/([^/]+/[^/?]+)(?:/|$)", endpoint)
         if match and "{" not in match[1]:
             return match[1]
     target = args[2] if len(args) > 2 else ""

@@ -113,6 +113,16 @@ pub struct BundledTool {
 /// entry here plus a new file under `crates/clud-bin/assets/tools/`.
 pub const BUNDLED_TOOLS: &[BundledTool] = &[
     BundledTool {
+        rel_path: "github/pr_merge.py",
+        body: include_str!("../assets/tools/github/pr_merge.py"),
+        // Submission mutates GitHub; an interrupted result needs inspection
+        // before retrying rather than an automatic resume.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(5 * 60),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "github/pr_merge_watch.py",
         body: include_str!("../assets/tools/github/pr_merge_watch.py"),
         // PR-merge watcher polls GitHub state; the world owns the merge
@@ -606,6 +616,16 @@ mod tests {
             tool.body.contains("CLUD_DAEMON_HTTP_SERVER"),
             "telemetry.py must reference the env-var discovery contract",
         );
+    }
+
+    #[test]
+    fn bundled_includes_pr_merge() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|tool| tool.rel_path == "github/pr_merge.py")
+            .expect("queue-aware PR submission must be bundled");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
     }
 
     /// Issue #418 sub-task 1: the pr_merge_watch.py tool ships in the
