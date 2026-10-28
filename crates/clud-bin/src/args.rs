@@ -1014,6 +1014,23 @@ pub enum Command {
     /// Open the explicitly requested persistent Command Prompt.
     #[command(name = "__start-cmd", hide = true)]
     InternalStartCmd,
+    /// Test seam for the OpenAI Chat Completions ingress: read one
+    /// OpenAI-shaped request body on stdin, write the translated Messages
+    /// request body to stdout. With `--response` it runs the other direction
+    /// instead (Anthropic Messages response in, OpenAI completion out).
+    /// Never used by a launched session.
+    #[command(name = "__openai-chat-translate", hide = true)]
+    InternalOpenAiChatTranslate {
+        /// Translate an Anthropic Messages response, not an OpenAI request.
+        #[arg(long)]
+        response: bool,
+        /// Read the response as SSE and emit one chat.completion.chunk per line.
+        #[arg(long, requires = "response")]
+        stream: bool,
+        /// Model to report when the response body carries none.
+        #[arg(long = "for-model")]
+        for_model: Option<String>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1575,6 +1592,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "__daemon",
     "__worker",
     "__start-cmd",
+    "__openai-chat-translate",
 ];
 
 impl Args {
