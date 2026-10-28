@@ -74,7 +74,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture
-def bridge():
+def bridge(monkeypatch):
     """Load `src/clud/mcp_server.py` as an importable module.
 
     Shared here (not in the test module) so both the original bridge tests and
@@ -82,6 +82,9 @@ def bridge():
     """
     name = "clud_test_mcp_server"
     script = Path(__file__).resolve().parents[1] / "src" / "clud" / "mcp_server.py"
+    # Exec lanes test sources without installing the project wheel. Resolve
+    # sibling package modules from that same source tree.
+    monkeypatch.syspath_prepend(str(script.parents[1]))
     spec = importlib.util.spec_from_file_location(name, script)
     assert spec is not None
     assert spec.loader is not None
