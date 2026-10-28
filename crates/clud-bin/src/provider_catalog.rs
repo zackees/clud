@@ -62,6 +62,25 @@ impl EffortLevel {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    /// Map an Anthropic token-denominated thinking budget onto this ladder.
+    ///
+    /// Faithful to CLIProxyAPI's `ConvertBudgetToLevel` with clud's two
+    /// corrections: the sub-512 band no gpt-5.6 model accepts is folded into
+    /// `low` (never the rejected `minimal`), and the ladder reaches `max`.
+    /// `None` means *the budget was negative*, i.e. "no budget stated" -- not
+    /// `medium`.
+    pub fn from_budget(budget: i64) -> Option<Self> {
+        match budget {
+            i64::MIN..=-1 => None,
+            0 => Some(Self::None),
+            1..=1024 => Some(Self::Low),
+            1025..=8192 => Some(Self::Medium),
+            8193..=24576 => Some(Self::High),
+            24577..=49152 => Some(Self::XHigh),
+            _ => Some(Self::Max),
+        }
+    }
 }
 
 impl std::fmt::Display for EffortLevel {
@@ -549,10 +568,58 @@ pub fn supported_context_windows(provider: ModelProvider) -> &'static [&'static 
     provider_context_windows(provider)
 }
 
+/// Split a CLIProxyAPI-compatible trailing `(<value>)` thinking suffix off a
+/// model id. Returns the trimmed base and the trimmed inner value only when the
+/// id *ends* in a non-empty `(...)`; a leading `(` (an empty base) or a model id
+/// that merely contains parentheses in the middle is left whole.
+fn split_paren_suffix(raw: &str) -> (&str, Option<&str>) {
+    let Some(open) = raw.rfind('(') else {
+        return (raw, None);
+    };
+    if open == 0 || !raw.ends_with(')') {
+        return (raw, None);
+    }
+    (
+        raw[..open].trim(),
+        Some(raw[open + 1..raw.len() - 1].trim()),
+    )
+}
+
+/// The two spellings of the model-id effort suffix clud accepts: its own
+/// `<model>@<effort>` and CLIProxyAPI's `<model>(<value>)`. The parenthesised
+/// form is checked first because an id never carries both.
 pub(crate) fn split_effort_suffix(raw: &str) -> (&str, Option<&str>) {
+    if let (base, Some(value)) = split_paren_suffix(raw) {
+        return (base, Some(value));
+    }
     raw.rsplit_once('@').map_or((raw, None), |(model, effort)| {
         (model.trim(), Some(effort.trim()))
     })
+}
+
+/// Interpret a compatibility effort token taken from a model-id suffix.
+///
+/// `Ok(None)` means *clud decides* -- the CLIProxyAPI `auto`/`-1` specials (and
+/// an empty token), which is the same "unspecified" state an absent suffix
+/// already has. `Ok(Some(level))` is an explicit level, `none`, or a numeric
+/// Anthropic thinking budget mapped onto the ladder by
+/// [`EffortLevel::from_budget`]. `Err(given)` is a token clud does not know;
+/// the caller renders it in its own error type.
+pub(crate) fn interpret_effort_suffix(value: &str) -> Result<Option<EffortLevel>, String> {
+    let value = value.trim();
+    let lowered = value.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "" | "auto" | "-1") {
+        return Ok(None);
+    }
+    if let Some(effort) = EffortLevel::parse(&lowered) {
+        return Ok(Some(effort));
+    }
+    if let Ok(budget) = value.parse::<i64>() {
+        if let Some(effort) = EffortLevel::from_budget(budget) {
+            return Ok(Some(effort));
+        }
+    }
+    Err(value.to_string())
 }
 
 fn split_context_suffix(raw: &str) -> (&str, Option<&str>) {
@@ -708,11 +775,10 @@ pub fn resolve(
 
     let (without_effort, legacy_effort_raw) = split_effort_suffix(raw_model);
     let legacy_effort = legacy_effort_raw
-        .map(|value| {
-            EffortLevel::parse(value)
-                .ok_or_else(|| SelectionError::InvalidEffort(value.to_string()))
-        })
-        .transpose()?;
+        .map(interpret_effort_suffix)
+        .transpose()
+        .map_err(SelectionError::InvalidEffort)?
+        .flatten();
     let (base_model, legacy_context_raw) = split_context_suffix(without_effort);
     let legacy_context = legacy_context_raw.map(str::to_string);
 
@@ -2095,6 +2161,54 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(selection.effort, Some(EffortLevel::Low));
+        assert_eq!(
+            selection.effort_source,
+            Some(SelectionSource::LegacyModelSuffix)
+        );
+    }
+
+    #[test]
+    fn a_numeric_thinking_budget_maps_onto_the_effort_ladder() {
+        assert_eq!(EffortLevel::from_budget(-1), None);
+        assert_eq!(EffortLevel::from_budget(0), Some(EffortLevel::None));
+        assert_eq!(EffortLevel::from_budget(512), Some(EffortLevel::Low));
+        assert_eq!(EffortLevel::from_budget(1024), Some(EffortLevel::Low));
+        assert_eq!(EffortLevel::from_budget(1025), Some(EffortLevel::Medium));
+        assert_eq!(EffortLevel::from_budget(8192), Some(EffortLevel::Medium));
+        assert_eq!(EffortLevel::from_budget(16_384), Some(EffortLevel::High));
+        assert_eq!(EffortLevel::from_budget(49_152), Some(EffortLevel::XHigh));
+        assert_eq!(EffortLevel::from_budget(49_153), Some(EffortLevel::Max));
+    }
+
+    #[test]
+    fn the_cliproxyapi_paren_suffix_resolves_like_the_at_suffix() {
+        // CLIProxyAPI spells a selection `<model>(<value>)`
+        // (internal/thinking/suffix.go); clud accepts it alongside `<model>@<effort>`.
+        assert_eq!(
+            split_effort_suffix("terra(16384)"),
+            ("terra", Some("16384"))
+        );
+        assert_eq!(split_effort_suffix("terra@high"), ("terra", Some("high")));
+        // A numeric budget lands on the ladder band exactly like a stated
+        // `thinking.budget_tokens`.
+        assert_eq!(
+            interpret_effort_suffix("16384"),
+            Ok(Some(EffortLevel::High))
+        );
+        assert_eq!(interpret_effort_suffix("high"), Ok(Some(EffortLevel::High)));
+        assert_eq!(interpret_effort_suffix("none"), Ok(Some(EffortLevel::None)));
+        // `auto`/`-1` mean "clud decides", i.e. the absent-effort state.
+        assert_eq!(interpret_effort_suffix("auto"), Ok(None));
+        assert_eq!(interpret_effort_suffix("-1"), Ok(None));
+        assert_eq!(interpret_effort_suffix("ultra"), Err("ultra".to_string()));
+    }
+
+    #[test]
+    fn the_paren_suffix_resolves_through_the_cli_boundary() {
+        let selection = resolve(Some(ModelProvider::Codex), Some("terra(16384)"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.effort, Some(EffortLevel::High));
         assert_eq!(
             selection.effort_source,
             Some(SelectionSource::LegacyModelSuffix)

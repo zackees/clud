@@ -642,15 +642,9 @@ fn base64_decode_urlsafe(value: &str) -> Result<Vec<u8>, ()> {
 /// ladder topped out at `xhigh` so `max` — supported by all three — was
 /// unreachable from any budget.
 fn effort_for_budget(budget: i64) -> Option<Effort> {
-    match budget {
-        i64::MIN..=-1 => None,
-        0 => Some(Effort::None),
-        1..=1024 => Some(Effort::Low),
-        1025..=8192 => Some(Effort::Medium),
-        8193..=24576 => Some(Effort::High),
-        24577..=49152 => Some(Effort::XHigh),
-        _ => Some(Effort::Max),
-    }
+    // One ladder, one owner: `provider_catalog::EffortLevel::from_budget` also
+    // backs the CLIProxyAPI-compatible numeric model-id suffix.
+    Effort::from_budget(budget)
 }
 
 fn effort_from_thinking(thinking: Option<&Thinking>) -> Option<Effort> {

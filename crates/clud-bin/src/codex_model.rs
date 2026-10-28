@@ -87,23 +87,15 @@ impl ModelSpec {
         if raw.is_empty() {
             return Err(SelectionError::EmptyModel);
         }
-        let (model_part, effort_part) = match raw.rsplit_once('@') {
-            Some((model, effort)) => (model.trim(), Some(effort.trim())),
-            None => (raw, None),
-        };
+        let (model_part, effort_part) = crate::provider_catalog::split_effort_suffix(raw);
         if model_part.is_empty() {
             return Err(SelectionError::EmptyModel);
         }
 
         let effort = match effort_part {
             None => None,
-            Some(value) => {
-                Some(
-                    Effort::parse(value).ok_or_else(|| SelectionError::UnknownEffort {
-                        given: value.to_string(),
-                    })?,
-                )
-            }
+            Some(value) => crate::provider_catalog::interpret_effort_suffix(value)
+                .map_err(|given| SelectionError::UnknownEffort { given })?,
         };
 
         let model = match model_by_alias(model_part) {
@@ -181,6 +173,28 @@ mod tests {
         let spec = ModelSpec::parse("gpt-5.6-luna@low").unwrap();
         assert_eq!(spec.model, "gpt-5.6-luna");
         assert_eq!(spec.effort, Some(Effort::Low));
+    }
+
+    #[test]
+    fn the_cliproxyapi_paren_suffix_is_parsed_like_the_at_suffix() {
+        // Upstream spells a thinking selection `<model>(<value>)`
+        // (internal/thinking/suffix.go); clud accepts it beside `<model>@<effort>`.
+        let spec = ModelSpec::parse("terra(16384)").unwrap();
+        assert_eq!(spec.model, "gpt-5.6-terra");
+        assert_eq!(spec.effort, Some(Effort::High));
+
+        let spec = ModelSpec::parse("gpt-5.6-luna(none)").unwrap();
+        assert_eq!(spec.model, "gpt-5.6-luna");
+        assert_eq!(spec.effort, Some(Effort::None));
+
+        // `(auto)` defers to the model's own default rather than pinning a level.
+        let spec = ModelSpec::parse("sol(auto)").unwrap();
+        assert_eq!(spec.effort, None);
+        assert_eq!(spec.effective_effort(), Effort::Low);
+
+        // A token clud does not know is still refused, naming it.
+        let rendered = ModelSpec::parse("terra(ultra)").unwrap_err().to_string();
+        assert!(rendered.contains("'ultra'"), "{rendered}");
     }
 
     #[test]
