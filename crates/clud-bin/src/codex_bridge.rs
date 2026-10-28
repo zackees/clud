@@ -3078,20 +3078,7 @@ fn serve_anthropic_proxy(
     };
     let status = response.status();
     if target.sanitize_errors && status >= 400 && !probe {
-        // On the standalone surface upstream error detail is suppressed. A chat
-        // caller must still get an OpenAI envelope: `write_error` speaks the
-        // Anthropic shape, so translating the status but not the body would
-        // hand an OpenAI client a payload it cannot parse.
-        if target.chat.is_some() {
-            return write_chat_error(
-                stream,
-                status,
-                "the upstream route refused this turn",
-                idle_timeout,
-            );
-        }
-        let _ = write_error(stream, status);
-        return ProxyOutcome::local(status);
+        return write_sanitized_failure(stream, status, target.chat.is_some(), idle_timeout);
     }
     let content_type = response
         .header("content-type")
@@ -3330,6 +3317,30 @@ fn upstream_error_message(body: &[u8]) -> String {
         None if body.is_empty() => "the upstream route returned an empty failure body".to_string(),
         None => "the upstream route refused this turn".to_string(),
     }
+}
+
+/// Answer a suppressed upstream failure in the shape the caller speaks.
+///
+/// The standalone surface hides upstream error detail. `write_error` emits the
+/// Anthropic envelope, so a chat caller has to be answered here instead: it
+/// cannot parse the Anthropic shape, and translating the status but not the
+/// body would hand it a payload it cannot read.
+fn write_sanitized_failure(
+    stream: &mut TcpStream,
+    status: u16,
+    chat: bool,
+    idle_timeout: Duration,
+) -> ProxyOutcome {
+    if chat {
+        return write_chat_error(
+            stream,
+            status,
+            "the upstream route refused this turn",
+            idle_timeout,
+        );
+    }
+    let _ = write_error(stream, status);
+    ProxyOutcome::local(status)
 }
 
 /// Write one OpenAI error envelope and close the connection.
