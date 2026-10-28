@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::shell_ast::{Invocation, Value};
 
+#[path = "block_bad_cmd_native_patch.rs"]
+mod native_patch;
+
 /// Programs that only read their operands when run without a redirection.
 const READ_ONLY: &[&str] = &[
     "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "jq", "wc", "ls",
@@ -24,12 +27,7 @@ pub(super) const REFUSAL: &str =
 
 pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<String> {
     let home = crate::home::user_home();
-    let tool = payload
-        .tool_name
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let tool = super::block_bad_cmd_gate::tool_basename(&payload.tool_name);
     if super::block_bad_cmd_gate::gates_tool(&tool) {
         return reason_in(
             &payload.command,
@@ -46,54 +44,43 @@ fn native_file_reason(
     tool: &str,
     home: Option<&Path>,
 ) -> Option<String> {
-    if tool == "apply_patch" {
-        let input = payload.tool_input.as_ref();
-        let patch = input.and_then(|input| {
-            input
-                .as_str()
-                .or_else(|| input.get("patch").and_then(serde_json::Value::as_str))
-                .or_else(|| input.get("input").and_then(serde_json::Value::as_str))
-        });
-        let Some(patch) = patch else {
-            return Some(REFUSAL.into());
-        };
-        let mut targets = patch
-            .lines()
-            .filter_map(|line| {
-                [
-                    "*** Add File: ",
-                    "*** Update File: ",
-                    "*** Delete File: ",
-                    "*** Move to: ",
-                ]
-                .iter()
-                .find_map(|prefix| line.strip_prefix(prefix))
-            })
-            .peekable();
-        if targets.peek().is_none()
-            || targets.any(|path| native_target_is_protected(path, payload, home))
-        {
-            return Some(REFUSAL.into());
-        }
+    let targets = if tool == "apply_patch" {
+        native_patch::targets(payload.tool_input.as_ref())
     } else if matches!(tool, "write" | "edit" | "multiedit" | "notebookedit") {
-        let path = payload.tool_input.as_ref().and_then(|input| {
-            ["file_path", "notebook_path", "path"]
-                .iter()
-                .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
-        });
-        if path.is_none_or(|path| native_target_is_protected(path, payload, home)) {
-            return Some(REFUSAL.into());
-        }
-    }
-    None
+        native_writer_target(payload.tool_input.as_ref()).map(|path| vec![path])
+    } else {
+        return None;
+    };
+    let targets = match targets {
+        Ok(targets) => targets,
+        Err(reason) => return Some(reason.into()),
+    };
+    let Some(home) = home else {
+        return Some("cannot establish native target paths: settings home is unavailable".into());
+    };
+    targets
+        .iter()
+        .any(|path| protected_file(path, &payload.cwd.to_string_lossy(), home))
+        .then(|| REFUSAL.into())
 }
 
-fn native_target_is_protected(
-    path: &str,
-    payload: &super::HookPayloadView,
-    home: Option<&Path>,
-) -> bool {
-    home.is_none_or(|home| protected_file(path, &payload.cwd.to_string_lossy(), home))
+fn native_writer_target(input: Option<&serde_json::Value>) -> Result<&str, &'static str> {
+    const ERROR: &str = "cannot establish native target path: expected a nonempty string file_path/notebook_path/path";
+    let object = input.and_then(serde_json::Value::as_object).ok_or(ERROR)?;
+    let mut path = None;
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(value) = object.get(key) {
+            let value = value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(ERROR)?;
+            if path.is_some_and(|path| path != value) || value.contains('\0') {
+                return Err(ERROR);
+            }
+            path = Some(value);
+        }
+    }
+    path.ok_or(ERROR)
 }
 
 fn reason_in(
@@ -185,29 +172,47 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
         crate::shell_ast::join_path(cwd, &expanded).into()
     };
     let settings = crate::clud_settings::settings_path_at(home);
-    let canonical = |path: &Path| {
-        crate::path_norm::display_slash(&canonical_creation_target(path)).to_ascii_lowercase()
-    };
-    canonical(&destination) == canonical(&settings)
+    match (
+        canonical_creation_target(&destination, 40),
+        canonical_creation_target(&settings, 40),
+    ) {
+        (Some(destination), Some(settings)) => crate::path_norm::display_slash(&destination)
+            .eq_ignore_ascii_case(&crate::path_norm::display_slash(&settings)),
+        // An unresolved alias must never establish an unprotected destination.
+        _ => true,
+    }
 }
 
-fn canonical_creation_target(path: &Path) -> std::path::PathBuf {
+fn canonical_creation_target(path: &Path, links_left: u8) -> Option<std::path::PathBuf> {
     let mut ancestor = path;
     let mut missing = Vec::new();
     loop {
-        if let Ok(mut canonical) = crate::path_norm::canonicalize_plain(ancestor) {
-            for component in missing.iter().rev() {
-                canonical.push(component);
+        let error = match crate::path_norm::canonicalize_plain(ancestor) {
+            Ok(canonical) => {
+                let target = missing
+                    .iter()
+                    .rev()
+                    .fold(canonical, |base, part| base.join(part));
+                return Some(
+                    Path::new(&crate::shell_ast::join_path("", &target.to_string_lossy())).into(),
+                );
             }
-            return Path::new(&crate::shell_ast::join_path(
-                "",
-                &canonical.to_string_lossy(),
-            ))
-            .into();
-        }
-        let (Some(parent), Some(component)) = (ancestor.parent(), ancestor.file_name()) else {
-            return path.to_path_buf();
+            Err(error) => error,
         };
+        // canonicalize fails on dangling links. Follow their declared target,
+        // including a relative target, before appending the not-yet-created tail.
+        if let Ok(link) = std::fs::read_link(ancestor) {
+            let base = ancestor.parent()?.join(link);
+            let target = missing
+                .iter()
+                .rev()
+                .fold(base, |base, part| base.join(part));
+            return canonical_creation_target(&target, links_left.checked_sub(1)?);
+        }
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return None;
+        }
+        let (parent, component) = (ancestor.parent()?, ancestor.file_name()?);
         missing.push(component);
         ancestor = parent;
     }
