@@ -346,6 +346,12 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
 /// and none of them may resolve a backend or start a daemon.
 fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
     let code = match args.command.as_ref()? {
+        args::Command::Serve {
+            claude,
+            codex,
+            openrouter,
+            port,
+        } => clud::serve_gateway::run(*port, *claude, *codex, *openrouter),
         args::Command::CodexUpdate => {
             if !args.passthrough.is_empty() {
                 eprintln!("codex-update accepts no passthrough arguments");

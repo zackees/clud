@@ -132,6 +132,8 @@ pub mod secret_prompt;
 pub mod secret_redaction;
 pub mod selector;
 pub mod self_install;
+pub mod serve_gateway;
+mod serve_transport;
 pub mod server_settings;
 pub mod session;
 pub mod session_history;

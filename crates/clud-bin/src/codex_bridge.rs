@@ -37,8 +37,7 @@ use std::time::{Duration, Instant};
 /// arrived in-band. The client already received the translator's own
 /// synthesized `error` frame; this is the copy for the human watching the
 /// terminal.
-const IN_BAND_QUOTA_MESSAGE: &str =
-    "upstream account quota exhausted mid-stream -- check your plan usage, or switch providers with --claude";
+const IN_BAND_QUOTA_MESSAGE: &str = "upstream account quota exhausted mid-stream -- check your plan usage, or switch providers with --claude";
 
 const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -340,6 +339,19 @@ impl UnifiedGatewayConfig {
         self
     }
 
+    /// Point the standalone server at explicitly enabled integration fakes.
+    pub(crate) fn with_standalone_test_upstreams(
+        mut self,
+        upstreams: &UnifiedIntegrationUpstreams,
+    ) -> Self {
+        self.anthropic_base_url = upstreams.anthropic_base_url.clone();
+        self.override_route_base_url(
+            ModelProvider::OpenRouter,
+            upstreams.openrouter_base_url.clone(),
+        );
+        self
+    }
+
     #[cfg(test)]
     fn with_upstreams(mut self, anthropic_base_url: String, deepseek_base_url: String) -> Self {
         self.anthropic_base_url = anthropic_base_url;
@@ -407,6 +419,19 @@ enum GatewayMode {
     Unified(Box<UnifiedGatewayConfig>),
 }
 
+/// Credential obtained by a standalone gateway for a native Claude request.
+/// Kept separate from the credential that authenticates the local client.
+pub enum StandaloneClaudeCredential {
+    ApiKey(String),
+    Bearer(String),
+}
+
+/// Resolves an upstream credential per request, allowing rotating credentials.
+/// Failure carries no provider response or secret into the client error.
+pub trait StandaloneClaudeCredentialSource: Send + Sync {
+    fn credential(&self) -> Option<StandaloneClaudeCredential>;
+}
+
 /// Resource and test-seam policy for one bridge launch.
 #[derive(Clone)]
 pub struct BridgeConfig {
@@ -429,6 +454,12 @@ pub struct BridgeConfig {
     /// construction).
     allowed_models: Vec<String>,
     gateway_mode: GatewayMode,
+    standalone_client_auth: bool,
+    standalone_port: u16,
+    standalone_client_token: Option<String>,
+    standalone_request_ids: Arc<AtomicUsize>,
+    standalone_upstreams: Arc<crate::serve_transport::UpstreamSockets>,
+    standalone_claude_credential: Option<Arc<dyn StandaloneClaudeCredentialSource>>,
     history_limits: HistoryLimits,
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
@@ -463,6 +494,12 @@ impl Default for BridgeConfig {
             selected_model_cli_id: None,
             allowed_models: Vec::new(),
             gateway_mode: GatewayMode::Codex,
+            standalone_client_auth: false,
+            standalone_port: 0,
+            standalone_client_token: None,
+            standalone_request_ids: Arc::new(AtomicUsize::new(0)),
+            standalone_upstreams: Arc::new(crate::serve_transport::UpstreamSockets::default()),
+            standalone_claude_credential: None,
             history_limits: HistoryLimits::default(),
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
@@ -505,6 +542,39 @@ impl BridgeConfig {
     /// This remains an in-process foreground listener; it is never a daemon.
     pub fn with_unified_gateway(mut self, config: UnifiedGatewayConfig) -> Self {
         self.gateway_mode = GatewayMode::Unified(Box::new(config));
+        self
+    }
+
+    /// Authenticate independent API clients using their bearer or API key.
+    pub fn with_standalone_client_auth(mut self) -> Self {
+        self.standalone_client_auth = true;
+        self
+    }
+
+    /// Set a loopback port and a caller-supplied client token for the API server.
+    pub fn with_standalone_listener(
+        mut self,
+        port: u16,
+        token: String,
+    ) -> Result<Self, BridgeError> {
+        if token.len() < 32 || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+            return Err(BridgeError::Settings(
+                "client token must contain at least 32 printable non-space ASCII characters"
+                    .to_string(),
+            ));
+        }
+        self.standalone_port = port;
+        self.standalone_client_token = Some(token);
+        self.standalone_client_auth = true;
+        Ok(self)
+    }
+
+    /// Supply the standalone server's upstream Claude credential source.
+    pub fn with_standalone_claude_credential(
+        mut self,
+        source: Arc<dyn StandaloneClaudeCredentialSource>,
+    ) -> Self {
+        self.standalone_claude_credential = Some(source);
         self
     }
 
@@ -640,6 +710,7 @@ pub struct BridgeHandle {
     active: Arc<AtomicUsize>,
     conversations: ConversationStore,
     connections: ActiveConnections,
+    upstream_sockets: Arc<crate::serve_transport::UpstreamSockets>,
     log: Option<SharedBridgeLog>,
     turn_requests: Arc<AtomicUsize>,
     status_usage: SharedStatusUsage,
@@ -647,20 +718,30 @@ pub struct BridgeHandle {
 }
 
 impl BridgeHandle {
-    pub fn start(config: BridgeConfig) -> Result<Self, BridgeError> {
+    pub fn start(mut config: BridgeConfig) -> Result<Self, BridgeError> {
+        // A cloned configuration must not share shutdown state across listeners.
+        config.standalone_upstreams = Arc::new(crate::serve_transport::UpstreamSockets::default());
         // Resolve the bounded remote/local model checks before the listener is
         // handed to Claude. A first /v1/messages request must not spend its
         // short response deadline waiting for Codex app-server model/list.
-        let _ = crate::codex_runtime::active_choice();
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(BridgeError::Bind)?;
+        if !config.standalone_client_auth {
+            let _ = crate::codex_runtime::active_choice();
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.standalone_port))
+            .map_err(BridgeError::Bind)?;
         listener.set_nonblocking(true).map_err(BridgeError::Bind)?;
         let socket_addr = listener.local_addr().map_err(BridgeError::Bind)?;
         debug_assert_eq!(socket_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
 
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| BridgeError::Random(error.to_string()))?;
-        let bearer_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
+        let bearer_token = match &config.standalone_client_token {
+            Some(token) => token.clone(),
+            None => {
+                let mut token_bytes = [0_u8; 32];
+                getrandom::fill(&mut token_bytes)
+                    .map_err(|error| BridgeError::Random(error.to_string()))?;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes)
+            }
+        };
         let mut fallback_bytes = [0_u8; 16];
         getrandom::fill(&mut fallback_bytes)
             .map_err(|error| BridgeError::Random(error.to_string()))?;
@@ -682,6 +763,7 @@ impl BridgeHandle {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let turn_requests = Arc::clone(&config.turn_requests);
         let status_usage = Arc::clone(&config.status_usage);
+        let upstream_sockets = Arc::clone(&config.standalone_upstreams);
         let cache_health = Arc::new(Mutex::new(CacheHealthTracker::default()));
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
@@ -720,6 +802,7 @@ impl BridgeHandle {
             active,
             conversations,
             connections,
+            upstream_sockets,
             log,
             turn_requests,
             status_usage,
@@ -768,6 +851,7 @@ impl BridgeHandle {
     pub fn shutdown(&mut self) -> Result<(), BridgeError> {
         let connections = lock_connections(&self.connections);
         self.shutdown.store(true, Ordering::Release);
+        self.upstream_sockets.cancel();
         for stream in connections.values() {
             let _ = stream.shutdown(Shutdown::Both);
         }
@@ -1008,10 +1092,20 @@ fn handle_connection(
     ) else {
         return;
     };
+    let standalone_root =
+        (config.standalone_client_auth && parsed.session_id.is_none()).then(|| {
+            format!(
+                "{}-{}",
+                fallback_root,
+                config
+                    .standalone_request_ids
+                    .fetch_add(1, Ordering::Relaxed)
+            )
+        });
     let conversation_key = conversation_key_from_headers(
         parsed.session_id.as_deref(),
         parsed.agent_id.as_deref(),
-        fallback_root,
+        standalone_root.as_deref().unwrap_or(fallback_root),
     );
     let connection = ConnectionContext {
         config,
@@ -1045,7 +1139,8 @@ fn admit_request(
     log: Option<&SharedBridgeLog>,
     header_deadline: Instant,
 ) -> Option<ParsedRequest> {
-    let parsed = match read_headers(stream, config.max_header_bytes, header_deadline, shutdown) {
+    let mut parsed = match read_headers(stream, config.max_header_bytes, header_deadline, shutdown)
+    {
         Ok(parsed) => parsed,
         Err(ABANDON) => return None,
         Err(status) => {
@@ -1060,7 +1155,12 @@ fn admit_request(
         let _ = write_error(stream, 413);
         return None;
     }
-    if !request_is_authenticated(&parsed, bearer_token, &config.gateway_mode) {
+    let authenticated = if config.standalone_client_auth {
+        standalone_request_is_authenticated(&parsed, bearer_token)
+    } else {
+        request_is_authenticated(&parsed, bearer_token, &config.gateway_mode)
+    };
+    if !authenticated {
         let reason = match config.gateway_mode {
             GatewayMode::Codex => "bearer_mismatch",
             GatewayMode::Unified(_) => "gateway_token_mismatch",
@@ -1068,6 +1168,13 @@ fn admit_request(
         record_rejection(log, 401, reason);
         let _ = write_error(stream, 401);
         return None;
+    }
+    if config.standalone_client_auth {
+        // These credentials authenticate the local caller, not an upstream.
+        parsed.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("x-api-key")
+        });
+        parsed.authorization = None;
     }
     Some(parsed)
 }
@@ -1454,7 +1561,7 @@ fn serve_unified_catalog(
         log,
         &advertised.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
     );
-    let data = advertised
+    let mut data = advertised
         .iter()
         .map(|(id, display_name)| {
             serde_json::json!({
@@ -1464,8 +1571,101 @@ fn serve_unified_catalog(
             })
         })
         .collect::<Vec<_>>();
-    let body = serde_json::json!({"data": data, "has_more": false}).to_string();
+    let mut has_more = false;
+    if config.standalone_claude_credential.is_some() {
+        let Ok((mut native, more)) = fetch_standalone_claude_models(config, unified) else {
+            let _ = write_error(stream, 502);
+            return;
+        };
+        native.append(&mut data);
+        data = native;
+        has_more = more;
+    }
+    let body = if config.standalone_client_auth {
+        let first = data.first().and_then(|row| row.get("id")).cloned();
+        let last = data.last().and_then(|row| row.get("id")).cloned();
+        serde_json::json!({"data": data, "has_more": has_more, "first_id": first, "last_id": last})
+    } else {
+        serde_json::json!({"data": data, "has_more": has_more})
+    }
+    .to_string();
     let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+/// Fetch native Claude inventory using the server's credential, not the client's.
+fn fetch_standalone_claude_models(
+    config: &BridgeConfig,
+    unified: &UnifiedGatewayConfig,
+) -> Result<(Vec<serde_json::Value>, bool), ()> {
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    for _ in 0..50 {
+        let page = fetch_standalone_claude_model_page(config, unified, cursor.as_deref())?;
+        let page_rows = page
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(())?;
+        if page_rows
+            .iter()
+            .any(|row| row.get("id").and_then(serde_json::Value::as_str).is_none())
+        {
+            return Err(());
+        }
+        rows.extend(page_rows.iter().cloned());
+        if rows.len() > 10_000 {
+            return Err(());
+        }
+        if !page
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok((rows, false));
+        }
+        let next = page
+            .get("last_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(())?;
+        if cursor.as_deref() == Some(next) {
+            return Err(());
+        }
+        cursor = Some(next.to_string());
+    }
+    Err(())
+}
+
+fn fetch_standalone_claude_model_page(
+    config: &BridgeConfig,
+    unified: &UnifiedGatewayConfig,
+    cursor: Option<&str>,
+) -> Result<serde_json::Value, ()> {
+    let headers = standalone_claude_headers(config, ConversationRoute::Claude, &[])?.ok_or(())?;
+    let builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(15));
+    let agent = crate::serve_transport::tracked_agent(builder, &config.standalone_upstreams);
+    let mut request = agent
+        .get(&format!(
+            "{}/v1/models",
+            unified.anthropic_base_url.trim_end_matches('/')
+        ))
+        .set("anthropic-version", "2023-06-01");
+    if let Some(cursor) = cursor {
+        request = request.query("after_id", cursor);
+    }
+    for (name, value) in headers {
+        request = request.set(&name, &value);
+    }
+    let response = request.call().map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() > 1_048_576 {
+        return Err(());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| ())
 }
 
 fn serve_codex_catalog(
@@ -1498,6 +1698,25 @@ fn serve_codex_catalog(
         .collect::<Vec<_>>();
     let body = serde_json::json!({"data": data, "has_more": false}).to_string();
     let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+/// Reject ambiguous credentials instead of choosing one of several headers.
+fn standalone_request_is_authenticated(request: &ParsedRequest, token: &str) -> bool {
+    let mut credentials = request.headers.iter().filter(|(name, _)| {
+        name.eq_ignore_ascii_case("x-api-key") || name.eq_ignore_ascii_case("authorization")
+    });
+    let Some((name, value)) = credentials.next() else {
+        return false;
+    };
+    if credentials.next().is_some() || token.is_empty() {
+        return false;
+    }
+    let provided = if name.eq_ignore_ascii_case("x-api-key") {
+        Some(value.as_str())
+    } else {
+        value.strip_prefix("Bearer ")
+    };
+    provided.is_some_and(|provided| constant_time_eq(provided.as_bytes(), token.as_bytes()))
 }
 
 fn request_is_authenticated(request: &ParsedRequest, token: &str, mode: &GatewayMode) -> bool {
@@ -2121,6 +2340,7 @@ fn dispatch_unified_attempt(
     let (config, unified) = (turn.config, turn.unified);
     match attempt.provider {
         ModelProvider::Claude => serve_unified_anthropic_proxy(
+            config,
             stream,
             turn.conversations,
             turn.conversation_key,
@@ -2147,6 +2367,7 @@ fn dispatch_unified_attempt(
             // it owns the request path.
             let routed = unified.routed_body(provider, payload);
             serve_unified_anthropic_proxy(
+                config,
                 stream,
                 turn.conversations,
                 turn.conversation_key,
@@ -2270,6 +2491,7 @@ fn finish_without_failover(
     };
     let routed = unified.routed_body(provider, payload);
     serve_unified_anthropic_proxy(
+        config,
         stream,
         conversations,
         conversation_key,
@@ -2290,6 +2512,7 @@ fn finish_without_failover(
 
 #[allow(clippy::too_many_arguments)]
 fn serve_unified_anthropic_proxy(
+    config: &BridgeConfig,
     stream: &mut TcpStream,
     conversations: &ConversationStore,
     conversation_key: &ConversationKey,
@@ -2306,6 +2529,14 @@ fn serve_unified_anthropic_proxy(
     status_usage: &SharedStatusUsage,
     redaction: Option<&SharedSession>,
 ) -> ProxyOutcome {
+    let managed_headers = match standalone_claude_headers(config, route, headers) {
+        Ok(headers) => headers,
+        Err(()) => {
+            let _ = write_error(stream, 503);
+            return ProxyOutcome::local(503);
+        }
+    };
+    let headers = managed_headers.as_deref().unwrap_or(headers);
     let provider = match route {
         ConversationRoute::Claude => AnthropicUsageProvider::Claude,
         ConversationRoute::DeepSeek => AnthropicUsageProvider::DeepSeek,
@@ -2353,6 +2584,10 @@ fn serve_unified_anthropic_proxy(
                 path,
                 injected_api_key,
                 redaction,
+                sanitize_errors: config.standalone_client_auth,
+                sockets: config
+                    .standalone_client_auth
+                    .then_some(&config.standalone_upstreams),
             },
             body,
             headers,
@@ -2516,6 +2751,7 @@ fn serve_unified_count_tokens(
     // answer is provider-specific, so a count from a fallback route would be
     // wrong rather than merely late.
     serve_unified_anthropic_proxy(
+        config,
         stream,
         conversations,
         conversation_key,
@@ -2542,6 +2778,43 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
         .collect()
 }
 
+/// Add a freshly resolved native credential only to standalone Claude requests.
+fn standalone_claude_headers(
+    config: &BridgeConfig,
+    route: ConversationRoute,
+    headers: &[(String, String)],
+) -> Result<Option<Vec<(String, String)>>, ()> {
+    if !config.standalone_client_auth || route != ConversationRoute::Claude {
+        return Ok(None);
+    }
+    let credential = config
+        .standalone_claude_credential
+        .as_ref()
+        .and_then(|source| source.credential())
+        .ok_or(())?;
+    let (name, secret, bearer) = match credential {
+        StandaloneClaudeCredential::ApiKey(key) => ("x-api-key", key, false),
+        StandaloneClaudeCredential::Bearer(token) => ("Authorization", token, true),
+    };
+    if secret.is_empty() || !secret.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return Err(());
+    }
+    let value = if bearer {
+        format!("Bearer {secret}")
+    } else {
+        secret
+    };
+    let mut managed: Vec<_> = headers
+        .iter()
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("x-api-key")
+        })
+        .cloned()
+        .collect();
+    managed.push((name.to_string(), value));
+    Ok(Some(managed))
+}
+
 /// Proxy an Anthropic-compatible Messages response without buffering its body.
 /// The caller's Claude credential is retained only for native Claude requests;
 /// DeepSeek injects its vault credential and never receives caller credentials.
@@ -2550,6 +2823,8 @@ struct AnthropicProxyTarget<'a> {
     path: &'a str,
     injected_api_key: Option<&'a str>,
     redaction: Option<&'a SharedSession>,
+    sanitize_errors: bool,
+    sockets: Option<&'a Arc<crate::serve_transport::UpstreamSockets>>,
 }
 
 fn redact_request<'a>(
@@ -2654,6 +2929,10 @@ fn serve_anthropic_proxy(
         Err(outcome) => return outcome,
     };
     let status = response.status();
+    if target.sanitize_errors && status >= 400 && !probe {
+        let _ = write_error(stream, status);
+        return ProxyOutcome::local(status);
+    }
     let content_type = response
         .header("content-type")
         .unwrap_or("application/json")
@@ -2857,11 +3136,19 @@ fn build_proxy_request(
     // absolute wall-clock had elapsed. The sibling Codex upstream hop has
     // always read this way (`codex_upstream`); the proxy hop was the outlier,
     // and this is the shape the constant's own doc comment claims.
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(idle_timeout)
+    let connect_timeout = if target.sockets.is_some() {
+        idle_timeout.min(Duration::from_secs(10))
+    } else {
+        idle_timeout
+    };
+    let builder = ureq::AgentBuilder::new()
+        .timeout_connect(connect_timeout)
         .timeout_read(idle_timeout)
-        .timeout_write(idle_timeout)
-        .build();
+        .timeout_write(idle_timeout);
+    let agent = match target.sockets {
+        Some(sockets) => crate::serve_transport::tracked_agent(builder, sockets),
+        None => builder.build(),
+    };
     let mut request = agent
         .post(&format!(
             "{}{}",
@@ -4822,6 +5109,413 @@ mod tests {
             .read_to_string(&mut response)
             .expect("bridge response within the client read timeout");
         response
+    }
+
+    #[test]
+    fn standalone_listener_requires_a_private_client_token() {
+        assert!(BridgeConfig::default()
+            .with_standalone_listener(0, "short".to_string())
+            .is_err());
+        assert!(BridgeConfig::default()
+            .with_standalone_listener(0, "a".repeat(31) + "\n")
+            .is_err());
+        let token = "local-client-token-0123456789abcdef";
+        let config = BridgeConfig::default()
+            .with_unified_gateway(UnifiedGatewayConfig::new(None, false))
+            .with_standalone_listener(0, token.to_string())
+            .unwrap();
+        assert!(!format!("{config:?}").contains(token));
+        let bridge = BridgeHandle::start(config).unwrap();
+        assert_eq!(bridge.bearer_token(), token);
+        assert!(bridge.socket_addr().ip().is_loopback());
+        assert!(!format!("{bridge:?}").contains(token));
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/unknown", token, ""),
+        );
+        assert_eq!(status(&response), 404, "{response}");
+    }
+
+    #[test]
+    fn standalone_client_auth_accepts_one_key_and_rejects_ambiguous_headers() {
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(UnifiedGatewayConfig::new(None, false))
+                .with_standalone_client_auth(),
+        )
+        .expect("start bridge");
+        let token = bridge.bearer_token();
+        for (headers, expected) in [
+            (format!("x-api-key: {token}\r\n"), "404"),
+            (format!("Authorization: Bearer {token}\r\n"), "404"),
+            (String::new(), "401"),
+            ("x-api-key: wrong\r\n".to_string(), "401"),
+            (format!("x-api-key: {token}\r\nx-api-key: wrong\r\n"), "401"),
+            (
+                format!("x-api-key: {token}\r\nAuthorization: Bearer {token}\r\n"),
+                "401",
+            ),
+        ] {
+            let wire = format!("GET /unknown HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n");
+            let response = request(bridge.socket_addr(), &wire);
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {expected}")),
+                "{response}"
+            );
+        }
+    }
+
+    struct FixedStandaloneClaudeCredential;
+
+    impl StandaloneClaudeCredentialSource for FixedStandaloneClaudeCredential {
+        fn credential(&self) -> Option<StandaloneClaudeCredential> {
+            Some(StandaloneClaudeCredential::ApiKey(
+                "upstream-claude-canary".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn standalone_codex_catalog_requires_no_claude_credential() {
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(UnifiedGatewayConfig::new(None, true))
+                .with_standalone_client_auth(),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("clud-claude-codex-sol"));
+        assert!(!response.contains("clud-claude-openrouter"));
+    }
+
+    #[test]
+    fn standalone_catalog_omits_openrouter_without_its_credential() {
+        let upstream = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"data":[{"id":"claude-test","type":"model"}],"has_more":false}"#,
+        )));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("claude-test"));
+        assert!(!response.contains("clud-claude-openrouter"));
+        let body = r#"{"model":"clud-claude-openrouter-sonnet","messages":[{"role":"user","content":"hello"}]}"#;
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        assert_eq!(upstream.requests().len(), 1, "no fallback to Claude");
+    }
+
+    #[test]
+    fn standalone_catalog_combines_claude_and_configured_openrouter_models() {
+        let upstream = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"data":[{"id":"claude-test","type":"model"}],"has_more":false}"#,
+        )));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_openrouter(Some("openrouter-canary".to_string()))
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("claude-test"));
+        assert!(response.contains("clud-claude-openrouter-sonnet"));
+        assert!(!response.contains("upstream-claude-canary"));
+        let sent = upstream.requests();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("upstream-claude-canary"));
+        assert!(!sent[0].contains(bridge.bearer_token()));
+        assert!(!sent[0].contains("openrouter-canary"));
+    }
+
+    #[test]
+    fn standalone_catalog_fetches_all_native_pages() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            Some(raw_response(
+                200,
+                "OK",
+                r#"{"data":[{"id":"first"}],"has_more":true,"last_id":"first"}"#,
+            )),
+            Some(raw_response(
+                200,
+                "OK",
+                r#"{"data":[{"id":"second"}],"has_more":false}"#,
+            )),
+        ]);
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("first") && response.contains("second"));
+        let sent = upstream.requests();
+        assert_eq!(sent.len(), 2);
+        assert!(sent[1].contains("after_id=first"));
+        assert!(sent
+            .iter()
+            .all(|wire| !wire.contains(bridge.bearer_token())));
+    }
+
+    #[test]
+    fn standalone_catalog_rejects_a_repeated_upstream_cursor() {
+        let page = raw_response(
+            200,
+            "OK",
+            r#"{"data":[{"id":"first"}],"has_more":true,"last_id":"first"}"#,
+        );
+        let upstream = FakeResponses::start_with_response(Some(page));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&response), 502, "{response}");
+        assert!(!response.contains("upstream-claude-canary"));
+        assert_eq!(upstream.requests().len(), 2);
+    }
+
+    #[test]
+    fn standalone_client_token_is_never_forwarded_to_claude() {
+        let upstream = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        let token = bridge.bearer_token();
+        let api_key_request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        for wire in [
+            authorized("POST", "/v1/messages", token, body),
+            api_key_request,
+        ] {
+            let response = request(bridge.socket_addr(), &wire);
+            assert_eq!(status(&response), 200, "{response}");
+        }
+        let requests = upstream.requests();
+        assert_eq!(requests.len(), 2);
+        for sent in requests {
+            assert!(!sent.contains(token));
+            assert!(!sent.to_ascii_lowercase().contains("authorization:"));
+            assert!(sent.contains("upstream-claude-canary"));
+        }
+    }
+
+    struct RotatingStandaloneClaudeCredential(AtomicUsize);
+
+    impl StandaloneClaudeCredentialSource for RotatingStandaloneClaudeCredential {
+        fn credential(&self) -> Option<StandaloneClaudeCredential> {
+            let next = self.0.fetch_add(1, Ordering::Relaxed);
+            Some(StandaloneClaudeCredential::Bearer(format!(
+                "upstream-token-{next}"
+            )))
+        }
+    }
+
+    #[test]
+    fn standalone_resolves_claude_credentials_for_every_request() {
+        let upstream = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(RotatingStandaloneClaudeCredential(
+                    AtomicUsize::new(0),
+                ))),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        for _ in 0..2 {
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+        let requests = upstream.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("Bearer upstream-token-0"));
+        assert!(requests[1].contains("Bearer upstream-token-1"));
+        assert!(requests
+            .iter()
+            .all(|sent| !sent.contains(bridge.bearer_token())));
+    }
+
+    struct MalformedStandaloneClaudeCredential;
+
+    impl StandaloneClaudeCredentialSource for MalformedStandaloneClaudeCredential {
+        fn credential(&self) -> Option<StandaloneClaudeCredential> {
+            Some(StandaloneClaudeCredential::Bearer(
+                "secret\r\nx-extra: injected".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn standalone_rejects_malformed_upstream_credentials_without_a_request() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(MalformedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+        );
+        assert_eq!(status(&response), 503, "{response}");
+        assert!(!response.contains("injected"));
+        assert!(upstream.requests().is_empty());
+    }
+
+    #[test]
+    fn standalone_never_follows_upstream_redirects_with_credentials() {
+        let destination = FakeResponses::start();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            destination.base_url
+        );
+        let upstream = FakeResponses::start_with_response(Some(redirect.into_bytes()));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+        );
+        assert_eq!(status(&response), 302, "{response}");
+        assert!(!response.contains("upstream-claude-canary"));
+        assert!(destination.requests().is_empty());
+    }
+
+    #[test]
+    fn standalone_sanitizes_upstream_error_bodies() {
+        let upstream = FakeResponses::start_with_response(Some(raw_response(
+            401,
+            "Unauthorized",
+            r#"{"error":{"message":"upstream-claude-canary"}}"#,
+        )));
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth()
+                .with_standalone_claude_credential(Arc::new(FixedStandaloneClaudeCredential)),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+        );
+        assert_eq!(status(&response), 401, "{response}");
+        assert!(!response.contains("upstream-claude-canary"));
+        assert!(!response.contains(bridge.bearer_token()));
+    }
+
+    #[test]
+    fn standalone_refuses_claude_requests_without_upstream_credentials() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_unified_gateway(
+                    UnifiedGatewayConfig::new(None, false)
+                        .with_upstreams(upstream.base_url.clone(), upstream.base_url.clone()),
+                )
+                .with_standalone_client_auth(),
+        )
+        .unwrap();
+        let body = r#"{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}"#;
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), body),
+        );
+        assert_eq!(status(&response), 503, "{response}");
+        assert!(upstream.requests().is_empty());
     }
 
     fn authorized(method: &str, path: &str, token: &str, body: &str) -> String {

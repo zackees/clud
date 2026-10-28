@@ -134,6 +134,13 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 
 Unknown flags are forwarded directly to the backend agent.
 
+### Local API gateway
+
+`clud serve --claude` or `clud serve --codex` exposes a local
+Anthropic-compatible API for other clients.
+Add `--openrouter` to make configured OpenRouter models available. See the
+[server setup and examples](docs/architecture/standalone-gateway.md).
+
 ### OpenRouter through Claude Code
 
 OpenRouter uses its own API key; a DeepSeek or Anthropic key cannot authenticate

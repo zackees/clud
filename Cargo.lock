@@ -775,6 +775,7 @@ dependencies = [
  "vte",
  "walkdir",
  "wasmi",
+ "webpki-roots 0.26.11",
  "which",
  "winapi",
  "windows 0.61.3",
