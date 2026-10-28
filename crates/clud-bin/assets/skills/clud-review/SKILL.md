@@ -529,3 +529,10 @@ buckets" combines results into the user-visible output.
 - The repo has no review configuration of any kind AND the user does
   not want generic feedback — `/clud-review` will emit
   `clud-review: no-rules` and exit; respect that as the answer.
+
+## Handoff after review
+
+Return findings to the calling workflow when delegated; the reviewer remains
+read-only. After a clean standalone review, point the implementing session to
+the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference): push, open a PR, watch CI and merge when permitted.
+A review request alone does not authorize publishing changes.

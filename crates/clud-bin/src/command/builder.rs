@@ -382,7 +382,7 @@ fn land_instructions(args: &Args) -> &'static str {
     let env =
         std::env::var_os("CLUD_LAND_BIAS").map(|value| value.into_string().unwrap_or_default());
     match resolve_land_bias(args.no_land, env.as_deref(), setting.as_deref()) {
-        LandBias::Merge => "Land the work: when a requested code change belongs in a git repository with a remote, aim to deliver a validated, pushed and merged PR. When appropriate branch from the default branch, commit the changes, and run the repository validation. Follow repository instructions and required reviews; use the merge queue when required, wait for checks with pr_merge_watch when available, fix failures, and report the merged PR URL. Reference the issue when applicable. Honor the user's explicit instructions, approval requirements, branch protection and --safe; never bypass them. If review or approval prevents merging, report what remains.",
+        LandBias::Merge => super::do_prompt::LAND_CONTRACT,
         LandBias::Pr => "Land the work: when a requested code change belongs in a git repository with a remote, aim to deliver a validated and pushed PR and report its URL. When appropriate branch from the default branch, commit the changes, and run the repository validation. Reference the issue when applicable. Honor the user's explicit instructions, approval requirements, repository rules, branch protection and --safe. Do not merge unless the user requests it.",
         LandBias::Off => "",
     }

@@ -151,3 +151,5 @@ When extending the bundled tool family (adding a stack, hardening a subcommand, 
 - zackees/clud#416 — architectural design + open-questions discussion
 - zackees/clud#421 — implementation slice (this PR)
 - zackees/zccache#785 — the consumer that prompted the work; `.perf-local/docker-repro/` in that repo is the working prototype the soldr stack derives from
+
+When the requested code change is done, follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) to deliver a validated PR.

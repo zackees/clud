@@ -56,3 +56,5 @@ This skill does not change code; it files an improvement request against `zackee
 - The improvement is in scope of the current coding task; just make the change.
 - The user already has a well-formed issue draft; use `/clud-issue` instead.
 - The report is a security issue; escalate privately to the maintainer rather than filing a public issue.
+
+After filing, offer the next step: "Fix it now? `/do <issue-url>`". Filing an issue alone does not authorize implementing or publishing a fix.

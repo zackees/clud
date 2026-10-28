@@ -678,3 +678,7 @@ If a publication-resume manifest has `exhausted: true`, stop the native loop,
 retain `orchestration_resume`, its launch references and the manifest, and
 report the replay-history limit. Do not call Finish, advance its epochs or
 restart completed work. The deferred goals remain unfinished.
+
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) when delivering changes. Preserve this role's scope; required checks, review, merge queues, `--safe` and explicit user
+instructions take precedence over any immediate admin-merge shortcut.

@@ -83,3 +83,5 @@ Read this before promising a drop-in replacement:
 
 When the work needs something in that list, say so and use Docker directly rather
 than bending the task to fit the tool.
+
+When the requested code change is done, follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) to deliver a validated PR.

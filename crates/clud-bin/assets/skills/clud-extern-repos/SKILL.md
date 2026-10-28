@@ -72,3 +72,10 @@ If the dependent PR must land first, make that ordering explicit in the parent P
 The daemon auto-removes `.extern-repos/<name>/` once the directory has been inactive (no descendant `mtime` change) for at least 24 hours and no live clud session is rooted inside it. Anything tracked under `.extern-repos/` is clud-managed by convention, so don't park work there that you want kept indefinitely — copy it elsewhere or commit + push it first.
 
 Override the inactivity window via `CLUD_GC_EXTERN_REPO_MAX_AGE_SECS` (default `86400`).
+
+## Landing coordinated changes
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) for each repository. Land upstream first,
+then release it or pin its merged revision before validating and landing the
+consumer PR. Cross-link PRs and report each merged URL. If required review,
+permissions or a release blocks the next repository, report that dependency.

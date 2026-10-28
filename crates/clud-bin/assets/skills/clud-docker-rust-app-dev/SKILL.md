@@ -309,3 +309,5 @@ After this skill runs, the project should have:
 - A measured cold/warm comparison committed in either the README or a perf doc, proving the no-op rebuild is seconds rather than minutes.
 
 The user should be able to run `python ci/perf_local.py cargo build --release` and get a fast incremental build, even on Windows.
+
+When the requested code change is done, follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) to deliver a validated PR.

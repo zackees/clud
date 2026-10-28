@@ -66,6 +66,9 @@ require checking every target for shared business-logic changes. Keep the
 repository's routine checks and complete release validation. Repository-local
 PTY skills follow [the same selection rule](../../../../docs/architecture/ci.md#when-to-add-native-ci-labels).
 
+Implementation skills follow the [shared landing contract](../../../../docs/architecture/launch-plan.md#landing-preference).
+Filing and build skills offer scoped next steps; their invocation policies are unchanged.
+
 ## How Skills Ship
 
 Each `SKILL.md` here is embedded into the binary via `include_str!` and written

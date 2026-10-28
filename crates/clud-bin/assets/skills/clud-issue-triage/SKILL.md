@@ -165,3 +165,5 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 - The user wants to file a brand-new issue → `/clud-issue` instead.
 - The user wants to implement an issue → `/goal` instead.
 - The repo's issue tracker is mostly used for discussion (not work tracking) — closing rules don't apply cleanly.
+
+Close an issue as resolved only when a merged PR proves its requirements are met. Point unresolved implementation work at `/do <issue-url>`; triage alone does not authorize implementing the fix.
