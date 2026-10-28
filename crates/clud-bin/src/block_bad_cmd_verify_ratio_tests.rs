@@ -24,6 +24,139 @@ fn calls_are_classified_by_tool_and_command() {
     assert_eq!(classify("Read", ""), None);
 }
 
+#[test]
+fn python_source_writes_count_as_edits_without_counting_reads_or_text() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join(".git")).unwrap();
+    std::fs::create_dir_all(repository.path().join("crates/clud-bin/src")).unwrap();
+    std::fs::create_dir(repository.path().join("src")).unwrap();
+    std::fs::write(
+        repository.path().join("crates/clud-bin/src/example.rs"),
+        "old",
+    )
+    .unwrap();
+    let writes = [
+        "python - <<'PY'\np = 'crates/clud-bin/src/example.rs'\nopen(p, 'w').write('new')\nPY",
+        "python - <<'PY'\np = 'crates/clud-bin/src/example.rs'\ns = open(p).read()\ns = s.replace('old', 'new')\nopen(p, 'w').write(s)\nPY",
+        "python - <<'PY'\nfrom pathlib import Path\nPath('crates/clud-bin/src/example.rs').write_text('new')\nPY",
+        "python - <<'PY'\nfrom pathlib import Path\nPath('crates/clud-bin/src/example.rs').write_bytes(b'new')\nPY",
+        "python -c \"p='src/a.rs'; open(p,'w')\"",
+        "python -c \"from pathlib import Path; Path('src/a.rs').write_text('x')\"",
+        "python -c \"open('src/a.rs','w');\"",
+        "python3 -c \"open('src/a.rs','w')\"", // python-name-lint: allow -- external agent command compatibility
+    ];
+    for command in writes {
+        assert_eq!(
+            classify_kind_at("Bash", command, Some(repository.path())),
+            Some(Kind::Edit),
+            "{command}"
+        );
+    }
+    let non_edits = [
+        "python - <<'PY'\nfrom pathlib import Path\nprint(Path('crates/clud-bin/src/example.rs').read_text())\nPY",
+        "python - <<'PY'\np = 'crates/clud-bin/src/example.rs'\ns = open(p).read()\ns = s.replace('old', 'new')\nPY",
+        "python - <<'PY'\nprint(\"open('crates/clud-bin/src/example.rs', 'w')\")\nPY",
+        "python - <<'PY'\n# Path('crates/clud-bin/src/example.rs').write_text('x')\nprint('read only')\nPY",
+        "python - <<'PY'\nfrom pathlib import Path\nPath('/tmp/report.log').write_text('diagnostic')\nPY",
+        "python - <<'PY'\nopen(dynamic_path, 'w').write('unknown')\nPY",
+        "bosn ci report 123 --json",
+        "python -c \"p='src/a.rs' + '.tmp'; open(p, 'w')\"",
+        "python -c \"p='src/a.rs'; p += '.tmp'; open(p, 'w')\"",
+        "python -c \"False and open('src/a.rs','w')\"",
+        "python -c \"raise SystemExit; open('src/a.rs','w')\"",
+        "python -c \"obj.open('src/a.rs','w')\"",
+        "python -c \"open(p,'w'); p='src/a.rs'\"",
+        "python -c \"p='src/a.rs'; del p; open(p,'w')\"",
+        "python -c \"1/0; open('src/a.rs','w')\"",
+        "python -c \"1%0; open('src/a.rs','w')\"",
+        "python -c \"; open('src/a.rs','w')\"",
+        "python -c \"open('src/a.rs','w');;\"",
+        "python -c \"missing_function(); open('src/a.rs','w')\"",
+        "python -c \"open('src/a.rs','w'); missing(\"",
+        "false; python -c \"open('src/a.rs','w')\"",
+        "python -c \"from pathlib import Path; obj.Path('src/a.rs').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path.write_text = print; Path('src/a.rs').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path('src/a.rs').write_text(b'x')\"",
+        "python -c \"from pathlib import Path; Path('src/a.rs').write_bytes('x')\"",
+        "python -c \"from pathlib import Path; Path('src/a.rs').write_bytes(b 'x')\"",
+        "python -c \"from pathlib import Path; Path('src/a.rs').write_bytes(b'é')\"",
+        "python - <<'PY' </dev/null\nopen('src/a.rs','w')\nPY",
+        "python - 3<<'PY'\nopen('src/a.rs','w')\nPY",
+        "python - <<'PY'\np='x'\n  open('src/a.rs','w')\nPY",
+        "python - <<'PY'\np='a\nb'\nopen('src/a.rs','w')\nPY",
+        "python -c \"__debug__='src/a.rs'; open(__debug__,'w')\"",
+        "python -c \"from pathlib import Path as Fake; Path('src/a.rs').write_text('x')\"",
+        "python -c \"from fake import open; open('src/a.rs','w')\"",
+        "false && python -c \"open('src/a.rs','w')\"",
+        "python - <<PY\nopen('src/$NAME.rs','w')\nPY",
+        "python -c \"open('src/a.rs','w')\" </definitely/nonexistent/file",
+    ];
+    for command in non_edits {
+        assert_eq!(
+            classify_kind_at("Bash", command, Some(repository.path())),
+            Some(Kind::Other),
+            "{command}"
+        );
+    }
+    let outside = tempfile::tempdir().unwrap();
+    assert_eq!(
+        classify_kind_at("Bash", writes[0], Some(outside.path())),
+        Some(Kind::Other)
+    );
+    let oversized = format!("python -c \"open('src/a.rs','w'); {}\"", "x".repeat(40_000));
+    assert_eq!(
+        classify_kind_at("Bash", &oversized, Some(repository.path())),
+        Some(Kind::Other)
+    );
+}
+
+#[test]
+fn python_attempt_recognition_uses_the_payload_shell_dialect() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join(".git")).unwrap();
+    std::fs::create_dir(repository.path().join("src")).unwrap();
+    let command = "python -c \"open('src/a.rs','w')\"";
+    let payload = |tool: &str| {
+        super::super::parse_payload_value(
+            &serde_json::json!({"tool_name": tool, "tool_input": {"command": command}}),
+            repository.path(),
+        )
+        .unwrap()
+    };
+    assert_eq!(classify_payload(&payload("Bash")), Some(Kind::Edit));
+    assert_eq!(classify_payload(&payload("PowerShell")), Some(Kind::Other));
+}
+
+#[test]
+fn python_edit_attempt_rejects_paths_through_external_or_dangling_symlinks() {
+    let repository = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join(".git")).unwrap();
+    std::fs::create_dir(repository.path().join("src")).unwrap();
+    match crate::platform::gc_test_fs::symlink(
+        outside.path(),
+        repository.path().join("src/external"),
+    ) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => return,
+        Err(error) => panic!("create external symlink: {error}"),
+    }
+    crate::platform::gc_test_fs::symlink(
+        outside.path().join("missing.rs"),
+        repository.path().join("src/dangling.rs"),
+    )
+    .unwrap();
+    for command in [
+        "python -c \"open('src/external/a.rs','w')\"",
+        "python -c \"open('src/dangling.rs','w')\"",
+    ] {
+        assert_eq!(
+            classify_kind_at("Bash", command, Some(repository.path())),
+            Some(Kind::Other)
+        );
+    }
+}
+
 fn run(ledger: &mut Ledger, classes: &str, ratio: u32) -> Vec<Counts> {
     let mut notes = Vec::new();
     for letter in classes.chars() {
