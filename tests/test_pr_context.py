@@ -2,6 +2,8 @@
 
 import importlib.util
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -262,7 +264,12 @@ def test_snapshot_fetch_rejects_a_mismatched_pull_request(pr_context):
         pr_context.fetch_snapshot("org/repo", 42, get=WrongRepo())
 
 
-def test_artifact_paths_outside_the_private_directory_are_rejected(pr_context, tmp_path):
+def test_artifact_paths_outside_the_private_directory_are_rejected(
+    pr_context, tmp_path, monkeypatch
+):
+    if sys.platform == "darwin" or os.name == "nt":
+        pytest.skip("artifact privacy verification is not supported on this platform")
+    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path / "private"))
     stray = tmp_path / "pr-context-abcdefgh.json"
     stray.write_text("{}")
     with pytest.raises(ValueError, match="outside the private"):
