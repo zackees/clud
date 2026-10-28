@@ -72,3 +72,8 @@ This skill should not implement fixes or features. If the release is blocked by 
 - The user wants to publish a hotfix from a branch other than main → that's a different flow; do a backport PR or use the workflow's `workflow_dispatch` input directly.
 - The user wants to bump the version → that's `/clud-bump` (or a manual edit + commit + this skill). This skill assumes the version is already bumped and committed.
 - The release publishes via a non-tag-driven path (e.g. `cargo publish` from CI on every main push) — the skill's pre-flight checks don't apply.
+
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) when delivering changes. Preserve this role's scope; required checks, review, merge queues, `--safe` and explicit user
+instructions take precedence over any immediate admin-merge shortcut. For a
+release, observe the tag's release workflow and report its result.

@@ -63,6 +63,74 @@ def test_prior_discovery_version_ignores_binaries_that_cannot_reach_the_catalog(
     assert prior_discovery_version(catalog, "2.8.31") is None
 
 
+def test_older_installer_discovery_records_an_unreachable_prior(tmp_path: Path) -> None:
+    # A skipped test produces no evidence row, and the acceptance aggregate then
+    # rejects the whole release with "missing public host evidence". Record the
+    # gap in the row instead so every host still reports.
+    catalog = {"releases": [{"version": "2.8.31"}]}
+    evidence = assert_older_installer_discovery(
+        catalog,
+        "linux",
+        "x86_64",
+        {},
+        tmp_path / "clud",
+        "2.8.37",
+        "0" * 64,
+        tmp_path,
+    )
+    assert evidence == {
+        "unavailable": "no catalog-aware prior release",
+        "catalog_move_version": "2.8.35",
+        "legacy_host": LEGACY_ONLINE_HOST,
+    }
+
+
+def require_evidence_lane_input(input_var: str, output_var: str, skip_reason: str) -> str:
+    """Refuse to let a lane that owes an evidence row vanish.
+
+    A lane whose workflow declared an evidence *output* (`output_var` is set)
+    must always emit its row: a skip produces no row, and the acceptance
+    aggregate rejects the whole release with "missing public host evidence"
+    (run 40478241694 rolled 2.8.37 back to 2.8.31 for exactly that). A missing
+    input in such a lane is a workflow defect, so this raises. With no evidence
+    output at all there is no row to emit and a skip stays honest.
+    """
+    value = os.environ.get(input_var)
+    if value:
+        return value
+    if os.environ.get(output_var):
+        raise RuntimeError(
+            f"{output_var} is set but {input_var} is not: this lane was asked for a host "
+            "evidence row and cannot produce one"
+        )
+    # Raised rather than called: `pytest.skip()` only raises this exception, and
+    # a bare call would leave the declared return type unsatisfied.
+    raise pytest.skip.Exception(f"no {output_var}: {skip_reason}")
+
+
+def test_public_release_probe_refuses_to_skip_when_the_lane_owes_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The workflow declares the evidence row it expects from this host. With that
+    # row owed but no input to build it, the lane must fail loudly rather than
+    # skip: a skip emits no row and the aggregate rejects a healthy release.
+    monkeypatch.setenv(
+        "CLUD_PUBLIC_EVIDENCE", "public-evidence/x86_64-unknown-linux-musl.json"
+    )
+    monkeypatch.delenv("CLUD_PUBLIC_RELEASE_TAG", raising=False)
+    with pytest.raises(RuntimeError, match="CLUD_PUBLIC_RELEASE_TAG"):
+        test_public_release_installs_by_name(None, tmp_path)  # type: ignore[arg-type]
+
+
+def test_public_release_probe_still_skips_a_local_run_that_owes_no_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("CLUD_PUBLIC_EVIDENCE", raising=False)
+    monkeypatch.delenv("CLUD_PUBLIC_RELEASE_TAG", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        test_public_release_installs_by_name(None, tmp_path)  # type: ignore[arg-type]
+
+
 def public_executable_flavor(row: dict) -> str | None:
     return row.get("variant", {}).get("flavor")
 
@@ -161,12 +229,16 @@ def assert_older_installer_discovery(
     """A fixed older public executable must discover and install today's stable."""
     prior_version = prior_discovery_version(catalog, version)
     if prior_version is None:
-        pytest.skip(
-            f"no public release between {CATALOG_MOVE_VERSION} (the catalog move) and "
-            f"{version}: every older binary hardcodes the retired "
-            f"{LEGACY_ONLINE_HOST} catalog URL, so cross-version discovery has "
-            "nothing it can download from"
-        )
+        # No stable-catalog release is both new enough to reach today's catalog
+        # URL and older than this release, so cross-version discovery has nothing
+        # it can download from. Record that gap in the evidence instead of
+        # skipping: the acceptance aggregate requires one row per host, and a
+        # skipped test would silently drop this host from it.
+        return {
+            "unavailable": "no catalog-aware prior release",
+            "catalog_move_version": CATALOG_MOVE_VERSION,
+            "legacy_host": LEGACY_ONLINE_HOST,
+        }
     assert version_key(prior_version) < version_key(version)
     release = next(row for row in catalog["releases"] if row["version"] == prior_version)
     matches = [
@@ -296,9 +368,11 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
 
 
 def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> None:  # noqa: F811
-    tag = os.environ.get("CLUD_PUBLIC_RELEASE_TAG")
-    if not tag:
-        pytest.skip("public release tag is provided by the release workflow")
+    tag = require_evidence_lane_input(
+        "CLUD_PUBLIC_RELEASE_TAG",
+        "CLUD_PUBLIC_EVIDENCE",
+        "public release tag is provided by the release workflow",
+    )
     mode = os.environ["CLUD_PUBLIC_MODE"]
     if mode not in {"candidate", "released"}:
         raise ValueError("invalid public release mode")

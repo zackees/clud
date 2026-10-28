@@ -77,11 +77,13 @@ def host_target_triple() -> str:
 
 
 def _cargo_host_triple() -> str | None:
-    cargo = shutil.which("cargo")
-    if not cargo:
+    soldr = soldr_path()
+    cargo = shutil.which("cargo") if not soldr else None
+    if not soldr and not cargo:
         return None
+    argv = [soldr, "cargo", "-Vv"] if soldr else [cargo, "-Vv"]
     result = process.run(
-        [cargo, "-Vv"],
+        argv,
         check=False,
         capture_output=True,
         text=True,
@@ -358,14 +360,9 @@ def build_env() -> dict[str, str]:
 
 
 def soldr_path(env: dict[str, str] | None = None) -> str | None:
-    """Return the path to the soldr binary, or None if not available.
-
-    `cargo_argv` routes a local (no-shim) call through this binary (#1158).
-    CI routes cargo through setup-soldr's PATH shims instead, so this is not
-    consulted when `CLUD_USE_SOLDR_SHIMS` or a shim on PATH is detected.
-    """
+    """Return the path to the soldr binary, or None if not available."""
     path = None if env is None else env.get("PATH")
-    found = shutil.which("soldr", path=path)
+    found = shutil.which("soldr") if path is None else shutil.which("soldr", path=path)
     if found:
         return found
     # `./install` (the documented default) puts soldr in the repo's .venv,
@@ -381,38 +378,16 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
 
 
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
-    """Return the cargo argv for CI and local helper scripts.
+    """Prefer the explicit Soldr driver when available, including under shims.
 
-    Resolution order, and why each rung exists:
-
-    1. setup-soldr shims requested (every CI lane) -> bare `cargo`, so PATH
-       resolves to the shim and the call goes through soldr/zccache with the
-       argv CI has always had. Checked first so nothing below can change a CI
-       lane.
-    2. `soldr` on PATH -> `soldr cargo ...`. This is the local developer, and
-       it is the #1158 fix: soldr's target-tree cache hardlinks artifacts into
-       `target/` read-only, so a plain cargo run against a tree that
-       `soldr cargo build` populated fails with "output file ... is not
-       writeable" on whichever dependency compiles first. Only soldr's own
-       driver knows how to rewrite those links. It is also what CLAUDE.md
-       requires of every cargo call in this repo, and what the
-       `.claude/hooks/check-soldr.py` hook enforces for interactive shells --
-       `bash lint` and `bash test` were the one path that still bypassed it.
-    3. Explicit `CARGO` -> that binary. Windows `build_env()` pins it to the
-       MSVC rustup toolchain for machines without soldr.
-    4. Otherwise bare `cargo`.
-
-    PR #116 removed soldr from this function because `soldr cargo` started
-    zccache on CI runners that then died (exit 137 / early exit). CI has since
-    moved wholesale to setup-soldr shims, which route through soldr anyway, so
-    rung 1 keeps that fix intact and rung 2 only ever fires off CI.
+    Keep existing fallback behavior for environments without the driver.
     """
-    if _soldr_shims_requested(env):
-        return ["cargo", *subcommand]
-
     soldr = soldr_path(env)
     if soldr:
         return [soldr, "cargo", *subcommand]
+
+    if _soldr_shims_requested(env):
+        return ["cargo", *subcommand]
 
     cargo = None if env is None else env.get("CARGO")
     if cargo:

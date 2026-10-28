@@ -128,9 +128,35 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         // PR-merge watcher polls GitHub state; the world owns the merge
         // status, so killing this process loses no work — `Resumable`.
         kill_semantics: KillSemantics::Resumable,
-        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        // The default watch is one hour plus 60 seconds to emit its result.
+        // Explicit requests can adjust this per invocation (up to 24 hours).
+        command_timeout: Duration::from_secs(3660),
         progress_timeout: None,
         quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "github/issue_context.py",
+        body: include_str!("../assets/tools/github/issue_context.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
+        rel_path: "github/pr_context.py",
+        body: include_str!("../assets/tools/github/pr_context.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
+        rel_path: "github/ci_failure_report.py",
+        body: include_str!("../assets/tools/github/ci_failure_report.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
     },
     BundledTool {
         rel_path: "github/run_watch.py",
@@ -326,6 +352,24 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         command_timeout: DEFAULT_KILLABLE_TIMEOUT,
         progress_timeout: Some(std::time::Duration::from_secs(120)),
         quiet_ok: false,
+    },
+    // Capture stays quiet while a local test is running; the helper owns its timeout.
+    BundledTool {
+        rel_path: "diagnostics/test_report.py",
+        body: include_str!("../assets/tools/diagnostics/test_report.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: std::time::Duration::from_secs(86_490),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    // Cross-turn audit reads transcript data without emitting its contents.
+    BundledTool {
+        rel_path: "diagnostics/codex_audit.py",
+        body: include_str!("../assets/tools/diagnostics/codex_audit.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
     },
     // transcript-report — privacy-preserving analyzer for one Claude session
     // transcript (#1276, DD-138). Read-only and writes no files, so killing
@@ -640,6 +684,56 @@ mod tests {
             "BUNDLED_TOOLS must include github/pr_merge_watch.py; \
              got {names:?}",
         );
+    }
+
+    /// Issue #2228: loop agents need a bundled bounded CI diagnostic tool.
+    #[test]
+    fn bundled_includes_issue_context() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/issue_context.py")
+            .expect("issue context tool must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
+    /// Pull requests need the same bounded read path issues already have: the
+    /// alternative is `gh pr view --json reviews,comments`, whose single-call
+    /// output reached 21 MB.
+    #[test]
+    fn bundled_includes_pr_context() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/pr_context.py")
+            .expect("pull request context tool must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
+    #[test]
+    fn bundled_includes_local_test_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/test_report.py")
+            .expect("local test report must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+        assert!(tool.quiet_ok);
+    }
+
+    #[test]
+    fn bundled_includes_codex_audit() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/codex_audit.py")
+            .expect("Codex audit must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
+    #[test]
+    fn bundled_includes_ci_failure_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/ci_failure_report.py")
+            .expect("BUNDLED_TOOLS must include github/ci_failure_report.py");
+        assert!(tool.body.contains("managed-by: clud"));
     }
 
     /// Issue #1941: non-PR Actions runs have a sanctioned waiter.

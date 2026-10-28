@@ -97,10 +97,7 @@ fn command_without_deletion_policy(p: &LaunchPlan) -> Vec<String> {
             .position(|arg| arg == "--append-system-prompt")
             .unwrap();
         assert_eq!(index, 1);
-        assert_eq!(
-            command[index + 1],
-            crate::deletion_rules::generated().instructions
-        );
+        assert!(command[index + 1].contains(&crate::deletion_rules::generated().instructions));
         command.drain(index..index + 2);
     } else if command[0] == "codex" {
         for prefix in [
@@ -891,10 +888,7 @@ fn test_safe_mode_no_yolo() {
 fn unsafe_launch_omits_clud_deletion_instructions_for_both_harnesses() {
     let claude = plan(&["clud", "--unsafe", "-p", "hello"]);
     assert!(claude.unsafe_mode);
-    assert!(!claude
-        .command
-        .iter()
-        .any(|arg| arg == "--append-system-prompt"));
+    assert!(claude.command.iter().all(|arg| !arg.contains("safe-rm")));
     assert!(claude
         .command
         .iter()
@@ -904,7 +898,7 @@ fn unsafe_launch_omits_clud_deletion_instructions_for_both_harnesses() {
     assert!(codex.unsafe_mode);
     assert!(codex_config_values(&codex)
         .iter()
-        .all(|value| !value.starts_with("developer_instructions=")));
+        .all(|value| !value.contains("safe-rm")));
     assert!(codex
         .command
         .iter()
@@ -991,3 +985,16 @@ mod repeat_schedule;
 
 #[path = "tests/repeat_execution.rs"]
 mod repeat_execution;
+
+#[test]
+fn landing_instructions_cover_both_backends_and_no_land() {
+    for backend in ["--claude", "--codex"] {
+        let default = plan(&["clud", backend, "-p", "hello"]);
+        assert!(default
+            .command
+            .iter()
+            .any(|arg| arg.contains("Land the work") && !arg.contains(['\r', '\n'])));
+        let off = plan(&["clud", backend, "--no-land", "-p", "hello"]);
+        assert!(off.command.iter().all(|arg| !arg.contains("Land the work")));
+    }
+}

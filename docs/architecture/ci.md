@@ -529,7 +529,11 @@ For a GitHub PR, `clud tool run github/pr_merge.py -- <PR> --repo <OWNER/REPO>
 disabled; otherwise it invokes a normal squash merge. It checks the live head
 against the required SHA and never uses admin bypass. A successful enqueue is
 not a merge: follow it with `clud tool run github/pr_merge_watch.py -- <PR>
---repo <OWNER/REPO>` and verify the MERGED verdict. On timeout or API failure,
+--repo <OWNER/REPO> --until merged` and verify the MERGED verdict. This mode
+reports queue position and state changes, exits 13 for ejection, 14 for an
+entry that remains UNMERGEABLE for two polls, and 4 on timeout. Without
+`--until merged`, the watch retains its ordinary check and merge-wait behavior.
+On timeout or API failure,
 inspect the PR and queue state before retrying the mutation (#2235).
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`

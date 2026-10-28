@@ -33,6 +33,8 @@ pub enum InvocationState {
     Failed,
     /// Aborted event seen (timeout / progress watchdog / external kill).
     Aborted,
+    /// Child exited, but its deadline outcome could not be established.
+    ObservationDelayed,
 }
 
 impl InvocationState {
@@ -43,6 +45,7 @@ impl InvocationState {
             InvocationState::Finished => "finished",
             InvocationState::Failed => "failed",
             InvocationState::Aborted => "aborted",
+            InvocationState::ObservationDelayed => "observation-delayed",
         }
     }
 }
@@ -162,6 +165,11 @@ pub fn parse_invocations(raw: &str) -> Vec<Invocation> {
                     } else {
                         InvocationState::Failed
                     };
+                }
+            }
+            "observation_delayed" => {
+                if let Some(&i) = idx_for.get(&tool_id) {
+                    apply_delayed_observation(&mut by_id[i], &value);
                 }
             }
             "aborted" => {
@@ -342,6 +350,22 @@ pub fn format_started_at(ms: u128) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
 }
 
+fn apply_delayed_observation(inv: &mut Invocation, value: &serde_json::Value) {
+    inv.state = InvocationState::ObservationDelayed;
+    inv.exit_code = value
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+    inv.reason = value
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    inv.ended_at_ms = value
+        .get("ended_at_ms")
+        .and_then(|v| v.as_u64())
+        .map(u128::from);
+}
+
 /// Path-safe accessor for tests that don't want to compute the index
 /// path manually.
 pub fn read_index_raw(path: &Path) -> std::io::Result<String> {
@@ -380,6 +404,19 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn delayed_observation_is_neither_success_nor_a_claimed_timeout() {
+        let raw = format!(
+            "{}\n{}",
+            started(1, "fixture", 1, 1),
+            r#"{"v":1,"event":"observation_delayed","tool_id":1,"exit_code":0,"reason":"command_timeout","ended_at_ms":2}"#
+        );
+        let invs = parse_invocations(&raw);
+        assert_eq!(invs[0].state, InvocationState::ObservationDelayed);
+        assert_eq!(invs[0].exit_code, Some(0));
+        assert_eq!(invs[0].reason.as_deref(), Some("command_timeout"));
     }
 
     #[test]

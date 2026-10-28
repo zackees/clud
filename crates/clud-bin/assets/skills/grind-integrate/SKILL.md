@@ -152,3 +152,7 @@ goal branch, push, open a PR, or run lint or test.
 4. Run `git status --porcelain` again. Return `parked` (whether you
    committed to the park branch), `branch`, `files`, and `clean=true` only
    when none of the goal's paths is still listed.
+
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) when delivering changes. Preserve this role's scope; required checks, review, merge queues, `--safe` and explicit user
+instructions take precedence over any immediate admin-merge shortcut.

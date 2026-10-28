@@ -1461,6 +1461,18 @@ where
     write_settings(&path, &document)
 }
 
+/// Read the optional launch landing preference from the user's settings.
+pub fn load_land_bias_at(home: &Path) -> Result<Option<String>, SettingsError> {
+    let document = read_settings_or_legacy(home)?;
+    Ok(match document.get("launch") {
+        None => None,
+        Some(section) if !section.is_object() => Some(String::new()),
+        Some(section) => section
+            .get("land_bias")
+            .map(|value| value.as_str().unwrap_or("").to_string()),
+    })
+}
+
 fn read_settings_or_legacy(home: &Path) -> Result<Value, SettingsError> {
     let path = settings_path_at(home);
     match fs::read_to_string(&path) {

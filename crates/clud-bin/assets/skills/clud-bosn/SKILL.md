@@ -40,46 +40,63 @@ A skill that fires on every mention of Docker becomes noise, and noise gets igno
 
 ## Before committing the agent to this path
 
-1. `command -v bosn` — if absent, say so and stop. Install is
-   `uv tool install 'bosn>=0.1.7'` (Python 3.11+; puts `bosn` and `bosn-docker` on
-   PATH). Do not install it without being asked. `bosn --version` below 0.1.7 can
-   run a task in another checkout's warm container (zackees/bosn#314) and runs one
-   job per machine; ask for an upgrade (`uv tool upgrade bosn`) rather than trust it.
+1. `command -v bosn` and `bosn --version` — use Bosn 0.1.29 or a later
+   compatible release. If it is missing or older, report that; do not install or
+   upgrade it without authorization.
 2. `docker info` must succeed — bosn manages a real engine, it does not replace one.
-3. **WSL is refused outright**: `bosn` exits non-zero inside WSL, because its Windows
-   loopback daemon is unreachable from there. Use a native Windows shell, macOS, or
-   Linux. (`bosn-docker` does not yet refuse it, so a WSL failure can surface later
-   and less clearly.)
-4. bosn is manifest-driven: it needs a `bosn.toml` at the repo root declaring stacks,
-   volumes, and tasks. Without one there is nothing for it to converge, and writing
-   one is a change to the repo — propose it, do not add it silently.
+3. Use the native host environment for the daemon and verify its connectivity;
+   Windows and WSL may have different socket and path access.
+4. Bosn is manifest-driven: it needs a `bosn.toml` at the repo root declaring
+   stacks, volumes, and tasks. Without one there is nothing to converge; propose
+   the manifest as part of the change before adding it.
 
 ## The loop
 
+Use names actually declared by the repository's manifest. `bosn run` finds the
+nearest `bosn.toml`, starts a daemon if needed, ensures the stack, and streams
+bounded output. Its `--deadline-ms` sets the job deadline; `--output-limit` caps
+captured output. Until bosn#789 is fixed, a limit as small as 4096 bytes can also
+truncate internal Docker inspection; use at least 65536. Ctrl-C cancels its active
+job, so observe an existing run rather
+than starting or cancelling another one.
+
 ```bash
-bosn ensure          # converge and register without running anything (pre-warm)
-bosn unit            # run the task named in bosn.toml
-bosn status --json   # bounded daemon/registry state
-bosn gc --dry-run --json   # what retention would remove, before it removes it
+bosn run --stack linux --manifest bosn.toml --deadline-ms 300000 --output-limit 65536
+bosn run --task test --stack linux --manifest bosn.toml --deadline-ms 1800000 --output-limit 65536
+bosn jobs --json
 ```
 
-Existing unmanaged volumes can be imported rather than recreated:
-`bosn adopt --legacy clud` plans and reports, `--yes` applies.
+For noisy tasks, send the full output to a uniquely named local log and preserve
+the command's exit status. Show only a bounded failure excerpt in the conversation;
+read incremental job logs when monitoring a run instead of repeating its full log.
+
+`--stack` without a task ensures the stack; `--task` runs that declared task.
+`bosn run` chooses `$BOSN_STATE_DIR`, then `$XDG_STATE_HOME/bosn`, then
+`~/.local/state/bosn` (Windows: `%LOCALAPPDATA%\bosn`). Low-level daemon and
+GC commands require the explicit state directory. On a Unix shell, inspect them
+without deleting anything:
+
+```bash
+task_bosn_state="${BOSN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/bosn}"
+bosn daemon status --state-dir "$task_bosn_state" --json
+# Set task_bosn_job_id to a job ID from `bosn jobs --json`.
+bosn job logs --state-dir "$task_bosn_state" --job-id "$task_bosn_job_id" --after 0 --limit 64 --json
+bosn gc owned --state-dir "$task_bosn_state" --container-ttl-secs 86400 --volume-ttl-secs 604800 --image-ttl-secs 604800 --json
+```
+
+The GC command is a preview unless both `--apply` and `--yes` are supplied.
+Never prune or stop unrelated resources to make the loop run.
 
 ## What it does not cover
 
 Read this before promising a drop-in replacement:
 
-- The Docker front door is **partial** — `bosn init` and
-  `bosn-docker compose {up,down,logs,ps}` over a small compose subset only.
-  `bosn-docker compose up -d` is rejected outright, not ignored.
-- **No `docker` / `docker-compose` shims and no podman.** Arbitrary docker commands
-  are not routed through bosn; only what is listed above is.
-- **BuildKit's own layer cache is outside the label contract.** bosn manages
-  containers, volumes, and images and never prunes the builder, so builder growth is
-  still yours to watch.
-- `docker compose up` maps to `bosn-docker compose up`, which labels and tracks the
-  service *containers*; volumes created that way are not tracked.
+- Bosn offers partial Docker coverage; podman is not a supported backend.
+- `bosn compose plan --file ...` is a planning interface, not a general Docker
+  or Compose replacement. Arbitrary Docker commands are not automatically routed
+  through Bosn.
+- BuildKit's own layer cache is outside the resource-label contract. Bosn does not
+  prune the builder; monitor its growth separately.
 
-When the work needs something in that list, say so and use Docker directly rather
-than bending the task to fit the tool.
+When an operation is not supported, say so and use the appropriate native tool
+without implying Bosn manages its resources.

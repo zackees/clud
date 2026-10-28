@@ -55,6 +55,7 @@ Exit codes:
  13  EJECTED: the merge queue removed the PR (the reason is
      printed), or a required check failed on its merge-group commit (the job
      is named); the watch exits at once instead of waiting for the matrix
+ 14  UNMERGEABLE: the queue entry stayed UNMERGEABLE for consecutive polls
  64  USAGE: a bad flag or argument (argparse's own error). The caller's mistake,
      never a verdict: fix the command and run it again (#1331)
  124  the tool runner's watchdog stopped a resumable watch before the tool
@@ -70,9 +71,13 @@ extra read. While it waits in the queue, the `merge_group` runs on the
 queue's own commit are judged, not the PR head. A green PR that nothing will
 merge exits 0 as before, so the caller can merge it. `--no-merge-wait` stops
 at green on the PR's own checks and only reports that the merge is pending.
+`--until merged` follows the PR directly until it merges, reporting queue
+position and state changes and a persistent UNMERGEABLE entry distinctly. It
+only observes the queue and never cancels workflow runs.
 
-A watch under the tool runner clamps its own timeout to at least 60 seconds
-below the wrapper's command cap, so it can exit 4 and finish cancellation.
+The tool runner allows requested waits up to 86400 seconds and reserves 60
+seconds for the watcher to exit and finish cancellation. It rejects longer
+requests. The watcher still clamps to the wrapper cap if necessary.
 If the wrapper stops first, exit 124 means watch again; it is never green.
 
 A watch only ever cancels runs on the head SHA it started on (#1418): when the
@@ -189,6 +194,7 @@ EXIT_NOT_ENQUEUED = 12
 # #2035: the merge queue removed the PR, or a required check failed on its
 # merge-group commit.
 EXIT_EJECTED = 13
+EXIT_UNMERGEABLE = 14
 # sysexits EX_USAGE. argparse exits 2 on a usage error, which is also this
 # tool's "new review activity" verdict, so a bad flag read as a review (#1331).
 EXIT_USAGE = 64
@@ -425,6 +431,8 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
     """
     if timeout is None:
         timeout = GH_CALL_TIMEOUT_SEC
+    if EXPLICIT_MERGE_WAIT and FOLLOW[1] > 0:
+        timeout = min(timeout, max(0.001, FOLLOW[1] - time.monotonic()))
     try:
         # #1175: running-process merges stderr into stdout unless it is asked
         # for separately, and `capture_output=True` alone is not asking.
@@ -3774,18 +3782,29 @@ def _removal(pr: dict) -> tuple[str | None, datetime | None]:
     stamp = node.get("createdAt")
     when = datetime.fromisoformat(stamp.replace("Z", "+00:00")) if isinstance(stamp, str) else None
     reason = node.get("reason")
-    return (str(reason) if reason else None), when
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("invalid queue removal reason")
+    return (reason.strip() or None) if reason is not None else None, when
 
 
 def parse_queue_state(data: object) -> QueueState | None:
+    if not isinstance(data, dict) or data.get("errors"):
+        return None
     try:
         pr = data["data"]["repository"]["pullRequest"]  # type: ignore[index]
     except (KeyError, TypeError):
         return None
     if not isinstance(pr, dict):
         return None
+    if not _complete_queue_response(pr):
+        return None
     entry = pr.get("mergeQueueEntry") or {}
-    reason, removed_at = _removal(pr)
+    try:
+        reason, removed_at = _removal(pr)
+        if removed_at is not None and removed_at.utcoffset() is None:
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
     return QueueState(
         state=str(pr.get("state") or ""),
         base_ref=str(pr.get("baseRefName") or ""),
@@ -3796,6 +3815,36 @@ def parse_queue_state(data: object) -> QueueState | None:
         removal_reason=reason,
         removed_at=removed_at,
     )
+
+
+def _complete_queue_response(pr: dict) -> bool:
+    state = pr.get("state")
+    if not isinstance(state, str) or state not in {"OPEN", "CLOSED", "MERGED"}:
+        return False
+    if not isinstance(pr.get("baseRefName"), str) or not pr["baseRefName"]:
+        return False
+    if "autoMergeRequest" not in pr or "mergeQueueEntry" not in pr:
+        return False
+    auto = pr["autoMergeRequest"]
+    if (auto is not None
+            and (not isinstance(auto, dict) or not isinstance(auto.get("enabledAt"), str))):
+        return False
+    timeline = pr.get("timelineItems")
+    if not isinstance(timeline, dict) or not isinstance(timeline.get("nodes"), list):
+        return False
+    nodes = timeline["nodes"]
+    if nodes and (not isinstance(nodes[-1], dict) or "reason" not in nodes[-1]
+                  or not isinstance(nodes[-1].get("createdAt"), str)):
+        return False
+    entry = pr["mergeQueueEntry"]
+    if entry is None:
+        return True
+    if (not isinstance(entry, dict) or not isinstance(entry.get("state"), str)
+            or isinstance(entry.get("position"), bool)
+            or not isinstance(entry.get("position"), int) or "headCommit" not in entry):
+        return False
+    head = entry["headCommit"]
+    return head is None or (isinstance(head, dict) and isinstance(head.get("oid"), str))
 
 
 def fetch_queue_state(repo: str, pr: int) -> QueueState | None:
@@ -3840,6 +3889,9 @@ class MergeFollow:
     required: set[str] | None = None
     required_read: bool = False
     api_failures: int = 0
+    last_queue: tuple[int | None, str] | None = None
+    unmergeable_polls: int = 0
+    removal_candidate: tuple[datetime, str] | None = None
 
 
 def _queue_verdict(q: QueueState, seen: MergeFollow) -> tuple[int, str] | None:
@@ -3849,9 +3901,21 @@ def _queue_verdict(q: QueueState, seen: MergeFollow) -> tuple[int, str] | None:
     if q.state == "CLOSED":
         return EXIT_PR_CLOSED, "closed"
     removed_now = q.removed_at is not None and q.removed_at >= seen.started
-    if q.entry_state is None and (seen.enqueued or removed_now) and not q.auto_merge:
-        return EXIT_EJECTED, f"removed from the merge queue: {q.removal_reason or 'reason not reported'}"
-    if q.entry_state is None and not q.auto_merge and seen.polls >= ENQUEUE_GRACE_POLLS:
+    if (q.entry_state is None and (seen.enqueued or removed_now)
+            and (EXPLICIT_MERGE_WAIT or not q.auto_merge)):
+        reason = (q.removal_reason or "").strip()
+        if removed_now and q.removed_at is not None and reason and reason.casefold() != "merged":
+            candidate = (q.removed_at, reason)
+            if seen.removal_candidate == candidate:
+                return EXIT_EJECTED, f"removed from the merge queue: {reason}"
+            seen.removal_candidate = candidate
+        else:
+            seen.removal_candidate = None
+        # A missing entry or a "merged" removal is not an authoritative PR state.
+        return None
+    seen.removal_candidate = None
+    if (not EXPLICIT_MERGE_WAIT and q.entry_state is None and not q.auto_merge
+            and not seen.enqueued and seen.polls >= ENQUEUE_GRACE_POLLS):
         return EXIT_NOT_ENQUEUED, "open, not in the merge queue and not set to auto-merge"
     return None
 
@@ -3871,6 +3935,7 @@ _UNTIL_MERGED_LABELS = {
     EXIT_PR_CLOSED: "PR-STATE CLOSED",
     EXIT_EJECTED: "EJECTED",
     EXIT_NOT_ENQUEUED: "NOT-ENQUEUED",
+    EXIT_UNMERGEABLE: "UNMERGEABLE",
 }
 
 
@@ -3878,16 +3943,28 @@ def _poll_queue(repo: str, pr: int, seen: MergeFollow, log: WatchLog | None) -> 
     q = fetch_queue_state(repo, pr)
     if q is None:
         seen.api_failures += 1
+        seen.unmergeable_polls = 0
+        seen.removal_candidate = None
         if seen.api_failures >= MAX_CONSECUTIVE_API_FAILURES:
             _exit_unreachable("merge queue state unreadable", log)
         return None
     seen.api_failures = 0
     seen.polls += 1
-    verdict = _queue_verdict(q, seen) or _merge_group_verdict(repo, q, seen)
+    verdict = _queue_verdict(q, seen)
+    if verdict is None and EXPLICIT_MERGE_WAIT:
+        seen.unmergeable_polls = seen.unmergeable_polls + 1 if q.entry_state == "UNMERGEABLE" else 0
+        if seen.unmergeable_polls >= 2:
+            return EXIT_UNMERGEABLE, "queue entry remained unmergeable"
+    if not EXPLICIT_MERGE_WAIT:
+        verdict = verdict or _merge_group_verdict(repo, q, seen)
     if verdict is None and q.entry_state is not None:
-        if not seen.enqueued:
+        current = (q.position, q.entry_state)
+        if not seen.enqueued or (EXPLICIT_MERGE_WAIT and current != seen.last_queue):
             print(f"ENQUEUED  #{pr} position={q.position} state={q.entry_state}")
+        seen.last_queue = current
         seen.enqueued = True
+    elif q.entry_state is None:
+        seen.last_queue = None
     if log:
         log.emit("queue", state=q.state, entry=q.entry_state, position=q.position,
                  queue_sha=q.queue_sha, auto_merge=q.auto_merge)
@@ -3898,6 +3975,7 @@ def _poll_queue(repo: str, pr: int, seen: MergeFollow, log: WatchLog | None) -> 
 FOLLOW: tuple[int, float] = (20, 0.0)
 # `--no-merge-wait` clears it: green on the PR's checks ends the watch.
 MERGE_WAIT = True
+EXPLICIT_MERGE_WAIT = False
 
 
 def follow_merge(pr: int, repo: str | None, log: WatchLog | None) -> int:
@@ -3910,8 +3988,12 @@ def follow_merge(pr: int, repo: str | None, log: WatchLog | None) -> int:
             code, why = verdict
             print(f"{_UNTIL_MERGED_LABELS[code]}  #{pr} {why}")
             _finish_exit(code, why.split(":")[0], log)
-        _sleep_remaining_interval(started, interval)
-    print(f"TIMEOUT  #{pr} not merged yet (queued={seen.enqueued})")
+        wait_interval = min(interval, max(0.0, deadline - started))
+        _sleep_remaining_interval(started, wait_interval)
+    if seen.enqueued and seen.last_queue is None:
+        print(f"TIMEOUT  #{pr} queue state unconfirmed; merge or removal not established")
+    else:
+        print(f"TIMEOUT  #{pr} not merged yet (queued={seen.enqueued})")
     _finish_exit(EXIT_TIMEOUT, "timeout", log)
     return EXIT_TIMEOUT
 
@@ -3989,9 +4071,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=_env_int("CLUD_PR_MERGE_WATCH_TIMEOUT", DEFAULT_TIMEOUT_SEC),
         help="overall wait cap in seconds (default $CLUD_PR_MERGE_WATCH_TIMEOUT, else "
-        "3600); clamped below the tool runner's command cap when present",
+        "3600); the tool runner accepts at most 86400 seconds",
     )
-    p.add_argument(
+    merge_mode = p.add_mutually_exclusive_group()
+    merge_mode.add_argument(
+        "--until", choices=["merged"], default=None,
+        help="wait for the PR to merge, reporting queue changes (#2141)",
+    )
+    merge_mode.add_argument(
         "--no-merge-wait",
         dest="merge_wait",
         action="store_false",
@@ -4129,7 +4216,7 @@ def _print_triggers(repo: str | None, base: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global FOLLOW, MERGE_WAIT
+    global FOLLOW, MERGE_WAIT, EXPLICIT_MERGE_WAIT
     ns = parse_args(argv if argv is not None else sys.argv[1:])
     if ns.triggers_for_base is not None:
         return _print_triggers(ns.repo, ns.triggers_for_base)
@@ -4155,6 +4242,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         FOLLOW = (ns.interval, time.monotonic() + ns.timeout)
         MERGE_WAIT = ns.merge_wait
+        EXPLICIT_MERGE_WAIT = ns.until == "merged"
+        if EXPLICIT_MERGE_WAIT:
+            return follow_merge(pr_number, repo, log)
         code = watch(
             pr_number,
             repo,

@@ -149,3 +149,5 @@ For GitHub API details, use https://docs.github.com/en/rest/issues/sub-issues. T
 - The user already has a clear, well-scoped issue draft — just file it directly.
 - The work is trivial enough to implement immediately (skip the issue, use `/clud-fix-quick`).
 - The topic is a question, not a request for tracked work — answer it instead of filing.
+
+After filing, offer the next step: "Fix it now? `/do <issue-url>`". Filing an issue alone does not authorize implementing or publishing a fix.

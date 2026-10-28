@@ -15,3 +15,7 @@ harness did not run it, or `clud` is missing), run `clud do-prompt <target>`
 yourself and follow its output. If that fails too, stop and tell the user;
 do not guess the contract. Every code change keeps a RED -> GREEN focused
 regression.
+
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) when delivering changes. Preserve this role's scope; required checks, review, merge queues, `--safe` and explicit user
+instructions take precedence over any immediate admin-merge shortcut.

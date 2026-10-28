@@ -36,20 +36,27 @@ server and merge.
    repository, PR, head and selected scope when resuming. Add `--no-cancel`
    when the user's policy requires keeping runs intact.
 2. By exit code:
-   - `0` (checks green, mergeable): `gh pr merge --repo <github-repo> <n> --admin --squash
-     --delete-branch`. Return `status=merged`. The watch never waits for
+   - `0` (checks green, mergeable): satisfy required review, resolve the full
+     head SHA, then submit with `clud tool run github/pr_merge.py -- <n>
+     --repo <github-repo> --match-head-commit <head-sha>`. This honors a
+     required merge queue. Follow with `github/pr_merge_watch.py -- <n>
+     --repo <github-repo> --until merged` and return `status=merged` only
+     after the PR is actually merged. The watch never waits for
      CodeRabbit unless you pass `--coderabbit-wait N`; never pass it for a
      repo that suppresses CodeRabbit or a head validated by the local
      bosn -> act gate. Every `coderabbit=` note (`suppressed`, `absent`,
      `completed`, `rate_limited`, `skipped`, `pending`, `timeout`) is still
      `0`: merge.
    - `1` (a required check failed): `gh pr checks --repo <github-repo> <n>` and
-     `gh run view --repo <github-repo> <run> --log-failed` for the failing job. Return
+     `clud tool run github/ci_failure_report.py -- --repo <github-repo> --run <run> --job <job>`
+     for the failing job. Use the returned artifact and line-range continuation to inspect more. Return
      `status=needs_fix` with the failing job and the relevant log lines in
      `failure_log`.
    - `2` (new review activity): read the unresolved comments with
-     `gh pr view --repo <github-repo> <n> --comments`. Return `status=needs_fix` with each
-     actionable comment in `failure_log`.
+     `clud tool run github/pr_context.py -- --repo <github-repo> --pr <n>`, then continue with
+     its `--section review-comments` / `--section reviews` offsets and the private snapshot.
+     Do not use `gh pr view --comments`: it prints every review and thread body at once.
+     Return `status=needs_fix` with each actionable comment in `failure_log`.
    - `3` (closed or merged elsewhere): report it; `status=merged` only if
      `gh pr view --repo <github-repo>` says merged, else `gave_up`.
    - `4` (timeout): incomplete observation. Revalidate the same CI and head;
@@ -162,3 +169,7 @@ business logic and callers of unchanged platform code use the routine gate.
 Name the implementation and select only affected targets; target inventories,
 helper extraction and local coverage gaps do not justify `ci-full` or
 `ci-windows`. Preserve routine checks and full release validation.
+
+
+Follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) when delivering changes. Preserve this role's scope; required checks, review, merge queues, `--safe` and explicit user
+instructions take precedence over any immediate admin-merge shortcut.

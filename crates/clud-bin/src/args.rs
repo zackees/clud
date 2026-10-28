@@ -178,6 +178,10 @@ pub struct Args {
     #[arg(long = "context-window")]
     pub context_window: Option<String>,
 
+    /// Disable the launch-level preference to finish work through a PR.
+    #[arg(long = "no-land")]
+    pub no_land: bool,
+
     #[arg(long = "safe", conflicts_with = "unsafe_mode")]
     pub safe: bool,
 
@@ -1037,6 +1041,23 @@ pub enum Command {
     /// Open the explicitly requested persistent Command Prompt.
     #[command(name = "__start-cmd", hide = true)]
     InternalStartCmd,
+    /// Test seam for the OpenAI Chat Completions ingress: read one
+    /// OpenAI-shaped request body on stdin, write the translated Messages
+    /// request body to stdout. With `--response` it runs the other direction
+    /// instead (Anthropic Messages response in, OpenAI completion out).
+    /// Never used by a launched session.
+    #[command(name = "__openai-chat-translate", hide = true)]
+    InternalOpenAiChatTranslate {
+        /// Translate an Anthropic Messages response, not an OpenAI request.
+        #[arg(long)]
+        response: bool,
+        /// Read the response as SSE and emit one chat.completion.chunk per line.
+        #[arg(long, requires = "response")]
+        stream: bool,
+        /// Model to report when the response body carries none.
+        #[arg(long = "for-model")]
+        for_model: Option<String>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1257,6 +1278,19 @@ pub enum TestSubcommand {
         #[arg(long = "target")]
         target: Option<String>,
         /// The command to run, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Capture test output for the bounded report tool.
+    #[command(hide = true)]
+    Capture {
+        /// Directory verified by the host-specific privacy implementation.
+        #[arg(long)]
+        output_dir: std::path::PathBuf,
+        /// Maximum time to wait for the child and its output writers.
+        #[arg(long, default_value_t = 3600)]
+        timeout_secs: u64,
+        /// Command to execute, after `--`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1586,6 +1620,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "__daemon",
     "__worker",
     "__start-cmd",
+    "__openai-chat-translate",
 ];
 
 impl Args {
@@ -1840,6 +1875,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--subprocess",
         "--pty",
         "--safe",
+        "--no-land",
         "--unsafe",
         "--unattended",
         "--allow-plan-mode",

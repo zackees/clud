@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "block_bad_cmd_verify_python.rs"]
+mod python_write;
+
 use super::block_bad_cmd_repeat::{prune, write_fast};
 
 /// Classified calls kept per session.
@@ -153,7 +156,12 @@ const WIDE_FLAGS: &[&str] = &["--workspace", "--all", "--release"];
 const FULL_GATE_WORDS: &[&str] = &["./lint", "bash lint", "ci/lint.py", "local-gate run"];
 
 /// The kind of one call, from its tool name and shell command.
+#[cfg(test)]
 pub(super) fn classify_kind(tool_name: &str, command: &str) -> Option<Kind> {
+    classify_kind_at(tool_name, command, None)
+}
+
+fn classify_kind_at(tool_name: &str, command: &str, cwd: Option<&Path>) -> Option<Kind> {
     if EDIT_TOOLS.contains(&tool_name) {
         return Some(Kind::Edit);
     }
@@ -163,7 +171,9 @@ pub(super) fn classify_kind(tool_name: &str, command: &str) -> Option<Kind> {
     let text = command.to_ascii_lowercase();
     // An edit chained with a build counts as the edit: the agent did change
     // something, and #1988 asks for them to be split, not punished twice.
-    if SHELL_EDITS.iter().any(|word| text.contains(word)) {
+    if SHELL_EDITS.iter().any(|word| text.contains(word))
+        || cwd.is_some_and(|cwd| python_write::writes_source(command, cwd))
+    {
         return Some(Kind::Edit);
     }
     let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
@@ -564,10 +574,18 @@ fn edited_path(tool_input: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn classify_payload(payload: &super::HookPayloadView) -> Option<Kind> {
+    // Python recognition uses the POSIX shell grammar. Other shells retain
+    // the existing ledger behavior rather than being interpreted as Bash.
+    let python_cwd = (super::shell_dialect_for_payload(payload) == super::ShellDialect::Posix)
+        .then_some(payload.cwd.as_path());
+    classify_kind_at(&payload.tool_name, &payload.command, python_cwd)
+}
+
 /// PreToolUse entry: a note to add or a call to deny, or `None`.
 pub(super) fn verdict(payload: &super::HookPayloadView, raw: &Value) -> Option<Verdict> {
     let session_id = payload.session_id.as_deref()?;
-    let kind = classify_kind(&payload.tool_name, &payload.command)?;
+    let kind = classify_payload(payload)?;
     let limits = effective_limits();
     if limits.ratio == 0 {
         return None;
@@ -655,7 +673,7 @@ fn format_ms(ms: u64) -> String {
 pub(super) fn note_text(counts: Counts, ratio: u32) -> String {
     format!(
         "[clud verify-ratio] Verification is crowding out editing: {} lint/build/test/CI calls \
-         against {} edits in the last {WINDOW} classified calls (limit {ratio} per edit, #1988). \
+         against {} edit attempts in the last {WINDOW} classified calls (limit {ratio} per edit, #1988). \
          Scope checks to what changed (`-p <crate>`, one test file), drop `--release` unless the \
          test needs optimized code, batch edits, and run the full gate once per commit or batch. \
          Keep edits and builds in separate tool calls. This is advice, not a refusal; set \

@@ -551,3 +551,31 @@ fn codex_project_trusted_reads_the_projects_table() {
     write(&config, "{not toml");
     assert!(!codex_project_trusted(&repo, &home));
 }
+
+#[test]
+fn codex_trust_from_custom_home_accepts_extended_windows_key() {
+    let temp = tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    write(
+        &config,
+        r#"[projects.'\\?\C:\work\repo']
+trust_level = "trusted"
+"#,
+    );
+    assert!(codex_project_trusted_in_config(
+        Path::new(r"c:\work\repo"),
+        &config
+    ));
+    assert!(!codex_project_trusted_in_config(
+        Path::new(r"c:\work\other"),
+        &config
+    ));
+    write(
+        &config,
+        "[projects.'C:/Work/Repo']\ntrust_level = 'trusted'\n",
+    );
+    assert!(codex_project_trusted_in_config(
+        Path::new(r"c:\work\repo"),
+        &config
+    ));
+}

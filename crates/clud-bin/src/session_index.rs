@@ -172,6 +172,12 @@ pub enum IndexEvent {
         reason: String,
         ended_at_ms: u128,
     },
+    ObservationDelayed {
+        tool_id: u32,
+        reason: String,
+        exit_code: i32,
+        ended_at_ms: u128,
+    },
 }
 
 /// Allocate the next session-local tool ID. fs4 exclusive lock on

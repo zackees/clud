@@ -1995,7 +1995,8 @@ fn resolve_unified_catalog(model: &str) -> UnifiedCatalogMatch<'_> {
     let mut codex_effort_suffix = None;
     let entry = exact_catalog
         .or_else(|| {
-            let (base, effort) = model.rsplit_once('@')?;
+            let (base, effort) = provider_catalog::split_effort_suffix(model);
+            let effort = effort?;
             let entry = provider_catalog::model_by_discovery_id(base).or_else(|| {
                 provider_catalog::non_claude_model_by_any_id(base)
                     .filter(|entry| entry.provider == ModelProvider::Codex)
@@ -2096,7 +2097,7 @@ impl UnifiedAttempt {
                 spec: None,
             };
         };
-        let requested_base = model.split_once('@').map_or(model, |(base, _)| base);
+        let requested_base = provider_catalog::split_effort_suffix(model).0;
         let target = if entry.provider == ModelProvider::Codex
             && requested_base.eq_ignore_ascii_case(entry.wire_id)
         {
@@ -3154,9 +3155,7 @@ fn serve_codex_discovery_messages(
         let _ = write_error(stream, 400);
         return;
     };
-    let (base, effort) = model
-        .rsplit_once('@')
-        .map_or((model, None), |(base, effort)| (base, Some(effort)));
+    let (base, effort) = provider_catalog::split_effort_suffix(model);
     // #1010 item 3: `codex_translate::resolve_selection` trims and treats an
     // empty selection as "unspecified -> serve the default". Testing the raw
     // string here made `{"model":""}` and `{"model":" claude-opus-5"}` take the

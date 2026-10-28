@@ -51,3 +51,15 @@ def test_an_unknown_flag_is_still_a_usage_error(watcher) -> None:
     with pytest.raises(SystemExit) as exit_info:
         watcher.parse_args(["1835", "--", "--not-a-flag"])
     assert exit_info.value.code == watcher.EXIT_USAGE
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["1835", "--timeout", "--", "7200"],
+        ["1835", "--timeo=7_200"],
+    ],
+)
+def test_requested_timeout_fits_the_wrapper_margin(watcher, monkeypatch, argv) -> None:
+    monkeypatch.setenv("CLUD_TOOL_COMMAND_TIMEOUT_SECS", "7260")
+    assert watcher.parse_args(argv).timeout == 7200

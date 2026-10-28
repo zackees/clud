@@ -311,6 +311,19 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
             action: args::SessionAction::Stats { session },
         } => session_stats(session.as_deref()),
         args::Command::InternalStartCmd => clud::platform::start_terminal::run(),
+        // Hidden test seam for the OpenAI Chat Completions ingress translator:
+        // stdin in, Messages request body out. No session, backend, or daemon.
+        args::Command::InternalOpenAiChatTranslate {
+            response,
+            stream,
+            for_model,
+        } => {
+            if *response {
+                clud::openai_ingress::run_translate_response_stdin(*stream, for_model.as_deref())
+            } else {
+                clud::openai_ingress::run_translate_stdin()
+            }
+        }
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),
         args::Command::GrindFacts { args } => clud::grind_facts::run_cli(args),
@@ -578,6 +591,11 @@ fn dispatch_local_tool_command(args: &args::Args) -> Option<i32> {
                 target,
                 command,
             } => test_runtime::cli::run(bucket, target.clone(), command),
+            args::TestSubcommand::Capture {
+                output_dir,
+                timeout_secs,
+                command,
+            } => test_runtime::capture::run_cli(output_dir, *timeout_secs, command),
             args::TestSubcommand::Stats { bucket, json } => {
                 test_runtime::cli::stats(bucket.as_deref(), *json)
             }

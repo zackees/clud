@@ -103,7 +103,22 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     let tool_bytes = fs::read(&tool_path)?;
     let cache_dir = resolved_uv_cache_dir_from(std::env::var_os("UV_CACHE_DIR"));
     let mut env: Vec<(String, String)> = build_child_env(&cache_dir);
-    let watchdog = Watchdog::for_rel_path(rel_path);
+    let mut watchdog = Watchdog::for_rel_path(rel_path);
+    let requested = std::env::var("CLUD_PR_MERGE_WATCH_TIMEOUT").ok();
+    let requested = watcher_deadline(rel_path, args, requested.as_deref())?;
+    // Debug-only integration fixtures deliberately shorten the wrapper cap.
+    #[cfg(debug_assertions)]
+    let test_override = std::env::var("CLUD_TEST_TOOL_COMMAND_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some();
+    #[cfg(not(debug_assertions))]
+    let test_override = false;
+    if !test_override {
+        if let Some(deadline) = requested {
+            watchdog.command_timeout = deadline;
+        }
+    }
     env.push((
         "CLUD_TOOL_COMMAND_TIMEOUT_SECS".to_string(),
         watchdog.command_timeout.as_secs().to_string(),
@@ -135,6 +150,93 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     }
 }
 
+/// Give the PR watcher time to finish its requested wait and emit a timeout.
+/// Reject oversized requests instead of silently clamping them at the wrapper.
+fn watcher_deadline(
+    rel_path: &str,
+    args: &[String],
+    configured: Option<&str>,
+) -> io::Result<Option<Duration>> {
+    if rel_path != "github/pr_merge_watch.py" {
+        return Ok(None);
+    }
+    const DEFAULT_SECS: u64 = 3600;
+    const MAX_SECS: u64 = 86400;
+    const EXIT_MARGIN_SECS: u64 = 60;
+    let mut value = configured;
+    let mut explicit = false;
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| *arg != "--")
+        .collect();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index];
+        let (option, attached) = argument
+            .split_once('=')
+            .map_or((argument, None), |(option, value)| (option, Some(value)));
+        // argparse allows unambiguous long-option prefixes. `--t` is
+        // ambiguous with --triggers-for-base; `--ti` and longer are unique.
+        if option.len() >= 4 && "--timeout".starts_with(option) {
+            explicit = true;
+            if let Some(attached) = attached {
+                value = Some(attached);
+            } else {
+                value = args.get(index + 1).copied();
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    let seconds = match value {
+        None => DEFAULT_SECS,
+        Some(raw) => {
+            let raw = raw.trim();
+            let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+            let valid_digits = !digits.is_empty()
+                && !digits.starts_with('_')
+                && !digits.ends_with('_')
+                && !digits.contains("__")
+                && digits
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'_');
+            if !valid_digits {
+                if !explicit
+                    && !raw
+                        .chars()
+                        .any(|character| !character.is_ascii() && character.is_numeric())
+                {
+                    return Ok(Some(Duration::from_secs(DEFAULT_SECS + EXIT_MARGIN_SECS)));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid PR watcher timeout",
+                ));
+            }
+            let digits = digits.replace('_', "");
+            if raw.starts_with('-') {
+                0
+            } else {
+                let seconds = digits.parse::<u64>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "PR watcher timeout exceeds 86400 seconds",
+                    )
+                })?;
+                if seconds > MAX_SECS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "PR watcher timeout exceeds 86400 seconds",
+                    ));
+                }
+                seconds
+            }
+        }
+    };
+    Ok(Some(Duration::from_secs(seconds + EXIT_MARGIN_SECS)))
+}
+
 /// Plain passthrough: child stdout/stderr are captured only long enough to
 /// immediately re-emit them and retain a stderr tail for tool telemetry.
 /// There is still no session index or per-tool log in this fallback path.
@@ -163,15 +265,35 @@ fn run_passthrough(
         address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
+    #[cfg(test)]
+    prepare_fixture_observer(&process, rel_path);
     let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
-    let exit_code = loop {
-        match process.wait(Some(DRAIN_POLL_INTERVAL)) {
-            Ok(code) => break code,
+    let mut progress_uncertain = false;
+    #[cfg(test)]
+    let mut fixture_timeout_forced = false;
+    let (exit_code, delayed) = loop {
+        #[cfg(test)]
+        let wait_result = fixture_wait(&process, rel_path, &mut fixture_timeout_forced);
+        #[cfg(not(test))]
+        let wait_result = process.wait(Some(DRAIN_POLL_INTERVAL));
+        match wait_result {
+            Ok(code) => {
+                #[cfg(test)]
+                if rel_path == "__test_buffered_progress" {
+                    assert!(progress_uncertain, "the buffered-progress path must run");
+                    assert_eq!(code, 0, "fixture must finish successfully");
+                }
+                let delayed = delayed_observation(&watchdog)
+                    .or(progress_uncertain.then_some(AbortReason::ProgressTimeout));
+                break (code, delayed);
+            }
             Err(ProcessError::Timeout) => {
                 emitted = drain_passthrough_output(&process, emitted);
                 if emitted > last_drain_count {
-                    watchdog.note_output();
+                    note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {
@@ -208,11 +330,109 @@ fn run_passthrough(
         }
     };
     let _ = drain_passthrough_output(&process, emitted);
+    let reported_code = uncertain_exit_code(exit_code, delayed);
+    if let Some(reason) = delayed {
+        let payload = serde_json::json!({
+            "v": 1,
+            "status": "observation-delayed",
+            "reason": reason.label(),
+            "deadline_outcome": "unknown",
+            "exit_code": exit_code,
+        });
+        let _ = writeln!(io::stderr().lock(), "{payload}");
+    }
     telemetry.finish(
-        exit_code,
+        reported_code,
         stderr_tail_200(&process.captured_stderr().concat()),
     );
-    Ok(exit_code)
+    Ok(reported_code)
+}
+
+#[cfg(test)]
+fn release_buffered_fixture(rel_path: &str, args: &[String], progress_uncertain: bool) {
+    if rel_path == "__test_buffered_progress" && progress_uncertain {
+        std::fs::write(&args[0], b"release").expect("release fixture child");
+    }
+}
+
+#[cfg(test)]
+fn prepare_fixture_observer(process: &NativeProcess, rel_path: &str) {
+    if rel_path == "__test_delayed_observer" {
+        process
+            .wait(Some(Duration::from_secs(10)))
+            .expect("fixture must exit");
+    } else if rel_path == "__test_buffered_progress" {
+        wait_for_buffered_fixture_output(process);
+    }
+}
+
+#[cfg(test)]
+fn fixture_wait(
+    process: &NativeProcess,
+    rel_path: &str,
+    forced: &mut bool,
+) -> Result<i32, ProcessError> {
+    if rel_path == "__test_buffered_progress" && !*forced {
+        assert!(
+            process.returncode().is_none(),
+            "fixture must still be running"
+        );
+        *forced = true;
+        Err(ProcessError::Timeout)
+    } else {
+        process.wait(Some(DRAIN_POLL_INTERVAL))
+    }
+}
+
+#[cfg(test)]
+fn wait_for_buffered_fixture_output(process: &NativeProcess) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let marker = b"buffered progress fixture";
+    let has_marker = || {
+        process.captured_combined().iter().any(|event| {
+            event
+                .line
+                .windows(marker.len())
+                .any(|window| window == marker)
+        })
+    };
+    while !has_marker() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(has_marker(), "fixture marker must be buffered");
+    assert!(
+        process.returncode().is_none(),
+        "fixture must still be running"
+    );
+}
+
+/// A late observation cannot establish when the child exited or last wrote output.
+fn delayed_observation(watchdog: &Watchdog) -> Option<AbortReason> {
+    match watchdog.check() {
+        WatchdogDecision::Continue => None,
+        WatchdogDecision::KillAndAbort(reason) | WatchdogDecision::ResumeLater(reason) => {
+            Some(reason)
+        }
+    }
+}
+
+/// Buffered output has no producer timestamp; a late drain cannot prove when it arrived.
+fn note_observed_progress(watchdog: &mut Watchdog, uncertain: &mut bool) {
+    if matches!(
+        delayed_observation(watchdog),
+        Some(AbortReason::ProgressTimeout)
+    ) {
+        *uncertain = true;
+    }
+    watchdog.note_output();
+}
+
+fn uncertain_exit_code(exit_code: i32, delayed: Option<AbortReason>) -> i32 {
+    if exit_code == 0 && delayed.is_some() {
+        WATCHDOG_EXIT_CODE
+    } else {
+        exit_code
+    }
 }
 
 fn render_passthrough_abort_payload(
@@ -307,6 +527,8 @@ fn run_with_session(
         address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
+    #[cfg(test)]
+    prepare_fixture_observer(&process, rel_path);
 
     // #1204: record the child's real OS PID and its start time so
     // `clud tool log --pid` / `clud tool info --pid` can match this
@@ -349,13 +571,31 @@ fn run_with_session(
     // terminal (resumable) and break out.
     let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
-    let exit_code = loop {
-        match process.wait(Some(DRAIN_POLL_INTERVAL)) {
-            Ok(code) => break code,
+    let mut progress_uncertain = false;
+    #[cfg(test)]
+    let mut fixture_timeout_forced = false;
+    let (exit_code, delayed) = loop {
+        #[cfg(test)]
+        let wait_result = fixture_wait(&process, rel_path, &mut fixture_timeout_forced);
+        #[cfg(not(test))]
+        let wait_result = process.wait(Some(DRAIN_POLL_INTERVAL));
+        match wait_result {
+            Ok(code) => {
+                #[cfg(test)]
+                if rel_path == "__test_buffered_progress" {
+                    assert!(progress_uncertain, "the buffered-progress path must run");
+                    assert_eq!(code, 0, "fixture must finish successfully");
+                }
+                let delayed = delayed_observation(&watchdog)
+                    .or(progress_uncertain.then_some(AbortReason::ProgressTimeout));
+                break (code, delayed);
+            }
             Err(ProcessError::Timeout) => {
                 emitted = drain_into_tee(&process, &mut tee, emitted);
                 if emitted > last_drain_count {
-                    watchdog.note_output();
+                    note_observed_progress(&mut watchdog, &mut progress_uncertain);
+                    #[cfg(test)]
+                    release_buffered_fixture(rel_path, args, progress_uncertain);
                     last_drain_count = emitted;
                 }
                 match watchdog.check() {
@@ -432,20 +672,30 @@ fn run_with_session(
     let _ = tee.flush();
 
     let ended_at_ms = unix_millis_now();
-    let _ = append_event(
-        ctx,
-        &IndexEvent::Finished {
+    let event = if let Some(reason) = delayed {
+        IndexEvent::ObservationDelayed {
+            tool_id,
+            reason: reason.label().to_string(),
+            exit_code,
+            ended_at_ms,
+        }
+    } else {
+        IndexEvent::Finished {
             tool_id,
             exit_code,
             ended_at_ms,
-        },
-    );
+        }
+    };
+    let _ = append_event(ctx, &event);
 
     // Slice 6: emit the structured payload + pointer block on every
     // non-zero exit so the agent always sees how to find the log.
     // We deliberately skip emission for the zero-exit happy path —
     // pointers there would be noise after a successful run.
-    if exit_code != 0 {
+    let exit_kind = delayed
+        .map(ExitKind::ObservationDelayed)
+        .or_else(|| (exit_code != 0).then_some(ExitKind::Failed));
+    if let Some(kind) = exit_kind {
         let _ = emit_termination(
             ctx.session_pid,
             tool_id,
@@ -454,16 +704,17 @@ fn run_with_session(
             started_at_ms,
             ended_at_ms,
             watchdog.started_at.elapsed(),
-            ExitKind::Failed,
+            kind,
             Some(exit_code),
         );
     }
 
+    let reported_code = uncertain_exit_code(exit_code, delayed);
     telemetry.finish(
-        exit_code,
+        reported_code,
         stderr_tail_200(&process.captured_stderr().concat()),
     );
-    Ok(exit_code)
+    Ok(reported_code)
 }
 
 fn drain_passthrough_output(process: &NativeProcess, emitted: usize) -> usize {
@@ -1043,5 +1294,81 @@ mod secret_tests {
         );
         assert!(!payload.contains(key));
         assert!(payload.contains("****cdef"));
+    }
+}
+
+#[cfg(test)]
+mod watcher_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn watcher_deadlines_honor_requested_duration_with_a_bounded_margin() {
+        let args = vec!["493".into(), "--timeout".into(), "3600".into()];
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &args, None).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], None).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("120")).unwrap(),
+            Some(Duration::from_secs(180))
+        );
+        assert_eq!(
+            watcher_deadline(
+                "github/pr_merge_watch.py",
+                &["--timeout=240".into()],
+                Some("120")
+            )
+            .unwrap(),
+            Some(Duration::from_secs(300))
+        );
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--timeout=86401".into()],
+            None
+        )
+        .is_err());
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some(" 7_200 ")).unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &["--timeo=7_200".into()], None).unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--ti".into(), "86_401".into()],
+            None
+        )
+        .is_err());
+        assert!(watcher_deadline(
+            "github/pr_merge_watch.py",
+            &["--timeout=7__200".into()],
+            None
+        )
+        .is_err());
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("  ")).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline("github/pr_merge_watch.py", &[], Some("bad")).unwrap(),
+            Some(Duration::from_secs(3660))
+        );
+        assert_eq!(
+            watcher_deadline(
+                "github/pr_merge_watch.py",
+                &["--timeout".into(), "--".into(), "7200".into()],
+                None
+            )
+            .unwrap(),
+            Some(Duration::from_secs(7260))
+        );
+        assert!(watcher_deadline("github/pr_merge_watch.py", &[], Some("٧٢٠٠")).is_err());
+        assert_eq!(watcher_deadline("other.py", &args, None).unwrap(), None);
     }
 }

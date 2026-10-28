@@ -115,7 +115,8 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
    - Resolved unambiguously (merged + on default branch + diff matches criteria) → `gh issue close <num> --comment "Resolved by #<pr>. Verified: <one-line evidence>."`
    - Anything ambiguous (partial implementation, stack-base merge, criteria not fully met, no clear PR) → leave open. Don't comment unless the user asked you to triage-comment.
 6. **Scan for un-addressed CodeRabbit comments.** For every PR linked to this issue (resolving or merely referencing):
-   - `gh api repos/<owner>/<repo>/pulls/<pr>/comments` (review-thread comments) and `gh pr view <pr> --json reviews,comments`.
+   - `"$CLUD_EXE" tool run github/pr_context.py -- --repo <owner>/<repo> --pr <pr>` (bounded overview),
+     then `--section review-comments` and `--section reviews` for thread bodies and review states.
    - Filter authors matching `coderabbitai*` (`coderabbitai`, `coderabbitai[bot]`).
    - Drop nits, praise, "consider", and threads marked `outdated` or `resolved: true`.
    - Group remaining comments by file/topic.
@@ -164,3 +165,5 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 - The user wants to file a brand-new issue → `/clud-issue` instead.
 - The user wants to implement an issue → `/goal` instead.
 - The repo's issue tracker is mostly used for discussion (not work tracking) — closing rules don't apply cleanly.
+
+Close an issue as resolved only when a merged PR proves its requirements are met. Point unresolved implementation work at `/do <issue-url>`; triage alone does not authorize implementing the fix.

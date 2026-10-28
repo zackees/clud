@@ -105,6 +105,7 @@ pub mod loop_check;
 pub mod loop_plan_mode;
 pub mod loop_spec;
 pub mod multicall;
+pub mod openai_ingress;
 pub mod openrouter_catalog;
 pub mod openrouter_free;
 pub mod openrouter_routing;
