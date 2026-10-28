@@ -138,7 +138,9 @@ Unknown flags are forwarded directly to the backend agent.
 
 `clud serve --claude` or `clud serve --codex` exposes a local
 Anthropic-compatible API for other clients.
-Add `--openrouter` to make configured OpenRouter models available. See the
+Add `--openrouter` to make configured OpenRouter models available. The optional
+MCP server (`python -m clud.mcp_server`, installed with `clud[mcp]`) exposes
+`serve_start`, `serve_status`, and `serve_stop` for discovery by Hermes. See the
 [server setup and examples](docs/architecture/standalone-gateway.md).
 
 ### OpenRouter through Claude Code

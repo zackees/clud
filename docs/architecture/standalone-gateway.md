@@ -65,3 +65,30 @@ Use `/v1/models` to discover the advertised Codex IDs (for example,
 `clud-claude-codex-sol`) and pass one as `model` to `/v1/messages`.
 Codex-only discovery does not contact Anthropic. This is an Anthropic-compatible
 frontend; `/v1/responses` and `/v1/chat/completions` are not exposed.
+
+## MCP discovery for Hermes
+
+Install the optional MCP extra (`pip install 'clud[mcp]'`) and register
+`python -m clud.mcp_server` as a stdio MCP server in Hermes. Its tool list now
+includes `serve_start`, `serve_status`, and `serve_stop` alongside agent-session
+tools. `serve_start` defaults to Codex; pass `backend="claude"` for Claude,
+`openrouter=true` for the additional OpenRouter route, or `port` to choose a
+loopback port. The default port is ephemeral for MCP-managed gateways.
+
+`serve_start` and `serve_status` return the base URL, model-list and Messages
+URLs, protocol (`anthropic_messages`), authentication header (`x-api-key`),
+and a freshly generated **client** token. Keep that token private. Provider
+credentials stay in the server environment or clud's credential store and
+are never returned through MCP. Hermes must use an Anthropic-compatible
+client to consume the endpoint; this does not expose OpenAI endpoints.
+
+Identical repeated starts reuse the same gateway. To change configuration,
+call `serve_stop` first. Startup has a 30-second deadline and returns an
+error with credential setup guidance if it fails. The MCP server owns the
+child process: disconnecting stops it; `serve_stop` also stops it explicitly.
+`serve_status` reports only the gateway owned by this MCP server, not servers
+started separately in a terminal. These controls do not require the clud daemon.
+
+Anonymous HTTP requests use request-local history, so a long-running gateway
+does not retain one conversation per independent request. Clients that send
+explicit session identifiers retain the existing bounded conversation history.

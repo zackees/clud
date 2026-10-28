@@ -1,9 +1,11 @@
 """MCP bridge exposing the `clud` agent harness to MCP clients (e.g. Hermes Agent).
 
-Runs as a stdio MCP server. It exposes two families of tools:
+Runs as a stdio MCP server. It exposes three families of tools:
 
 * ``run`` / ``dry_run`` — launch ``clud -p <prompt>`` as a child process and
   stream its output back (the original blocking surface).
+* ``serve_start`` / ``serve_status`` / ``serve_stop`` — expose a local
+  Anthropic-compatible Claude/Codex API gateway for clients such as Hermes.
 * ``session_*`` — drive clud's durable ``/v1/sessions`` daemon API as an
   explicit session handle: create + submit a turn and get a ``session_id``
   back immediately, then probe, collect, wait on, or kill that session.
@@ -34,9 +36,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import asynccontextmanager
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
+
+from clud.serve_mcp import GatewayManager
 
 #: Upper bound on harness output returned to the client, in characters. Hermes'
 #: own MCP client hard-caps a single result at 2,000,000 chars; stay well under
@@ -45,13 +51,28 @@ from mcp.server.mcpserver.context import Context
 _RESULT_CHAR_CAP = 1_000_000
 _LOG_LINE_CAP = 2_000
 
+_gateway = GatewayManager()
+
+
+@asynccontextmanager
+async def _gateway_lifespan(app):
+    del app
+    try:
+        yield {}
+    finally:
+        with anyio.CancelScope(shield=True):
+            await _gateway.stop()
+
+
 server = MCPServer(
     name="clud",
-    title="clud — agent harness runner",
+    title="clud — agent harness runner and local model gateway",
+    lifespan=_gateway_lifespan,
     description=(
         "Run the clud agent harness (Claude Code / Codex in YOLO mode) on a "
         "prompt — either as a blocking child process, or as a durable session "
-        "you can probe, wait on, and collect."
+        "you can probe, wait on, and collect. Discover and manage local Claude/Codex "
+        "Anthropic Messages endpoints with serve_start, serve_status, and serve_stop."
     ),
 )
 
@@ -926,6 +947,42 @@ async def run_json(
     }
     del waited_s
     return json.dumps(result, indent=2)
+
+
+@server.tool()
+async def serve_start(backend: str = "codex", openrouter: bool = False, port: int = 0) -> str:
+    """Start a local Claude/Codex model API and return connection details for Hermes.
+
+    Returns base_url, models_url, messages_url, auth_header and client_token.
+    This exposes the Anthropic Messages protocol, including streaming and tools;
+    it does not expose OpenAI Chat Completions or Responses endpoints. The token
+    authenticates local clients; keep it private. Upstream credentials are never
+    returned. An identical repeat reuses the running gateway. This MCP server
+    owns the gateway and stops it on disconnect; use serve_stop to stop earlier.
+
+    Args:
+        backend: "codex" (default, clud auth login codex or OPENAI_API_KEY) or
+            "claude" (ANTHROPIC_API_KEY).
+        openrouter: Add the route configured by clud auth login openrouter.
+        port: Loopback port; 0 chooses an available port.
+    """
+    return _dump(await _gateway.start(_clud_bin(), backend, openrouter, port))
+
+
+@server.tool()
+async def serve_status() -> str:
+    """Discover the MCP-owned gateway's URL, protocol and client authentication.
+
+    Returns running=false when no managed gateway is alive. Use serve_start to
+    create one. No connection to an upstream model is required for this probe.
+    """
+    return _dump(_gateway.status())
+
+
+@server.tool()
+async def serve_stop() -> str:
+    """Stop and reap the MCP-owned model gateway; safe to repeat."""
+    return _dump(await _gateway.stop())
 
 
 def main() -> None:
