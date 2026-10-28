@@ -1169,6 +1169,12 @@ fn admit_request(
             GatewayMode::Unified(_) => "gateway_token_mismatch",
         };
         record_rejection(log, 401, reason);
+        if config.standalone_client_auth {
+            let remaining = parsed
+                .content_length
+                .saturating_sub(parsed.body_prefix.len());
+            let _ = crate::serve_transport::drain_rejected_body(stream, remaining, shutdown);
+        }
         let _ = write_error(stream, 401);
         return None;
     }
@@ -5248,6 +5254,30 @@ mod tests {
         bridge.shutdown().unwrap();
         assert!(start.elapsed() < Duration::from_secs(3));
         client.join().unwrap();
+    }
+
+    #[test]
+    fn standalone_unauthorized_post_returns_complete_error_for_a_split_body() {
+        let upstream = FakeResponses::start();
+        let bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_standalone_client_auth()).unwrap();
+        let mut client = TcpStream::connect(bridge.socket_addr()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.set_nodelay(true).unwrap();
+        let body = PROBE_BODY;
+        write!(client, "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: wrong\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        client.write_all(body.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert_eq!(status(&response), 401, "{response}");
+        let json: serde_json::Value =
+            serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(json["error"]["type"], "authentication_error");
+        assert!(upstream.requests().is_empty());
     }
 
     #[test]

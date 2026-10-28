@@ -1,9 +1,10 @@
-//! Cancellation of standalone gateway HTTPS connections during shutdown.
+//! Socket cancellation and bounded request draining for standalone gateways.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -240,6 +241,38 @@ impl ureq::ReadWrite for TrackedStream {
     }
 }
 
+/// Consume a small rejected request body before closing the connection, avoiding
+/// a reset that can discard the 401 response on Windows. Untrusted callers get
+/// at most 250ms and 64KiB of draining; no provider request or parsing occurs.
+pub(crate) fn drain_rejected_body(
+    stream: &mut TcpStream,
+    mut remaining: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<()> {
+    if remaining == 0 || remaining > 64 * 1024 {
+        return Ok(());
+    }
+    stream.set_nonblocking(true)?;
+    let mut restore = BlockingRestore {
+        inner: stream,
+        active: true,
+    };
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut buffer = [0; 4096];
+    while remaining > 0 && Instant::now() < deadline && !shutdown.load(Ordering::Acquire) {
+        let count = remaining.min(buffer.len());
+        match restore.inner.read(&mut buffer[..count]) {
+            Ok(0) => break,
+            Ok(count) => remaining -= count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            Err(_) => break,
+        }
+    }
+    restore.restore()
+}
+
 fn tls_config() -> Arc<ureq::rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<ureq::rustls::ClientConfig>> = OnceLock::new();
     Arc::clone(CONFIG.get_or_init(|| {
@@ -400,6 +433,16 @@ mod tests {
         assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
         worker.join().unwrap();
         assert!(sockets.0.lock().unwrap().sockets.is_empty());
+    }
+
+    #[test]
+    fn rejected_request_drain_is_bounded_when_the_body_never_arrives() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let started = Instant::now();
+        drain_rejected_body(&mut client, 100, &AtomicBool::new(false)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
