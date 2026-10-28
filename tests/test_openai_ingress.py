@@ -95,6 +95,101 @@ def test_openai_chat_request_becomes_a_messages_request() -> None:
     assert translated["tool_choice"]["type"] == "any"
 
 
+def _translate_response(
+    payload: dict[str, object] | str, *args: str
+) -> process.CompletedProcess[object]:
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    return process.run(
+        [str(_clud_binary()), "__openai-chat-translate", "--response", *args],
+        input=body,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_messages_response_becomes_a_chat_completion() -> None:
+    completed = _translate_response(
+        {
+            "id": "msg_42",
+            "type": "message",
+            "model": "claude-sonnet",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "thinking", "thinking": "pick the tool"},
+                {"type": "text", "text": "reading it"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_42",
+                    "name": "read_file",
+                    "input": {"path": "a.rs"},
+                },
+            ],
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "cache_read_input_tokens": 4,
+            },
+        }
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    translated = json.loads(completed.stdout)
+    assert translated["object"] == "chat.completion"
+    assert translated["id"] == "msg_42"
+    assert translated["model"] == "claude-sonnet"
+    message = translated["choices"][0]["message"]
+    assert message["content"] == "reading it"
+    assert message["reasoning_content"] == "pick the tool"
+    assert message["tool_calls"][0]["function"]["name"] == "read_file"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"path": "a.rs"}
+    assert translated["choices"][0]["finish_reason"] == "tool_calls"
+    assert translated["usage"]["prompt_tokens"] == 15
+    assert translated["usage"]["total_tokens"] == 18
+
+
+def test_for_model_names_the_reply_when_the_body_has_no_model() -> None:
+    completed = _translate_response(
+        {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"},
+        "--for-model",
+        "my-alias",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["model"] == "my-alias"
+
+
+def test_sse_stream_becomes_openai_chunks_with_a_trailing_usage_frame() -> None:
+    events = [
+        {"type": "message_start", "message": {"id": "msg_s", "model": "claude-sonnet",
+                                              "usage": {"input_tokens": 2}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ]
+    body = "".join(f"event: x\ndata: {json.dumps(event)}\n\n" for event in events)
+    completed = _translate_response(body, "--stream")
+
+    assert completed.returncode == 0, completed.stderr
+    chunks = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+    assert len(chunks) == 4
+    assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+    assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+    assert chunks[1]["choices"][0]["delta"]["content"] == "hello"
+    assert chunks[2]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[3]["choices"] == []
+    assert chunks[3]["usage"]["total_tokens"] == 3
+
+
+def test_response_body_that_is_not_json_exits_non_zero() -> None:
+    completed = _translate_response("not json")
+
+    assert completed.returncode == 2
+    assert "JSON" in completed.stderr
+
+
 def test_unsupported_content_part_is_refused_with_its_name() -> None:
     completed = _translate(
         {
