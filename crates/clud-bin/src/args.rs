@@ -601,6 +601,21 @@ impl Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Serve Claude or Codex and optional OpenRouter models to local API clients.
+    Serve {
+        /// Enable the Claude upstream.
+        #[arg(long, required_unless_present = "codex")]
+        claude: bool,
+        /// Enable Codex using clud's managed login or OPENAI_API_KEY.
+        #[arg(long)]
+        codex: bool,
+        /// Add the configured OpenRouter upstream.
+        #[arg(long)]
+        openrouter: bool,
+        /// Local port for API clients; zero chooses an available port.
+        #[arg(long, default_value_t = 8317)]
+        port: u16,
+    },
     /// Acquire a credential in a masked window and deliver it directly to a sink.
     Secret(crate::secret_prompt::Options),
     /// Explicit compatibility spelling for a normal backend launch.
@@ -1548,6 +1563,7 @@ pub enum GcSubcommand {
 }
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
+    "serve",
     "do-prompt",
     "grind-scripts",
     "grind-facts",

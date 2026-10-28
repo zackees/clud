@@ -9,6 +9,8 @@
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
+Using Hermes Agent? Start with [Hermes integration](#hermes-integration) for MCP setup and model gateway discovery.
+
 ## Run Codex on the Claude harness
 
 ```bash
@@ -64,6 +66,61 @@ uv tool install clud   # recommended — isolated, fast
 pipx install clud      # equivalent if you already use pipx
 pip install clud       # plain pip; you must ensure the install bin dir is on PATH
 ```
+
+
+## Hermes integration
+
+Hermes Agent can discover clud through its stdio MCP server: run durable agent
+sessions or start a local Claude/Codex model API. Gateway discovery tools are
+available in clud 2.8.41 and later.
+
+Install the MCP extra with the Python interpreter that will run the server:
+
+```bash
+python -m pip install --upgrade 'clud[mcp]'
+```
+
+Add this entry under `mcp_servers` in `~/.hermes/config.yaml`, using
+[Hermes's MCP configuration format](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp):
+
+```yaml
+mcp_servers:
+  clud:
+    command: "python"
+    args: ["-m", "clud.mcp_server"]
+```
+
+Use the installed interpreter's absolute path for `command` when Hermes uses a
+different Python environment. The `clud` binary must be on that server's PATH;
+set `CLUD_BIN` to its absolute path if needed. Restart Hermes or use
+`/reload-mcp` to refresh discovery.
+
+| Discoverable MCP tool | What Hermes can do |
+| --- | --- |
+| `serve_start` | Start a gateway with `backend="codex"` (default) or `backend="claude"`; optionally add `openrouter=true`. |
+| `serve_status` | Retrieve the running gateway's URLs, protocol, authentication header, and client token. |
+| `serve_stop` | Stop the gateway owned by this MCP connection. |
+| `session_start` | Submit an agent task and receive a durable session handle immediately. |
+| `session_status`, `session_result`, `session_wait`, `session_kill` | Inspect, collect, wait for, or stop an agent session. |
+
+For Codex, authenticate with
+`clud auth login codex --acknowledge-experimental`, or provide `OPENAI_API_KEY`
+to the MCP server. Claude requires `ANTHROPIC_API_KEY`; optional OpenRouter uses
+`clud auth login openrouter`. Keep provider credentials in the server's
+environment or credential store.
+
+Example instruction to Hermes:
+
+> Use clud's serve_start with backend codex, then show the base URL and model
+> discovery URL. Keep the client token private.
+
+`serve_start` returns connection details for an **Anthropic Messages** API:
+`base_url`, `models_url`, `messages_url`, `auth_header`, and `client_token`.
+Use the listed model IDs and returned client authentication for inference.
+The MCP connection owns the gateway and stops it on disconnect. For agent
+tasks that must survive a tool-call deadline, use the durable `session_*`
+tools. See [gateway setup and lifecycle](docs/architecture/standalone-gateway.md)
+for the complete contract and HTTP examples.
 
 ## Usage
 
@@ -133,6 +190,14 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `-V`, `--version` | Show version |
 
 Unknown flags are forwarded directly to the backend agent.
+
+### Local API gateway
+
+`clud serve --claude` or `clud serve --codex` exposes a local
+Anthropic-compatible API for other clients.
+Add `--openrouter` to make configured OpenRouter models available. See the
+[server setup and examples](docs/architecture/standalone-gateway.md), or
+[Hermes integration](#hermes-integration) for MCP discovery.
 
 ### OpenRouter through Claude Code
 

@@ -682,6 +682,7 @@ pub struct UpstreamClient<C: CredentialSource> {
     /// Stable upstream cache/session identity.
     session_id: String,
     retry_observer: Option<RetryObserver>,
+    shutdown_sockets: Option<std::sync::Arc<crate::serve_transport::UpstreamSockets>>,
     /// The bearer actually sent on the last attempt may differ from the
     /// source's initial bearer after a guarded 401 refresh.
     last_target: Mutex<Option<UpstreamTarget>>,
@@ -704,8 +705,28 @@ impl<C: CredentialSource> UpstreamClient<C> {
             config,
             session_id: new_session_id(),
             retry_observer: None,
+            shutdown_sockets: None,
             last_target: Mutex::new(None),
             redaction: None,
+        }
+    }
+
+    /// Track standalone HTTPS connections so shutdown interrupts blocked reads.
+    pub(crate) fn with_shutdown_sockets(
+        mut self,
+        sockets: std::sync::Arc<crate::serve_transport::UpstreamSockets>,
+    ) -> Self {
+        self.shutdown_sockets = Some(sockets);
+        self
+    }
+
+    fn agent(&self) -> ureq::Agent {
+        let builder = ureq::AgentBuilder::new()
+            .timeout_connect(self.config.connect_timeout)
+            .timeout_read(self.config.read_timeout);
+        match &self.shutdown_sockets {
+            Some(sockets) => crate::serve_transport::tracked_agent(builder, sockets),
+            None => builder.build(),
         }
     }
 
@@ -788,10 +809,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
         }
         let target = self.credentials.resolve()?;
         let body = self.redacted_body(body, &target)?;
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.config.connect_timeout)
-            .timeout_read(self.config.read_timeout)
-            .build();
+        let agent = self.agent();
         let mut request = agent
             .post(&target.compact_url())
             .set("Content-Type", "application/json")
@@ -960,10 +978,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
             .config
             .first_frame_timeout
             .map(|timeout| Instant::now() + timeout);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.config.connect_timeout)
-            .timeout_read(self.config.read_timeout)
-            .build();
+        let agent = self.agent();
 
         // Every header is constructed here. Nothing from the downstream request
         // is copied, so the harness's Anthropic bearer cannot travel upstream.

@@ -1,0 +1,109 @@
+//! Foreground API server lifecycle and credential setup.
+
+use std::io::{self, Write};
+use std::sync::Arc;
+
+use crate::codex_bridge::{
+    BridgeConfig, BridgeHandle, StandaloneClaudeCredential, StandaloneClaudeCredentialSource,
+    UnifiedGatewayConfig,
+};
+use crate::provider_auth::{
+    NativeSecretStore, SecretStore, OPENROUTER_VAULT_ACCOUNT, OPENROUTER_VAULT_SERVICE,
+};
+
+struct ClaudeApiKey(String);
+
+impl StandaloneClaudeCredentialSource for ClaudeApiKey {
+    fn credential(&self) -> Option<StandaloneClaudeCredential> {
+        Some(StandaloneClaudeCredential::ApiKey(self.0.clone()))
+    }
+}
+
+/// Start the API server and stop its listener on the first Ctrl+C.
+pub fn run(port: u16, claude: bool, codex: bool, openrouter: bool) -> i32 {
+    match start(port, claude, codex, openrouter) {
+        Ok(mut bridge) => {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            if ctrlc::set_handler(move || {
+                let _ = sender.send(());
+            })
+            .is_err()
+            {
+                eprintln!("clud serve: could not install interrupt handler");
+                return 1;
+            }
+            println!("clud serve listening at {}", bridge.base_url());
+            let _ = io::stdout().flush();
+            let _ = receiver.recv();
+            match bridge.shutdown() {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("clud serve: {error}");
+                    1
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("clud serve: {error}");
+            2
+        }
+    }
+}
+
+fn claude_api_key() -> Result<String, String> {
+    let key = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Claude credentials are missing; set ANTHROPIC_API_KEY".to_string())?;
+    if !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return Err("Claude credential is malformed".to_string());
+    }
+    Ok(key)
+}
+
+fn start(port: u16, claude: bool, codex: bool, openrouter: bool) -> Result<BridgeHandle, String> {
+    if !claude && !codex {
+        return Err("select --claude or --codex".to_string());
+    }
+    let claude_key = claude.then(claude_api_key).transpose()?;
+    if codex {
+        crate::codex_upstream::ResolvedCredentials::preflight_default()
+            .map_err(|error| error.to_string())?;
+    }
+    let client_token = std::env::var("CLUD_SERVE_CLIENT_TOKEN")
+        .map_err(|_| "set CLUD_SERVE_CLIENT_TOKEN to a random client token".to_string())?;
+    let openrouter_key = if openrouter {
+        let vault = NativeSecretStore::new_for(OPENROUTER_VAULT_SERVICE, OPENROUTER_VAULT_ACCOUNT)
+            .map_err(|error| error.to_string())?;
+        Some(
+            vault
+                .get()
+                .map_err(|error| error.to_string())?
+                .filter(|key| !key.trim().is_empty())
+                .ok_or_else(|| {
+                    "OpenRouter credentials are missing; run `clud auth login openrouter`"
+                        .to_string()
+                })?,
+        )
+    } else {
+        None
+    };
+    if claude_key.as_deref() == Some(client_token.as_str())
+        || openrouter_key.as_deref() == Some(client_token.as_str())
+        || (codex && std::env::var("OPENAI_API_KEY").ok().as_deref() == Some(client_token.as_str()))
+    {
+        return Err("client token must differ from provider credentials".to_string());
+    }
+    let mut gateway = UnifiedGatewayConfig::new(None, codex).with_openrouter(openrouter_key);
+    if let Some(upstreams) = crate::codex_bridge::unified_integration_upstreams_from_process() {
+        gateway = gateway.with_standalone_test_upstreams(&upstreams);
+    }
+    let mut config = BridgeConfig::default().with_unified_gateway(gateway);
+    if let Some(key) = claude_key {
+        config = config.with_standalone_claude_credential(Arc::new(ClaudeApiKey(key)));
+    }
+    let config = config
+        .with_standalone_listener(port, client_token)
+        .map_err(|error| error.to_string())?;
+    BridgeHandle::start(config).map_err(|error| error.to_string())
+}

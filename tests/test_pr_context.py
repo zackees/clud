@@ -2,8 +2,6 @@
 
 import importlib.util
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -267,9 +265,9 @@ def test_snapshot_fetch_rejects_a_mismatched_pull_request(pr_context):
 def test_artifact_paths_outside_the_private_directory_are_rejected(
     pr_context, tmp_path, monkeypatch
 ):
-    if sys.platform == "darwin" or os.name == "nt":
-        pytest.skip("artifact privacy verification is not supported on this platform")
-    monkeypatch.setenv("CLUD_TOOL_OUTPUT_DIR", str(tmp_path / "private"))
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(pr_context, "artifact_root", lambda: private.resolve())
     stray = tmp_path / "pr-context-abcdefgh.json"
     stray.write_text("{}")
     with pytest.raises(ValueError, match="outside the private"):
@@ -310,3 +308,20 @@ def test_limit_range_and_selector_conflicts_are_rejected(pr_context, capsys):
     assert "limit must be 512..8192" in capsys.readouterr().err
     assert pr_context.main(["--artifact", "/tmp/x.json", "--refresh", "/tmp/x.json"]) == 1
     assert "choose either" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("platform", "message"),
+    [("win32", "Windows artifact privacy"), ("darwin", "macOS artifact ACL")],
+)
+def test_artifacts_fail_closed_on_platforms_without_privacy_verification(
+    pr_context, monkeypatch, platform, message
+):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(pr_context, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(
+        pr_context, "os", SimpleNamespace(name="nt" if platform == "win32" else "posix")
+    )
+    with pytest.raises(ValueError, match=message):
+        pr_context.artifact_root()
