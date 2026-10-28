@@ -1030,6 +1030,10 @@ pub enum Command {
         /// Model to report when the response body carries none.
         #[arg(long = "for-model")]
         for_model: Option<String>,
+        /// Emit the exact HTTP body the route writes, not one JSON per line:
+        /// a chat.completion body, or `data: <chunk>` frames plus `[DONE]`.
+        #[arg(long, requires = "response")]
+        http: bool,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
