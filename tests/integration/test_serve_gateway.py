@@ -418,6 +418,10 @@ def test_serve_codex_without_claude_key(
         else:
             assert "bridged reply" in json.loads(body)["content"][0]["text"]
         assert len(upstream.requests) == 1
+        if not streaming:
+            for _ in range(40):
+                status, body = call("POST", "/v1/messages", payload)
+                assert status == 200, body
         headers, _, raw = upstream.requests[0].partition(b"\r\n\r\n")
         assert token.encode() not in headers
         translated = json.loads(raw)

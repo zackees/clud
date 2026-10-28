@@ -1107,10 +1107,13 @@ fn handle_connection(
         parsed.agent_id.as_deref(),
         standalone_root.as_deref().unwrap_or(fallback_root),
     );
+    let request_conversations = standalone_root
+        .as_ref()
+        .map(|_| ConversationStore::new(config.history_limits));
     let connection = ConnectionContext {
         config,
         shutdown,
-        conversations,
+        conversations: request_conversations.as_ref().unwrap_or(conversations),
         log,
         fallback_root,
         cache_health,
@@ -1970,6 +1973,9 @@ fn build_pipeline(
     let mut client = UpstreamClient::new(credentials, upstream_config)
         .with_session_id(conversation_key.id.clone())
         .with_redaction(redaction.cloned());
+    if config.standalone_client_auth {
+        client = client.with_shutdown_sockets(Arc::clone(&config.standalone_upstreams));
+    }
     if let Some(log) = log.cloned() {
         client = client.with_retry_observer(move |error, attempt, budget, backoff| {
             record_retry(&log, error, attempt, budget, backoff);
@@ -5190,6 +5196,58 @@ mod tests {
         assert_eq!(status(&response), 200, "{response}");
         assert!(response.contains("clud-claude-codex-sol"));
         assert!(!response.contains("clud-claude-openrouter"));
+    }
+
+    #[test]
+    fn anonymous_standalone_requests_do_not_exhaust_conversation_capacity() {
+        let upstream = FakeResponses::start();
+        let limits = HistoryLimits {
+            max_conversations: 1,
+            ..HistoryLimits::default()
+        };
+        let bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_standalone_client_auth()
+                .with_history_limits(limits),
+        )
+        .unwrap();
+        for _ in 0..40 {
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+        assert_eq!(upstream.requests().len(), 40);
+    }
+
+    #[test]
+    fn standalone_shutdown_interrupts_codex_tls_handshake() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut config = BridgeConfig::default()
+            .with_test_upstream_url(Some(format!("https://{}", listener.local_addr().unwrap())))
+            .with_standalone_client_auth();
+        config.stream_idle_timeout = Duration::from_secs(5);
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_string();
+        let client = thread::spawn(move || {
+            request(
+                addr,
+                &authorized("POST", "/v1/messages", &token, PROBE_BODY),
+            )
+        });
+        let (mut upstream, _) = listener.accept().unwrap();
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0];
+        upstream.read_exact(&mut byte).unwrap();
+        assert_eq!(byte[0], 0x16, "TLS handshake reached the tracked socket");
+        let start = Instant::now();
+        bridge.shutdown().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        client.join().unwrap();
     }
 
     #[test]
