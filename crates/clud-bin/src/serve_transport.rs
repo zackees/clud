@@ -5,6 +5,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct SocketState {
@@ -38,6 +39,13 @@ impl UpstreamSockets {
             registry: Arc::clone(self),
             id,
         })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed
     }
 
     pub(crate) fn cancel(&self) {
@@ -80,11 +88,123 @@ impl ureq::TlsConnector for TrackedTlsConnector {
             .socket()
             .ok_or_else(|| io::Error::other("upstream socket unavailable"))?;
         let lease = self.sockets.register(socket)?;
-        let inner = self.tls.connect(dns_name, io)?;
+        let cancellable = CancellableIo {
+            inner: io,
+            sockets: Arc::clone(&self.sockets),
+        };
+        let inner = self.tls.connect(dns_name, Box::new(cancellable))?;
         Ok(Box::new(TrackedStream {
             inner,
             _lease: lease,
         }))
+    }
+}
+
+/// Bound raw socket operations without retrying blocking socket timeouts.
+/// ureq supplies a blocking stream. Each operation temporarily uses nonblocking
+/// mode; WouldBlock means no bytes moved and can safely be retried on Windows.
+struct CancellableIo {
+    inner: Box<dyn ureq::ReadWrite>,
+    sockets: Arc<UpstreamSockets>,
+}
+
+impl fmt::Debug for CancellableIo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CancellableIo")
+    }
+}
+
+/// Restore ureq's blocking-mode contract on success, error, or unwinding.
+struct BlockingRestore<'a> {
+    inner: &'a mut dyn ureq::ReadWrite,
+    active: bool,
+}
+
+impl BlockingRestore<'_> {
+    fn restore(&mut self) -> io::Result<()> {
+        self.inner
+            .socket()
+            .ok_or_else(|| io::Error::other("missing socket"))?
+            .set_nonblocking(false)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for BlockingRestore<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.restore();
+        }
+    }
+}
+
+impl CancellableIo {
+    fn transfer(
+        &mut self,
+        writing: bool,
+        mut operation: impl FnMut(&mut dyn ureq::ReadWrite) -> io::Result<usize>,
+    ) -> io::Result<usize> {
+        const POLL: Duration = Duration::from_millis(10);
+        let socket = self
+            .inner
+            .socket()
+            .ok_or_else(|| io::Error::other("missing socket"))?;
+        let original = if writing {
+            socket.write_timeout()?
+        } else {
+            socket.read_timeout()?
+        };
+        let deadline = original.map(|timeout| Instant::now() + timeout);
+        socket.set_nonblocking(true)?;
+        let mut restore = BlockingRestore {
+            inner: self.inner.as_mut(),
+            active: true,
+        };
+        let result = loop {
+            if self.sockets.is_closed() {
+                break Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "gateway shutting down",
+                ));
+            }
+            let remaining = deadline.map(|value| value.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|value| value.is_zero()) {
+                break Err(io::Error::new(io::ErrorKind::TimedOut, "upstream timeout"));
+            }
+            match operation(&mut *restore.inner) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::park_timeout(remaining.unwrap_or(POLL).min(POLL));
+                }
+                result => break result,
+            }
+        };
+        let restored = restore.restore();
+        match result {
+            Ok(count) => restored.map(|()| count),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Read for CancellableIo {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.transfer(false, |stream| stream.read(buf))
+    }
+}
+
+impl Write for CancellableIo {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.transfer(true, |stream| stream.write(buf))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl ureq::ReadWrite for CancellableIo {
+    fn socket(&self) -> Option<&TcpStream> {
+        self.inner.socket()
     }
 }
 
@@ -283,6 +403,86 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_poll_preserves_the_original_read_deadline_and_timeout() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let timeout = Duration::from_millis(250);
+        client.set_read_timeout(Some(timeout)).unwrap();
+        let mut stream = CancellableIo {
+            inner: Box::new(client),
+            sockets: Arc::new(UpstreamSockets::default()),
+        };
+        let started = Instant::now();
+        let error = stream.read(&mut [0_u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= timeout);
+        assert_eq!(
+            stream.inner.socket().unwrap().read_timeout().unwrap(),
+            Some(timeout)
+        );
+    }
+
+    #[test]
+    fn delayed_data_survives_polling_and_restores_blocking_mode() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            peer.write_all(b"late").unwrap();
+            finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        let mut stream = CancellableIo {
+            inner: Box::new(client),
+            sockets: Arc::new(UpstreamSockets::default()),
+        };
+        let mut bytes = [0; 4];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"late");
+        stream
+            .inner
+            .socket()
+            .unwrap()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let started = Instant::now();
+        assert!(stream.inner.read(&mut [0; 1]).is_err());
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        finished_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn writes_under_backpressure_preserve_every_byte() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut bytes = Vec::new();
+            peer.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let payload = vec![0x5a; 8 * 1024 * 1024];
+        let mut stream = CancellableIo {
+            inner: Box::new(client),
+            sockets: Arc::new(UpstreamSockets::default()),
+        };
+        stream.write_all(&payload).unwrap();
+        drop(stream);
+        assert_eq!(server.join().unwrap(), payload);
+    }
+
+    #[test]
     fn tracked_connector_requires_a_valid_tls_handshake() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -350,10 +550,14 @@ mod tests {
     #[test]
     fn cancellation_unblocks_an_upstream_read_and_rejects_late_connections() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
         let sockets = Arc::new(UpstreamSockets::default());
         let lease = sockets.register(&client).unwrap();
+        let mut client = CancellableIo {
+            inner: Box::new(client),
+            sockets: Arc::clone(&sockets),
+        };
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
