@@ -142,6 +142,9 @@ fn starting_point(facts: &BranchFacts, verdict: Verdict) -> String {
     }
 }
 
+/// Shared landing guidance for normal launches and the rendered `/do` contract.
+pub(super) const LAND_CONTRACT: &str = "Land the work: when a requested code change belongs in a git repository with a remote, aim to deliver a validated, pushed and merged PR. When appropriate branch from the default branch, commit the changes, and run the repository validation. Follow repository instructions and required reviews; use the merge queue when required, wait for checks with pr_merge_watch when available, fix failures, and report the merged PR URL. Reference the issue when applicable. Honor the user's explicit instructions, approval requirements, branch protection and --safe; never bypass them. If review or approval prevents merging, report what remains.";
+
 const ISSUE_CONTRACT: &str = "\
 Read the issue and implement it. Every code change keeps a RED -> GREEN \
 focused regression: first show the failure or reproduction, then make that \
