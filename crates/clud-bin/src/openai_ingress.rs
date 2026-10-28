@@ -20,9 +20,10 @@
 //!
 //! The response half (`Anthropic Messages JSON/SSE → OpenAI`) lives further down
 //! in [`translate_chat_response`] and [`ChatStreamTranslator`], ported from
-//! CLIProxyAPI `.../claude_openai_response.go`. Wiring either half onto a route
-//! is still a separate slice: nothing here changes the launch-scoped gateway
-//! contract.
+//! CLIProxyAPI `.../claude_openai_response.go`. [`render_chat_body`],
+//! [`render_chat_stream`] and [`render_chat_error`] are the bytes the
+//! `POST /v1/chat/completions` route puts on the wire. Nothing here changes the
+//! launch-scoped gateway contract: the route is additive beside it.
 
 use serde_json::{json, Map, Value};
 
@@ -1001,17 +1002,95 @@ pub fn translate_chat_sse(model: &str, body: &[u8]) -> Vec<Value> {
     ChatStreamTranslator::new(model).push_body(body)
 }
 
-/// `clud __openai-chat-translate --response [--stream]` — the process seam for
-/// the response half. Reads the upstream body on stdin; writes one OpenAI JSON
-/// object per line (a single `chat.completion`, or one chunk per line for a
-/// stream). No session, backend, credential or daemon action.
-pub fn run_translate_response_stdin(stream: bool, requested_model: Option<&str>) -> i32 {
+/// Render one buffered Anthropic Messages body as the OpenAI
+/// `chat.completion` body an HTTP client receives.
+pub fn render_chat_body(model: &str, body: &[u8]) -> Result<Vec<u8>, IngressError> {
+    let translated = translate_chat_response(body, Some(model))?;
+    serde_json::to_vec(&translated).map_err(|_| IngressError::NotJson)
+}
+
+/// Render one buffered Anthropic Messages SSE body as the OpenAI stream an
+/// HTTP client receives: one `data: <chunk>` frame per translated chunk, then
+/// the `data: [DONE]` sentinel OpenAI clients wait for.
+pub fn render_chat_stream(model: &str, body: &[u8]) -> Vec<u8> {
+    let mut rendered = String::new();
+    for chunk in translate_chat_sse(model, body) {
+        if let Ok(encoded) = serde_json::to_string(&chunk) {
+            rendered.push_str("data: ");
+            rendered.push_str(&encoded);
+            rendered.push_str("\n\n");
+        }
+    }
+    rendered.push_str("data: [DONE]\n\n");
+    rendered.into_bytes()
+}
+
+/// Render an OpenAI-shaped error envelope.
+///
+/// A client that speaks Chat Completions only understands this shape, so every
+/// refusal this gateway makes on that route — a malformed request, an
+/// unsupported model, an upstream failure — arrives as one. `status` picks the
+/// OpenAI error `type` the client's own retry logic keys on.
+pub fn render_chat_error(status: u16, message: &str) -> Vec<u8> {
+    let kind = match status {
+        400 | 422 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        501 | 503 => "service_unavailable_error",
+        _ => "api_error",
+    };
+    let envelope = json!({
+        "error": {
+            "message": message,
+            "type": kind,
+            "param": Value::Null,
+            "code": Value::Null,
+        }
+    });
+    serde_json::to_vec(&envelope).unwrap_or_default()
+}
+
+/// `clud __openai-chat-translate --response [--stream] [--http]` — the process
+/// seam for the response half. Reads the upstream body on stdin; writes one
+/// OpenAI JSON object per line (a single `chat.completion`, or one chunk per
+/// line for a stream), or with `--http` the exact HTTP body the route writes.
+/// No session, backend, credential or daemon action.
+pub fn run_translate_response_stdin(
+    stream: bool,
+    requested_model: Option<&str>,
+    http: bool,
+) -> i32 {
     use std::io::{Read, Write};
 
     let mut body = Vec::new();
     if std::io::stdin().read_to_end(&mut body).is_err() {
         eprintln!("could not read the response body from stdin");
         return 2;
+    }
+    if http {
+        // The exact bytes the route puts on the wire, so the Python suite can
+        // assert the client-visible framing rather than one JSON per line.
+        let model = requested_model.unwrap_or_default();
+        let rendered = if stream {
+            render_chat_stream(model, &body)
+        } else {
+            match render_chat_body(model, &body) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 2;
+                }
+            }
+        };
+        return match std::io::stdout().write_all(&rendered) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("could not write the translated response: {error}");
+                2
+            }
+        };
     }
     let mut rendered = Vec::new();
     if stream {
@@ -1058,6 +1137,35 @@ pub fn run_translate_response_stdin(stream: bool, requested_model: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_stream_frames_are_data_lines_terminated_by_done() {
+        let sse = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_r\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":2}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let rendered = String::from_utf8(render_chat_stream("alias-m", sse.as_bytes())).unwrap();
+        assert!(rendered.ends_with("data: [DONE]\n\n"), "{rendered:?}");
+        let frames: Vec<&str> = rendered.split("\n\n").filter(|f| !f.is_empty()).collect();
+        assert!(
+            frames.iter().all(|frame| frame.starts_with("data: ")),
+            "{frames:?}"
+        );
+        let first: Value = serde_json::from_str(&frames[0]["data: ".len()..]).unwrap();
+        assert_eq!(first["object"], "chat.completion.chunk");
+        // The body's own model wins over the fallback alias.
+        assert_eq!(first["model"], "claude-x");
+    }
+
+    #[test]
+    fn rendered_error_is_an_openai_envelope_typed_by_status() {
+        let body: Value = serde_json::from_slice(&render_chat_error(429, "slow down")).unwrap();
+        assert_eq!(body["error"]["message"], "slow down");
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        let body: Value = serde_json::from_slice(&render_chat_error(400, "bad")).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
 
     fn translate(request: Value) -> Value {
         translate_chat_request(&serde_json::to_vec(&request).unwrap()).unwrap()

@@ -1151,6 +1151,9 @@ fn route_request(
         ("POST", "/v1/messages") => {
             route_messages(stream, connection, &mut parsed, conversation_key);
         }
+        ("POST", "/v1/chat/completions") => {
+            route_chat_completions(stream, connection, &mut parsed, conversation_key);
+        }
         _ => {
             if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
                 eprintln!(
@@ -1309,6 +1312,7 @@ fn route_messages(
             &parsed.headers,
             log,
             connection.cache_health,
+            None,
         );
     } else {
         serve_codex_discovery_messages(
@@ -1323,6 +1327,91 @@ fn route_messages(
             connection.cache_health,
         );
     }
+}
+
+/// `POST /v1/chat/completions`: an OpenAI-shaped turn.
+///
+/// clud's routing, failover, catalog and credentials all speak Anthropic
+/// Messages, so an OpenAI client is served by translating its request into that
+/// shape at the door (`openai_ingress::translate_chat_request`) and translating
+/// the answer back on the way out. This is CLIProxyAPI's
+/// `internal/api/server_routes.go:73` (`v1.POST("/chat/completions")`) ported
+/// onto the gateway clud already has: no route in the ladder learns a second
+/// protocol, and nothing here changes the launch-scoped contract.
+fn route_chat_completions(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+    conversation_key: &ConversationKey,
+) {
+    let (config, log) = (connection.config, connection.log);
+    config.turn_requests.fetch_add(1, Ordering::Release);
+    let Some(body) = read_request_body(stream, connection, parsed, "request_body") else {
+        return;
+    };
+    let request: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            record_rejection(log, 400, "invalid_json");
+            refuse_chat(stream, 400, "request body is not valid JSON");
+            return;
+        }
+    };
+    let Some(model) = request.get("model").and_then(serde_json::Value::as_str) else {
+        record_rejection(log, 400, "missing_model");
+        refuse_chat(stream, 400, "request is missing a model");
+        return;
+    };
+    let model = model.to_string();
+    let streaming = request.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
+    if !matches!(config.gateway_mode, GatewayMode::Unified(_)) {
+        record_rejection(log, 501, "chat_completions_unsupported");
+        refuse_chat(
+            stream,
+            501,
+            "POST /v1/chat/completions needs the unified gateway; this launch exposes the Codex discovery bridge only",
+        );
+        return;
+    }
+    let translated = match crate::openai_ingress::translate_chat_request(&body) {
+        Ok(translated) => translated,
+        Err(error) => {
+            record_rejection(log, 400, "untranslatable_request");
+            refuse_chat(stream, 400, &error.to_string());
+            return;
+        }
+    };
+    let translated = serde_json::to_vec(&translated).unwrap_or_default();
+    serve_unified_messages(
+        stream,
+        config,
+        connection.shutdown,
+        connection.conversations,
+        &translated,
+        streaming,
+        conversation_key,
+        &parsed.headers,
+        log,
+        connection.cache_health,
+        Some(ChatTranslation { model: &model }),
+    );
+}
+
+/// Answer a refused `/v1/chat/completions` turn in the shape its client speaks.
+fn refuse_chat(stream: &mut TcpStream, status: u16, message: &str) {
+    // Every refusal on this route is an OpenAI error envelope: the client did
+    // not ask for, and cannot parse, an Anthropic one.
+    let envelope = crate::openai_ingress::render_chat_error(status, message);
+    let _ = write_response(stream, status, "application/json", &envelope, false);
+}
+
+/// The client shape a translated `/v1/chat/completions` turn is answered in.
+///
+/// `model` is whatever the client asked for: OpenAI's reply echoes it, and a
+/// provider that renames the wire model must not leak that name back.
+#[derive(Clone, Copy)]
+struct ChatTranslation<'a> {
+    model: &'a str,
 }
 
 /// `GET /_clud/route/status` -- the configured ladder and each route's health.
@@ -1813,6 +1902,7 @@ fn serve_unified_messages(
     headers: &[(String, String)],
     log: Option<&SharedBridgeLog>,
     cache_health: &SharedCacheHealth,
+    chat: Option<ChatTranslation<'_>>,
 ) {
     let GatewayMode::Unified(unified) = &config.gateway_mode else {
         unreachable!("unified request dispatch is guarded by the caller");
@@ -1844,15 +1934,7 @@ fn serve_unified_messages(
     }
     let original_model = model.to_string();
     let mut attempt = UnifiedAttempt::for_launch(unified, &resolved, model);
-    let _redaction_report = crate::secret_redaction::status::Report::new(
-        unified.redaction.as_ref(),
-        config
-            .status_usage
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .writer
-            .clone(),
-    );
+    let _redaction_report = redaction_launch_report(config, unified);
     let mut turn = UnifiedTurn {
         config,
         unified,
@@ -1864,6 +1946,7 @@ fn serve_unified_messages(
         log,
         cache_health,
         redaction: None,
+        chat,
     };
 
     // Descend the ladder. Probing is enabled only while a further rung exists,
@@ -1919,6 +2002,7 @@ fn serve_unified_messages(
                         shutdown,
                         cache_health,
                         turn.redaction,
+                        chat,
                     );
                 };
                 warn_route_exhausted(attempt.route, verdict, state, Some(&rung));
@@ -1931,6 +2015,22 @@ fn serve_unified_messages(
             }
         }
     }
+}
+
+/// The launch's one redaction report, held for the life of a unified turn.
+fn redaction_launch_report(
+    config: &BridgeConfig,
+    unified: &UnifiedGatewayConfig,
+) -> crate::secret_redaction::status::Report {
+    crate::secret_redaction::status::Report::new(
+        unified.redaction.as_ref(),
+        config
+            .status_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .writer
+            .clone(),
+    )
 }
 
 fn write_provider_fault(stream: &mut TcpStream, route: ConversationRoute) {
@@ -2098,6 +2198,9 @@ struct UnifiedTurn<'a> {
     log: Option<&'a SharedBridgeLog>,
     cache_health: &'a SharedCacheHealth,
     redaction: Option<&'a SharedSession>,
+    /// `Some` when the client speaks OpenAI Chat Completions, so every
+    /// committed response body is translated back before it is written.
+    chat: Option<ChatTranslation<'a>>,
 }
 
 impl UnifiedTurn<'_> {
@@ -2135,6 +2238,7 @@ fn dispatch_unified_attempt(
             turn.cache_health,
             &config.status_usage,
             turn.redaction,
+            turn.chat,
         ),
         provider @ (ModelProvider::DeepSeek | ModelProvider::Kimi | ModelProvider::OpenRouter)
             if unified.route_for(provider).is_some() =>
@@ -2161,7 +2265,20 @@ fn dispatch_unified_attempt(
                 turn.cache_health,
                 &config.status_usage,
                 turn.redaction,
+                turn.chat,
             )
+        }
+        ModelProvider::Codex if unified.codex_available && turn.chat.is_some() => {
+            // Codex's pipeline writes Messages frames straight to the client,
+            // so an OpenAI-shaped turn cannot be answered verbatim. Refuse
+            // rather than emit a body the client cannot parse; the Anthropic
+            // routes stay available for the same model.
+            let body = crate::openai_ingress::render_chat_error(
+                400,
+                "this model is served by the Codex route, which does not translate Anthropic responses back to OpenAI on this gateway",
+            );
+            let _ = write_response(stream, 400, "application/json", &body, false);
+            ProxyOutcome::local(400)
         }
         ModelProvider::Codex if unified.codex_available => {
             // Codex is a valid destination but never a probe source: its
@@ -2250,6 +2367,7 @@ fn finish_without_failover(
     shutdown: &AtomicBool,
     cache_health: &SharedCacheHealth,
     redaction: Option<&SharedSession>,
+    chat: Option<ChatTranslation<'_>>,
 ) {
     let direct = match route {
         ConversationRoute::DeepSeek => unified.route_for(ModelProvider::DeepSeek),
@@ -2284,6 +2402,7 @@ fn finish_without_failover(
         cache_health,
         &config.status_usage,
         redaction,
+        chat,
     );
 }
 
@@ -2304,6 +2423,7 @@ fn serve_unified_anthropic_proxy(
     cache_health: &SharedCacheHealth,
     status_usage: &SharedStatusUsage,
     redaction: Option<&SharedSession>,
+    chat: Option<ChatTranslation<'_>>,
 ) -> ProxyOutcome {
     let provider = match route {
         ConversationRoute::Claude => AnthropicUsageProvider::Claude,
@@ -2352,6 +2472,7 @@ fn serve_unified_anthropic_proxy(
                 path,
                 injected_api_key,
                 redaction,
+                chat,
             },
             body,
             headers,
@@ -2530,6 +2651,7 @@ fn serve_unified_count_tokens(
         cache_health,
         &config.status_usage,
         unified.redactor_for(ModelProvider::Claude, Some(model)),
+        None,
     );
 }
 
@@ -2549,6 +2671,9 @@ struct AnthropicProxyTarget<'a> {
     path: &'a str,
     injected_api_key: Option<&'a str>,
     redaction: Option<&'a SharedSession>,
+    /// `Some` when the caller asked for an OpenAI `chat.completion`; the
+    /// upstream body is then buffered and translated before it is written.
+    chat: Option<ChatTranslation<'a>>,
 }
 
 fn redact_request<'a>(
@@ -2701,6 +2826,19 @@ fn serve_anthropic_proxy(
         retry_after,
         request_id,
     };
+    if let Some(chat) = target.chat {
+        return relay_translated_chat(
+            stream,
+            chat,
+            &head,
+            prefix,
+            reader.as_mut(),
+            target.redaction,
+            idle_timeout,
+            shutdown,
+            usage,
+        );
+    }
     if let Some(session) = target.redaction {
         if content_type
             .to_ascii_lowercase()
@@ -2739,6 +2877,172 @@ fn restore_response(body: &[u8], session: &SharedSession) -> io::Result<Vec<u8>>
         .restore_body(body)
         .map(|body| body.into_owned())
         .map_err(|_| io::Error::other("invalid response for secret restoration"))
+}
+
+/// Largest upstream body a translated turn will buffer.
+///
+/// A translated response cannot stream through unchanged -- every chunk has to
+/// be re-framed before the client sees it -- so this route buffers by
+/// construction. The cap is what stops a runaway upstream from turning that
+/// into unbounded memory: past it the client gets an OpenAI error it can retry
+/// instead of a stalled turn.
+const TRANSLATED_BODY_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Buffer one upstream Messages response, translate it into the OpenAI shape
+/// the client asked for, and write it back.
+///
+/// Errors are translated too: a status the upstream chose (a guardrail
+/// rejection, a rate limit) reaches the client as an OpenAI error envelope with
+/// that same status, so the client's own retry logic still keys on it.
+#[allow(clippy::too_many_arguments)]
+fn relay_translated_chat(
+    stream: &mut TcpStream,
+    chat: ChatTranslation<'_>,
+    head: &ProxyResponseHead<'_>,
+    prefix: Vec<u8>,
+    reader: &mut dyn Read,
+    redaction: Option<&SharedSession>,
+    idle_timeout: Duration,
+    shutdown: &AtomicBool,
+    usage: &mut StreamingUsage,
+) -> ProxyOutcome {
+    let status = head.status;
+    let chat_stream = head
+        .content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream");
+    let mut body = prefix;
+    let overrun = read_translated_body(reader, &mut body, shutdown).is_err();
+    usage.feed(&body);
+    if overrun {
+        let message = format!(
+            "upstream response exceeded the {TRANSLATED_BODY_LIMIT}-byte translation buffer"
+        );
+        return write_chat_error(stream, 502, &message, idle_timeout);
+    }
+    let restored = match redaction {
+        Some(session) => match restore_response(&body, session) {
+            Ok(restored) => restored,
+            Err(_) => {
+                return write_chat_error(
+                    stream,
+                    502,
+                    "upstream response could not be restored for the client",
+                    idle_timeout,
+                );
+            }
+        },
+        None => body,
+    };
+    if status >= 400 {
+        // The upstream's own failure: keep its status, but in the client's
+        // shape, with whatever the upstream said as the message.
+        let message = upstream_error_message(&restored);
+        return write_chat_error(stream, status, &message, idle_timeout);
+    }
+    let (out_status, out_type, payload) = if chat_stream {
+        (
+            200,
+            "text/event-stream",
+            crate::openai_ingress::render_chat_stream(chat.model, &restored),
+        )
+    } else {
+        match crate::openai_ingress::render_chat_body(chat.model, &restored) {
+            Ok(payload) => (200, "application/json", payload),
+            Err(error) => {
+                return write_chat_error(
+                    stream,
+                    502,
+                    &format!("upstream response was not a Messages body: {error}"),
+                    idle_timeout,
+                );
+            }
+        }
+    };
+    let translated = ProxyResponseHead {
+        status: out_status,
+        content_type: out_type,
+        retry_after: head.retry_after.clone(),
+        request_id: head.request_id.clone(),
+    };
+    if !write_proxy_head(stream, &translated, &payload, idle_timeout) {
+        return ProxyOutcome::Committed { status: out_status };
+    }
+    finish_proxy_body(
+        stream,
+        ProxyRelay {
+            forwarded: payload.len(),
+            stalled: None,
+        },
+        out_type,
+    );
+    ProxyOutcome::Committed { status: out_status }
+}
+
+/// Read the rest of a translated turn's upstream body into `body`, stopping at
+/// the translation buffer's ceiling, or at shutdown.
+fn read_translated_body(
+    reader: &mut dyn Read,
+    body: &mut Vec<u8>,
+    shutdown: &AtomicBool,
+) -> Result<(), ()> {
+    let mut chunk = [0_u8; 8192];
+    while (body.len() as u64) <= TRANSLATED_BODY_LIMIT {
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(count) => body.extend_from_slice(&chunk[..count]),
+            Err(_) => return Err(()),
+        }
+    }
+    Err(())
+}
+
+/// The most useful one-line message an upstream failure body carries.
+fn upstream_error_message(body: &[u8]) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
+    let message = parsed.as_ref().and_then(|error| {
+        error
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+    });
+    match message {
+        Some(message) => message.to_string(),
+        None if body.is_empty() => "the upstream route returned an empty failure body".to_string(),
+        None => "the upstream route refused this turn".to_string(),
+    }
+}
+
+/// Write one OpenAI error envelope and close the connection.
+fn write_chat_error(
+    stream: &mut TcpStream,
+    status: u16,
+    message: &str,
+    idle_timeout: Duration,
+) -> ProxyOutcome {
+    let payload = crate::openai_ingress::render_chat_error(status, message);
+    let head = ProxyResponseHead {
+        status,
+        content_type: "application/json",
+        retry_after: None,
+        request_id: None,
+    };
+    if !write_proxy_head(stream, &head, &payload, idle_timeout) {
+        return ProxyOutcome::Committed { status };
+    }
+    finish_proxy_body(
+        stream,
+        ProxyRelay {
+            forwarded: payload.len(),
+            stalled: None,
+        },
+        "application/json",
+    );
+    ProxyOutcome::Committed { status }
 }
 
 fn finish_proxy_body(stream: &mut TcpStream, relayed: ProxyRelay, content_type: &str) {
@@ -5572,6 +5876,152 @@ Connection: close
         statuses.sort_unstable();
         assert_eq!(statuses, [200, 200, 200, 200, 400]);
         assert_eq!(upstream.requests().len(), 4, "the fifth turn stays local");
+        bridge.shutdown().unwrap();
+    }
+
+    /// One buffered Anthropic Messages body, as the upstream sends it.
+    fn chat_messages_response() -> Vec<u8> {
+        let body = r#"{"id":"msg_chat_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"hello from messages"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":7}}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// The same turn as an Anthropic SSE stream.
+    fn chat_messages_stream() -> Vec<u8> {
+        response_with_events(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_chat_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n\
+             event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+             event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello \"}}\n\n\
+             event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+             event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n\
+             event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )
+    }
+
+    fn chat_request(bridge: &BridgeHandle, body: &str, session: &str) -> String {
+        request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/chat/completions",
+                bridge.bearer_token(),
+                body,
+                &[
+                    (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                    ("x-claude-code-session-id", session),
+                    ("content-type", "application/json"),
+                ],
+            ),
+        )
+    }
+
+    /// `POST /v1/chat/completions` is translated in, routed by the ladder the
+    /// gateway already owns, and translated back out.
+    #[test]
+    fn chat_completions_answers_in_the_openai_shape() {
+        let anthropic = FakeResponses::start_with_response(Some(chat_messages_response()));
+        let codex = FakeResponses::start_with_response(None);
+        let deepseek = FakeResponses::start_with_response(None);
+        let mut bridge =
+            BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let body =
+            r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+        let response = chat_request(&bridge, body, "chat-shaped-session");
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("chat.completion"), "{response}");
+        assert!(response.contains("hello from messages"), "{response}");
+        assert!(
+            response.contains("\"finish_reason\":\"stop\""),
+            "{response}"
+        );
+        // The request that reached the upstream was a Messages request.
+        let sent = anthropic.requests();
+        assert_eq!(sent.len(), 1, "{}", sent.len());
+        assert!(sent[0].contains("\"messages\""), "{}", sent[0]);
+        assert!(
+            !sent[0].contains("\"max_completion_tokens\""),
+            "{}",
+            sent[0]
+        );
+        bridge.shutdown().unwrap();
+    }
+
+    /// The streaming half keeps its framing: OpenAI chunks, then `[DONE]`.
+    #[test]
+    fn chat_completions_streams_openai_chunks_then_done() {
+        let anthropic = FakeResponses::start_with_response(Some(chat_messages_stream()));
+        let codex = FakeResponses::start_with_response(None);
+        let deepseek = FakeResponses::start_with_response(None);
+        let mut bridge =
+            BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let body =
+            r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+        let response = chat_request(&bridge, body, "chat-stream-session");
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("text/event-stream"), "{response}");
+        assert!(response.contains("chat.completion.chunk"), "{response}");
+        assert!(response.contains("hello "), "{response}");
+        assert!(response.contains("data: [DONE]"), "{response}");
+        bridge.shutdown().unwrap();
+    }
+
+    /// A part clud has no Anthropic spelling for is refused, not dropped, and
+    /// the refusal is an OpenAI error envelope.
+    #[test]
+    fn chat_completions_refuses_an_untranslatable_part() {
+        let anthropic = FakeResponses::start_with_response(Some(chat_messages_response()));
+        let codex = FakeResponses::start_with_response(None);
+        let deepseek = FakeResponses::start_with_response(None);
+        let mut bridge =
+            BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let body = r#"{"model":"claude-x","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAA","format":"wav"}}]}],"stream":false}"#;
+        let response = chat_request(&bridge, body, "chat-refused-session");
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(response.contains("invalid_request_error"), "{response}");
+        assert!(response.contains("input_audio"), "{response}");
+        assert!(
+            anthropic.requests().is_empty(),
+            "a refused turn must not reach the upstream"
+        );
+        bridge.shutdown().unwrap();
+    }
+
+    /// Codex writes Messages frames directly, so an OpenAI-shaped turn for a
+    /// Codex model is refused in the client's shape instead of half-translated.
+    #[test]
+    fn chat_completions_refuses_a_codex_model() {
+        let anthropic = FakeResponses::start_with_response(Some(chat_messages_response()));
+        let codex = FakeResponses::start_with_response(None);
+        let deepseek = FakeResponses::start_with_response(None);
+        let mut bridge =
+            BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let body =
+            r#"{"model":"codex-sol","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+        let response = chat_request(&bridge, body, "chat-codex-session");
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(
+            response.contains("api_error") || response.contains("invalid_request_error"),
+            "{response}"
+        );
+        assert!(response.contains("Codex route"), "{response}");
+        bridge.shutdown().unwrap();
+    }
+
+    /// A launch with no unified gateway has no OpenAI surface at all, and says
+    /// so in the shape its client speaks.
+    #[test]
+    fn chat_completions_is_refused_without_a_unified_gateway() {
+        let upstream = FakeResponses::start_with_response(Some(chat_messages_response()));
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let body =
+            r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+        let response = chat_request(&bridge, body, "chat-no-gateway-session");
+        assert_eq!(status(&response), 501, "{response}");
+        assert!(response.contains("service_unavailable_error"), "{response}");
+        assert!(upstream.requests().is_empty(), "{response}");
         bridge.shutdown().unwrap();
     }
 
