@@ -143,6 +143,14 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: true,
     },
     BundledTool {
+        rel_path: "github/pr_context.py",
+        body: include_str!("../assets/tools/github/pr_context.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "github/ci_failure_report.py",
         body: include_str!("../assets/tools/github/ci_failure_report.py"),
         kill_semantics: KillSemantics::Resumable,
@@ -685,6 +693,18 @@ mod tests {
             .iter()
             .find(|t| t.rel_path == "github/issue_context.py")
             .expect("issue context tool must be bundled");
+        assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
+    }
+
+    /// Pull requests need the same bounded read path issues already have: the
+    /// alternative is `gh pr view --json reviews,comments`, whose single-call
+    /// output reached 21 MB.
+    #[test]
+    fn bundled_includes_pr_context() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/pr_context.py")
+            .expect("pull request context tool must be bundled");
         assert!(tool.body.contains(MANAGED_BY_CLUD_MARKER));
     }
 
