@@ -211,7 +211,8 @@ def test_patch_without_recognizable_targets_is_refused(tmp_path: Path, patch: st
     original = world[3].read_bytes()
     result = _tool(world, "apply_patch", patch)
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "settings" in result.stderr.lower()
+    assert "malformed patch" in result.stderr.lower()
+    assert "raw writes to user settings" not in result.stderr
     assert world[3].read_bytes() == original
 
 
