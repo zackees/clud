@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "clud"
-version = "2.8.40"
+version = "2.8.41"
 dependencies = [
  "arboard",
  "base64",
@@ -775,6 +775,7 @@ dependencies = [
  "vte",
  "walkdir",
  "wasmi",
+ "webpki-roots 0.26.11",
  "which",
  "winapi",
  "windows 0.61.3",
@@ -1082,7 +1083,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daemon-stub"
-version = "2.8.40"
+version = "2.8.41"
 dependencies = [
  "libc",
  "running-process",
@@ -3053,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.8.40"
+version = "2.8.41"
 dependencies = [
  "libc",
  "serde_json",
@@ -4030,11 +4031,11 @@ dependencies = [
 
 [[package]]
 name = "probe-dll"
-version = "2.8.40"
+version = "2.8.41"
 
 [[package]]
 name = "probe-target"
-version = "2.8.40"
+version = "2.8.41"
 
 [[package]]
 name = "proc-macro-crate"
@@ -5179,7 +5180,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tap-gate"
-version = "2.8.40"
+version = "2.8.41"
 dependencies = [
  "running-process",
  "tempfile",

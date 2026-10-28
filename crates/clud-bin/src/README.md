@@ -135,6 +135,8 @@ Entry and orchestration:
   DD-028 amendment, DD-079). Before committing a successful Messages response,
   it classifies non-Message JSON and zero-event SSE as provider faults (#1698);
   see `docs/architecture/provider-failover.md`.
+- `serve_gateway.rs` - foreground API-server startup and credential setup; see [standalone-gateway.md](../../../docs/architecture/standalone-gateway.md).
+- `serve_transport.rs` - tracked standalone upstream TLS sockets and shutdown cancellation.
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
   catalog: the `sol`/`terra`/`luna` aliases and per-model defaults, the
   `<model>@<effort>` parser, and the provider-neutral `Effort` ladder

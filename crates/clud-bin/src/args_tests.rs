@@ -1,6 +1,50 @@
 use super::*;
 use std::path::PathBuf;
 
+#[test]
+fn serve_grammar_is_dispatched_without_backend_passthrough() {
+    for arguments in [
+        vec!["clud", "serve", "--claude"],
+        vec!["clud", "serve", "--claude", "--openrouter"],
+    ] {
+        let raw: Vec<String> = arguments.iter().map(|value| (*value).to_string()).collect();
+        let (known, unknown) = split_known_unknown(&raw).expect("known serve grammar");
+        assert!(
+            unknown.is_empty(),
+            "{arguments:?} must not reach the harness"
+        );
+        let args = Args::try_parse_from(known).expect("serve arguments must parse");
+        assert!(
+            matches!(args.command, Some(Command::Serve { claude: true, codex: false, openrouter, port: 8317 })
+            if openrouter == (arguments.len() == 4)),
+            "serve must dispatch the selected routes"
+        );
+        assert!(!args.claude && !args.openrouter, "serve flags are local");
+    }
+    assert!(Args::try_parse_from(["clud", "serve", "--openrouter"]).is_err());
+}
+
+#[test]
+fn serve_codex_flags_stay_local_and_can_add_routes() {
+    for extra in [vec![], vec!["--openrouter"], vec!["--claude"]] {
+        let mut arguments = vec!["clud", "serve", "--codex"];
+        arguments.extend(extra);
+        let raw = arguments
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let (known, unknown) = split_known_unknown(&raw).unwrap();
+        assert!(unknown.is_empty());
+        let args = Args::try_parse_from(known).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Serve { codex: true, .. })
+        ));
+        assert!(!args.codex, "serve must not select an interactive backend");
+    }
+    assert!(Args::try_parse_from(["clud", "serve"]).is_err());
+}
+
 fn parse(args: &[&str]) -> Args {
     let raw: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     Args::parse_from_raw(raw)
