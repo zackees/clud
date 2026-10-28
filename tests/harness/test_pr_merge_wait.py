@@ -2,15 +2,34 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from tests.harness.harness import Harness
 
 
+def _removed(reason: str = "MANUAL") -> dict:
+    """A queue snapshot whose entry is gone with a *readable* removal (see #2266).
+
+    An ejection is only proven by a removal the watcher can read -- the timeline's
+    last node carries the reason and a timestamp at or after the watch started --
+    and the same removal has to be observed twice. Until #2266 a bare empty
+    ``{}`` sample stood in for that, so this case kept passing while the waiter
+    had already stopped calling it an ejection.
+    """
+    stamp = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    return {"state": "OPEN", "removed": {"reason": reason, "createdAt": stamp}}
+
+
+REMOVED_BY_QUEUE = _removed()
+
+
 @pytest.mark.parametrize(("sequence", "message", "error"), [
     ([{"entry": "AWAITING_CHECKS", "position": 4},
       {"entry": "MERGEABLE", "position": 1}, {"state": "MERGED"}], "MERGED", False),
-    ([{"entry": "AWAITING_CHECKS", "position": 4}, {}], "EJECTED", True),
+    ([{"entry": "AWAITING_CHECKS", "position": 4},
+      REMOVED_BY_QUEUE, REMOVED_BY_QUEUE], "EJECTED", True),
     ([{"entry": "UNMERGEABLE", "position": 1}], "UNMERGEABLE", True),
     ([{"entry": "AWAITING_CHECKS", "position": 1}], "TIMEOUT", True),
 ])

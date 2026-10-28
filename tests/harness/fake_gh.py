@@ -34,7 +34,10 @@ works unchanged:
 - per PR: ``base``, ``draft``, ``body``, ``merge_method``, ``admin``,
   ``requires_review`` (alias ``reviews_required``) and ``approved``.
 - per PR ``queue_sequence``: queue snapshots consumed by merge-watch GraphQL
-  reads; the last snapshot remains available for subsequent polls.
+  reads; the last snapshot remains available for subsequent polls. A snapshot
+  may carry ``removed`` (``{"reason": str, "createdAt": ISO8601-Z}``) to render the
+  queue-removal timeline node a merged-queue ejection is read from (#2266); a
+  snapshot whose ``createdAt`` predates the watch is not an ejection.
 - ``repositories`` maps owner/name to independent worlds with their own
   issues, PRs and default branch. Explicit repo flags, issue/PR URLs and REST
   endpoints select one; an unknown repo fails instead of reading the primary.
@@ -606,8 +609,16 @@ def _graphql_merge(path: Path, state: dict, argv: list[str]) -> int | None:
         entry_state = snapshot.get("entry")
         entry = {"state": entry_state, "position": snapshot.get("position"),
                  "headCommit": None} if entry_state else None
+        # A queue *removal* is only readable when the timeline's last node carries
+        # the reason and its timestamp (#2266): an empty `mergeQueueEntry` with no
+        # removal node is an unreadable sample, not an ejection, and merge-watch
+        # treats it as such. A fixture asks for one with `removed` on the snapshot.
+        removal = snapshot.get("removed")
+        nodes = ([{"reason": removal.get("reason"), "createdAt": removal.get("createdAt")}]
+                 if isinstance(removal, dict) else [])
         value = {"state": snapshot.get("state", "OPEN"), "baseRefName": pr.get("base", "main"),
-                 "autoMergeRequest": None, "mergeQueueEntry": entry, "timelineItems": {"nodes": []}}
+                 "autoMergeRequest": None, "mergeQueueEntry": entry,
+                 "timelineItems": {"nodes": nodes}}
         return _emit(argv, {"data": {"repository": {"pullRequest": value}}})
     if "enqueuePullRequest" in query:
         pr = next((p for p in state.get("prs", [])
