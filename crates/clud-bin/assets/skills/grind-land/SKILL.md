@@ -49,8 +49,10 @@ server and merge.
      `status=needs_fix` with the failing job and the relevant log lines in
      `failure_log`.
    - `2` (new review activity): read the unresolved comments with
-     `gh pr view --repo <github-repo> <n> --comments`. Return `status=needs_fix` with each
-     actionable comment in `failure_log`.
+     `clud tool run github/pr_context.py -- --repo <github-repo> --pr <n>`, then continue with
+     its `--section review-comments` / `--section reviews` offsets and the private snapshot.
+     Do not use `gh pr view --comments`: it prints every review and thread body at once.
+     Return `status=needs_fix` with each actionable comment in `failure_log`.
    - `3` (closed or merged elsewhere): report it; `status=merged` only if
      `gh pr view --repo <github-repo>` says merged, else `gave_up`.
    - `4` (timeout): incomplete observation. Revalidate the same CI and head;

@@ -56,6 +56,7 @@ Audit (#1676):
 | `python/lint_deadcode.py` | unbounded (one JSON row per finding) | `emit_bounded` |
 | `diagnostics/transcript_report.py` | unbounded (`--json` lists every response; text lists every burst) | `emit_bounded` |
 | `github/issue_context.py` | bounded issue overview and explicit continuation | private issue snapshot |
+| `github/pr_context.py` | bounded pull-request overview and explicit continuation | private pull-request snapshot |
 | `github/ci_failure_report.py` | failure summary and ranged continuation | bounded summary plus private raw-log artifact |
 | `github/pr_merge_watch.py` | a few lines per check, but `first error:` was one unbounded log line | line capped at 1000 chars with a notice pointing at the log probe |
 | `git/review_range.py`, `git/ci_targets.py`, `github/is_meta_issue.py`, `github/run_watch.py` | < 2 KB fixed-shape JSON | none |

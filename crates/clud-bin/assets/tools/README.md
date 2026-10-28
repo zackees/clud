@@ -27,6 +27,14 @@ and deleted comments. The existing loop issue cache and `/grind` context pack
 remain separate; refresh each explicitly. Windows and macOS fail closed until
 private artifact ACL verification is available (#2246, #2256).
 
+For a pull request with many reviews or review comments, use `clud tool run
+github/pr_context.py -- --repo OWNER/REPO --pr N`. It returns a bounded overview (review
+states, check summary, omission counts) plus a private snapshot path. Continue with
+`--artifact PATH --section body`, `--section reviews`, `--section review:<id>`,
+`--section comments`, `--section comment:<id>`, `--section review-comments` or
+`--section checks`; `--refresh PATH` reports what changed. Use it instead of
+`gh pr view --json reviews,comments`, which prints every review and thread body at once.
+
 For a failed GitHub Actions job, use
 `clud tool run github/ci_failure_report.py -- --repo OWNER/REPO --run RUN_ID --job JOB_ID`.
 It reads the completed job even while siblings run, prints bounded possible
