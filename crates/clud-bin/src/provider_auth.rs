@@ -603,10 +603,10 @@ pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
 /// `display_name` names the provider prompted for (e.g. "DeepSeek", "Kimi")
 /// so this one implementation serves every Anthropic-compat provider.
 pub(crate) fn prompt_secret(display_name: &str) -> Result<String, ()> {
-    eprint!("{display_name} API key: ");
-    io::stderr().flush().map_err(|_| ())?;
     terminal::enable_raw_mode().map_err(|_| ())?;
     let result = (|| {
+        eprint!("{display_name} API key: ");
+        io::stderr().flush().map_err(|_| ())?;
         let mut secret = String::new();
         loop {
             if let Event::Key(key) = event::read().map_err(|_| ())? {

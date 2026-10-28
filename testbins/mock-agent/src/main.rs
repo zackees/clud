@@ -39,9 +39,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Windows shim tests copy this executable to the next PATH entry. It is
     // a recording handoff only: even a missed catastrophe guard cannot delete.
-    if let Some(path) = std::env::var_os("MOCK_RM_STUB_LOG") {
-        let payload = serde_json::to_vec(&args[1..]).expect("serialize recording-stub args");
-        std::fs::write(path, payload).expect("write recording-stub args");
+    if run_early_fixture(&args) {
         return;
     }
 
@@ -586,6 +584,26 @@ fn main() {
 
     trace(&format!("exit {exit_code}"));
     std::process::exit(exit_code);
+}
+
+fn run_early_fixture(args: &[String]) -> bool {
+    if let Some(path) = std::env::var_os("MOCK_RM_STUB_LOG") {
+        let payload = serde_json::to_vec(&args[1..]).expect("serialize recording-stub args");
+        std::fs::write(path, payload).expect("write recording-stub args");
+        return true;
+    }
+    if let Some(path) = std::env::var_os("CLUD_TEST_HANDOFF_MARKER") {
+        println!("handoff-ready");
+        io::stdout().flush().expect("flush handoff prompt");
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .expect("read handoff input");
+        let payload = serde_json::json!({"args": &args[1..], "input": input});
+        std::fs::write(path, payload.to_string()).expect("write handoff report");
+        std::process::exit(37);
+    }
+    false
 }
 
 /// Append one timestamped stage line to `$MOCK_AGENT_TRACE_DIR/mock-<pid>.log`

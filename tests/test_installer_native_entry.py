@@ -662,3 +662,297 @@ def browser_user_path_snapshot():
             return winreg.QueryValueEx(key, "Path")
         except FileNotFoundError:
             return None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+def test_interactive_install_offers_provider_setup(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    pid, master = pty.fork()
+    if pid == 0:
+        binary = str(clud_binary())
+        os.execve(binary, [binary, "--installer", "--install-current"], env)
+    output = bytearray()
+    sent = False
+    status = None
+    deadline = time.monotonic() + 45
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            if b"Install clud" in output and b"Not now" in output and not sent:
+                os.write(master, b"\x1b[A\r")
+                sent = True
+            if b"Setup for:" in output and b"Codex" in output:
+                break
+            waited, child_status = os.waitpid(pid, os.WNOHANG)
+            if waited:
+                status = child_status
+                break
+        assert b"Setup for:" in output, output.decode(errors="replace")
+        assert b"OpenRouter" in output
+        assert b"Claude" in output
+        assert b"Codex" in output
+    finally:
+        if status is None:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        os.close(master)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+@pytest.mark.parametrize(
+    ("selection", "model"),
+    [
+        (b"\r", "deepseek/deepseek-v4.1-flash"),
+        (b"\x1b[B\r", "z-ai/glm-5.3-flash"),
+        (b"\x1b[B\x1b[B\r", "example/custom"),
+    ],
+)
+def test_interactive_openrouter_setup_saves_key_and_model(
+    tmp_path: Path, selection: bytes, model: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    vault = tmp_path / "vault"
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    env["CLUD_INTEGRATION_TESTS"] = "1"
+    env["CLUD_TEST_SECRET_STORE_DIR"] = str(vault)
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer", "--install-current"], env=env, capture=True
+    )
+    try:
+        process.expect("Not now", timeout=30)
+        process.write("\x1b[A\r")
+        process.expect("Setup for:", timeout=60)
+        process.write("\r")
+        process.expect("OpenRouter API key:", timeout=30)
+        process.write("sk-or-test-install-12345\r")
+        process.expect("Select a model:", timeout=30)
+        process.write(selection.decode())
+        if model == "example/custom":
+            process.expect("OpenRouter model ID:", timeout=30)
+            process.write("example/custom\r")
+        process.expect("Start right now?", timeout=30)
+        process.write("\x1b[B\r")
+        assert process.wait(timeout=30) == 0, process.output_text
+        assert "sk-or-test-install-12345" not in process.output_text
+        assert "z-ai/glm-5.3-flash" in process.output_text
+        document = json.loads((home / ".clud" / "settings.json").read_text())
+        assert document["providers"]["openrouter"]["model"] == model
+        assert document["backend"]["default"] == "openrouter"
+        assert document["harness"]["default"] == "default"
+        installed = home / ".local" / "bin" / "clud"
+        plan = run_process(
+            [str(installed), "--dry-run", "-p", "hi"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        assert json.loads(plan.stdout)["model_selection"]["wire_model"] == model
+        if model == "deepseek/deepseek-v4.1-flash":
+            assert_bare_openrouter_launch(installed, env, tmp_path)
+        assert [path.read_text() for path in vault.glob("*.secret")] == [
+            "sk-or-test-install-12345"
+        ]
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+def assert_bare_openrouter_launch(installed: Path, env: dict[str, str], tmp_path: Path) -> None:
+    mock = os.environ.get("CLUD_TEST_MOCK_AGENT_BINARY")
+    assert mock, "compiled mock-agent bundle is required"
+    mock_dir = tmp_path / "mock-harnesses"
+    mock_dir.mkdir()
+    for name in ("claude", "codex"):
+        target = mock_dir / name
+        shutil.copyfile(mock, target)
+        target.chmod(0o755)
+    bare_env = env.copy()
+    bare_env["PATH"] = os.pathsep.join([str(mock_dir), str(installed.parent), bare_env["PATH"]])
+    bare_env["CLUD_TEST_SECRET_STORE_DIR"] = str(tmp_path / "empty-vault")
+    bare_env["CLUD_TEST_CREDENTIAL_PROBE_URL"] = "http://127.0.0.1:1"
+    bare_env["CLUD_DAEMON_TEST_MODE"] = "1"
+    bare_env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "daemon")
+    process = PseudoTerminalProcess([str(installed)], env=bare_env, capture=True)
+    try:
+        try:
+            process.expect("OpenRouter API key:", timeout=60)
+        except (EOFError, TimeoutError):
+            pytest.fail(f"bare launch did not reach OpenRouter preflight: {process.output_text}")
+        process.write("\x1b")
+        try:
+            process.wait(timeout=30)
+        except KeyboardInterrupt:
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
+@pytest.mark.parametrize(
+    ("child_exit", "expected"),
+    [("exit 37", 37), ("kill -INT $$", 130), ("ulimit -c 0; kill -ABRT $$", 134)],
+)
+def test_start_uses_the_installed_executable(
+    tmp_path: Path, child_exit: str, expected: int
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    marker = tmp_path / "launched"
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    env["CLUD_TEST_HANDOFF_MARKER"] = str(marker)
+    destination = home / ".local" / "bin" / "clud"
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer", "--install-current"], env=env, capture=True
+    )
+    try:
+        process.expect("Not now", timeout=30)
+        process.write("\x1b[A\r")
+        process.expect("Setup for:", timeout=60)
+        process.write("\x1b[B\r")
+        process.expect("Start right now?", timeout=30)
+        # A distinguishable installed executable proves which binary gets launched.
+        destination.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$CLUD_TEST_HANDOFF_MARKER"\n'
+            f"{child_exit}\n"
+        )
+        destination.chmod(0o755)
+        process.write("\r")
+        if expected == 130:
+            with pytest.raises(KeyboardInterrupt):
+                process.wait(timeout=30)
+            assert process.poll() == 130
+        else:
+            assert process.wait(timeout=30) == expected, process.output_text
+        assert marker.read_text().splitlines() == [
+            str(destination), "--claude", "--harness", "default"
+        ]
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ConPTY")
+def test_start_handoff_inherits_windows_console(installer_target, tmp_path: Path) -> None:
+    env, destination = installer_target
+    mock = os.environ.get("CLUD_TEST_MOCK_AGENT_BINARY")
+    if not mock:
+        pytest.skip("compiled mock-agent bundle is required")
+    marker = tmp_path / "handoff.json"
+    env["CLUD_TEST_HANDOFF_MARKER"] = str(marker)
+    process = PseudoTerminalProcess(
+        [str(clud_binary()), "--installer", "--install-current"], env=env, capture=True
+    )
+    try:
+        process.expect("Not now", timeout=30)
+        process.write("\x1b[A\r")
+        process.expect("Setup for:", timeout=60)
+        process.write("\x1b[B\r")
+        process.expect("Start right now?", timeout=30)
+        shutil.copyfile(mock, destination)
+        process.write("\r")
+        process.expect("handoff-ready", timeout=30)
+        process.write("hello from terminal\r")
+        assert process.wait(timeout=30) == 37, process.output_text
+        report = json.loads(marker.read_text())
+        assert report["args"] == ["--claude", "--harness", "default"]
+        assert report["input"].strip() == "hello from terminal"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell startup")
+def test_activation_verifies_shell_with_terminal_stdin(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    (home / ".bashrc").write_text(
+        'if [ ! -t 0 ]; then clud() { printf "%s\\n" wrong; }; fi\n'
+        "printf '\\033[6n'\n"
+        "IFS= read -r -s -n 6 -t 2 reply\n"
+        "if [ \"$reply\" != \"$(printf '\\033[1;1R')\" ]; then "
+        "clud() { printf '%s\\n' wrong; }; fi\n"
+        "printf '\\n'\n"
+    )
+    (home / ".bashrc").chmod(0o600)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert b"verified fresh name-based lookup" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell startup")
+@pytest.mark.parametrize("flood", [False, True])
+def test_activation_handles_unread_terminal_queries(tmp_path: Path, flood: bool) -> None:
+    home = tmp_path / "home^[[1;1R"
+    home.mkdir(mode=0o700)
+    query = "printf '\\033[6n'"
+    (home / ".bashrc").write_text(
+        ("for i in {1..20}; do " + query + "; done\n" if flood else query + "\n")
+        + "printf '\\n'\n"
+    )
+    (home / ".bashrc").chmod(0o600)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if flood:
+        assert result.returncode != 0
+        assert b"too many terminal queries" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell startup")
+def test_activation_bounds_noisy_shell_version_output(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    profile = home / ".bashrc"
+    profile.write_text("clud() { yes excessive-output; }\n")
+    profile.chmod(0o600)
+    env = isolated_env(home)
+    env["SHELL"] = shutil.which("bash") or "/bin/bash"
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert b"fresh shell output is too large" in result.stderr

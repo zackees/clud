@@ -189,8 +189,14 @@ fn status_command(argv: Vec<String>) -> Result<(i32, Vec<u8>), ()> {
 
 pub const DEFAULT_COUNTDOWN: Duration = Duration::from_secs(3);
 
-pub fn should_select(args: &Args, stdin_is_terminal: bool, stderr_is_terminal: bool) -> bool {
-    stdin_is_terminal
+pub fn should_select(
+    args: &Args,
+    stdin_is_terminal: bool,
+    stderr_is_terminal: bool,
+    configured_provider: Option<ModelProvider>,
+) -> bool {
+    configured_provider.is_none()
+        && stdin_is_terminal
         && stderr_is_terminal
         && !args.dry_run
         && args.command.is_none()
@@ -531,7 +537,7 @@ mod tests {
 
     #[test]
     fn only_bare_interactive_launches_offer_the_picker() {
-        assert!(should_select(&parse(&["clud"]), true, true));
+        assert!(should_select(&parse(&["clud"]), true, true, None));
         for argv in [
             vec!["clud", "--codex"],
             vec!["clud", "--harness", "deepseek"],
@@ -541,10 +547,25 @@ mod tests {
             vec!["clud", "--experimental-daemon-centralized"],
             vec!["clud", "loop", "task"],
         ] {
-            assert!(!should_select(&parse(&argv), true, true), "argv={argv:?}");
+            assert!(
+                !should_select(&parse(&argv), true, true, None),
+                "argv={argv:?}"
+            );
         }
-        assert!(!should_select(&parse(&["clud"]), false, true));
-        assert!(!should_select(&parse(&["clud"]), true, false));
+        assert!(!should_select(&parse(&["clud"]), false, true, None));
+        assert!(!should_select(&parse(&["clud"]), true, false, None));
+        for provider in [
+            ModelProvider::OpenRouter,
+            ModelProvider::Claude,
+            ModelProvider::Codex,
+        ] {
+            assert!(!should_select(
+                &parse(&["clud"]),
+                true,
+                true,
+                Some(provider)
+            ));
+        }
     }
 
     #[test]

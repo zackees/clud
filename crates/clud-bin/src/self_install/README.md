@@ -10,7 +10,9 @@ menu defaults to **Not now**; the explicit menu defaults to **Install this
 version**. `transaction.rs` builds the read-only plan, verifies the selected
 source, and commits one executable. `activation.rs` builds the read-only
 shell plan shown before consent, updates owned Bash, zsh, or fish startup
-files, and proves fresh login and interactive name-based lookup.
+files, and proves fresh login and interactive name-based lookup. The shell
+probes use isolated PTYs so they exercise terminal-dependent startup without
+taking over the user's terminal before setup resumes.
 The host halves live behind the platform boundary (#1953):
 `platform/unix/self_install_activation.rs` owns the Bash, zsh, and fish
 startup-file edits and fresh-shell proof, and
@@ -20,7 +22,11 @@ change broadcast, and OS-built user-environment proof on Windows.
 reparse-point checks `transaction.rs` applies. A binary commit alone does not
 count as installer success. Explicit `--no-modify-path` instead skips the
 activation plan entirely, preserves profiles/User Path, and reports binary
-installation with activation still required.
+installation with activation still required. After a successful interactive install and verified
+activation, `setup.rs` offers OpenRouter, Claude, or Codex, saves an
+OpenRouter key and model when selected, persists the chosen provider and native
+harness, and offers to launch the installed executable immediately.
+Scripted installs and structured installer reports do not run this setup.
 
 `result.rs` defines the versioned `clud-installer-result/v1` outcome. Add
 `--installer-json` to an explicit current/version request to emit exactly one
