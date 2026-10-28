@@ -92,3 +92,10 @@ A green local run is strong evidence, not a guarantee. Say which one you ran.
 They do not overlap. bosn manages Docker resources on the **host**; a workflow run by
 preloop uses the Docker engine **inside its own microVM**, which the host's bosn
 neither sees nor tracks. Use bosn for the local build loop, preloop for the workflow.
+
+## After local validation
+
+When implementing a requested change, continue with the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference):
+push, open the PR, watch hosted CI, fix failures and merge when permitted.
+A request only to replay CI ends with its result; offer `/do <issue-url>`
+for remaining implementation work.

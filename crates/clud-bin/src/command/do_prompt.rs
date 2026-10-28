@@ -269,11 +269,15 @@ pub fn render(
         Ok(DoKind::Single) if issue.is_some() || target.contains("://") => {
             out.push_str(ISSUE_CONTRACT);
             out.push_str("\n\n");
+            out.push_str(LAND_CONTRACT);
+            out.push_str("\n\n");
             out.push_str(&finish_step(&default));
         }
         Ok(DoKind::Single) => {
             out.push_str(&format!("The goal: {target}\n\n"));
             out.push_str(GOAL_CONTRACT);
+            out.push_str("\n\n");
+            out.push_str(LAND_CONTRACT);
             out.push_str("\n\n");
             out.push_str(&finish_step(&default));
         }

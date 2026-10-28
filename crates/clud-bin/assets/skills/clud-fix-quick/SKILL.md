@@ -1,6 +1,6 @@
 ---
 name: clud-fix-quick
-description: Local-first speed mode. Edits in place on the current branch, runs lint + targeted test + /clud-review on source-code changes only, skips all three for docs/config/SKILL.md. Pushes direct; falls back to PR + admin-merge without waiting for CI when the branch is protected. Trades rigor for iteration speed; escalate to /goal when the change is large or risky.
+description: Local-first speed mode. Edits in place on the current branch, runs lint + targeted test + /clud-review on source-code changes only, skips all three for docs/config/SKILL.md. Pushes direct; falls back to a PR when the branch is protected, merging immediately only where repository policy permits, then observes hosted validation. Trades rigor for iteration speed; escalate to /goal when the change is large or risky.
 triggers:
   - When the user says "/clud-fix-quick <issue-or-task>"
   - When the user asks to "quickly fix" / "just push" / "iterate fast" / "speed mode"
@@ -18,8 +18,8 @@ offer a new worktree or a retry after the claim releases.
 Speed mode for small, well-understood changes. Edits files in place on the current
 branch (no disposable worktree), runs the smallest set of gates that
 still catches regressions, then pushes — directly when the branch
-allows, or via a PR that gets admin-merged immediately when the branch
-is protected. The targeted-test step (when source files change) is the
+allows, or via a PR that gets admin-merged immediately only where policy permits.
+Required checks, reviews and merge queues take precedence. The targeted-test step (when source files change) is the
 GREEN signal that the change works; this skill delegates the RED ->
 GREEN cycle to that focused test rather than running a full ritual,
 trading some rigor for iteration speed.
@@ -170,18 +170,28 @@ for review purposes; run the source gates.
 9. **Push.** Try direct push to the current branch
    (`git push origin <current-branch>`). On `protected branch` /
    `remote rejected` / `non-fast-forward` (for a protected branch),
-   fall back to the PR path: `gh pr create --base
-   <default-branch>` then `gh pr merge <num> --admin --squash
-   --delete-branch` immediately. Do NOT use `--auto` and do NOT wait
-   for CI — the local gates already validated. On a plain
+   fall back to the PR path: `gh pr create --base <default-branch>`.
+   First inspect repository policy: required checks, reviews and merge
+   queues must be satisfied through the shared landing contract below.
+   Only where policy permits immediate merging, use
+   `gh pr merge <num> --admin --squash --delete-branch` without waiting
+   for CI first; observe hosted validation in step 10. On a plain
    `non-fast-forward` / `fetch first` rejection of an unprotected
    branch, run the Push-Race Recovery procedure below instead.
-10. **Surface result.** One-line summary: commit SHA on the target
+10. **Observe delivery.** After a direct push or permitted immediate merge,
+    start the exact commit's hosted run watch (`github/run_watch.py`) or
+    `github/pr_merge_watch.py` in the background and wait for completion
+    notification. Report failures and carry the fix forward in a new PR; do
+    not stop at "pushed" or claim validation while checks remain pending.
+    Repository rules, required checks/reviews and merge queues override the
+    immediate admin-merge shortcut above; never bypass protections. In those
+    repositories use the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference).
+11. **Surface result.** One-line summary: commit SHA on the target
     branch, push mode (`direct` or `pr-admin-merged-<pr-num>`), and
     any non-default test/lint/review notes. A recovered push race is
     reported as a note (`push: direct after rebase onto <sha>`), not
     as a blocker.
-11. **Release this run's checkout claim** with `clud claim release-own`.
+12. **Release this run's checkout claim** with `clud claim release-own`.
 
 ## Push-Race Recovery
 

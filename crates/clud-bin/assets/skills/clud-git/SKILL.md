@@ -117,3 +117,9 @@ When called from `/clud-fix-quick`, `/clud-issue-triage`, or any other skill:
 
 - `"$CLUD_EXE" trash` subcommand — quarantines paths under `~/.clud/trash/<timestamp>/` for daemon GC.
 - `/clud-fix-quick` — speed-mode skill that wants the same worktree teardown without the full PR ceremony.
+
+## Landing a working branch
+
+When code work is ready, follow the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference) before tearing down
+its branch or checkout. Preserve work when checks, review or permissions block
+landing and report the remaining gate.

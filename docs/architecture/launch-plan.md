@@ -181,8 +181,34 @@ merge a PR when appropriate. `launch.land_bias` in the user settings accepts
 disable the preference. `--dry-run` exposes the resulting instructions in
 the command. This is guidance, not permission: user instructions, `--safe`,
 repository rules, required reviews and branch protection still apply. The
-instructions are appended to existing user instructions. DeepSeek Harness
+instructions are appended to existing user instructions. The merge guidance is
+shared with the rendered `/do` contract (`command/do_prompt.rs::LAND_CONTRACT`).
+Bundled implementation skills hand off to that contract; issue-filing and
+build-only tasks offer a next step without authorizing implementation. DeepSeek Harness
 does not currently expose an equivalent instruction channel.
+
+For implementation tasks in a repository with a remote, finish the delivery:
+branch from the default branch when appropriate, commit, run the repository's
+validation, push and open a PR referencing the issue (`Closes #N` for the
+final fix). Observe hosted checks with `github/pr_merge_watch.py`, fix failures,
+and satisfy required review before submitting the PR through the repository's
+merge mechanism. For a required merge queue, submit with
+`github/pr_merge.py --match-head-commit <head-sha>` and observe the PR until it
+actually merges; queue submission alone is incomplete. Use the tools through
+`clud tool run <tool> -- <arguments>` and their help for selectors and deadlines.
+Start a bounded watcher once and wait on its live session or completion
+notification; never write a polling loop. Report the merged PR URL, or the
+specific approval, permission or policy gate that still prevents delivery.
+
+Quick-fix may retain its permitted direct-push or immediate-merge path, but
+must then observe the exact delivered commit's hosted run with
+`github/run_watch.py` (or the PR watcher), report failures and fix forward in a
+PR. This speed exception never bypasses required checks, reviews or queues.
+Review-only skills return findings and a handoff, build-only skills point to
+landing when implementation finishes, and issue-filing skills offer
+`/do <issue-url>` without starting a fix. These pointers do not grant permission
+for additional work. Cross-repository implementation lands upstream first,
+releases or pins the merged dependency, then validates and lands the consumer.
 
 ## Unknown-flag passthrough
 
