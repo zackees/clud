@@ -774,9 +774,7 @@ fn an_incomplete_signature_is_not_a_pwd_walk() {
     ));
 }
 
-/// The remedy names the session project root, and says why a walk is wrong —
-/// an operator reading it should not have to rediscover the extern-checkout
-/// interaction.
+/// The denial `cd /elsewhere` produces under the relaxed policy.
 fn full_denial() -> String {
     deny("cd /elsewhere", CdPolicy::Relaxed).expect("denied")
 }
@@ -808,6 +806,25 @@ fn a_different_session_gets_the_full_text_again() {
 }
 
 #[test]
+fn stale_seen_markers_are_pruned_when_a_new_one_is_written() {
+    let dir = TempDir::new().unwrap();
+    let seen = dir.path().join(SEEN_DIR_NAME);
+    fs::create_dir_all(&seen).unwrap();
+    let stale = seen.join("stale.seen");
+    fs::write(&stale, b"1").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    condense_at(Some(dir.path()), Some("fresh"), full_denial());
+    assert!(!stale.exists(), "stale marker survived");
+    assert!(seen_file(dir.path(), "fresh").exists());
+}
+
+#[test]
 fn unreadable_state_or_no_session_fails_open_to_full() {
     let dir = TempDir::new().unwrap();
     let blocker = dir.path().join("not-a-dir");
@@ -827,6 +844,9 @@ fn unreadable_state_or_no_session_fails_open_to_full() {
     }
 }
 
+/// The remedy names the session project root, and says why a walk is wrong —
+/// an operator reading it should not have to rediscover the extern-checkout
+/// interaction.
 #[test]
 fn the_pwd_walk_remedy_names_the_root_and_the_reason() {
     assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains("CLAUDE_PROJECT_DIR"));

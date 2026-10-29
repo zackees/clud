@@ -502,8 +502,13 @@ fn short_message(full: &str) -> String {
         return full.to_string();
     };
     let head = &full[..=end];
+    let why = if full.contains("outside the registered repos") {
+        "cd back to a registered root"
+    } else {
+        "session cwd is pinned"
+    };
     format!(
-        "[{rule}] {head} (session cwd is pinned); use `(cd DIR && CMD)` or an absolute path. \
+        "[{rule}] {head} ({why}); use `(cd DIR && CMD)` or an absolute path. \
          override: CLUD_BAD_CMD_OVERRIDE={rule}:<reason>",
         rule = BLOCK_CD_RULE_ID,
     )
@@ -526,6 +531,9 @@ pub(super) fn condense_at(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // Best effort: if the marker cannot be written, the next block
             // simply prints the full text again.
+            if let Some(parent) = path.parent() {
+                super::block_bad_cmd_repeat::prune(parent, std::time::SystemTime::now());
+            }
             let _ = super::block_bad_cmd_repeat::write_fast(&path, b"1", true);
             full
         }
