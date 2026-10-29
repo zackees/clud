@@ -46,6 +46,11 @@ If Bosn is unavailable or busy, use hosted CI. Stop only your own Bosn run;
 never kill other sessions' processes. Native Windows/macOS behavior needs the
 relevant native CI lane; a local run on another OS cannot prove it.
 
+Agent landing: in a queue-live repo a worker ends at enqueue and frees its
+checkout; a checkout-free chaperone owns the PR to `MERGED`. Native labels go on
+at PR creation. See [`ci.md`](docs/architecture/ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge)
+and [DD-192](docs/DESIGN_DECISIONS.md#dd-192-workers-end-at-enqueue-and-a-chaperone-owns-the-merge).
+
 See [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci)
 for optional replay commands and coverage limits. Do not weaken a test or
 waive a hosted job to obtain a green result.

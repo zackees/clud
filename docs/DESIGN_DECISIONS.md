@@ -7338,3 +7338,26 @@ repository policies, review requirements or branch protection. DD-002's
 `--safe` continues to disable permission bypasses; it is independent of the
 landing preference. LaunchPlan and `--dry-run` expose the injected instructions
 under DD-005.
+
+
+## DD-192: Workers end at enqueue and a chaperone owns the merge
+
+**Decision (2026-10-29):** In queue-live repos a code-writing worker ends at
+enqueue, frees its single checkout and may hand the PR to a checkout-free
+chaperone that waits for the merge. The chaperone reports `MERGED`,
+`NEEDS-FIXUP` or `STUCK`; the orchestrator counts work done only on `MERGED`.
+Native CI labels are applied at PR creation, never later. Harnesses without
+background agents keep the old behavior: the agent observes until merged.
+`LAND_CONTRACT` carries the short form; the full contract is in
+[ci.md](architecture/ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge)
+and mirrors fleet policy GEN-033 (forge-ci/ci.yml).
+
+**Why:** A worker waiting on PR CI and the merge_group run holds the only
+checkout while idle. Worktrees would add parallelism but also cost disk,
+caches and cleanup; chaperones are cheap and need no checkout. A late native
+label cancels a run and leaves a stale failing `CI OK` (#2273), hence labels
+at creation.
+
+**Evidence:** The 2026-10-29 burn-down loop spent 70-80% of worker wall time
+(about 15-17 of 21-24 minutes) idle on CI while holding the checkout, and a
+`ci-windows` PR (#2323) stalled the pipeline for 45+ minutes.
