@@ -1725,6 +1725,12 @@ fn is_ram_backed(path: &Path) -> bool {
 #[path = "rm_tool_clone.rs"]
 mod clone;
 
+/// Whether `rev` holds commits no remote-tracking ref reaches; the predicate
+/// `safe-rm` applies to clones, shared with the worktree trash schedule.
+pub(crate) fn has_unpushed(dir: &Path, rev: &str) -> Result<bool, String> {
+    clone::has_unpushed(dir, rev)
+}
+
 #[path = "rm_tool_ledger.rs"]
 pub mod ledger;
 

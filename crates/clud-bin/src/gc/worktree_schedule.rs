@@ -43,6 +43,10 @@ pub struct Candidate {
     pub idle_secs: i64,
     /// Kept, in use, unknown to the probe, or already reclaimable.
     pub exempt: bool,
+    /// Why the worktree holds work that trashing would lose (uncommitted
+    /// tracked changes, unpushed commits, or unreadable git state). Only
+    /// probed for candidates about to be scheduled; see [`mark_dirty`].
+    pub dirty: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +59,64 @@ pub enum Action {
     },
     /// The date has passed: move it to trash.
     Trash { path: String },
+    /// Exempt because it holds unsaved work; log "kept: dirty".
+    KeptDirty { path: String, reason: String },
+}
+
+/// Candidates that would be scheduled this tick: not exempt and idle long
+/// enough. Only these are worth a git probe.
+fn schedulable(c: &Candidate) -> bool {
+    !c.exempt && c.idle_secs >= MIN_IDLE_SECS
+}
+
+/// Fill `dirty` for every [`schedulable`] candidate with `probe`, which
+/// returns the reason a worktree holds unsaved work. The probe must fail
+/// closed (an unreadable repo is reported as dirty).
+pub fn mark_dirty(candidates: &mut [Candidate], probe: &dyn Fn(&str) -> Option<String>) {
+    for c in candidates.iter_mut().filter(|c| schedulable(c)) {
+        c.dirty = probe(&c.path);
+    }
+}
+
+/// Git facts that make trashing a worktree lossy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DirtyFacts {
+    /// `git status --porcelain --untracked-files=no` is non-empty.
+    pub tracked_changes: bool,
+    /// HEAD holds commits no remote-tracking ref reaches.
+    pub unpushed: bool,
+    /// Git could not be read; treated as dirty.
+    pub unreadable: Option<String>,
+}
+
+/// The reason to keep the worktree, or `None` when it is safe to trash.
+pub fn dirty_reason(f: &DirtyFacts) -> Option<String> {
+    if let Some(e) = &f.unreadable {
+        return Some(format!("git state unreadable: {e}"));
+    }
+    match (f.tracked_changes, f.unpushed) {
+        (true, true) => Some("uncommitted tracked changes and unpushed commits".into()),
+        (true, false) => Some("uncommitted tracked changes".into()),
+        (false, true) => Some("unpushed commits".into()),
+        (false, false) => None,
+    }
+}
+
+/// Gather [`DirtyFacts`] with git. Every failure fails closed.
+pub fn probe_dirty(dir: &Path) -> DirtyFacts {
+    let mut facts = DirtyFacts::default();
+    match crate::worktrees::run_git(dir, &["status", "--porcelain", "--untracked-files=no"]) {
+        Ok(out) => facts.tracked_changes = !out.trim().is_empty(),
+        Err(e) => {
+            facts.unreadable = Some(e);
+            return facts;
+        }
+    }
+    match crate::rm_tool::has_unpushed(dir, "HEAD") {
+        Ok(v) => facts.unpushed = v,
+        Err(e) => facts.unreadable = Some(e),
+    }
+    facts
 }
 
 /// Update `schedule` for this tick and return what to do.
@@ -68,14 +130,21 @@ pub fn plan(
         schedule.remove_after.clear();
         return Vec::new();
     }
-    let eligible: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|c| !c.exempt && c.idle_secs >= MIN_IDLE_SECS)
-        .collect();
+    let mut actions = Vec::new();
+    let mut eligible: Vec<&Candidate> = Vec::new();
+    for c in candidates.iter().filter(|c| schedulable(c)) {
+        match &c.dirty {
+            // Dropped from the schedule below, even if already scheduled.
+            Some(reason) => actions.push(Action::KeptDirty {
+                path: c.path.clone(),
+                reason: reason.clone(),
+            }),
+            None => eligible.push(c),
+        }
+    }
     schedule
         .remove_after
         .retain(|path, _| eligible.iter().any(|c| &c.path == path));
-    let mut actions = Vec::new();
     for c in eligible {
         match schedule.remove_after.get(&c.path) {
             Some(&after) if now >= after => {
@@ -161,6 +230,7 @@ mod tests {
             bytes: 10,
             idle_secs: 2 * DAY,
             exempt,
+            dirty: None,
         }
     }
 
@@ -187,6 +257,76 @@ mod tests {
                 path: "/wt/a".into()
             }]
         );
+        assert!(s.remove_after.is_empty());
+    }
+
+    fn dirty_cand(path: &str) -> Candidate {
+        Candidate {
+            dirty: Some("uncommitted tracked changes".into()),
+            ..cand(path, false)
+        }
+    }
+
+    #[test]
+    fn dirty_reason_covers_each_fact_and_fails_closed() {
+        assert_eq!(dirty_reason(&DirtyFacts::default()), None);
+        let tracked = DirtyFacts {
+            tracked_changes: true,
+            ..DirtyFacts::default()
+        };
+        assert!(dirty_reason(&tracked).unwrap().contains("uncommitted"));
+        let unpushed = DirtyFacts {
+            unpushed: true,
+            ..DirtyFacts::default()
+        };
+        assert!(dirty_reason(&unpushed).unwrap().contains("unpushed"));
+        let unreadable = DirtyFacts {
+            unreadable: Some("boom".into()),
+            ..DirtyFacts::default()
+        };
+        assert!(dirty_reason(&unreadable).unwrap().contains("unreadable"));
+        let missing = std::path::Path::new("/nonexistent/clud-dirty-probe");
+        assert!(dirty_reason(&probe_dirty(missing)).is_some());
+    }
+
+    #[test]
+    fn only_schedulable_candidates_are_probed() {
+        let mut exempt = cand("/wt/exempt", true);
+        let mut fresh = cand("/wt/fresh", false);
+        fresh.idle_secs = 1;
+        let mut cands = [exempt.clone(), fresh, cand("/wt/ok", false)];
+        let probed = std::cell::RefCell::new(Vec::new());
+        mark_dirty(&mut cands, &|p| {
+            probed.borrow_mut().push(p.to_string());
+            Some("dirty".into())
+        });
+        assert_eq!(*probed.borrow(), ["/wt/ok"]);
+        exempt.dirty = None;
+        assert_eq!(cands[0], exempt);
+        assert_eq!(cands[2].dirty.as_deref(), Some("dirty"));
+    }
+
+    #[test]
+    fn dirty_worktrees_are_never_scheduled_and_are_reported() {
+        let mut s = Schedule::default();
+        let acts = plan(&mut s, true, &[dirty_cand("/wt/d")], 0);
+        assert_eq!(
+            acts,
+            [Action::KeptDirty {
+                path: "/wt/d".into(),
+                reason: "uncommitted tracked changes".into()
+            }]
+        );
+        assert!(s.remove_after.is_empty());
+    }
+
+    #[test]
+    fn a_scheduled_worktree_that_becomes_dirty_is_unscheduled() {
+        let mut s = Schedule::default();
+        plan(&mut s, true, &[cand("/wt/a", false)], 0);
+        assert!(s.remove_after.contains_key("/wt/a"));
+        let acts = plan(&mut s, true, &[dirty_cand("/wt/a")], GRACE_SECS);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Trash { .. })));
         assert!(s.remove_after.is_empty());
     }
 

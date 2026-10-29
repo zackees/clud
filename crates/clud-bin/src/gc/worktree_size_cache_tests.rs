@@ -315,3 +315,23 @@ fn over_limit_refresh_names_the_largest_worktrees() {
     refresh_cache(&root, 1 << 40, NOW).unwrap();
     assert!(crate::gc::worktree_top::read_for(&root, NOW, 60).is_empty());
 }
+
+#[test]
+fn over_is_flagged_as_a_lower_bound_and_old_files_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worktrees-size.json");
+    for (check, lower) in [
+        (SizeCheck::Over(60 * GIB), true),
+        (SizeCheck::Under(GIB), false),
+        (SizeCheck::Unknown, false),
+    ] {
+        write_cache(&path, &cached(check, 0)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["bytes_is_lower_bound"], lower, "{check:?}");
+        assert_eq!(read_cache(&path).unwrap().check, check);
+    }
+    let old = r#"{"checked_unix":1,"warn_bytes":5,"state":"over","bytes":9}"#;
+    std::fs::write(&path, old).unwrap();
+    assert_eq!(read_cache(&path).unwrap().check, SizeCheck::Over(9));
+}

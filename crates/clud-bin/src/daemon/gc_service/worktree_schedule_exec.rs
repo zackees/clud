@@ -55,6 +55,7 @@ fn candidates(
                 bytes: t.bytes,
                 idle_secs: row.map_or(0, |r| now.saturating_sub(r.mtime_unix)),
                 exempt,
+                dirty: None,
             }
         })
         .collect()
@@ -79,6 +80,10 @@ pub(super) fn run(
     let mut over = matches!(cached.map(|c| c.check), Some(SizeCheck::Over(_)));
     let mut schedule = worktree_schedule::load(wt_root);
     let mut cands = candidates(wt_root, rows, live_cwds, procs, now);
+    // Only candidates about to be scheduled cost a git probe.
+    worktree_schedule::mark_dirty(&mut cands, &|p| {
+        worktree_schedule::dirty_reason(&worktree_schedule::probe_dirty(Path::new(p)))
+    });
     if over && mode == ReclaimMode::Delete {
         let warn_bytes = cached.map_or(0, |c| c.warn_bytes);
         over = prune_build_output(wt_root, rows, live_cwds, &mut cands, warn_bytes, now);
@@ -95,6 +100,9 @@ pub(super) fn run(
                 "[clud] gc: {path} ({bytes} bytes) is unmerged and over worktrees.warn_bytes; \
                  it moves to clud trash after unix {remove_after} unless `clud gc keep` pins it"
             ),
+            Action::KeptDirty { path, reason } => {
+                eprintln!("[clud] gc: kept: dirty {path} ({reason}); not scheduled for trash");
+            }
             Action::Trash { path } if mode == ReclaimMode::Observe => {
                 eprintln!("[clud] gc tick: observe mode, would trash oversized worktree {path}");
             }

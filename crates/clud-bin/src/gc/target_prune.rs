@@ -231,6 +231,7 @@ mod tests {
             bytes: 1,
             idle_secs: idle,
             exempt,
+            dirty: None,
         }
     }
 
