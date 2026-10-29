@@ -453,3 +453,103 @@ def test_serve_codex_missing_credentials_is_actionable(
     assert result.returncode == 2
     assert "clud auth login codex" in result.stderr
     assert "ANTHROPIC_API_KEY" not in result.stderr
+
+
+def test_serve_applies_payload_rules_to_the_upstream_body(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, api_upstreams
+) -> None:
+    """The rules file rewrites the request the upstream actually receives.
+
+    Ports CLIProxyAPI's ``requests.payload`` (``config.example.yaml:266-334``):
+    ``override`` replaces a parameter the caller sent, ``default`` fills one it
+    omitted, and ``filter`` removes one. A rule that cannot be applied must not
+    refuse the client's request.
+    """
+    import http.client
+    import json
+    from urllib.parse import urlsplit
+
+    claude, openrouter = api_upstreams
+    rules = tmp_path / "payload-rules.json"
+    rules.write_text(
+        json.dumps(
+            {
+                "default": [{"models": [{"name": "claude-*"}], "params": {"temperature": 0.3}}],
+                "override": [{"models": [{"name": "claude-*"}], "params": {"max_tokens": 32}}],
+                "filter": [{"params": ["metadata.user_id", "messages.9.content"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client_token = "local-client-token-payload-rules"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "clud_openrouter--api_key_v1.secret").write_text(
+        "openrouter-upstream-canary", encoding="utf-8"
+    )
+    env = mock_env.copy()
+    env.update(
+        {
+            "CLUD_INTEGRATION_TESTS": "1",
+            "CLUD_TEST_SECRET_STORE_DIR": str(vault),
+            "CLUD_SERVE_CLIENT_TOKEN": client_token,
+            "ANTHROPIC_API_KEY": "claude-upstream-canary",
+            "CLUD_TEST_GATEWAY_PLAINTEXT_TLS": "1",
+            "CLUD_PAYLOAD_RULES": str(rules),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+            "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": claude.url.replace("http://", "https://"),
+            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": claude.url.replace("http://", "https://"),
+            # The unified seam is all-or-nothing: one missing URL sends the
+            # launch at the real providers.
+            "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": openrouter.url.replace(
+                "http://", "https://"
+            ),
+            "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": openrouter.url.replace(
+                "http://", "https://"
+            ),
+        }
+    )
+    child = process.Popen(
+        [str(clud_binary), "serve", "--claude", "--openrouter", "--port", "0"],
+        env=env,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        text=True,
+        creationflags=process.CREATE_NEW_PROCESS_GROUP,
+    )
+    try:
+        line = child.next_stdout(timeout=60)
+        assert isinstance(line, str), (line, child.poll())
+        address = urlsplit(line.strip().split("listening at ", 1)[1])
+        connection = http.client.HTTPConnection(address.hostname, address.port, timeout=15)
+        connection.request(
+            "POST",
+            "/v1/messages",
+            body=json.dumps(
+                {
+                    "model": "claude-test",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 64,
+                    "metadata": {"user_id": "must-not-reach-the-upstream"},
+                }
+            ),
+            headers={"x-api-key": client_token, "content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        status = response.status
+        response.read()
+        connection.close()
+        assert status == 200, f"status {status}"
+        assert claude.requests, "the gateway never reached the upstream"
+        forwarded = claude.requests[-1][2]
+        assert forwarded["max_tokens"] == 32, "override replaces what the caller sent"
+        assert forwarded["temperature"] == 0.3, "default fills an omitted parameter"
+        assert "user_id" not in forwarded.get("metadata", {}) or "metadata" not in forwarded, (
+            "filter removes the parameter"
+        )
+        assert forwarded["messages"] == [{"role": "user", "content": "hello"}]
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=15)

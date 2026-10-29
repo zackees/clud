@@ -1,0 +1,186 @@
+//! Unit tests for [`crate::payload_rules`].
+//!
+//! Ports CLIProxyAPI's `requests.payload` (`config.example.yaml:266-334`).
+//! The Python suite (`tests/test_payload_rules.py`) drives the same engine
+//! through the hidden `__apply-payload-rules` seam.
+
+use super::*;
+
+fn rules(json: Value) -> PayloadRules {
+    parse(&serde_json::to_vec(&json).expect("fixture serializes")).expect("fixture parses")
+}
+
+#[test]
+fn wildcard_star_is_the_whole_language() {
+    assert!(wildcard_matches("claude-*", "claude-sonnet-4"));
+    assert!(wildcard_matches("claude-*", "CLAUDE-OPUS"));
+    assert!(wildcard_matches("*sonnet*", "x-sonnet-y"));
+    assert!(wildcard_matches("*", "anything"));
+    assert!(wildcard_matches("gpt-5.?", "gpt-5.?"));
+    assert!(!wildcard_matches("claude-*", "gpt-6-sol"));
+    assert!(!wildcard_matches("gpt-5", "gpt-5.1"));
+    assert!(!wildcard_matches("a?c", "abc"));
+}
+
+#[test]
+fn default_fills_only_what_the_caller_left_out() {
+    let rules = rules(serde_json::json!({
+        "default": [
+            {"models": [{"name": "claude-*"}],
+             "params": {"temperature": 0.2, "max_tokens": 4096}}
+        ]
+    }));
+    let mut payload = serde_json::json!({"model": "claude-sonnet-4", "temperature": 1.0});
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(outcome.defaulted, 1);
+    assert_eq!(outcome.problems, Vec::<String>::new());
+    assert_eq!(payload["temperature"], serde_json::json!(1.0));
+    assert_eq!(payload["max_tokens"], serde_json::json!(4096));
+}
+
+#[test]
+fn default_treats_null_as_missing_but_override_does_not_care() {
+    let rules = rules(serde_json::json!({
+        "default": [{"params": {"metadata.user_id": "probe"}}],
+        "override": [{"params": {"metadata.user_id": "forced"}}],
+    }));
+    let mut payload = serde_json::json!({"metadata": {"user_id": null}});
+    let outcome = apply(&rules, "any", "claude", &mut payload);
+    assert_eq!(outcome.defaulted, 1);
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["metadata"]["user_id"], serde_json::json!("forced"));
+}
+
+#[test]
+fn override_replaces_and_runs_after_default() {
+    let rules = rules(serde_json::json!({
+        "default": [{"models": [{"name": "gpt-*", "protocol": "codex"}],
+                     "params": {"reasoning.effort": "low"}}],
+        "override": [{"models": [{"name": "gpt-*", "protocol": "codex"}],
+                      "params": {"reasoning.effort": "high"}}],
+    }));
+    let mut payload = serde_json::json!({"reasoning": {"effort": "medium"}});
+    let outcome = apply(&rules, "gpt-6-sol", "codex", &mut payload);
+    assert_eq!(outcome.defaulted, 0, "already present, so default skipped");
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["reasoning"]["effort"], serde_json::json!("high"));
+}
+
+#[test]
+fn a_protocol_selector_keeps_other_protocols_untouched() {
+    let rules = rules(serde_json::json!({
+        "override": [{"models": [{"name": "*", "protocol": "claude"}],
+                      "params": {"max_tokens": 128000}}]
+    }));
+    let mut claude = serde_json::json!({"max_tokens": 1000});
+    apply(&rules, "claude-opus", "claude", &mut claude);
+    assert_eq!(claude["max_tokens"], serde_json::json!(128000));
+
+    let mut codex = serde_json::json!({"max_tokens": 1000});
+    let outcome = apply(&rules, "gpt-6-sol", "codex", &mut codex);
+    assert_eq!(outcome.overridden, 0);
+    assert_eq!(codex["max_tokens"], serde_json::json!(1000));
+}
+
+#[test]
+fn filter_removes_a_path_and_reports_nothing_when_absent() {
+    let rules = rules(serde_json::json!({
+        "filter": [{"models": [{"name": "claude-*"}],
+                    "params": ["metadata.user_id", "thinking"]}]
+    }));
+    let mut payload = serde_json::json!({
+        "model": "claude-sonnet-4",
+        "metadata": {"user_id": "abc"},
+        "thinking": {"budget_tokens": 1024}
+    });
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(outcome.filtered, 2);
+    assert_eq!(payload["metadata"], serde_json::json!({}));
+    assert!(payload.get("thinking").is_none());
+
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(outcome.filtered, 0);
+    assert!(!outcome.changed());
+}
+
+#[test]
+fn array_indices_are_addressed_and_removal_shifts_them() {
+    let rules = rules(serde_json::json!({
+        "override": [{"params": {"messages.0.role": "user"}}],
+        "filter": [{"params": ["messages.1"]}],
+    }));
+    let mut payload = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "drop me"},
+            {"role": "user", "content": "keep me"}
+        ]
+    });
+    let outcome = apply(&rules, "m", "claude", &mut payload);
+    assert_eq!((outcome.overridden, outcome.filtered), (1, 1));
+    assert_eq!(payload["messages"][0]["role"], serde_json::json!("user"));
+    assert_eq!(
+        payload["messages"][1]["content"],
+        serde_json::json!("keep me")
+    );
+    assert_eq!(payload["messages"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn a_path_inside_a_missing_object_is_created_but_a_missing_message_is_not() {
+    let rules = rules(serde_json::json!({
+        "override": [{"params": {
+            "metadata.client": "codex",
+            "messages.7.content": "nope"
+        }}]
+    }));
+    let mut payload = serde_json::json!({"messages": [{"role": "user"}]});
+    let outcome = apply(&rules, "m", "claude", &mut payload);
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["metadata"]["client"], serde_json::json!("codex"));
+    assert_eq!(outcome.problems.len(), 1);
+    assert!(
+        outcome.problems[0].contains("past the end"),
+        "{:?}",
+        outcome.problems
+    );
+}
+
+#[test]
+fn a_typo_in_a_rule_key_is_refused_rather_than_ignored() {
+    let error = parse(br#"{"overide": []}"#).expect_err("unknown key is refused");
+    assert!(error.contains("unknown field"), "{error}");
+    assert!(parse(b"[]").is_err(), "a rules document is an object");
+    assert!(parse(br#"{"default": [{"models": [{"name": ""}], "params": {}}]}"#).is_err());
+    assert!(parse(br#"{"default": [{"params": {"a..b": 1}}]}"#).is_err());
+    assert_eq!(
+        parse(b"{}").expect("empty rules are valid"),
+        PayloadRules::default()
+    );
+}
+
+#[test]
+fn body_bytes_are_untouched_when_nothing_fires() {
+    // `CLUD_PAYLOAD_RULES` is unset in the unit-test environment, so this is
+    // the pre-existing behavior the launch-scoped gateway depends on.
+    let body = br#"{"model":"m","temperature":1.0}"#.to_vec();
+    let mut payload: Value = serde_json::from_slice(&body).expect("fixture parses");
+    let (rewritten, outcome) = rewrite_body("m", "claude", body.clone(), &mut payload);
+    assert_eq!(rewritten, body);
+    assert!(!outcome.changed());
+}
+
+#[test]
+fn from_path_refuses_an_oversized_rules_file() {
+    let dir = std::env::temp_dir().join(format!("payload-rules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("rules.json");
+    let big = vec![b' '; MAX_RULES_BYTES as usize + 1];
+    std::fs::write(&path, &big).expect("write");
+    let error = from_path(&path).expect_err("oversized file refused");
+    assert!(error.contains("over the"), "{error}");
+    std::fs::write(&path, br#"{"filter": [{"params": ["x"]}]}"#).expect("write");
+    let rules = from_path(&path).expect("a small file parses");
+    assert_eq!(rules.filter.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

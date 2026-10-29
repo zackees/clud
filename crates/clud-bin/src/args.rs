@@ -1046,6 +1046,24 @@ pub enum Command {
         #[arg(long = "for-model")]
         for_model: Option<String>,
     },
+    /// Test seam for the JSON-path payload rules: read `{"rules": ..., "payload": ...}`
+    /// on stdin (or the rules from `--rules` and the payload on stdin), write the
+    /// rewritten payload and what each rule kind did to stdout. Never used by a
+    /// launched session.
+    #[command(name = "__apply-payload-rules", hide = true)]
+    InternalApplyPayloadRules {
+        /// Read the rules from this file instead of the stdin document. This is
+        /// the same loader `CLUD_PAYLOAD_RULES` uses at gateway time.
+        #[arg(long = "rules")]
+        rules: Option<PathBuf>,
+        /// Model the rules select on. Absent matches no `models` entry, so only
+        /// model-agnostic rules fire.
+        #[arg(long)]
+        model: Option<String>,
+        /// Protocol the rules select on (`claude` for `POST /v1/messages`).
+        #[arg(long, default_value = "claude")]
+        protocol: String,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1609,6 +1627,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "__worker",
     "__start-cmd",
     "__openai-chat-translate",
+    "__apply-payload-rules",
 ];
 
 impl Args {
