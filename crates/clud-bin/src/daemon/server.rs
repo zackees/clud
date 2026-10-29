@@ -2442,6 +2442,48 @@ mod tests {
         ));
     }
 
+    const PROST_PERF_MAX_ATTEMPTS: usize = 3;
+
+    fn timed_list_live_cwds(state_dir: &Path, format: DaemonWireFormat) -> Duration {
+        let (response, _, elapsed) =
+            timed_daemon_request_line(state_dir, &DaemonRequest::ListLiveCwds, format);
+        assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
+        elapsed
+    }
+
+    /// One warmup + interleaved measurement round. `Err` carries the numbers.
+    fn measure_prost_vs_json_once(state_dir: &Path) -> Result<(), String> {
+        for _ in 0..DAEMON_WIRE_PERF_WARMUP_SAMPLES {
+            timed_list_live_cwds(state_dir, DaemonWireFormat::Json);
+            timed_list_live_cwds(state_dir, DaemonWireFormat::Prost);
+        }
+        let mut json_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
+        let mut prost_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
+        for sample in 0..DAEMON_WIRE_PERF_MEASURED_SAMPLES {
+            if sample % 2 == 0 {
+                json_samples.push(timed_list_live_cwds(state_dir, DaemonWireFormat::Json));
+                prost_samples.push(timed_list_live_cwds(state_dir, DaemonWireFormat::Prost));
+            } else {
+                prost_samples.push(timed_list_live_cwds(state_dir, DaemonWireFormat::Prost));
+                json_samples.push(timed_list_live_cwds(state_dir, DaemonWireFormat::Json));
+            }
+        }
+        let json_median = median_duration(&mut json_samples);
+        let prost_median = median_duration(&mut prost_samples);
+        let budget = scaled_duration(
+            json_median,
+            PROST_PERF_BUDGET_NUMERATOR,
+            PROST_PERF_BUDGET_DENOMINATOR,
+        ) + PROST_PERF_LOAD_FLOOR;
+        if prost_median <= budget {
+            Ok(())
+        } else {
+            Err(format!(
+                "prost median {prost_median:?} > budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"
+            ))
+        }
+    }
+
     #[test]
     fn prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2450,69 +2492,25 @@ mod tests {
         let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
 
         let info = wait_for_daemon_ready(&state_dir);
-        for _ in 0..DAEMON_WIRE_PERF_WARMUP_SAMPLES {
-            let (json_response, _) = send_daemon_request_line(
-                &state_dir,
-                &DaemonRequest::ListLiveCwds,
-                DaemonWireFormat::Json,
-            );
-            assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
-            let (prost_response, _) = send_daemon_request_line(
-                &state_dir,
-                &DaemonRequest::ListLiveCwds,
-                DaemonWireFormat::Prost,
-            );
-            assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
-        }
-
-        let mut json_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
-        let mut prost_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
-        for sample in 0..DAEMON_WIRE_PERF_MEASURED_SAMPLES {
-            if sample % 2 == 0 {
-                let (json_response, _, json_elapsed) = timed_daemon_request_line(
-                    &state_dir,
-                    &DaemonRequest::ListLiveCwds,
-                    DaemonWireFormat::Json,
-                );
-                assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
-                json_samples.push(json_elapsed);
-
-                let (prost_response, _, prost_elapsed) = timed_daemon_request_line(
-                    &state_dir,
-                    &DaemonRequest::ListLiveCwds,
-                    DaemonWireFormat::Prost,
-                );
-                assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
-                prost_samples.push(prost_elapsed);
-            } else {
-                let (prost_response, _, prost_elapsed) = timed_daemon_request_line(
-                    &state_dir,
-                    &DaemonRequest::ListLiveCwds,
-                    DaemonWireFormat::Prost,
-                );
-                assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
-                prost_samples.push(prost_elapsed);
-
-                let (json_response, _, json_elapsed) = timed_daemon_request_line(
-                    &state_dir,
-                    &DaemonRequest::ListLiveCwds,
-                    DaemonWireFormat::Json,
-                );
-                assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
-                json_samples.push(json_elapsed);
+        // #2212: a single noisy window on a shared runner can push the prost
+        // median over budget. Allow up to PROST_PERF_MAX_ATTEMPTS independent
+        // warmup+measure rounds; any one meeting budget passes, so a real
+        // regression (which fails every round) is still caught.
+        let mut failures = Vec::new();
+        let mut passed = false;
+        for attempt in 1..=PROST_PERF_MAX_ATTEMPTS {
+            match measure_prost_vs_json_once(&state_dir) {
+                Ok(()) => {
+                    passed = true;
+                    break;
+                }
+                Err(detail) => failures.push(format!("attempt {attempt}: {detail}")),
             }
         }
-
-        let json_median = median_duration(&mut json_samples);
-        let prost_median = median_duration(&mut prost_samples);
-        let budget = scaled_duration(
-            json_median,
-            PROST_PERF_BUDGET_NUMERATOR,
-            PROST_PERF_BUDGET_DENOMINATOR,
-        ) + PROST_PERF_LOAD_FLOOR;
         assert!(
-            prost_median <= budget,
-            "prost ListLiveCwds median latency {prost_median:?} exceeded 50% JSON budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"
+            passed,
+            "prost ListLiveCwds exceeded 50% JSON budget in all {PROST_PERF_MAX_ATTEMPTS} attempts:\n{}",
+            failures.join("\n")
         );
 
         let (shutdown_response, shutdown_line) = send_daemon_request_line(
