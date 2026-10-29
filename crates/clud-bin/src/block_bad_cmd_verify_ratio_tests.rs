@@ -43,6 +43,9 @@ fn python_source_writes_count_as_edits_without_counting_reads_or_text() {
         "python -c \"p='src/a.rs'; open(p,'w')\"",
         "python -c \"from pathlib import Path; Path('src/a.rs').write_text('x')\"",
         "python -c \"open('src/a.rs','w');\"",
+        "python -c \"open('src/a.rs','a')\"",
+        "python -c \"open('src/a.rs','x')\"",
+        "python -c \"open('src/a.rs','wb')\"",
         "python3 -c \"open('src/a.rs','w')\"", // python-name-lint: allow -- external agent command compatibility
     ];
     for command in writes {
@@ -60,6 +63,9 @@ fn python_source_writes_count_as_edits_without_counting_reads_or_text() {
         "python - <<'PY'\nfrom pathlib import Path\nPath('/tmp/report.log').write_text('diagnostic')\nPY",
         "python - <<'PY'\nopen(dynamic_path, 'w').write('unknown')\nPY",
         "bosn ci report 123 --json",
+        "python -c \"m='w'; open('src/a.rs', m)\"",
+        "python -c \"import json; json.load(open('src/a.rs'))\"",
+        "python -c \"open('src/a.rs','r')\"",
         "python -c \"p='src/a.rs' + '.tmp'; open(p, 'w')\"",
         "python -c \"p='src/a.rs'; p += '.tmp'; open(p, 'w')\"",
         "python -c \"False and open('src/a.rs','w')\"",
@@ -254,8 +260,61 @@ fn call(kind: Kind, now_ms: u64) -> Call {
         workspace_lint: false,
         package: None,
         id: None,
+        dedupe_id: None,
         now_ms,
     }
+}
+
+#[test]
+fn python_write_in_a_mixed_sequence_counts_as_an_edit() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join(".git")).unwrap();
+    std::fs::create_dir(repository.path().join("src")).unwrap();
+    let cwd = Some(repository.path());
+    let mut ledger = Ledger::default();
+    let steps = [
+        "soldr cargo test -p a",
+        "python - <<'PY'\nopen('src/a.rs', 'w').write('x')\nPY",
+        "soldr cargo clippy -p a",
+    ];
+    for command in steps {
+        let kind = classify_kind_at("Bash", command, cwd).unwrap();
+        ledger = observe(&ledger, &call(kind, 1), LIMITS).0;
+    }
+    assert_eq!(ledger.window, "vev");
+}
+
+#[test]
+fn a_redelivered_tool_call_is_counted_once() {
+    let mut first = call(Kind::Test, 1);
+    first.dedupe_id = Some("toolu_1".to_string());
+    let (once, _) = observe(&Ledger::default(), &first, LIMITS);
+    let (twice, verdict) = observe(&once, &first, LIMITS);
+    assert_eq!(once, twice);
+    assert_eq!(verdict, None);
+    let mut other = first.clone();
+    other.dedupe_id = Some("toolu_2".to_string());
+    assert_eq!(observe(&twice, &other, LIMITS).0.window, "vv");
+}
+
+#[test]
+fn concurrent_hook_invocations_do_not_lose_ledger_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let handles: Vec<_> = (0..8)
+        .map(|n| {
+            let state = dir.path().to_path_buf();
+            std::thread::spawn(move || {
+                let mut c = call(Kind::Test, 1);
+                c.dedupe_id = Some(format!("toolu_{n}"));
+                observe_call_at(&state, "s1", &c, LIMITS)
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let (_, ledger) = load(&session_file(dir.path(), "s1"));
+    assert_eq!(ledger.window.len(), 8);
 }
 
 #[test]
