@@ -36,6 +36,10 @@ its caps. Clear them only when the loop ends. Every tick runs
 `clud grind reconcile` before picking a goal, so an issue whose goal PR
 landed on a feature branch is tracked by its `grind:v1` marker and never lost.
 
+Intake runs once, before the loop. A tick never re-runs `/grind-intake`; it
+takes the next goal straight from `<source>`, so a single-issue wrap (a
+one-child meta for #N) happens at most once per run and ticks create no meta.
+
 ## Follow-ups
 
 When a tick picks the next goal, skip issues an open feature PR's `Closes`

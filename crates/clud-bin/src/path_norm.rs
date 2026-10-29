@@ -296,6 +296,82 @@ pub fn file_stem_any_separator(raw: &str) -> Option<String> {
         .map(|stem| stem.to_string_lossy().into_owned())
 }
 
+/// Strips the spellings Win32 ignores from the last component of `path`: an
+/// NTFS stream suffix (everything from the first `:`, such as `::$DATA`) and
+/// trailing dots and spaces. A leading drive prefix (`C:`) is left alone, and
+/// a component made only of dots and spaces (`.`, `..`) is returned as is.
+/// Pure string logic so it is testable on any host; [`win32_file_name`]
+/// applies it on Windows only.
+fn strip_win32_name_quirks(path: &str) -> String {
+    let split = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    let (dir, name) = path.split_at(split);
+    let (dir, name) = match name.as_bytes() {
+        [drive, b':', ..] if split == 0 && drive.is_ascii_alphabetic() => (&path[..2], &path[2..]),
+        _ => (dir, name),
+    };
+    let stem = name.split(':').next().unwrap_or(name);
+    let trimmed = stem.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return path.to_string();
+    }
+    format!("{dir}{trimmed}")
+}
+
+/// `path` with its last component reduced to the name the host would open.
+/// Win32 ignores trailing dots/spaces and NTFS stream suffixes (`::$DATA`),
+/// so a path-equality guard must too; Unix takes names literally.
+pub(crate) fn win32_file_name(path: &Path) -> PathBuf {
+    if crate::platform::host::WINDOWS {
+        strip_win32_name_quirks(&path.to_string_lossy()).into()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod win32_name_tests {
+    use super::strip_win32_name_quirks as strip;
+
+    #[test]
+    fn strips_trailing_dot_and_space_dot() {
+        assert_eq!(strip("a/b/guarded.json."), "a/b/guarded.json");
+        assert_eq!(strip("a\\b\\guarded.json ."), "a\\b\\guarded.json");
+        assert_eq!(strip("a/guarded.json.. "), "a/guarded.json");
+    }
+
+    #[test]
+    fn strips_ntfs_stream_suffixes() {
+        assert_eq!(strip("a/guarded.json::$DATA"), "a/guarded.json");
+        assert_eq!(strip("a/guarded.json:stream"), "a/guarded.json");
+        assert_eq!(strip("a/guarded.json:stream:$DATA"), "a/guarded.json");
+        assert_eq!(strip("a/guarded.json::$DATA."), "a/guarded.json");
+    }
+
+    #[test]
+    fn drive_prefix_survives() {
+        assert_eq!(strip("C:guarded.json::$DATA"), "C:guarded.json");
+        assert_eq!(strip("C:\\x\\guarded.json:s"), "C:\\x\\guarded.json");
+        assert_eq!(strip("C:"), "C:");
+        assert_eq!(strip("C:\\"), "C:\\");
+    }
+
+    #[test]
+    fn ordinary_names_are_unchanged() {
+        for name in [
+            "a/b/guarded.json",
+            ".clud",
+            "a/.hidden",
+            ".",
+            "..",
+            "a/..",
+            "a/b/",
+            "",
+        ] {
+            assert_eq!(strip(name), name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

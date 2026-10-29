@@ -320,6 +320,26 @@ soldr cargo test -p clud --test integration diagnostics::tier_refresh_probe -- -
 Any new test file that is `#[ignore]`d and says "run manually" must be added to
 this list; `tests/test_manual_windows_probes.py` enforces it.
 
+### Reading CI status without flooding context (#2312)
+
+This section owns the rule; skills link here. Every CI read re-enters the
+agent's context, and hand-polling repeats near-identical output.
+
+- To **wait** on CI, use `clud tool run github/pr_merge_watch.py -- <PR>`
+  (background or bounded, never a hand-written loop; DD-168). Its output is
+  already compact.
+- For a **one-off** read, ask only for what is unresolved:
+
+  ```bash
+  gh pr checks N --json name,state --jq '[.[]|select(.state!="SUCCESS" and .state!="SKIPPED")]'
+  gh run view ID --json status,conclusion,jobs --jq '[.jobs[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]'
+  ```
+
+  An empty list means nothing is unresolved. Drop the filter only when you
+  need the full job list.
+- Do not repeat an identical read; a status that has not changed is not new
+  information.
+
 ## The problem
 
 Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,
@@ -535,6 +555,42 @@ entry that remains UNMERGEABLE for two polls, and 4 on timeout. Without
 `--until merged`, the watch retains its ordinary check and merge-wait behavior.
 On timeout or API failure,
 inspect the PR and queue state before retrying the mutation (#2235).
+
+#### Agent landing: workers end at enqueue, chaperones own the merge
+
+This section owns the contract; `LAND_CONTRACT`, `launch-plan.md`, `CLAUDE.md`
+and [DD-192](../DESIGN_DECISIONS.md#dd-192-workers-end-at-enqueue-and-a-chaperone-owns-the-merge)
+(rationale and timing evidence) link here. It is a candidate fleet policy,
+[GEN-033](https://github.com/forge-ci/ci.yml/blob/main/docs/agent-guide.md).
+
+**Scope.** The chaperone handoff applies only where a merge queue is required
+and the harness can run background agents. With no required queue, or without
+background agents, the agent observes the PR until it merges, per repository
+policy (a repository with no hosted required checks merges after the local
+gate). One checkout per worker; parallelism comes from cheap chaperones, not
+worktrees.
+
+- **Worker:** fix, test, lint, push. Apply the repository's native-coverage
+  labels, if any, at creation with `gh pr create --label`, never later. Wait
+  for PR checks, enqueue with `github/pr_merge.py --match-head-commit`, return
+  the checkout to the clean default branch and report one line: PR, head SHA,
+  `enqueued|pushed`. The worker may hand off at push or at enqueue.
+- **Chaperone:** no checkout, no build, cheapest capable model. Handed a PR
+  at push (or after a NEEDS-FIXUP push), it first waits for the PR's required
+  checks (`pr_merge_watch.py --no-merge-wait`), then enqueues with
+  `pr_merge.py --match-head-commit <head>` (or merges by repository policy
+  where there is no queue). Handed an already-enqueued PR it skips that step.
+  Then one deadline-bounded `pr_merge_watch.py --until merged` call (exit 0 merged, 13
+  ejected, 14 unmergeable, 4 timeout). It self-serves once each: `gh run rerun
+  --failed` for infra or flakes, a rerun of a stale aggregate from a superseded
+  run, a re-enqueue after a batch-mate ejection. Code failures go back as
+  `NEEDS-FIXUP <PR> <job> <first error line>`. Maximum 2 automatic retries and
+  a 90 minute cap, then `STUCK <PR> <reason>`. Success reports `MERGED <PR> <sha>`.
+- **Orchestrator:** counts work done only on `MERGED`. On `NEEDS-FIXUP` the
+  worker checks the branch out again, fixes and pushes, then hands it back to a
+  chaperone (which waits for checks and enqueues again); these queue ahead of new work and run as an ordinary worker once
+  the checkout is free. On `STUCK` it reports what remains. Review may run in
+  parallel on the PR diff.
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old

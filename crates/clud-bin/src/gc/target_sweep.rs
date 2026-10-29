@@ -77,10 +77,12 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+        // Symlinks are never followed: a linked `target/` or tree could point
+        // outside the worktree (#2302 review).
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
+        let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if SKIP_DIRS.contains(&name.as_ref()) {
@@ -176,7 +178,7 @@ pub fn sweep_roots_at(
 /// build under `target/debug/...` leaves `target/` looking old (#1911). The
 /// profile dirs and their `deps/`, `.fingerprint/` and `build/` children do
 /// change on every build that produces output.
-fn newest_build_mtime(target: &Path) -> Option<SystemTime> {
+pub(crate) fn newest_build_mtime(target: &Path) -> Option<SystemTime> {
     let mut newest = fs::metadata(target).ok()?.modified().ok()?;
     let mut consider = |path: &Path| {
         if let Ok(mtime) = fs::symlink_metadata(path).and_then(|meta| meta.modified()) {
@@ -195,15 +197,25 @@ fn newest_build_mtime(target: &Path) -> Option<SystemTime> {
     Some(newest)
 }
 
-fn dir_size(path: &Path) -> u64 {
+pub(crate) fn dir_size(path: &Path) -> u64 {
+    let mut budget = usize::MAX;
+    dir_size_bounded(path, &mut budget)
+}
+
+/// [`dir_size`] that stops (undercounting) after `budget` entries.
+pub(crate) fn dir_size_bounded(path: &Path, budget: &mut usize) -> u64 {
     let mut total = 0u64;
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };
     for entry in entries.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
-            total = total.saturating_add(dir_size(&entry.path()));
+            total = total.saturating_add(dir_size_bounded(&entry.path(), budget));
         } else {
             total = total.saturating_add(meta.len());
         }

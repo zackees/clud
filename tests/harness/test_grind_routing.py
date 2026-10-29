@@ -49,8 +49,9 @@ CONVERT_Q = {
     ],
 }
 REFUSAL = (
-    "`clud grind` works on meta issues. #1 is a single change; "
-    "run `/do 1` (or `clud do 1`) instead."
+    "`clud grind` works on meta issues. #1 has several independent parts and "
+    "you chose not to convert it; run `/do 1` (or `clud do 1`) on one part "
+    "at a time instead."
 )
 
 
@@ -302,20 +303,31 @@ def test_r6_multi_part_issue_left_alone_on_refusal(harness: Harness) -> None:
     _no_workflow(result)
 
 
-def test_r7_single_change_issue_is_sent_to_do_without_asking(harness: Harness) -> None:
+def test_r7_single_change_issue_is_wrapped_in_a_one_child_meta(harness: Harness) -> None:
     harness.write_gh_state(worlds.single_change())
     before = _issues(harness)
-    local = _local_state(harness)
+    wrapped = "Wrapped in meta #2; closes when #2 closes."
     steps = [
         _bash(f"{TOOL} 1 --repo o/r"),
-        _after(_saw('"meta": false'), {"text": REFUSAL}),
+        _after(
+            _saw('"meta": false'), _bash("gh issue create --title 'meta: typo' --body 'Tracks #1'")
+        ),
+        *_attach_steps("2", ("1",)),
+        _after(OK, _bash(_verify("2", ("1",)))),
+        _after(_saw('"number": 2'), _bash(f"gh issue comment 1 --body '{wrapped}'")),
+        _after(OK, {"text": "Wrapped #1 in meta #2"}),
     ]
     result = _run(harness, steps)
-    assert "run `/do 1`" in result.stdout
     assert _questions(result) == []
-    assert _issues(harness) == before
-    assert _local_state(harness) == local
-    _no_run_files(harness)
+    assert "run `/do 1`" not in result.stdout
+    assert _created(harness, before) == ["2"]
+    issues = _issues(harness)
+    assert issues["1"]["parent"] == 2
+    assert issues["1"]["body"] == before["1"]["body"]
+    assert issues["1"]["state"] == before["1"]["state"] == "open"
+    assert [c["body"] for c in issues["1"]["comments"]] == [wrapped]
+    assert "Wrapped #1 in meta #2" in result.stdout
+    _verified(harness, "2", ("1",))
     _no_workflow(result)
 
 

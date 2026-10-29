@@ -342,8 +342,10 @@ Every run works on a meta issue:
   non-meta issue gets intake's one question, *Convert #N into a meta
   issue?* (*Convert to a meta issue* / *Abort*): convert creates the
   children first, then a meta issue that `Tracks #N`, and comments on the
-  original (which stays open); *Abort*, or a single-change issue, refuses
-  with ``run `/do N` (or `clud do N`) instead`` and creates nothing.
+  original (which stays open); *Abort* refuses with
+  ``run `/do N` (or `clud do N`) instead`` and creates nothing. A
+  single-change issue is wrapped in a one-child meta (`Tracks #N`, #N
+  attached as its only sub-issue) and runs the normal bug stage (#2160).
 - **Issue list.** A new meta issue tracks the given issues as sub-issues.
 - **Prompt.** Split into deliverables, one child issue each, under a new meta.
 - **Nothing.** Pick from the open issues, then route as a list.

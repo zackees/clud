@@ -25,6 +25,21 @@ before selecting native coverage.
 
 All `cargo` / `rustc` / `rustfmt` calls **must go through [soldr](https://github.com/zackees/soldr)**: `soldr cargo build`, `soldr cargo test -p clud-bin`, etc. soldr resolves the rustup-managed toolchain via `rustup which`, sidestepping chocolatey cargo on Windows and other stale PATH shims. A `.claude/hooks/check-soldr.py` PreToolUse hook enforces this.
 
+Agent validation runs should add the bounded mode: `SOLDR_PORCELAIN=1 soldr cargo test ...`
+prints ONE JSON line (verdict, `exit_code`, counts, `log_path`) instead of relaying every
+passing test and per-crate cache record. Open `log_path` only when `exit_code` is non-zero;
+if stdout is not a JSON object the installed soldr predates the mode, so read the output as
+usual (forge-ci/soldr#3924, clud#2231).
+
+**Batch validation (clud#2313).** This is about the edit loop's soldr calls; each call
+pays its own soldr process start and banner. While iterating, run one `soldr lint`
+(fmt check, Clippy, configured Dylint; `soldr lint --host-only` skips cross-target
+clippy) instead of separate fmt/clippy calls, and one
+`SOLDR_PORCELAIN=1 soldr cargo test -p a -p b` with targeted filters instead of
+per-crate calls. `soldr lint` does not replace `bash lint`: that stays the mandatory
+gate (repo guards, Ruff, pinned Dylint setup), as do the hosted Static checks, Clippy
+and Dylint jobs.
+
 Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
 
 ### Validation before merging
@@ -39,6 +54,8 @@ through soldr. An optional `bosn ci run --workspace . --trigger pr` or
 If Bosn is unavailable or busy, use hosted CI. Stop only your own Bosn run;
 never kill other sessions' processes. Native Windows/macOS behavior needs the
 relevant native CI lane; a local run on another OS cannot prove it.
+
+Agent landing (workers, chaperones, labels): see [`ci.md`](docs/architecture/ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge).
 
 See [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci)
 for optional replay commands and coverage limits. Do not weaken a test or

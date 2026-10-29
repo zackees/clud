@@ -484,6 +484,69 @@ fn strict_message(
     )
 }
 
+const SEEN_DIR_NAME: &str = "block-cd-seen";
+const SEEN_DOMAIN: &str = "clud-block-cd-seen-v1\0";
+
+fn seen_file(state_dir: &Path, session_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{SEEN_DOMAIN}{session_id}").as_bytes());
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    state_dir.join(SEEN_DIR_NAME).join(format!("{hash}.seen"))
+}
+
+/// The one-line refusal (#2314): the blocked `cd`, the rule id, the escape
+/// and the override. Falls back to `full` if its `Blocked `cd X`` prefix is
+/// missing.
+fn short_message(full: &str) -> String {
+    let Some(end) = full.find("`:") else {
+        return full.to_string();
+    };
+    let head = &full[..=end];
+    let why = if full.contains("outside the registered repos") {
+        "cd back to a registered root"
+    } else {
+        "session cwd is pinned"
+    };
+    format!(
+        "[{rule}] {head} ({why}); use `(cd DIR && CMD)` or an absolute path. \
+         override: CLUD_BAD_CMD_OVERRIDE={rule}:<reason>",
+        rule = BLOCK_CD_RULE_ID,
+    )
+}
+
+/// `full` the first time a session is refused, the short form afterwards.
+/// Fails open to the full text: no state dir, no session id, or unreadable
+/// or unwritable state.
+pub(super) fn condense_at(
+    state_dir: Option<&Path>,
+    session_id: Option<&str>,
+    full: String,
+) -> String {
+    let (Some(dir), Some(session)) = (state_dir, session_id.filter(|id| !id.is_empty())) else {
+        return full;
+    };
+    let path = seen_file(dir, session);
+    match std::fs::metadata(&path) {
+        Ok(_) => short_message(&full),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Best effort: if the marker cannot be written, the next block
+            // simply prints the full text again.
+            if let Some(parent) = path.parent() {
+                super::block_bad_cmd_repeat::prune(parent, std::time::SystemTime::now());
+            }
+            let _ = super::block_bad_cmd_repeat::write_fast(&path, b"1", true);
+            full
+        }
+        Err(_) => full,
+    }
+}
+
+/// Hook entry for [`condense_at`] using the clud state dir.
+pub(super) fn condense_denial(full: String, session_id: Option<&str>) -> String {
+    let dir = crate::daemon::default_state_dir().ok();
+    condense_at(dir.as_deref(), session_id, full)
+}
+
 fn escape_message(described: &str, roots: &[PathBuf]) -> String {
     format!(
         "Blocked `cd {described}`: it moves the session cwd outside the registered repos \

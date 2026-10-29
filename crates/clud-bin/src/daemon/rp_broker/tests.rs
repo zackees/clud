@@ -1,6 +1,6 @@
 use super::super::io_helpers::read_json_file;
 use super::super::paths::daemon_info_path;
-use super::super::server::run_daemon;
+use super::super::server::run_daemon_uninterrupted;
 use super::super::types::DaemonInfo;
 use super::*;
 use running_process::broker::backend_handle::{BackendHandle, DaemonProcess};
@@ -152,7 +152,7 @@ fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
-    let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+    let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
 
     wait_for_daemon_ready(&state_dir);
     let identity = wait_for_identity_sidecar(&state_dir);
@@ -211,7 +211,7 @@ fn disable_env_skips_frame_lane_entirely() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
-    let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+    let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
 
     let info = wait_for_daemon_ready(&state_dir);
     assert!(
@@ -252,7 +252,7 @@ fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
     let daemon_thread;
     {
         let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
-        daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+        daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
         wait_for_daemon_ready(&state_dir);
         wait_for_identity_sidecar(&state_dir);
 
@@ -315,7 +315,7 @@ fn fake_backend_seam_overrides_cached_endpoint() {
     let real_endpoint_path;
     {
         let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
-        daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+        daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
         wait_for_daemon_ready(&state_dir);
         let identity = wait_for_identity_sidecar(&state_dir);
         real_endpoint_path = identity.ipc_endpoint.path.clone();

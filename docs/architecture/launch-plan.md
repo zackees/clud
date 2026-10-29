@@ -193,8 +193,12 @@ validation, push and open a PR referencing the issue (`Closes #N` for the
 final fix). Observe hosted checks with `github/pr_merge_watch.py`, fix failures,
 and satisfy required review before submitting the PR through the repository's
 merge mechanism. For a required merge queue, submit with
-`github/pr_merge.py --match-head-commit <head-sha>` and observe the PR until it
-actually merges; queue submission alone is incomplete. Use the tools through
+`github/pr_merge.py --match-head-commit <head-sha>` and see the PR through to
+an actual merge; queue submission alone is incomplete. Who waits (the worker,
+or a chaperone handoff at push or enqueue), when native labels are applied and
+what each report means are owned by
+[agent landing](ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge).
+Use the tools through
 `clud tool run <tool> -- <arguments>` and their help for selectors and deadlines.
 Start a bounded watcher once and wait on its live session or completion
 notification; never write a polling loop. Report the merged PR URL, or the

@@ -183,6 +183,54 @@ def test_sse_stream_becomes_openai_chunks_with_a_trailing_usage_frame() -> None:
     assert chunks[3]["usage"]["total_tokens"] == 3
 
 
+def test_http_streaming_framing_matches_what_the_route_writes() -> None:
+    """The route writes SSE frames plus the ``[DONE]`` sentinel an OpenAI
+    client waits for; ``--http`` renders exactly those bytes."""
+    events = [
+        {"type": "message_start", "message": {"id": "msg_h", "model": "claude-sonnet",
+                                              "usage": {"input_tokens": 2}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "hello"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
+    ]
+    body = "".join(f"event: x\ndata: {json.dumps(event)}\n\n" for event in events)
+    completed = _translate_response(body, "--stream", "--http", "--for-model", "alias-m")
+
+    assert completed.returncode == 0, completed.stderr
+    # The capture adapter re-joins lines, so the blank-line frame separator is
+    # asserted in Rust (``render_chat_stream``); here every frame must still
+    # carry its ``data: `` prefix and the stream must end with the sentinel.
+    frames = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert all(frame.startswith("data: ") for frame in frames), frames
+    assert frames[-1] == "data: [DONE]", frames[-1]
+    chunks = [json.loads(frame[len("data: "):]) for frame in frames[:-1]]
+    assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+    assert chunks[0]["model"] == "claude-sonnet"
+    assert chunks[-1]["choices"] == []
+
+
+def test_http_buffered_body_is_one_completion_object() -> None:
+    completed = _translate_response(
+        {
+            "id": "msg_b",
+            "type": "message",
+            "model": "claude-sonnet",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "buffered"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "--http",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    translated = json.loads(completed.stdout)
+    assert translated["object"] == "chat.completion"
+    assert translated["choices"][0]["message"]["content"] == "buffered"
+    assert "data:" not in completed.stdout
+
+
 def test_response_body_that_is_not_json_exits_non_zero() -> None:
     completed = _translate_response("not json")
 

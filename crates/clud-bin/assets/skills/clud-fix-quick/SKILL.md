@@ -73,8 +73,14 @@ or infer from `git remote get-url origin` for bare-number inputs.
 
 2. **No full test suite.** Run only the targeted test that exercises
    the change. Targeted-test selection rules per language:
-   - **Rust**: `soldr cargo test -p <crate> --lib <module>::<test-name>`
-     or `--test <file>` matching the changed file.
+   - **Rust**: `SOLDR_PORCELAIN=1 soldr cargo test -p <crate> --lib
+     <module>::<test-name>` or `--test <file>` matching the changed file.
+     That prints ONE JSON line (verdict, `exit_code`, counts, `log_path`);
+     read the `log_path` file only when `exit_code` is non-zero. If stdout
+     is not a JSON object, the installed soldr predates the mode - read the
+     output normally. Never wrap the call in a grep/sed filter.
+     If several crates need targeted tests, use one
+     `SOLDR_PORCELAIN=1 soldr cargo test -p a -p b` call with the targeted filters.
    - **Python**: `pytest -k <pattern>` matching the changed file or
      test name.
    - **JS/TS**: `npm test -- -t <pattern>` matching the changed file
@@ -183,6 +189,8 @@ for review purposes; run the source gates.
     `github/pr_merge_watch.py` in the background and wait for completion
     notification. Report failures and carry the fix forward in a new PR; do
     not stop at "pushed" or claim validation while checks remain pending.
+    To wait use `pr_merge_watch`; for a one-off read ask only for unresolved
+    items ([Reading CI status](https://github.com/zackees/clud/blob/main/docs/architecture/ci.md#reading-ci-status-without-flooding-context-2312)).
     Repository rules, required checks/reviews and merge queues override the
     immediate admin-merge shortcut above; never bypass protections. In those
     repositories use the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference).
