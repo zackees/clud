@@ -86,8 +86,7 @@ def test_probe_demo_gfx_sixel_emits_sixel_bytes(
         env=mock_env,
     )
     assert result.returncode == 0, (
-        f"clud --demo-gfx-sixel failed: rc={result.returncode} "
-        f"stderr={result.stderr!r}"
+        f"clud --demo-gfx-sixel failed: rc={result.returncode} stderr={result.stderr!r}"
     )
     assert result.stdout.startswith(b"\x1bP"), "stdout should start with Sixel DCS"
     # running-process exposes line-oriented capture and therefore omits the

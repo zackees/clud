@@ -47,14 +47,13 @@ def test_an_explicit_openrouter_model_is_saved_and_reused(
     env = _env(mock_env, tmp_path)
 
     # A dry run resolves the model but never writes it.
-    assert _dry_run_selection(clud_binary, env, "--model", "openai/gpt-5.5")[
-        "wire_model"
-    ] == "openai/gpt-5.5"
+    assert (
+        _dry_run_selection(clud_binary, env, "--model", "openai/gpt-5.5")["wire_model"]
+        == "openai/gpt-5.5"
+    )
     assert _saved_openrouter_model(env) is None
 
-    live = _run(
-        clud_binary, "--openrouter", "--model", "openai/gpt-5.5", "-p", "hi", env=env
-    )
+    live = _run(clud_binary, "--openrouter", "--model", "openai/gpt-5.5", "-p", "hi", env=env)
     # No key is stored, so the launch stops at the preflight -- after saving.
     assert live.returncode == 2, live.stderr
     assert "clud auth login openrouter" in live.stderr
@@ -66,9 +65,10 @@ def test_an_explicit_openrouter_model_is_saved_and_reused(
     assert selection["model_source"] == "provider_setting"
 
     # An explicit --model wins over the saved one and replaces it.
-    assert _dry_run_selection(clud_binary, env, "--model", "x-ai/grok-5")[
-        "wire_model"
-    ] == "x-ai/grok-5"
+    assert (
+        _dry_run_selection(clud_binary, env, "--model", "x-ai/grok-5")["wire_model"]
+        == "x-ai/grok-5"
+    )
     live = _run(clud_binary, "--openrouter", "--model", "x-ai/grok-5", "-p", "hi", env=env)
     assert live.returncode == 2, live.stderr
     assert _saved_openrouter_model(env) == "x-ai/grok-5"

@@ -368,9 +368,7 @@ def test_serve_answers_openai_chat_completions(
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
             "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": claude.url.replace("http://", "https://"),
-            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": claude.url.replace(
-                "http://", "https://"
-            ),
+            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": claude.url.replace("http://", "https://"),
             # The test-upstream override is all-or-nothing, so every route needs
             # a fake even though this test only exercises Claude.
             "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": openrouter.url.replace(

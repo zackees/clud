@@ -817,8 +817,7 @@ def stop_daemon(
             for attempt in range(5):
                 time.sleep(0.1)
                 reprobes.append(
-                    f"  +{(attempt + 1) * 100}ms alive="
-                    f"{process_identity_is_alive(pid, start_time)}"
+                    f"  +{(attempt + 1) * 100}ms alive={process_identity_is_alive(pid, start_time)}"
                 )
         raise AssertionError(
             "daemon cleanup did not complete safely\n"

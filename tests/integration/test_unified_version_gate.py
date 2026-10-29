@@ -57,9 +57,7 @@ def _assert_rc(result: process.CompletedProcess[str], expected: int) -> None:
     )
 
 
-def test_unified_refuses_a_pre_223_claude_code(
-    clud_binary: Path, mock_env: dict[str, str]
-) -> None:
+def test_unified_refuses_a_pre_223_claude_code(clud_binary: Path, mock_env: dict[str, str]) -> None:
     """A pre-floor client refuses, naming the floor, the found version, and the fix."""
     mock_env["MOCK_CLAUDE_VERSION"] = "2.1.212 (Claude Code)"
     result = _run_unified(clud_binary, mock_env)
@@ -69,9 +67,7 @@ def test_unified_refuses_a_pre_223_claude_code(
     assert "claude update" in result.stderr
 
 
-def test_unified_launches_at_the_223_floor(
-    clud_binary: Path, mock_env: dict[str, str]
-) -> None:
+def test_unified_launches_at_the_223_floor(clud_binary: Path, mock_env: dict[str, str]) -> None:
     """A client at (or above) the floor launches without the refusal."""
     mock_env["MOCK_CLAUDE_VERSION"] = "2.1.223 (Claude Code)"
     result = _run_unified(clud_binary, mock_env)
@@ -96,10 +92,7 @@ def test_direct_codex_refuses_a_pre_223_claude_code(
     mock_env["MOCK_CLAUDE_VERSION"] = "2.1.212 (Claude Code)"
     result = _run_direct_codex(clud_binary, mock_env)
     _assert_rc(result, 2)
-    assert (
-        "Codex-through-Claude model discovery requires Claude Code >= 2.1.223"
-        in result.stderr
-    )
+    assert "Codex-through-Claude model discovery requires Claude Code >= 2.1.223" in result.stderr
     assert "installed version is 2.1.212" in result.stderr
     assert "claude update" in result.stderr
 

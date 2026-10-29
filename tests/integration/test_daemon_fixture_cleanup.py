@@ -21,9 +21,7 @@ pytestmark = pytest.mark.integration
 pytest_plugins = ("pytester",)
 
 
-def _start_daemon(
-    clud_binary: Path, env: dict[str, str], state_dir: Path
-) -> dict[str, object]:
+def _start_daemon(clud_binary: Path, env: dict[str, str], state_dir: Path) -> dict[str, object]:
     result = process.run(
         [str(clud_binary), "daemon", "restart"],
         capture_output=True,

@@ -306,11 +306,7 @@ class TestDaemonSessionHardening:
             listed = run_until(
                 [str(clud_binary), "list"],
                 env,
-                lambda r: (
-                    r.returncode == 0
-                    and "my-task" in r.stdout
-                    and session_id in r.stdout
-                ),
+                lambda r: r.returncode == 0 and "my-task" in r.stdout and session_id in r.stdout,
                 what="named session to appear in the list",
             )
             assert listed.returncode == 0
@@ -381,9 +377,7 @@ class TestDaemonSessionHardening:
         finally:
             kill_daemon_for_session(state_dir, session_id)
 
-    def test_attach_last(
-        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
-    ) -> None:
+    def test_attach_last(self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path) -> None:
         state_dir = tmp_path / "daemon-state"
         env = managed_env(mock_env, state_dir)
         # Create first session
@@ -476,9 +470,7 @@ class TestDaemonSessionHardening:
             # exited, but the daemon process itself must still be alive and
             # serving (otherwise we'd be looking at a much worse bug).
             daemon_pid = metadata["daemon_pid"]
-            assert pid_is_alive(daemon_pid), (
-                f"daemon process {daemon_pid} died on backend crash"
-            )
+            assert pid_is_alive(daemon_pid), f"daemon process {daemon_pid} died on backend crash"
 
             # `clud list` must not show this dead session as running.
             listed = run_until(

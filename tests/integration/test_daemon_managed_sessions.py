@@ -81,8 +81,11 @@ def safe_daemon_event_tail(path: Path, session_id: str) -> str:
             if type(value) is int and 0 <= value <= 10**16:
                 safe[key] = value
         op = event.get("op")
-        if isinstance(op, str) and 0 < len(op) <= 48 and op.isascii() and all(
-            char.islower() or char.isdigit() or char == "_" for char in op
+        if (
+            isinstance(op, str)
+            and 0 < len(op) <= 48
+            and op.isascii()
+            and all(char.islower() or char.isdigit() or char == "_" for char in op)
         ):
             safe["op"] = op
         if "session_id" in event:
@@ -181,9 +184,19 @@ def test_ctrl_c_metadata_diagnostics_bounds_and_filters_event_tail(tmp_path: Pat
     secret = "sensitive-provider-key"
     events = state_dir / "daemon-events.jsonl"
     events.write_text(
-        json.dumps({"op": "oversized", "reason": secret * 1000}) + "\n"
-        + json.dumps({"ts_ms": 123, "event_id": 4, "daemon_pid": 5,
-                      "op": "ctrl_c_kill", "reason": secret, "session_id": "sess-1"}) + "\n",
+        json.dumps({"op": "oversized", "reason": secret * 1000})
+        + "\n"
+        + json.dumps(
+            {
+                "ts_ms": 123,
+                "event_id": 4,
+                "daemon_pid": 5,
+                "op": "ctrl_c_kill",
+                "reason": secret,
+                "session_id": "sess-1",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -311,9 +324,7 @@ class TestDaemonManagedSessionFlags:
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
 
-            report = attach_for_report(
-                clud_binary, env, state_dir, session_id, "hello-detach"
-            )
+            report = attach_for_report(clud_binary, env, state_dir, session_id, "hello-detach")
             assert "hello-detach" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
@@ -477,9 +488,7 @@ class TestDaemonManagedSessionFlags:
         assert session_id in listed.stdout
 
         try:
-            report = attach_for_report(
-                clud_binary, env, state_dir, session_id, "hello-detachable"
-            )
+            report = attach_for_report(clud_binary, env, state_dir, session_id, "hello-detachable")
             assert "hello-detachable" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)

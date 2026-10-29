@@ -505,24 +505,52 @@ class TestCodexBridgeForeground:
         ],
     )
     def test_6_1_launch_reaches_the_selected_wire_model(
-        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path,
-        fake_responses: _FakeResponsesServer, model: str, wire: str, discovery: str,
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        fake_responses: _FakeResponsesServer,
+        model: str,
+        wire: str,
+        discovery: str,
     ) -> None:
         env = mock_env.copy()
         env["CLUD_INTEGRATION_TESTS"] = "1"
         env["CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL"] = fake_responses.base_url
         dry = _run(
-            clud_binary, "--dry-run", "--codex", "--harness", "claude",
-            "--model", model, "--effort", "high", "-p", "hello", env=env,
+            clud_binary,
+            "--dry-run",
+            "--codex",
+            "--harness",
+            "claude",
+            "--model",
+            model,
+            "--effort",
+            "high",
+            "-p",
+            "hello",
+            env=env,
         )
         assert dry.returncode == 0, dry.stderr
         plan = json.loads(dry.stdout)
         model_index = plan["command"].index("--model")
         assert plan["command"][model_index + 1] == discovery
         result = _run(
-            clud_binary, "--codex", "--harness", "claude", "--subprocess",
-            "--model", model, "--effort", "high", "-p", "hello", "--",
-            "--mock-codex-bridge-probe", str(tmp_path / "sol-6-1-probe.json"), env=env,
+            clud_binary,
+            "--codex",
+            "--harness",
+            "claude",
+            "--subprocess",
+            "--model",
+            model,
+            "--effort",
+            "high",
+            "-p",
+            "hello",
+            "--",
+            "--mock-codex-bridge-probe",
+            str(tmp_path / "sol-6-1-probe.json"),
+            env=env,
         )
         assert result.returncode == 0, result.stderr
         assert len(fake_responses.requests) == 1
@@ -605,8 +633,16 @@ class TestCodexBridgeForeground:
             assert plan["codex_model_source"] == source
             if expected == "gpt-6.1-sol":
                 invalid = _run(
-                    clud_binary, "--dry-run", "--codex", "--harness", "claude",
-                    "--effort", "none", "-p", "hello", env=env,
+                    clud_binary,
+                    "--dry-run",
+                    "--codex",
+                    "--harness",
+                    "claude",
+                    "--effort",
+                    "none",
+                    "-p",
+                    "hello",
+                    env=env,
                 )
                 assert invalid.returncode != 0
                 assert "none" in invalid.stderr
@@ -1458,7 +1494,8 @@ class TestInterruptReporting:
         report = describe_process_tree(os.getpid(), [os.getpid(), 2**22 + 1])
         assert f"client pid {os.getpid()}" in report
         assert "watched pids still alive" in report
-        assert tail_file(log).endswith("end") and len(tail_file(log)) == 2000
+        assert tail_file(log).endswith("end")
+        assert len(tail_file(log)) == 2000
         assert tail_text(b"abc") == "abc"
         assert tail_file(tmp_path / "missing").startswith("<unreadable")
 
