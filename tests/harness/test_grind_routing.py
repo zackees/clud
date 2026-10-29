@@ -302,20 +302,24 @@ def test_r6_multi_part_issue_left_alone_on_refusal(harness: Harness) -> None:
     _no_workflow(result)
 
 
-def test_r7_single_change_issue_is_sent_to_do_without_asking(harness: Harness) -> None:
+def test_r7_single_change_issue_is_wrapped_in_a_one_child_meta(harness: Harness) -> None:
     harness.write_gh_state(worlds.single_change())
     before = _issues(harness)
-    local = _local_state(harness)
     steps = [
         _bash(f"{TOOL} 1 --repo o/r"),
-        _after(_saw('"meta": false'), {"text": REFUSAL}),
+        _after(
+            _saw('"meta": false'), _bash("gh issue create --title 'meta: typo' --body 'Tracks #1'")
+        ),
+        *_attach_steps("2", ("1",)),
+        _after(OK, _bash(_verify("2", ("1",)))),
+        _after(_saw('"number": 2'), {"text": "META_READY #2"}),
     ]
     result = _run(harness, steps)
-    assert "run `/do 1`" in result.stdout
     assert _questions(result) == []
-    assert _issues(harness) == before
-    assert _local_state(harness) == local
-    _no_run_files(harness)
+    assert "run `/do 1`" not in result.stdout
+    assert _created(harness, before) == ["2"]
+    assert _issues(harness)["1"]["parent"] == 2
+    _verified(harness, "2", ("1",))
     _no_workflow(result)
 
 
