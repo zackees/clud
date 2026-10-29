@@ -59,11 +59,42 @@ fn spawn_tool_installer() {
         .spawn(crate::tool_install::ensure_installed);
 }
 
+/// #2142: why the accept loop should stop without a `Shutdown` request.
+/// `interrupted` is flipped by the process-wide SIGTERM/SIGHUP/SIGQUIT/SIGINT
+/// handlers, which replace the default "die" disposition, so a daemon that
+/// never polls it ignores `kill -TERM`. A daemon whose `daemon.json` now names
+/// another pid has been superseded and must release `data.redb` for it.
+/// The disk read is throttled to once a second.
+fn stop_reason(
+    interrupted: &AtomicBool,
+    state_dir: &Path,
+    last_check: &mut Instant,
+) -> Option<&'static str> {
+    if interrupted.load(Ordering::SeqCst) {
+        return Some("daemon_signal_shutdown");
+    }
+    if last_check.elapsed() < Duration::from_secs(1) {
+        return None;
+    }
+    *last_check = Instant::now();
+    let on_disk = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).ok()?;
+    is_superseded(on_disk.pid, std::process::id()).then_some("daemon_superseded_shutdown")
+}
+
+fn is_superseded(recorded_pid: u32, own_pid: u32) -> bool {
+    recorded_pid != own_pid
+}
+
+#[cfg(test)]
+pub(super) fn run_daemon_uninterrupted(state_dir: &Path) -> i32 {
+    run_daemon(state_dir, &AtomicBool::new(false))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
 )]
-pub(super) fn run_daemon(state_dir: &Path) -> i32 {
+pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     // Retag the crash reporter installed by main.rs so any crash inside the
     // daemon process gets written under role="daemon". `install_native`
     // also ensures the SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT /
@@ -240,6 +271,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let checkout_claims = CheckoutClaimRegistry::new(Duration::from_secs(2));
     let session_flags = SessionFlagRegistry::default();
     let mut last_client_lease_prune = Instant::now();
+    let mut last_stop_check = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     // #933: a daemon's base environment is the OS/login environment, not the
     // shell that won daemon auto-start. Refresh it on admissions and on this
@@ -360,6 +392,11 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                     break;
                 }
                 let now = Instant::now();
+                if let Some(reason) = stop_reason(interrupted, state_dir, &mut last_stop_check) {
+                    daemon_events::log_event(state_dir, reason, []);
+                    shutdown_requested.store(true, Ordering::SeqCst);
+                    break;
+                }
                 if now.duration_since(last_client_lease_prune) >= Duration::from_secs(1) {
                     for identity in client_leases.prune_dead() {
                         daemon_events::log_event(
@@ -463,7 +500,12 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         lane.cleanup();
     }
     daemon_events::log_event(state_dir, "daemon_stopping", []);
-    let _ = fs::remove_file(daemon_info_path(state_dir));
+    // A superseded daemon must not delete the successor's `daemon.json`.
+    let successor_owns_info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))
+        .is_ok_and(|on_disk| is_superseded(on_disk.pid, std::process::id()));
+    if !successor_owns_info {
+        let _ = fs::remove_file(daemon_info_path(state_dir));
+    }
     daemon_events::log_event(state_dir, "daemon_stopped", []);
     0
 }
@@ -2313,12 +2355,51 @@ mod tests {
         line
     }
 
+    /// #2142: SIGTERM/SIGHUP/SIGQUIT only flip `interrupted`; the daemon must
+    /// poll it and exit instead of ignoring the signal.
+    #[test]
+    fn daemon_exits_when_interrupted_flag_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let flag = Arc::new(AtomicBool::new(false));
+        let (dir, thread_flag) = (state_dir.clone(), Arc::clone(&flag));
+        let daemon_thread = thread::spawn(move || run_daemon(&dir, &thread_flag));
+        wait_for_daemon_ready(&state_dir);
+
+        flag.store(true, Ordering::SeqCst);
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+        assert!(!daemon_info_path(&state_dir).exists());
+    }
+
+    /// #2142: a daemon whose `daemon.json` now names another pid exits, and
+    /// leaves the successor's file alone.
+    #[test]
+    fn superseded_daemon_exits_and_keeps_successor_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let dir = state_dir.clone();
+        let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&dir));
+        let mut info = wait_for_daemon_ready(&state_dir);
+
+        info.pid = std::process::id().wrapping_add(1);
+        write_json_file(&daemon_info_path(&state_dir), &info).unwrap();
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+        let after = read_json_file::<DaemonInfo>(&daemon_info_path(&state_dir)).unwrap();
+        assert_eq!(after.pid, info.pid, "successor's daemon.json must survive");
+    }
+
+    #[test]
+    fn supersede_check_compares_recorded_pid() {
+        assert!(!is_superseded(7, 7));
+        assert!(is_superseded(8, 7));
+    }
+
     #[test]
     fn daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
-        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+        let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
 
         let info = wait_for_daemon_ready(&state_dir);
         let (json_response, json_line) = send_daemon_request_line(
@@ -2389,7 +2470,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
-        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+        let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
 
         let info = wait_for_daemon_ready(&state_dir);
         let list_line = send_raw_daemon_request_line(&state_dir, r#"{"op":"list_live_cwds"}"#);
@@ -2489,7 +2570,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
-        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+        let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
 
         let info = wait_for_daemon_ready(&state_dir);
         // #2212: a single noisy window on a shared runner can push the prost
