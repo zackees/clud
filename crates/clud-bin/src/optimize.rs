@@ -631,7 +631,8 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
 
 use crate::platform::optimize::make_executable;
 
-fn global_bin_dir(home: &Path) -> PathBuf {
+/// Where clud installs soldr: `$CARGO_HOME/bin` when present, else `~/.local/bin`.
+pub(crate) fn global_bin_dir(home: &Path) -> PathBuf {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".cargo"));

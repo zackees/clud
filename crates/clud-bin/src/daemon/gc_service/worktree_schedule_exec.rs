@@ -131,6 +131,7 @@ fn prune_build_output(
     };
     let mut state = target_prune::PruneState::load(wt_root);
     let mut total = 0u64;
+    let mut pruned = 0usize;
     for i in picked {
         // Re-evaluated right before each prune with a fresh process table:
         // the snapshot behind `cands` is stale after earlier, slow prunes.
@@ -160,9 +161,12 @@ fn prune_build_output(
         }
         cands[i].bytes = cands[i].bytes.saturating_sub(out.reclaimed_bytes);
         total = total.saturating_add(out.reclaimed_bytes);
+        pruned += out.targets_pruned;
     }
     state.save(wt_root);
-    if total == 0 {
+    // A capped size scan can report 0 reclaimed for a real prune, so any
+    // successful prune forces a re-measure.
+    if total == 0 && pruned == 0 {
         return true;
     }
     // Re-measure and record: the size report and top list now show the

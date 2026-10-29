@@ -66,7 +66,13 @@ impl PruneState {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, wt_root: &Path) {
+    /// Forget targets that no longer exist, so the file cannot grow forever.
+    fn forget_vanished(&mut self) {
+        self.handled.retain(|path, _| Path::new(path).exists());
+    }
+
+    pub fn save(&mut self, wt_root: &Path) {
+        self.forget_vanished();
         if let Ok(text) = serde_json::to_string(self) {
             let _ = fs::write(Self::path_for(wt_root), text);
         }
@@ -151,18 +157,18 @@ pub fn prune_worktree(
     out
 }
 
-/// `soldr` from PATH, else `~/.cargo/bin` or `~/.local/bin`.
+/// `soldr` from PATH, else the directory clud installs it into
+/// ([`crate::optimize::global_bin_dir`], which honours `CARGO_HOME`).
 fn find_soldr() -> Result<PathBuf, String> {
     if let Ok(found) = which::which("soldr") {
         return Ok(found);
     }
     let home = crate::home::user_home().ok_or("soldr not found: no home directory")?;
-    let dirs = std::env::join_paths([
-        home.join(".cargo").join("bin"),
-        home.join(".local").join("bin"),
-    ])
-    .map_err(|e| format!("soldr not found: {e}"))?;
-    which::which_in("soldr", Some(dirs), &home).map_err(|e| format!("soldr not found: {e}"))
+    find_soldr_in(crate::optimize::global_bin_dir(&home), &home)
+}
+
+fn find_soldr_in(dir: PathBuf, cwd: &Path) -> Result<PathBuf, String> {
+    which::which_in("soldr", Some(dir), cwd).map_err(|e| format!("soldr not found: {e}"))
 }
 
 fn rejects_prune_target(output: &str) -> bool {
@@ -322,10 +328,53 @@ mod tests {
     fn state_round_trips_through_the_gc_state_dir() {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("worktrees");
+        let target = home.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let key = target.to_string_lossy().into_owned();
         let mut state = PruneState::default();
-        state.handled.insert("/x/target".into(), 7);
+        state.handled.insert(key.clone(), 7);
         state.save(&root);
-        assert_eq!(PruneState::load(&root).handled.get("/x/target"), Some(&7));
+        assert_eq!(PruneState::load(&root).handled.get(&key), Some(&7));
+    }
+
+    #[test]
+    fn save_drops_entries_for_vanished_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let live = home.path().join("live-target");
+        fs::create_dir_all(&live).unwrap();
+        let mut state = PruneState::default();
+        state.handled.insert(live.to_string_lossy().into_owned(), 1);
+        state.handled.insert("/gone/target".into(), 2);
+        state.save(&root);
+        let loaded = PruneState::load(&root);
+        assert_eq!(loaded.handled.len(), 1);
+        assert!(loaded.handled.contains_key(live.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn soldr_is_found_in_the_dir_global_bin_dir_picks_from_cargo_home() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("CARGO_HOME", v),
+                    None => std::env::remove_var("CARGO_HOME"),
+                }
+            }
+        }
+        let _lock = crate::test_env::home_lock();
+        let cargo_home = tempfile::tempdir().unwrap();
+        let bin = cargo_home.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let name = if cfg!(windows) { "soldr.exe" } else { "soldr" };
+        fs::write(bin.join(name), "").unwrap();
+        crate::platform::optimize::make_executable(&bin.join(name)).unwrap();
+        let _restore = Restore(std::env::var_os("CARGO_HOME"));
+        std::env::set_var("CARGO_HOME", cargo_home.path());
+        let dir = crate::optimize::global_bin_dir(Path::new("/nonexistent-home"));
+        assert_eq!(dir, bin);
+        assert!(find_soldr_in(dir, cargo_home.path()).is_ok());
     }
 
     #[test]
