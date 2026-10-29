@@ -52,10 +52,18 @@ def test_intake_verifies_links_and_reports_partial_state() -> None:
     assert "partial" in text.lower()
 
 
-def test_intake_refuses_single_issues_with_do() -> None:
-    text = _read("grind-intake")
-    assert "run `/do N`" in text
-    assert "(or `clud do N`) instead." in text
+def test_intake_wraps_single_change_issue_and_aborts_only_multi_part() -> None:
+    """#2160: a single-change issue is wrapped in a one-child meta, not refused."""
+    text = " ".join(_read("grind-intake").split())
+    assert "**meta false, single change:** no question and no refusal." in text
+    assert "attach #N as its only native sub-issue" in text
+    assert "Wrapped in meta #<meta>;" in text
+    assert "Print `Wrapped #N in meta #M` to the user." in text
+    assert "Create no new child issue" in text
+    # The remaining refusal is Abort-only, on a multi-part issue.
+    assert "The refusal below applies only to **Abort** on a multi-part issue." in text
+    assert "#N has several independent parts" in text
+    assert "run `/do N` (or `clud do N`) on one part > at a time instead." in text
     assert "Nothing to do" in text
 
 
