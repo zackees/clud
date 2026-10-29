@@ -31,6 +31,11 @@ passing test and per-crate cache record. Open `log_path` only when `exit_code` i
 if stdout is not a JSON object the installed soldr predates the mode, so read the output as
 usual (forge-ci/soldr#3924, clud#2231).
 
+**Batch validation (clud#2313).** Validate Rust with one `soldr lint` call (it runs
+`fmt --all -- --check`, Clippy and configured Dylint together) plus one
+`SOLDR_PORCELAIN=1 soldr cargo test -p a -p b`, not per-step or per-crate calls that each
+re-print soldr boilerplate. A single step is fine for a fast inner loop.
+
 Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
 
 ### Validation before merging
