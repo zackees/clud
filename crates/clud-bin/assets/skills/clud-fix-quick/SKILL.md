@@ -73,8 +73,12 @@ or infer from `git remote get-url origin` for bare-number inputs.
 
 2. **No full test suite.** Run only the targeted test that exercises
    the change. Targeted-test selection rules per language:
-   - **Rust**: `soldr cargo test -p <crate> --lib <module>::<test-name>`
-     or `--test <file>` matching the changed file.
+   - **Rust**: `SOLDR_PORCELAIN=1 soldr cargo test -p <crate> --lib
+     <module>::<test-name>` or `--test <file>` matching the changed file.
+     That prints ONE JSON line (verdict, `exit_code`, counts, `log_path`);
+     read the `log_path` file only when `exit_code` is non-zero. If stdout
+     is not a JSON object, the installed soldr predates the mode - read the
+     output normally. Never wrap the call in a grep/sed filter.
    - **Python**: `pytest -k <pattern>` matching the changed file or
      test name.
    - **JS/TS**: `npm test -- -t <pattern>` matching the changed file
