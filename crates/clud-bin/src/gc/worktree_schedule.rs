@@ -81,7 +81,8 @@ pub fn mark_dirty(candidates: &mut [Candidate], probe: &dyn Fn(&str) -> Option<S
 /// Git facts that make trashing a worktree lossy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirtyFacts {
-    /// `git status --porcelain --untracked-files=no` is non-empty.
+    /// `git status --porcelain --untracked-files=all --ignored=no` is non-empty
+    /// (modified, staged or untracked-new files).
     pub tracked_changes: bool,
     /// HEAD holds commits no remote-tracking ref reaches.
     pub unpushed: bool,
@@ -105,7 +106,15 @@ pub fn dirty_reason(f: &DirtyFacts) -> Option<String> {
 /// Gather [`DirtyFacts`] with git. Every failure fails closed.
 pub fn probe_dirty(dir: &Path) -> DirtyFacts {
     let mut facts = DirtyFacts::default();
-    match crate::worktrees::run_git(dir, &["status", "--porcelain", "--untracked-files=no"]) {
+    match crate::worktrees::run_git(
+        dir,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored=no",
+        ],
+    ) {
         Ok(out) => facts.tracked_changes = !out.trim().is_empty(),
         Err(e) => {
             facts.unreadable = Some(e);

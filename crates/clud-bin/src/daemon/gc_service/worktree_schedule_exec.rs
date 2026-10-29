@@ -80,10 +80,13 @@ pub(super) fn run(
     let mut over = matches!(cached.map(|c| c.check), Some(SizeCheck::Over(_)));
     let mut schedule = worktree_schedule::load(wt_root);
     let mut cands = candidates(wt_root, rows, live_cwds, procs, now);
-    // Only candidates about to be scheduled cost a git probe.
-    worktree_schedule::mark_dirty(&mut cands, &|p| {
-        worktree_schedule::dirty_reason(&worktree_schedule::probe_dirty(Path::new(p)))
-    });
+    // Probe git only when the root is over budget: candidates are scheduled
+    // only then, so an under-budget root pays no git cost.
+    if over {
+        worktree_schedule::mark_dirty(&mut cands, &|p| {
+            worktree_schedule::dirty_reason(&worktree_schedule::probe_dirty(Path::new(p)))
+        });
+    }
     if over && mode == ReclaimMode::Delete {
         let warn_bytes = cached.map_or(0, |c| c.warn_bytes);
         over = prune_build_output(wt_root, rows, live_cwds, &mut cands, warn_bytes, now);

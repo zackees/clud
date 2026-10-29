@@ -537,11 +537,13 @@ the default branch, so ancestry-based checks call them live work forever
   the root dropping under the limit removes it from the schedule. Observe
   mode only logs; no process snapshot means no scheduling
   (`gc::worktree_schedule` decides, `gc_service::worktree_schedule_exec` acts).
-- **Dirty worktrees are never trashed (#2302 follow-up).** A schedulable
-  candidate (non-exempt, idle >= 24 h) is probed once per tick with
-  `git status --porcelain --untracked-files=no` and
+- **Dirty worktrees are never trashed (#2302 follow-up).** When the root is
+  over budget, a schedulable candidate (non-exempt, idle >= 24 h) is probed
+  once per tick with
+  `git status --porcelain --untracked-files=all --ignored=no` (untracked new
+  files count as dirty) and
   `rev-list --count HEAD --not --remotes` (the predicate `safe-rm` uses for
-  clones, `rm_tool_clone::has_unpushed`). Uncommitted tracked changes,
+  clones, `rm_tool_clone::has_unpushed`). Uncommitted or untracked changes,
   unpushed commits, or any git failure (fail closed) make it exempt: it is
   logged as `kept: dirty <path> (<reason>)`, and a worktree already on the
   schedule that turns dirty drops off it (`worktree_schedule::mark_dirty`,
