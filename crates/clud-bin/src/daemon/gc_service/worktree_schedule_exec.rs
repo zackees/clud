@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::gc::keep_list;
+use crate::gc::target_prune;
 use crate::gc::worktree_root::SizeCheck;
 use crate::gc::worktree_schedule::{self, Action, Candidate};
 use crate::gc::worktree_size_cache::{cache_path_for, now_unix, read_cache};
@@ -73,12 +74,14 @@ pub(super) fn run(
         return;
     }
     let now = now_unix();
-    let over = matches!(
-        read_cache(&cache_path_for(wt_root)).map(|c| c.check),
-        Some(SizeCheck::Over(_))
-    );
+    let cached = read_cache(&cache_path_for(wt_root));
+    let mut over = matches!(cached.map(|c| c.check), Some(SizeCheck::Over(_)));
     let mut schedule = worktree_schedule::load(wt_root);
-    let cands = candidates(wt_root, rows, live_cwds, procs, now);
+    let mut cands = candidates(wt_root, rows, live_cwds, procs, now);
+    if over && mode == ReclaimMode::Delete {
+        let warn_bytes = cached.map_or(0, |c| c.warn_bytes);
+        over = prune_build_output(wt_root, &mut cands, warn_bytes, now);
+    }
     let actions = worktree_schedule::plan(&mut schedule, over, &cands, now);
     let _ = worktree_schedule::save(wt_root, &schedule);
     for action in actions {
@@ -97,6 +100,51 @@ pub(super) fn run(
             Action::Trash { path } => trash(&path, tx, now),
         }
     }
+}
+
+/// #2302: prune `target/` dirs of idle, unused worktrees before anything is
+/// scheduled for trash. Returns whether the root is still over budget; any
+/// failure (no soldr, prune error) leaves the previous verdict standing.
+fn prune_build_output(wt_root: &Path, cands: &mut [Candidate], warn_bytes: u64, now: i64) -> bool {
+    let picked: Vec<usize> = (0..cands.len())
+        .filter(|&i| !target_prune::select(true, &cands[i..=i]).is_empty())
+        .collect();
+    if picked.is_empty() {
+        return true;
+    }
+    let mut run = match target_prune::soldr_runner() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[clud] gc: build-output prune skipped: {e}");
+            return true;
+        }
+    };
+    let mut total = 0u64;
+    for i in picked {
+        let out = target_prune::prune_worktree(
+            Path::new(&cands[i].path),
+            &mut run,
+            &target_prune::real_size,
+        );
+        if out.targets_pruned > 0 {
+            eprintln!(
+                "[clud] gc: pruned {} target dir(s) in {}, reclaimed {} bytes",
+                out.targets_pruned, cands[i].path, out.reclaimed_bytes
+            );
+        }
+        cands[i].bytes = cands[i].bytes.saturating_sub(out.reclaimed_bytes);
+        total = total.saturating_add(out.reclaimed_bytes);
+    }
+    if total == 0 {
+        return true;
+    }
+    // Re-measure and record: the size report and top list now show the
+    // post-prune magnitudes, not the stale pre-prune ones.
+    let _ = crate::gc::worktree_size_cache::refresh_cache(wt_root, warn_bytes, now);
+    matches!(
+        read_cache(&cache_path_for(wt_root)).map(|c| c.check),
+        Some(SizeCheck::Over(_))
+    )
 }
 
 fn trash(path: &str, tx: &mpsc::Sender<RegistryMsg>, now: i64) {

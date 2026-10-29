@@ -195,7 +195,7 @@ fn newest_build_mtime(target: &Path) -> Option<SystemTime> {
     Some(newest)
 }
 
-fn dir_size(path: &Path) -> u64 {
+pub(crate) fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
