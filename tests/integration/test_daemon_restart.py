@@ -146,7 +146,7 @@ def test_daemon_stop_falls_back_when_old_daemon_rejects_shutdown(
             "        request=conn.recv(65536)\n"
             "        with pathlib.Path(sys.argv[2]).open('ab') as received:\n"
             "            received.write(request)\n"
-            '        conn.sendall(b\'{"op":"error","message":"old client refused"}\\n\')\n',
+            "        conn.sendall(b'{\"op\":\"error\",\"message\":\"old client refused\"}\\n')\n",
             str(port_file),
             str(requests_file),
         ],

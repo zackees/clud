@@ -17,7 +17,9 @@ from tests import process
 from ._daemon_helpers import managed_env
 
 
-def _run_orphan_status(clud_binary: Path, env: dict[str, str]) -> process.CompletedProcess[str]:
+def _run_orphan_status(
+    clud_binary: Path, env: dict[str, str]
+) -> process.CompletedProcess[str]:
     return process.run(
         [str(clud_binary), "daemon", "orphan-status", "--json"],
         capture_output=True,
@@ -37,7 +39,9 @@ def test_orphan_status_reports_recent_sweep_as_fresh(
     now_ms = int(time.time() * 1000)
     events = [
         json.dumps({"op": "orphan_sweep_started", "ts_ms": now_ms - 100}),
-        json.dumps({"op": "orphan_sweep_finished", "ts_ms": now_ms, "found": 4, "reaped": 2}),
+        json.dumps(
+            {"op": "orphan_sweep_finished", "ts_ms": now_ms, "found": 4, "reaped": 2}
+        ),
     ]
     (state_dir / "daemon-events.jsonl").write_text("\n".join(events) + "\n")
 

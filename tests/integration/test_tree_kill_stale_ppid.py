@@ -88,29 +88,10 @@ def _orphan_with_stale_parent() -> tuple[process.RunningChild, int, psutil.Proce
     started = time.time()
     keeper = process.Popen(
         [
-            "cmd",
-            "/d",
-            "/c",
-            "start",
-            "/b",
-            "cmd",
-            "/d",
-            "/c",
-            "start",
-            "/b",
-            "ping",
-            "-n",
-            "120",
-            "127.0.0.1",
-            ">NUL",
-            "2>&1",
-            "&",
-            "ping",
-            "-n",
-            "120",
-            "127.0.0.1",
-            ">NUL",
-            "2>&1",
+            "cmd", "/d", "/c",
+            "start", "/b", "cmd", "/d", "/c", "start", "/b", "ping", "-n", "120", "127.0.0.1",
+            ">NUL", "2>&1", "&",
+            "ping", "-n", "120", "127.0.0.1", ">NUL", "2>&1",
         ],
     )
     orphan: list[psutil.Process] = []

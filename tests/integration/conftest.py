@@ -179,7 +179,9 @@ def _cargo_build_inherit_stdio(package: str) -> None:
         env=_build_env_without_rustc_wrapper(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"cargo build -p {package} exited with code {result.returncode}")
+        raise RuntimeError(
+            f"cargo build -p {package} exited with code {result.returncode}"
+        )
 
 
 def _find_clud() -> Path:
@@ -308,7 +310,8 @@ def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str
 
     codex_wrapper = tmp_path / "codex.cmd"
     codex_wrapper.write_text(
-        '@echo off\r\n"%~dp0mock-agent.exe" %*\r\n',
+        "@echo off\r\n"
+        "\"%~dp0mock-agent.exe\" %*\r\n",
         encoding="utf-8",
     )
 
@@ -332,7 +335,8 @@ def mock_env_cmd_wrappers(mock_agent_binary: Path, tmp_path: Path) -> dict[str, 
     for backend in ("claude", "codex"):
         wrapper = tmp_path / f"{backend}.cmd"
         wrapper.write_text(
-            '@echo off\r\n"%~dp0mock-agent.exe" %*\r\n',
+            "@echo off\r\n"
+            "\"%~dp0mock-agent.exe\" %*\r\n",
             encoding="utf-8",
         )
 
@@ -364,7 +368,12 @@ def _scan_for_clud_zombies() -> list[dict]:
     ext = ".exe" if sys.platform == "win32" else ""
     candidates = [
         # MSVC-pinned builds put artifacts under target/<triple>/debug.
-        ROOT / "target" / "x86_64-pc-windows-msvc" / "debug" / "examples" / f"scan_zombies{ext}",
+        ROOT
+        / "target"
+        / "x86_64-pc-windows-msvc"
+        / "debug"
+        / "examples"
+        / f"scan_zombies{ext}",
         ROOT / "target" / "debug" / "examples" / f"scan_zombies{ext}",
     ]
     scan_bin = next((p for p in candidates if p.is_file()), None)
@@ -400,7 +409,8 @@ def _daemon_cleanup_roots(clud_binary: Path):
             failures.append(f"{root}:\n{error}")
     if failures:
         pytest.fail(
-            "daemon cleanup failed during the session-final sweep:\n" + "\n\n".join(failures)
+            "daemon cleanup failed during the session-final sweep:\n"
+            + "\n\n".join(failures)
         )
 
 

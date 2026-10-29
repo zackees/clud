@@ -57,7 +57,9 @@ def _openrouter_row(clud: Path, env: dict[str, str]) -> dict[str, Any]:
     return next(row for row in rows if row["provider"] == "openrouter")
 
 
-def test_headless_host_reads_the_fallback_file(clud_binary: Path, mock_env: dict[str, str]) -> None:
+def test_headless_host_reads_the_fallback_file(
+    clud_binary: Path, mock_env: dict[str, str]
+) -> None:
     env = _headless(mock_env)
     assert _openrouter_row(clud_binary, env)["status"] == "login_required"
 

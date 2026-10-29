@@ -87,7 +87,9 @@ def _daemon_diagnostics(state_dir: Path, session_id: str | None = None) -> str:
         except OSError as error:
             lines.append(f"session log {session_id}: <unreadable: {error}>")
     try:
-        entries = sorted(str(path.relative_to(state_dir)) for path in state_dir.rglob("*"))
+        entries = sorted(
+            str(path.relative_to(state_dir)) for path in state_dir.rglob("*")
+        )
         lines.append(f"state dir entries: {entries}")
     except OSError as error:
         lines.append(f"state dir entries: <unreadable: {error}>")
@@ -138,13 +140,20 @@ def _wait_for_owned_identities(
         root_start = int(metadata.get("root_pid_start", 0))
         worker_pid = metadata.get("worker_pid")
         worker_start = int(metadata.get("worker_pid_start", 0))
-        if root_pid is not None and root_start > 0 and worker_pid is not None and worker_start > 0:
+        if (
+            root_pid is not None
+            and root_start > 0
+            and worker_pid is not None
+            and worker_start > 0
+        ):
             return [
                 (int(worker_pid), worker_start),
                 (int(root_pid), root_start),
             ]
         time.sleep(0.05)
-    raise AssertionError(f"worker/backend identities were not recorded for session {session_id}")
+    raise AssertionError(
+        f"worker/backend identities were not recorded for session {session_id}"
+    )
 
 
 def _wait_for_identities_exit(
@@ -153,7 +162,10 @@ def _wait_for_identities_exit(
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not any(process_identity_is_alive(pid, start_time) for pid, start_time in identities):
+        if not any(
+            process_identity_is_alive(pid, start_time)
+            for pid, start_time in identities
+        ):
             return
         time.sleep(0.05)
     raise AssertionError(f"owned process identities survived daemon exit: {identities}")
@@ -164,7 +176,9 @@ def _events(state_dir: Path) -> list[dict[str, object]]:
     if not path.is_file():
         return []
     return [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
 
 
@@ -184,7 +198,9 @@ def _wait_for_events(
         if expected_ops <= ops:
             return ops
         time.sleep(0.05)
-    raise AssertionError(f"daemon events did not include {sorted(expected_ops)}: {sorted(ops)}")
+    raise AssertionError(
+        f"daemon events did not include {sorted(expected_ops)}: {sorted(ops)}"
+    )
 
 
 def _dashboard_state_request(info: dict[str, object]) -> urllib.request.Request:
@@ -271,7 +287,9 @@ def test_test_daemon_exits_at_hard_max_without_another_request(
     _wait_for_identities_exit(owned_identities)
 
     assert not (state_dir / "daemon.json").exists()
-    assert "daemon_test_max_lifetime_expired" in {event["op"] for event in _events(state_dir)}
+    assert "daemon_test_max_lifetime_expired" in {
+        event["op"] for event in _events(state_dir)
+    }
 
 
 def test_test_daemon_exits_after_safe_idle_window(
@@ -287,7 +305,9 @@ def test_test_daemon_exits_after_safe_idle_window(
 
     _wait_for_identity_exit(info)
 
-    assert "daemon_test_idle_expired" in {event["op"] for event in _events(state_dir)}
+    assert "daemon_test_idle_expired" in {
+        event["op"] for event in _events(state_dir)
+    }
 
 
 def test_configured_production_idle_timeout_exits_and_next_client_restarts(
@@ -336,7 +356,9 @@ def test_production_idle_timeout_defaults_to_fifteen_minutes(
     env = _production_default_idle_env(mock_env, state_dir, home)
     _start_daemon(clud_binary, env, state_dir)
 
-    profile = next(event for event in _events(state_dir) if event["op"] == "daemon_runtime_profile")
+    profile = next(
+        event for event in _events(state_dir) if event["op"] == "daemon_runtime_profile"
+    )
     assert profile["production_idle_timeout_secs"] == 900
     settings = json.loads((home / ".clud" / "settings.json").read_text(encoding="utf-8"))
     assert settings["daemon"]["idle_timeout_secs"] == 900
@@ -519,7 +541,9 @@ def test_dashboard_activity_defers_test_idle_expiry(
         time.sleep(0.25)
 
     _wait_for_identity_exit(info, timeout=6, state_dir=state_dir)
-    assert "daemon_test_idle_expired" in {event["op"] for event in _events(state_dir)}
+    assert "daemon_test_idle_expired" in {
+        event["op"] for event in _events(state_dir)
+    }
 
 
 def test_test_session_starts_no_host_scanners(

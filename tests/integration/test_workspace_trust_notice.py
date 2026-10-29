@@ -134,7 +134,9 @@ def test_single_interactive_launch_is_silent(
     assert _NOTICE not in result.stderr, result.stderr
 
 
-def test_dry_run_stays_clean(clud_binary: Path, mock_env: dict[str, str], tmp_path: Path) -> None:
+def test_dry_run_stays_clean(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
     # `--dry-run` is consumed by tooling; it must not grow a new stderr line.
     repo = _workspace(tmp_path)
     _write_state(mock_env, {})
