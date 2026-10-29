@@ -7,7 +7,7 @@
 //! stderr line in `daemon.stderr.log`, so the cause survives a detached
 //! daemon whose stderr is `discarded. Both reuse the existing event append.
 
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
@@ -76,6 +76,7 @@ fn append_stderr_log(path: &Path, message: &str) {
 mod tests {
     use super::*;
     use crate::daemon::paths::daemon_events_path;
+    use std::fs;
 
     fn events(dir: &Path) -> Vec<serde_json::Value> {
         fs::read_to_string(daemon_events_path(dir))
