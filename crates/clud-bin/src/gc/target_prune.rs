@@ -367,7 +367,11 @@ mod tests {
         let cargo_home = tempfile::tempdir().unwrap();
         let bin = cargo_home.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let name = if cfg!(windows) { "soldr.exe" } else { "soldr" };
+        let name = if crate::platform::host::WINDOWS {
+            "soldr.exe"
+        } else {
+            "soldr"
+        };
         fs::write(bin.join(name), "").unwrap();
         crate::platform::optimize::make_executable(&bin.join(name)).unwrap();
         let _restore = Restore(std::env::var_os("CARGO_HOME"));
@@ -408,16 +412,21 @@ mod tests {
         assert_eq!(asked.get(), 2);
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinked_target_to_outside_is_not_pruned_and_linked_dirs_are_not_walked() {
+        if crate::platform::host::WINDOWS {
+            return; // directory symlinks need privileges there
+        }
         let outside = tempfile::tempdir().unwrap();
         make_target(outside.path(), 100);
         let wt = tempfile::tempdir().unwrap();
         fs::write(wt.path().join("Cargo.toml"), "").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("target"), wt.path().join("target"))
-            .unwrap();
-        std::os::unix::fs::symlink(outside.path(), wt.path().join("linked")).unwrap();
+        crate::platform::alias_link::symlink(
+            &outside.path().join("target"),
+            &wt.path().join("target"),
+        )
+        .unwrap();
+        crate::platform::alias_link::symlink(outside.path(), &wt.path().join("linked")).unwrap();
         assert!(find_target_dirs(wt.path()).is_empty());
         let mut run = |_: &Path| -> Result<(), String> { panic!("must not run") };
         let out = go(wt.path(), &mut run, &mut PruneState::default(), later());
