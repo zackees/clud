@@ -5,11 +5,11 @@
 //! `daemon_startup_phase` event per finished step (`phase`, `elapsed_ms` since
 //! start) and [`StartupPhases::fail`] records `daemon_start_failed` plus the
 //! stderr line in `daemon.stderr.log`, so the cause survives a detached
-//! daemon whose stderr is `/dev/null`. Both reuse the existing event append.
+//! daemon whose stderr is `discarded. Both reuse the existing event append.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use serde_json::json;
@@ -36,47 +36,37 @@ impl<'a> StartupPhases<'a> {
             "daemon_startup_phase",
             [
                 ("phase", json!(phase)),
-                ("elapsed_ms", json!(self.started.as_millis_u64())),
+                ("elapsed_ms", json!(elapsed_ms(self.started))),
             ],
         );
     }
 
     /// Report an early exit: stderr, `daemon.stderr.log`, and a
     /// `daemon_start_failed` event. Returns the exit code (1).
-    pub(super) fn fail(&self, phase: &'static str, message: &str) -> i32 {
+    pub(super) fn fail(&self, phase: &'static str, error: &str) -> i32 {
+        let message = format!("[clud] {error}");
         eprintln!("{message}");
-        append_stderr_log(&self.state_dir.join(STDERR_LOG_NAME), message);
+        append_stderr_log(&self.state_dir.join(STDERR_LOG_NAME), &message);
         daemon_events::log_event(
             self.state_dir,
             "daemon_start_failed",
             [
                 ("phase", json!(phase)),
-                ("elapsed_ms", json!(self.started.as_millis_u64())),
-                ("error", json!(message)),
+                ("elapsed_ms", json!(elapsed_ms(self.started))),
+                ("error", json!(error)),
             ],
         );
         1
     }
 }
 
-trait ElapsedMs {
-    fn as_millis_u64(&self) -> u64;
-}
-
-impl ElapsedMs for Instant {
-    fn as_millis_u64(&self) -> u64 {
-        u64::try_from(self.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Append one line, rolling to a single `.1` backup past the size cap.
 fn append_stderr_log(path: &Path, message: &str) {
-    if fs::metadata(path).is_ok_and(|m| m.len() >= MAX_STDERR_LOG_BYTES) {
-        let mut backup = PathBuf::from(path);
-        backup.set_extension("log.1");
-        let _ = fs::remove_file(&backup);
-        let _ = fs::rename(path, backup);
-    }
+    let _ = daemon_events::rotate_if_needed(path, MAX_STDERR_LOG_BYTES);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{message}");
     }
@@ -124,7 +114,7 @@ mod tests {
         assert_eq!(got[0]["phase"], "loopback_bind");
         assert_eq!(got[0]["error"], "boom");
         let log = fs::read_to_string(tmp.path().join(STDERR_LOG_NAME)).unwrap();
-        assert_eq!(log, "boom\n");
+        assert_eq!(log, "[clud] boom\n");
     }
 
     #[test]

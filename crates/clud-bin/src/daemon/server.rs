@@ -1,3 +1,4 @@
+use super::startup_phases::StartupPhases;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -90,6 +91,19 @@ pub(super) fn run_daemon_uninterrupted(state_dir: &Path) -> i32 {
     run_daemon(state_dir, &AtomicBool::new(false))
 }
 
+/// Bind the IPC listener on an ephemeral loopback port (`loopback_bind`).
+fn bind_loopback(phases: &StartupPhases) -> Result<(TcpListener, u16), i32> {
+    let fail = |what: &str, err: io::Error| phases.fail("loopback_bind", &format!("{what}: {err}"));
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| fail("failed to bind daemon listener", err))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| fail("failed to read daemon listener addr", err))?
+        .port();
+    phases.mark("loopback_bind");
+    Ok((listener, port))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -114,7 +128,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
-    let phases = super::startup_phases::StartupPhases::new(state_dir, daemon_started_at);
+    let phases = StartupPhases::new(state_dir, daemon_started_at);
     daemon_events::log_event(state_dir, "daemon_starting", []);
     daemon_events::log_event(
         state_dir,
@@ -169,25 +183,10 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     }
     phases.mark("api_session_reconcile");
 
-    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            return phases.fail(
-                "loopback_bind",
-                &format!("[clud] failed to bind daemon listener: {err}"),
-            );
-        }
+    let (listener, port) = match bind_loopback(&phases) {
+        Ok(bound) => bound,
+        Err(code) => return code,
     };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => {
-            return phases.fail(
-                "loopback_bind",
-                &format!("[clud] failed to read daemon listener addr: {err}"),
-            );
-        }
-    };
-    phases.mark("loopback_bind");
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
     // will error back to the CLI. Log once and continue.
@@ -263,7 +262,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
         return phases.fail(
             "daemon_info_write",
-            &format!("[clud] failed to persist daemon info: {err}"),
+            &format!("failed to persist daemon info: {err}"),
         );
     }
     phases.mark("daemon_info_write");
@@ -1781,9 +1780,10 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
             .filter(|e| {
-                e["op"]
-                    .as_str()
-                    .is_some_and(|o| o.starts_with("daemon_start"))
+                matches!(
+                    e["op"].as_str(),
+                    Some("daemon_starting" | "daemon_startup_phase" | "daemon_start_failed")
+                )
             })
             .map(|e| {
                 (

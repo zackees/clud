@@ -186,7 +186,7 @@ Dead rows are omitted by default. Passing `--since <duration>` sets `include_dea
 - `const ENV_STATE_DIR = "CLUD_DAEMON_STATE_DIR"` — `types.rs:21`
 - `const DEFAULT_BACKLOG_LIMIT_BYTES = 256 KiB` — `types.rs:26`
 - `const LOG_ROTATE_BYTES = 10 MiB` — `types.rs:34`
-- `fn run_daemon(&Path) -> i32` — `server.rs:56`
+- `fn run_daemon(&Path, &AtomicBool) -> i32` — `server.rs`
 - `fn run_worker(&Path, &str, u32, &Path) -> i32` — `worker.rs:32`
 - `fn ensure_daemon(&Path) -> io::Result<()>` — `client.rs:43`
 - `fn send_daemon_request(&Path, &DaemonRequest)` — `client.rs:168`. Tries the
