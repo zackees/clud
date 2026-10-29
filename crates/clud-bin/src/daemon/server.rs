@@ -1,3 +1,4 @@
+use super::startup_phases::StartupPhases;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -90,6 +91,19 @@ pub(super) fn run_daemon_uninterrupted(state_dir: &Path) -> i32 {
     run_daemon(state_dir, &AtomicBool::new(false))
 }
 
+/// Bind the IPC listener on an ephemeral loopback port (`loopback_bind`).
+fn bind_loopback(phases: &StartupPhases) -> Result<(TcpListener, u16), i32> {
+    let fail = |what: &str, err: io::Error| phases.fail("loopback_bind", &format!("{what}: {err}"));
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| fail("failed to bind daemon listener", err))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| fail("failed to read daemon listener addr", err))?
+        .port();
+    phases.mark("loopback_bind");
+    Ok((listener, port))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -114,6 +128,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
+    let phases = StartupPhases::new(state_dir, daemon_started_at);
     daemon_events::log_event(state_dir, "daemon_starting", []);
     daemon_events::log_event(
         state_dir,
@@ -148,6 +163,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     );
 
     cleanup_stale_state(state_dir);
+    phases.mark("stale_state_cleanup");
     // A new daemon never adopts a persisted provider PID. Seal active turns
     // before accepting either HTTP or RPC lifecycle mutations.
     let api_lifecycle = Arc::new(
@@ -165,20 +181,11 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
             [("error", json!(error.to_string()))],
         );
     }
+    phases.mark("api_session_reconcile");
 
-    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("[clud] failed to bind daemon listener: {}", err);
-            return 1;
-        }
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => {
-            eprintln!("[clud] failed to read daemon listener addr: {}", err);
-            return 1;
-        }
+    let (listener, port) = match bind_loopback(&phases) {
+        Ok(bound) => bound,
+        Err(code) => return code,
     };
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
@@ -194,6 +201,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
             None
         }
     };
+    phases.mark("gc_registry_worker");
 
     // Issue #183: in-process HTTP dashboard. Bind a second loopback port
     // alongside the IPC listener and run a `tiny_http` server on a worker
@@ -222,6 +230,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         Some(activity.clone()),
         Arc::clone(&api_lifecycle),
     );
+    phases.mark("dashboard_bind");
 
     // Workers inherit these private capability values and use them for their
     // telemetry POSTs. The value is never returned by a dashboard endpoint.
@@ -251,9 +260,12 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
-        eprintln!("[clud] failed to persist daemon info: {}", err);
-        return 1;
+        return phases.fail(
+            "daemon_info_write",
+            &format!("failed to persist daemon info: {err}"),
+        );
     }
+    phases.mark("daemon_info_write");
     daemon_events::log_event(
         state_dir,
         "daemon_started",
@@ -1756,6 +1768,45 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn startup_failure_in_daemon_info_write_records_start_failed_after_phases() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where daemon.json belongs forces the write to fail.
+        fs::create_dir_all(daemon_info_path(tmp.path())).unwrap();
+        assert_eq!(run_daemon(tmp.path(), &AtomicBool::new(false)), 1);
+        let log = fs::read_to_string(daemon_events_path(tmp.path())).unwrap();
+        let ops: Vec<(String, String)> = log
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|e| {
+                matches!(
+                    e["op"].as_str(),
+                    Some("daemon_starting" | "daemon_startup_phase" | "daemon_start_failed")
+                )
+            })
+            .map(|e| {
+                (
+                    e["op"].as_str().unwrap().to_string(),
+                    e["phase"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let phases: Vec<&str> = ops.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(
+            phases,
+            [
+                "",
+                "stale_state_cleanup",
+                "api_session_reconcile",
+                "loopback_bind",
+                "gc_registry_worker",
+                "dashboard_bind",
+                "daemon_info_write",
+            ]
+        );
+        assert_eq!(ops.last().unwrap().0, "daemon_start_failed");
+    }
 
     #[test]
     fn checkout_claim_round_trips_through_daemon_tcp_handler() {

@@ -61,7 +61,7 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
         // Windows cannot rename an open file without FILE_SHARE_DELETE.
         // Drop our cached handle before rotating, then open the fresh file.
         *writer = None;
-        rotate_if_needed(path)?;
+        rotate_if_needed(path, MAX_EVENT_LOG_BYTES)?;
     } else if metadata.is_none() {
         // A different actor removed the active file; do not keep writing to
         // its unlinked handle.
@@ -94,11 +94,12 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
     file.flush()
 }
 
-fn rotate_if_needed(path: &Path) -> io::Result<()> {
+/// Roll `path` to its single `.1` backup once it reaches `cap` bytes.
+pub(super) fn rotate_if_needed(path: &Path, cap: u64) -> io::Result<()> {
     let Ok(metadata) = fs::metadata(path) else {
         return Ok(());
     };
-    if metadata.len() < MAX_EVENT_LOG_BYTES {
+    if metadata.len() < cap {
         return Ok(());
     }
     let backup = rotated_path(path);
