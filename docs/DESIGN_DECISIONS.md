@@ -7339,18 +7339,19 @@ repository policies, review requirements or branch protection. DD-002's
 landing preference. LaunchPlan and `--dry-run` expose the injected instructions
 under DD-005.
 
-
 ## DD-192: Workers end at enqueue and a chaperone owns the merge
 
-**Decision (2026-10-29):** In queue-live repos a code-writing worker ends at
-enqueue, frees its single checkout and may hand the PR to a checkout-free
-chaperone that waits for the merge. The chaperone reports `MERGED`,
+**Decision (2026-10-29):** Amends [DD-191](#dd-191-launches-prefer-delivering-completed-prs).
+In queue-live repos a code-writing worker ends at
+enqueue (or at push), frees its single checkout and may hand the PR to a
+checkout-free chaperone that waits for the merge, where a merge queue is
+required and background agents exist. The chaperone reports `MERGED`,
 `NEEDS-FIXUP` or `STUCK`; the orchestrator counts work done only on `MERGED`.
 Native CI labels are applied at PR creation, never later. Harnesses without
 background agents keep the old behavior: the agent observes until merged.
-`LAND_CONTRACT` carries the short form; the full contract is in
-[ci.md](architecture/ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge)
-and mirrors fleet policy GEN-033 (forge-ci/ci.yml).
+`LAND_CONTRACT` carries the short form; the full contract is owned by
+[ci.md](architecture/ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge),
+a candidate fleet policy (GEN-033, forge-ci/ci.yml).
 
 **Why:** A worker waiting on PR CI and the merge_group run holds the only
 checkout while idle. Worktrees would add parallelism but also cost disk,

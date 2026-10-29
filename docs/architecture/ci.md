@@ -538,21 +538,23 @@ inspect the PR and queue state before retrying the mutation (#2235).
 
 #### Agent landing: workers end at enqueue, chaperones own the merge
 
-In a queue-live repo a code-writing worker holds one checkout, and most of its
-wall time used to go to idle waiting on PR CI and the `merge_group` run
-(2026-10-29 burn-down: roughly 15-17 of 21-24 minutes; a `ci-windows` PR,
-#2323, stalled the pipeline for 45+ minutes). So the worker ends at enqueue and
-a checkout-free chaperone owns the PR to merge. Mirrors fleet policy
-[GEN-033](https://github.com/forge-ci/ci.yml/blob/main/docs/agent-guide.md);
-rationale in [DD-192](../DESIGN_DECISIONS.md#dd-192-workers-end-at-enqueue-and-a-chaperone-owns-the-merge).
-One checkout per worker; parallelism comes from cheap chaperones, not worktrees.
+This section owns the contract; `LAND_CONTRACT`, `launch-plan.md`, `CLAUDE.md`
+and [DD-192](../DESIGN_DECISIONS.md#dd-192-workers-end-at-enqueue-and-a-chaperone-owns-the-merge)
+(rationale and timing evidence) link here. It is a candidate fleet policy,
+[GEN-033](https://github.com/forge-ci/ci.yml/blob/main/docs/agent-guide.md).
 
-- **Worker:** fix, test, lint, push. Add native labels (`ci-windows`,
-  `ci-macos`, `ci-full`) at creation with `gh pr create --label`, never later:
-  a late label cancels a run and leaves a stale failing `CI OK` (#2273). Wait
+**Scope.** The chaperone handoff applies only where a merge queue is required
+and the harness can run background agents. With no required queue, or without
+background agents, the agent observes the PR until it merges, per repository
+policy (a repository with no hosted required checks merges after the local
+gate). One checkout per worker; parallelism comes from cheap chaperones, not
+worktrees.
+
+- **Worker:** fix, test, lint, push. Apply the repository's native-coverage
+  labels, if any, at creation with `gh pr create --label`, never later. Wait
   for PR checks, enqueue with `github/pr_merge.py --match-head-commit`, return
   the checkout to the clean default branch and report one line: PR, head SHA,
-  `enqueued|pushed`. It may instead hand off at push.
+  `enqueued|pushed`. The worker may hand off at push or at enqueue.
 - **Chaperone:** no checkout, no build, cheapest capable model. One
   deadline-bounded `pr_merge_watch.py --until merged` call (exit 0 merged, 13
   ejected, 14 unmergeable, 4 timeout). It self-serves once each: `gh run rerun
@@ -560,11 +562,11 @@ One checkout per worker; parallelism comes from cheap chaperones, not worktrees.
   run, a re-enqueue after a batch-mate ejection. Code failures go back as
   `NEEDS-FIXUP <PR> <job> <first error line>`. Maximum 2 automatic retries and
   a 90 minute cap, then `STUCK <PR> <reason>`. Success reports `MERGED <PR> <sha>`.
-- **Orchestrator:** counts work done only on `MERGED`. `NEEDS-FIXUP` and review
-  defects queue ahead of new work and run as an ordinary worker once the
-  checkout is free. Review may run in parallel on the PR diff.
-- **No background agents:** the old rule stands; the agent itself observes
-  until merged (enqueue alone is not landed).
+- **Orchestrator:** counts work done only on `MERGED`. On `NEEDS-FIXUP` the
+  worker checks the branch out again, fixes and pushes, then hands it back to a
+  chaperone; these queue ahead of new work and run as an ordinary worker once
+  the checkout is free. On `STUCK` it reports what remains. Review may run in
+  parallel on the PR diff.
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old

@@ -194,13 +194,11 @@ final fix). Observe hosted checks with `github/pr_merge_watch.py`, fix failures,
 and satisfy required review before submitting the PR through the repository's
 merge mechanism. For a required merge queue, submit with
 `github/pr_merge.py --match-head-commit <head-sha>` and see the PR through to
-an actual merge; queue submission alone is incomplete. Apply native CI labels
-at PR creation, never later. Where the harness can run background agents, the
-worker may hand the enqueued PR to a checkout-free chaperone sub-agent that
-waits for the merge and reports `MERGED`, `NEEDS-FIXUP` or `STUCK`, then free
-its checkout; the task is done only on `MERGED`
-([agent landing](ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge)).
-Without background agents the agent itself observes until merged. Use the tools through
+an actual merge; queue submission alone is incomplete. Who waits (the worker,
+or a chaperone handoff at push or enqueue), when native labels are applied and
+what each report means are owned by
+[agent landing](ci.md#agent-landing-workers-end-at-enqueue-chaperones-own-the-merge).
+Use the tools through
 `clud tool run <tool> -- <arguments>` and their help for selectors and deadlines.
 Start a bounded watcher once and wait on its live session or completion
 notification; never write a polling loop. Report the merged PR URL, or the
