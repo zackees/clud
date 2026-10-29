@@ -774,6 +774,76 @@ fn an_incomplete_signature_is_not_a_pwd_walk() {
     ));
 }
 
+/// The denial `cd /elsewhere` produces under the relaxed policy.
+fn full_denial() -> String {
+    deny("cd /elsewhere", CdPolicy::Relaxed).expect("denied")
+}
+
+#[test]
+fn first_block_in_a_session_is_full_then_short() {
+    let dir = TempDir::new().unwrap();
+    let first = condense_at(Some(dir.path()), Some("s1"), full_denial());
+    assert_eq!(first, full_denial());
+    let second = condense_at(Some(dir.path()), Some("s1"), full_denial());
+    assert!(second.len() < first.len() / 2, "{second}");
+    assert!(second.contains("[block-cd]"), "{second}");
+    assert!(second.contains("cd /elsewhere"), "{second}");
+    assert!(second.contains("(cd DIR && CMD)"), "{second}");
+    assert!(
+        second.contains(&format!(
+            "CLUD_BAD_CMD_OVERRIDE={BLOCK_CD_RULE_ID}:<reason>"
+        )),
+        "{second}"
+    );
+}
+
+#[test]
+fn a_different_session_gets_the_full_text_again() {
+    let dir = TempDir::new().unwrap();
+    condense_at(Some(dir.path()), Some("s1"), full_denial());
+    let other = condense_at(Some(dir.path()), Some("s2"), full_denial());
+    assert_eq!(other, full_denial());
+}
+
+#[test]
+fn stale_seen_markers_are_pruned_when_a_new_one_is_written() {
+    let dir = TempDir::new().unwrap();
+    let seen = dir.path().join(SEEN_DIR_NAME);
+    fs::create_dir_all(&seen).unwrap();
+    let stale = seen.join("stale.seen");
+    fs::write(&stale, b"1").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    condense_at(Some(dir.path()), Some("fresh"), full_denial());
+    assert!(!stale.exists(), "stale marker survived");
+    assert!(seen_file(dir.path(), "fresh").exists());
+}
+
+#[test]
+fn unreadable_state_or_no_session_fails_open_to_full() {
+    let dir = TempDir::new().unwrap();
+    let blocker = dir.path().join("not-a-dir");
+    fs::write(&blocker, b"x").unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            condense_at(Some(&blocker), Some("s1"), full_denial()),
+            full_denial()
+        );
+    }
+    assert_eq!(condense_at(None, Some("s1"), full_denial()), full_denial());
+    for _ in 0..2 {
+        assert_eq!(
+            condense_at(Some(dir.path()), None, full_denial()),
+            full_denial()
+        );
+    }
+}
+
 /// The remedy names the session project root, and says why a walk is wrong —
 /// an operator reading it should not have to rediscover the extern-checkout
 /// interaction.

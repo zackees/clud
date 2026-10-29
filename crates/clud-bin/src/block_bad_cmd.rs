@@ -1607,7 +1607,10 @@ fn block_cd_denial(
         return None;
     }
     append_log(&format!("block_cd_denied policy={policy:?}"));
-    Some(reason)
+    Some(block_bad_cmd_cd::condense_denial(
+        reason,
+        payload.session_id.as_deref(),
+    ))
 }
 
 /// Cheap, conservative pre-filter for whether `command_text` could possibly
