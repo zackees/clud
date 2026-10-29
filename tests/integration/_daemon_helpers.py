@@ -853,6 +853,44 @@ def stop_daemons_below(root: Path, clud_binary: Path) -> list[Path]:
     return state_dirs
 
 
+def describe_process_tree(root_pid: int, watched: list[int], limit: int = 40) -> str:
+    """Bounded snapshot of `root_pid`'s tree plus which `watched` pids are alive.
+
+    Built for timeout diagnostics (#2272): a client that fails to exit after
+    Ctrl-Break otherwise leaves nothing but a TimeoutExpired to read.
+    """
+    rows = []
+    for proc in psutil.process_iter(["pid", "ppid", "name", "create_time"]):
+        info = proc.info
+        rows.append((info["pid"], info["ppid"], info["create_time"]))
+    children = process.index_children(rows)
+    names = {}
+    for proc in psutil.process_iter(["pid", "name"]):
+        names[proc.info["pid"]] = proc.info["name"]
+    lines = []
+    if root_pid not in names:
+        lines.append(f"client pid {root_pid}: not running")
+    else:
+        lines.append(f"client pid {root_pid} ({names[root_pid]}): running")
+    for pid in process.descendants(children, root_pid)[:limit]:
+        lines.append(f"  descendant pid {pid} ({names.get(pid)})")
+    alive = [f"{pid} ({names[pid]})" for pid in watched if pid in names]
+    lines.append(f"watched pids still alive: {alive or 'none'}")
+    return "\n".join(lines)
+
+
+def tail_text(value: object, limit: int = 2000) -> str:
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+    return text[-limit:]
+
+
+def tail_file(path: Path, limit: int = 2000) -> str:
+    try:
+        return tail_text(path.read_text(encoding="utf-8", errors="replace"), limit)
+    except OSError as exc:
+        return f"<unreadable: {exc}>"
+
+
 def wait_for_pids_to_exit(pids: list[int], timeout: float = 15.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
