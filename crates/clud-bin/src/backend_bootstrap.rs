@@ -976,11 +976,73 @@ pub(crate) fn run_captured_command(command: Vec<String>) -> Result<(i32, String)
     Ok((exit_code, String::from_utf8_lossy(&buf).into_owned()))
 }
 
+/// Like [`run_captured_command`] but bounded: a child still producing no EOF
+/// after `limit` is killed and reported as an error (#2302 review: a stalled
+/// `soldr` must not block the GC thread forever).
+pub(crate) fn run_captured_command_with_deadline(
+    command: Vec<String>,
+    limit: Duration,
+) -> Result<(i32, String), String> {
+    let process = subprocess::ManagedSubprocess::start_inheriting_env(
+        command,
+        None,
+        true,
+        invisible_helper_creationflags(),
+    )
+    .map_err(|err| format!("failed to start command: {err}"))?;
+    let drained = drain_until(
+        std::time::Instant::now() + limit,
+        || process.read_stdout(Some(Duration::from_millis(100))),
+        || {
+            let _ = process.poll();
+        },
+    );
+    let Some(buf) = drained else {
+        let _ = process.kill();
+        return Err(format!("timed out after {}s", limit.as_secs()));
+    };
+    let exit_code = process
+        .wait(Some(Duration::from_secs(30)))
+        .map_err(|err| format!("failed to wait for command: {err}"))?;
+    Ok((exit_code, String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Read until EOF; `None` once `deadline` passes first.
+fn drain_until(
+    deadline: std::time::Instant,
+    mut read: impl FnMut() -> ReadStatus<Vec<u8>>,
+    mut on_timeout: impl FnMut(),
+) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        match read() {
+            ReadStatus::Line(line) => buf.extend_from_slice(&line),
+            ReadStatus::Timeout => on_timeout(),
+            ReadStatus::Eof => return Some(buf),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io;
+
+    #[test]
+    fn drain_until_gives_up_on_a_reader_that_never_finishes() {
+        let started = std::time::Instant::now();
+        let got = drain_until(
+            started + Duration::from_millis(150),
+            || ReadStatus::Timeout,
+            || {},
+        );
+        assert!(got.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     /// #1962/#1971: `WorktreeCreate` exists from Claude Code 2.1.50.
     #[test]

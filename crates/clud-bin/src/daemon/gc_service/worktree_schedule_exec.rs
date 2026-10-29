@@ -20,6 +20,20 @@ use super::{GcOp, GcRequestMsg, RegistryMsg};
 
 const INSERT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Kept, reserved, reclaimable-elsewhere, or holding a live session/process.
+fn in_use(
+    r: &RepoWorktreeRow,
+    keep: &keep_list::KeepList,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+) -> bool {
+    r.reservation
+        || r.verdict.state == RepoWorktreeState::Reclaimable
+        || keep.keeps(&r.path)
+        || super::entry_path_contains_live_cwd_path(&r.path, live_cwds)
+        || super::source_guard::source_in_use_with_processes(Path::new(&r.path), procs).is_some()
+}
+
 /// Build one candidate per large worktree. Anything the probe did not see as
 /// a worktree, a reservation, a reclaimable row, a kept path or a path with a
 /// live session or process inside is exempt.
@@ -35,20 +49,7 @@ fn candidates(
     top.into_iter()
         .map(|t| {
             let row = rows.iter().find(|r| r.path == t.path);
-            let exempt = match row {
-                None => true,
-                Some(r) => {
-                    r.reservation
-                        || r.verdict.state == RepoWorktreeState::Reclaimable
-                        || keep.keeps(&r.path)
-                        || super::entry_path_contains_live_cwd_path(&r.path, live_cwds)
-                        || super::source_guard::source_in_use_with_processes(
-                            Path::new(&r.path),
-                            procs,
-                        )
-                        .is_some()
-                }
-            };
+            let exempt = row.is_none_or(|r| in_use(r, &keep, live_cwds, procs));
             Candidate {
                 path: t.path,
                 bytes: t.bytes,
@@ -80,7 +81,7 @@ pub(super) fn run(
     let mut cands = candidates(wt_root, rows, live_cwds, procs, now);
     if over && mode == ReclaimMode::Delete {
         let warn_bytes = cached.map_or(0, |c| c.warn_bytes);
-        over = prune_build_output(wt_root, &mut cands, warn_bytes, now);
+        over = prune_build_output(wt_root, rows, live_cwds, &mut cands, warn_bytes, now);
     }
     let actions = worktree_schedule::plan(&mut schedule, over, &cands, now);
     let _ = worktree_schedule::save(wt_root, &schedule);
@@ -105,9 +106,16 @@ pub(super) fn run(
 /// #2302: prune `target/` dirs of idle, unused worktrees before anything is
 /// scheduled for trash. Returns whether the root is still over budget; any
 /// failure (no soldr, prune error) leaves the previous verdict standing.
-fn prune_build_output(wt_root: &Path, cands: &mut [Candidate], warn_bytes: u64, now: i64) -> bool {
+fn prune_build_output(
+    wt_root: &Path,
+    rows: &[RepoWorktreeRow],
+    live_cwds: &[PathBuf],
+    cands: &mut [Candidate],
+    warn_bytes: u64,
+    now: i64,
+) -> bool {
     let picked: Vec<usize> = (0..cands.len())
-        .filter(|&i| !target_prune::select(true, &cands[i..=i]).is_empty())
+        .filter(|&i| target_prune::eligible(&cands[i]))
         .collect();
     if picked.is_empty() {
         return true;
@@ -115,16 +123,34 @@ fn prune_build_output(wt_root: &Path, cands: &mut [Candidate], warn_bytes: u64, 
     let mut run = match target_prune::soldr_runner() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[clud] gc: build-output prune skipped: {e}");
+            if !e.is_empty() {
+                eprintln!("[clud] gc: build-output prune skipped: {e}");
+            }
             return true;
         }
     };
+    let mut state = target_prune::PruneState::load(wt_root);
     let mut total = 0u64;
     for i in picked {
+        // Re-evaluated right before each prune with a fresh process table:
+        // the snapshot behind `cands` is stale after earlier, slow prunes.
+        let path = cands[i].path.clone();
+        let unused = || {
+            let keep = keep_list::load(&keep_list::keep_path_for(wt_root));
+            let procs = super::repo_worktree_cli::live_process_cwds();
+            procs.available
+                && rows
+                    .iter()
+                    .find(|r| r.path == path)
+                    .is_some_and(|r| !in_use(r, &keep, live_cwds, &procs))
+        };
         let out = target_prune::prune_worktree(
-            Path::new(&cands[i].path),
+            Path::new(&path),
             &mut run,
             &target_prune::real_size,
+            &unused,
+            &mut state,
+            now,
         );
         if out.targets_pruned > 0 {
             eprintln!(
@@ -135,6 +161,7 @@ fn prune_build_output(wt_root: &Path, cands: &mut [Candidate], warn_bytes: u64, 
         cands[i].bytes = cands[i].bytes.saturating_sub(out.reclaimed_bytes);
         total = total.saturating_add(out.reclaimed_bytes);
     }
+    state.save(wt_root);
     if total == 0 {
         return true;
     }

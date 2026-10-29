@@ -8,13 +8,36 @@
 //! failed prune is logged and the worktree falls through to the warn-then-trash
 //! path unchanged.
 //!
+//! Safety: symlinks are never followed (a linked `target/` is skipped, and each
+//! target must canonicalize inside the canonical worktree); each `soldr` call
+//! has a hard [`PRUNE_DEADLINE`]; a target whose newest build output is under
+//! [`MIN_IDLE_SECS`] old counts as in use; the in-use predicate is re-checked
+//! right before every prune; and a target whose newest build mtime matches the
+//! persisted [`PruneState`] is skipped, so an idle over-budget root does not
+//! re-run `soldr` or re-walk sizes every sweep.
+//!
 //! [`select`] and [`prune_worktree`] are pure over injected facts (candidate
 //! facts, a runner, a sizer); the daemon wires in the real `soldr` runner.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::gc::target_sweep::{dir_size, find_target_dirs};
+use serde::{Deserialize, Serialize};
+
+use crate::gc::target_sweep::{dir_size_bounded, find_target_dirs, newest_build_mtime};
+use crate::gc::worktree_root::SIZE_SCAN_ENTRY_BUDGET;
 use crate::gc::worktree_schedule::{Candidate, MIN_IDLE_SECS};
+
+/// Hard ceiling for one `soldr cache prune-target` call.
+pub const PRUNE_DEADLINE: Duration = Duration::from_secs(5 * 60);
+
+/// Set once `soldr` rejects `prune-target`; stops retrying for this daemon run.
+static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+const STATE_FILE_NAME: &str = "worktrees-target-prune.json";
 
 /// Result of pruning one worktree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -24,54 +47,145 @@ pub struct PruneOutcome {
     pub targets_failed: usize,
 }
 
-/// Worktrees to prune this tick: root over budget, idle long enough, and not
-/// exempt (kept, reservation, live session/cwd, source in use). Largest first
-/// is the caller's order and is preserved.
+/// Canonical target path -> newest build mtime (unix secs) when last handled.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PruneState {
+    handled: BTreeMap<String, i64>,
+}
+
+impl PruneState {
+    fn path_for(wt_root: &Path) -> PathBuf {
+        wt_root.parent().unwrap_or(wt_root).join(STATE_FILE_NAME)
+    }
+
+    /// Missing or corrupt reads as empty: that only costs a redundant prune.
+    pub fn load(wt_root: &Path) -> Self {
+        fs::read_to_string(Self::path_for(wt_root))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, wt_root: &Path) {
+        if let Ok(text) = serde_json::to_string(self) {
+            let _ = fs::write(Self::path_for(wt_root), text);
+        }
+    }
+}
+
+/// Whether one candidate may be pruned: idle long enough and not exempt.
+pub fn eligible(c: &Candidate) -> bool {
+    !c.exempt && c.idle_secs >= MIN_IDLE_SECS
+}
+
+/// Worktrees to prune this tick: root over budget and [`eligible`]. Largest
+/// first is the caller's order and is preserved.
 pub fn select(over: bool, candidates: &[Candidate]) -> Vec<&Candidate> {
     if !over {
         return Vec::new();
     }
-    candidates
-        .iter()
-        .filter(|c| !c.exempt && c.idle_secs >= MIN_IDLE_SECS)
-        .collect()
+    candidates.iter().filter(|c| eligible(c)).collect()
+}
+
+fn secs(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Prune every `target/` under `worktree` through `run`, measuring each with
-/// `size`. A `run` error counts as a failed target and never aborts the rest.
+/// `size`. `unused` is re-asked before every prune; `now` is unix seconds.
+/// A `run` error counts as a failed target and never aborts the rest.
 pub fn prune_worktree(
     worktree: &Path,
     run: &mut dyn FnMut(&Path) -> Result<(), String>,
     size: &dyn Fn(&Path) -> u64,
+    unused: &dyn Fn() -> bool,
+    state: &mut PruneState,
+    now: i64,
 ) -> PruneOutcome {
     let mut out = PruneOutcome::default();
-    let targets: Vec<PathBuf> = find_target_dirs(worktree);
-    for target in targets {
-        let before = size(&target);
-        match run(&target) {
+    let Ok(root) = fs::canonicalize(worktree) else {
+        return out;
+    };
+    for target in find_target_dirs(worktree) {
+        let Ok(canon) = fs::canonicalize(&target) else {
+            continue;
+        };
+        if !canon.starts_with(&root) {
+            continue;
+        }
+        let Some(newest) = newest_build_mtime(&canon).map(secs) else {
+            continue;
+        };
+        let key = canon.to_string_lossy().into_owned();
+        if now.saturating_sub(newest) < MIN_IDLE_SECS || state.handled.get(&key) == Some(&newest) {
+            continue;
+        }
+        if !unused() {
+            continue;
+        }
+        let before = size(&canon);
+        match run(&canon) {
             Ok(()) => {
                 out.targets_pruned += 1;
                 out.reclaimed_bytes = out
                     .reclaimed_bytes
-                    .saturating_add(before.saturating_sub(size(&target)));
+                    .saturating_add(before.saturating_sub(size(&canon)));
             }
             Err(e) => {
                 out.targets_failed += 1;
-                eprintln!(
-                    "[clud] gc: soldr prune-target failed for {}: {e}",
-                    target.display()
-                );
+                if !e.is_empty() {
+                    eprintln!(
+                        "[clud] gc: soldr prune-target failed for {}: {e}",
+                        canon.display()
+                    );
+                }
             }
+        }
+        // Record the post-prune mtime (pruning itself touches the tree) so an
+        // unchanged target is not retried, even after a failure.
+        if let Some(after) = newest_build_mtime(&canon).map(secs) {
+            state.handled.insert(key, after);
         }
     }
     out
 }
 
-/// Real runner: `soldr cache prune-target <target> --force`. `Err` when
-/// soldr is not installed or exits non-zero.
+/// `soldr` from PATH, else `~/.cargo/bin` or `~/.local/bin`.
+fn find_soldr() -> Result<PathBuf, String> {
+    if let Ok(found) = which::which("soldr") {
+        return Ok(found);
+    }
+    let home = crate::home::user_home().ok_or("soldr not found: no home directory")?;
+    let dirs = std::env::join_paths([
+        home.join(".cargo").join("bin"),
+        home.join(".local").join("bin"),
+    ])
+    .map_err(|e| format!("soldr not found: {e}"))?;
+    which::which_in("soldr", Some(dirs), &home).map_err(|e| format!("soldr not found: {e}"))
+}
+
+fn rejects_prune_target(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("prune-target")
+        && ["unrecognized", "unknown", "unexpected argument", "invalid"]
+            .iter()
+            .any(|w| lower.contains(w))
+}
+
+/// Real runner: `soldr cache prune-target <target> --force`, killed after
+/// [`PRUNE_DEADLINE`]. `Err` when soldr is missing, times out or exits
+/// non-zero; an old soldr without `prune-target` is reported once per daemon
+/// run, then every later call fails with an empty (unlogged) message.
 pub fn soldr_runner() -> Result<impl FnMut(&Path) -> Result<(), String>, String> {
-    let soldr = which::which("soldr").map_err(|e| format!("soldr not found: {e}"))?;
+    if UNSUPPORTED.load(Ordering::Relaxed) {
+        return Err(String::new());
+    }
+    let soldr = find_soldr()?;
     Ok(move |target: &Path| {
+        if UNSUPPORTED.load(Ordering::Relaxed) {
+            return Err(String::new());
+        }
         let argv = vec![
             soldr.to_string_lossy().into_owned(),
             "cache".into(),
@@ -79,22 +193,29 @@ pub fn soldr_runner() -> Result<impl FnMut(&Path) -> Result<(), String>, String>
             target.to_string_lossy().into_owned(),
             "--force".into(),
         ];
-        match crate::backend_bootstrap::run_captured_command(argv)? {
+        match crate::backend_bootstrap::run_captured_command_with_deadline(argv, PRUNE_DEADLINE)? {
             (0, _) => Ok(()),
+            (code, out) if rejects_prune_target(&out) => {
+                UNSUPPORTED.store(true, Ordering::Relaxed);
+                Err(format!(
+                    "soldr lacks `cache prune-target` (exit {code}); disabled until daemon restart"
+                ))
+            }
             (code, out) => Err(format!("exit {code}: {}", out.trim())),
         }
     })
 }
 
-/// Production sizer.
+/// Production sizer, bounded by the worktree size-scan entry budget.
 pub fn real_size(path: &Path) -> u64 {
-    dir_size(path)
+    let mut budget = SIZE_SCAN_ENTRY_BUDGET;
+    dir_size_bounded(path, &mut budget)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::gc::target_sweep::dir_size;
 
     const DAY: i64 = 24 * 60 * 60;
 
@@ -125,6 +246,20 @@ mod tests {
         fs::write(dir.join("target/debug/big"), vec![0u8; bytes]).unwrap();
     }
 
+    /// Unix "now" two days past the freshly written fixture files.
+    fn later() -> i64 {
+        secs(SystemTime::now()) + 2 * DAY
+    }
+
+    fn go(
+        wt: &Path,
+        run: &mut dyn FnMut(&Path) -> Result<(), String>,
+        state: &mut PruneState,
+        now: i64,
+    ) -> PruneOutcome {
+        prune_worktree(wt, run, &dir_size, &|| true, state, now)
+    }
+
     #[test]
     fn prunes_top_level_and_nested_targets_and_sums_reclaimed() {
         let wt = tempfile::tempdir().unwrap();
@@ -136,7 +271,7 @@ mod tests {
             fs::write(t.join("debug/big"), b"x").unwrap(); // shrink to 1 byte
             Ok(())
         };
-        let out = prune_worktree(wt.path(), &mut run, &dir_size);
+        let out = go(wt.path(), &mut run, &mut PruneState::default(), later());
         assert_eq!(seen.len(), 2);
         assert_eq!(out.targets_pruned, 2);
         assert_eq!(out.reclaimed_bytes, 999 + 499);
@@ -148,7 +283,7 @@ mod tests {
         let wt = tempfile::tempdir().unwrap();
         make_target(wt.path(), 100);
         let mut run = |_: &Path| Err("boom".to_string());
-        let out = prune_worktree(wt.path(), &mut run, &dir_size);
+        let out = go(wt.path(), &mut run, &mut PruneState::default(), later());
         assert_eq!(
             out,
             PruneOutcome {
@@ -164,9 +299,87 @@ mod tests {
         let wt = tempfile::tempdir().unwrap();
         fs::create_dir_all(wt.path().join("target")).unwrap();
         let mut run = |_: &Path| -> Result<(), String> { panic!("must not run") };
-        assert_eq!(
-            prune_worktree(wt.path(), &mut run, &dir_size),
-            PruneOutcome::default()
-        );
+        let out = go(wt.path(), &mut run, &mut PruneState::default(), later());
+        assert_eq!(out, PruneOutcome::default());
+    }
+
+    #[test]
+    fn second_sweep_of_an_unchanged_target_does_not_call_the_runner() {
+        let wt = tempfile::tempdir().unwrap();
+        make_target(wt.path(), 100);
+        let mut state = PruneState::default();
+        let mut calls = 0;
+        let mut run = |_: &Path| {
+            calls += 1;
+            Ok(())
+        };
+        go(wt.path(), &mut run, &mut state, later());
+        go(wt.path(), &mut run, &mut state, later());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn state_round_trips_through_the_gc_state_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let mut state = PruneState::default();
+        state.handled.insert("/x/target".into(), 7);
+        state.save(&root);
+        assert_eq!(PruneState::load(&root).handled.get("/x/target"), Some(&7));
+    }
+
+    #[test]
+    fn recent_build_output_counts_as_in_use() {
+        let wt = tempfile::tempdir().unwrap();
+        make_target(wt.path(), 100);
+        let mut run = |_: &Path| -> Result<(), String> { panic!("must not run") };
+        let now = secs(SystemTime::now());
+        let out = go(wt.path(), &mut run, &mut PruneState::default(), now);
+        assert_eq!(out, PruneOutcome::default());
+    }
+
+    #[test]
+    fn a_worktree_that_becomes_in_use_mid_loop_stops_being_pruned() {
+        let wt = tempfile::tempdir().unwrap();
+        make_target(wt.path(), 100);
+        make_target(&wt.path().join("nested"), 100);
+        let asked = std::cell::Cell::new(0);
+        let unused = || {
+            asked.set(asked.get() + 1);
+            asked.get() == 1 // free for the first target only
+        };
+        let mut calls = 0;
+        let mut run = |_: &Path| {
+            calls += 1;
+            Ok(())
+        };
+        let mut state = PruneState::default();
+        prune_worktree(wt.path(), &mut run, &dir_size, &unused, &mut state, later());
+        assert_eq!(calls, 1);
+        assert_eq!(asked.get(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_target_to_outside_is_not_pruned_and_linked_dirs_are_not_walked() {
+        let outside = tempfile::tempdir().unwrap();
+        make_target(outside.path(), 100);
+        let wt = tempfile::tempdir().unwrap();
+        fs::write(wt.path().join("Cargo.toml"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("target"), wt.path().join("target"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), wt.path().join("linked")).unwrap();
+        assert!(find_target_dirs(wt.path()).is_empty());
+        let mut run = |_: &Path| -> Result<(), String> { panic!("must not run") };
+        let out = go(wt.path(), &mut run, &mut PruneState::default(), later());
+        assert_eq!(out, PruneOutcome::default());
+    }
+
+    #[test]
+    fn rejected_subcommand_output_is_recognised() {
+        assert!(rejects_prune_target(
+            "error: unrecognized subcommand 'prune-target'"
+        ));
+        assert!(!rejects_prune_target("disk full"));
     }
 }

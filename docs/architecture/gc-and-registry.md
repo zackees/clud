@@ -543,7 +543,12 @@ the default branch, so ancestry-based checks call them live work forever
   before scheduling; only superseded artifacts go, never source or git state.
   The size cache and top list are re-measured afterwards, and the schedule sees
   the root as under budget if the prune was enough. No soldr or a failed prune
-  logs and falls through (`gc::target_prune`).
+  logs and falls through (`gc::target_prune`). Symlinks are never followed
+  (each target must canonicalize inside its worktree), each soldr call is
+  killed after 5 minutes, a target built within the last day counts as in use,
+  the in-use check re-runs before every prune, and unchanged targets are
+  skipped via `worktrees-target-prune.json` so idle sweeps cost nothing. An
+  old soldr without `prune-target` is reported once per daemon run.
 - **Keep list (#2101).** `clud gc keep [PATH]` (default `.`; `--remove`,
   `--list`) records a canonical path in `~/.clud/gc-keep.json`, no daemon
   needed. A kept path covers itself and everything below it. The tick skips
