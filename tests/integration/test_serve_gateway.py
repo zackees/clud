@@ -340,6 +340,101 @@ def test_serve_http_routes_streams_and_isolates_credentials(
             child.wait(timeout=15)
 
 
+def test_serve_answers_openai_chat_completions(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, api_upstreams
+) -> None:
+    """The durable serve surface accepts and answers the OpenAI chat shape.
+
+    The served endpoint reuses the gateway's route table, so a chat caller must
+    work there too: translated in at the door and back out at the response.
+    """
+    import http.client
+    import json
+    import signal
+    from urllib.parse import urlsplit
+
+    claude, openrouter = api_upstreams
+    client_token = "local-client-token-0123456789abcdef"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    env = mock_env.copy()
+    env.update(
+        {
+            "CLUD_INTEGRATION_TESTS": "1",
+            "CLUD_TEST_SECRET_STORE_DIR": str(vault),
+            "CLUD_SERVE_CLIENT_TOKEN": client_token,
+            "ANTHROPIC_API_KEY": "claude-upstream-canary",
+            "CLUD_TEST_GATEWAY_PLAINTEXT_TLS": "1",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+            "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": claude.url.replace("http://", "https://"),
+            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": claude.url.replace(
+                "http://", "https://"
+            ),
+            # The test-upstream override is all-or-nothing, so every route needs
+            # a fake even though this test only exercises Claude.
+            "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": openrouter.url.replace(
+                "http://", "https://"
+            ),
+            "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": openrouter.url.replace(
+                "http://", "https://"
+            ),
+        }
+    )
+    child = process.Popen(
+        [str(clud_binary), "serve", "--claude", "--port", "0"],
+        env=env,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        text=True,
+        creationflags=process.CREATE_NEW_PROCESS_GROUP,
+    )
+    try:
+        line = child.next_stdout(timeout=60)
+        assert isinstance(line, str), (line, child.poll())
+        assert "listening at " in line, (line, child.poll())
+        assert client_token not in line
+        assert "claude-upstream-canary" not in line
+        address = urlsplit(line.strip().split("listening at ", 1)[1])
+        assert address.hostname is not None
+        assert child.stderr is not None
+
+        connection = http.client.HTTPConnection(address.hostname, address.port, timeout=15)
+        request_body = {
+            "model": "claude-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        }
+        connection.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps(request_body),
+            headers={"x-api-key": client_token, "content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        assert response.status == 200, data
+        payload = json.loads(data)
+        assert payload["object"] == "chat.completion", payload
+        assert payload["choices"][0]["message"]["content"] == "claude", payload
+        assert payload["choices"][0]["finish_reason"] == "stop", payload
+        # What reached the backend was a Messages request, not the chat shape.
+        _, _, upstream_body = claude.requests[-1]
+        assert upstream_body["messages"][0]["role"] == "user", upstream_body
+        assert "max_completion_tokens" not in upstream_body, upstream_body
+
+        child.send_signal(signal.SIGINT)
+        assert child.wait(timeout=15) == 0
+        stderr = child.stderr.read()
+        assert client_token not in stderr
+        assert "claude-upstream-canary" not in stderr
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=15)
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 def test_serve_codex_without_claude_key(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, streaming: bool

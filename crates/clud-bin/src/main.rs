@@ -317,9 +317,14 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
             response,
             stream,
             for_model,
+            http,
         } => {
             if *response {
-                clud::openai_ingress::run_translate_response_stdin(*stream, for_model.as_deref())
+                clud::openai_ingress::run_translate_response_stdin(
+                    *stream,
+                    for_model.as_deref(),
+                    *http,
+                )
             } else {
                 clud::openai_ingress::run_translate_stdin()
             }

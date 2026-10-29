@@ -87,6 +87,9 @@ jobs:
         uses: zackees/setup-soldr@v0
         with:
           cache: true
+          # #2300 / setup-soldr#473: the solo-toolchain cache cold path fails
+          # with "repaired a poisoned restore but has no replacement manifest".
+          solo-toolchain-cache: false
           # setup-soldr#559: a failed or cancelled job saves no build outputs
           # (its store may be partial; an exact-hit key is never re-saved).
           job-status: ${{ job.status }}

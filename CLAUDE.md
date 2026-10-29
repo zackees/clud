@@ -25,6 +25,12 @@ before selecting native coverage.
 
 All `cargo` / `rustc` / `rustfmt` calls **must go through [soldr](https://github.com/zackees/soldr)**: `soldr cargo build`, `soldr cargo test -p clud-bin`, etc. soldr resolves the rustup-managed toolchain via `rustup which`, sidestepping chocolatey cargo on Windows and other stale PATH shims. A `.claude/hooks/check-soldr.py` PreToolUse hook enforces this.
 
+Agent validation runs should add the bounded mode: `SOLDR_PORCELAIN=1 soldr cargo test ...`
+prints ONE JSON line (verdict, `exit_code`, counts, `log_path`) instead of relaying every
+passing test and per-crate cache record. Open `log_path` only when `exit_code` is non-zero;
+if stdout is not a JSON object the installed soldr predates the mode, so read the output as
+usual (forge-ci/soldr#3924, clud#2231).
+
 Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
 
 ### Validation before merging
