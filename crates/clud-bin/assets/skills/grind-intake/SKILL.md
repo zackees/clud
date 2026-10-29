@@ -65,14 +65,23 @@ Do not infer it from `gh repo view` or a fork's default upstream selection.
        #<meta> closes."`. Do not close #N. Return `original: N`; the run
        proceeds on the new meta issue.
      - **Abort:** print the refusal below and stop.
-   - **meta false, single change:** no question; print the refusal below and
-     stop.
+   - **meta false, single change:** no question and no refusal. Wrap it in a
+     one-child plan exactly as step 4 does ("One cohesive change is still one
+     child under a meta"): create a meta issue whose body is `Tracks #N`,
+     attach #N as its only native sub-issue (see *Attach and verify*), then
+     `gh issue comment --repo <github-repo> N --body "Wrapped in meta #<meta>;
+     closes when #<meta> closes."`. Print `Wrapped #N in meta #M` to the user.
+     Return `original: N`; the run continues the normal bug stage with #N as
+     the single goal. Create no new child issue, edit nothing else on #N, and
+     do not close it.
 
-   The refusal, verbatim with `N` filled in, creates nothing (no issues,
-   comments, labels, run facts, worktrees or branches):
+   The refusal below applies only to **Abort** on a multi-part issue. It
+   creates nothing (no issues, comments, labels, run facts, worktrees or
+   branches), with `N` filled in verbatim:
 
-   > `clud grind` works on meta issues. #N is a single change; run `/do N`
-   > (or `clud do N`) instead.
+   > `clud grind` works on meta issues. #N has several independent parts and
+   > you chose not to convert it; run `/do N` (or `clud do N`) on one part
+   > at a time instead.
 3. **Issue list** (two or more numbers/URLs, space or comma separated).
    Create a meta issue whose body is `Tracks #a, #b, ...` listing the given
    issues, and attach each given issue as a sub-issue. Create no new child
@@ -84,7 +93,8 @@ Do not infer it from `gh repo view` or a fork's default upstream selection.
 5. **Nothing.** List the repo's open issues (`gh issue list --repo <github-repo>`), excluding
    ones with an open linked PR (an issue whose fix sits on a grind feature
    branch is linked by the feature PR's `Closes` line), ask the user which
-   to take, then route the chosen set via 2 (one issue) or 3 (several).
+   to take, then route the chosen set via 2 (one issue) or 3 (several). Single
+   issues are valid candidates: never stop because none is a meta issue.
    A follow-up (its body carries `<!-- grind:followup ... -->`) is eligible
    only when either:
    - its body marker `<!-- grind:followup ... stage=bugs ... -->` names the

@@ -87,8 +87,9 @@ Intake always resolves the input to a meta issue: it creates or attaches one
 for a prompt or issue list, or converts a multi-part issue after asking. That
 conversion question (or, with no argument, the pick of which open issues to
 take) is intake's only question and comes before section 1b.
-Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
-do", or a `gh` error; then stop there: skip every later section (Finish
+Intake may instead end the run with the Abort refusal (a multi-part issue
+the user declined to convert; "run `/do N`"), "Nothing to do", or a `gh`
+error; then stop there: skip every later section (Finish
 included), write no run facts, and create nothing.
 
 **Goals in several repositories (#1422).** When the goals resolve to issues
