@@ -755,7 +755,7 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
             grant_spawn_for_daemon_subcommand(subcommand);
             Some(run_daemon_subcommand(&state_dir, subcommand))
         }
-        Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
+        Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir, interrupted)),
         Some(Command::InternalWorker {
             state_dir,
             session_id,
