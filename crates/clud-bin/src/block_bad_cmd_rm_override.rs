@@ -80,27 +80,25 @@ const PATCH_MARKERS: [&str; 4] = [
     "*** Move to: ",
 ];
 
-/// The patch text from the shapes Codex sends: a bare string,
-/// `{"patch"|"input"|"command": "<patch>"}`, or a `command` argv array such as
-/// `["apply_patch", "<patch>"]` (the element holding `*** Begin Patch`, else the last string).
-fn patch_text(input: &serde_json::Value) -> Option<&str> {
+/// Every string that may carry patch text in the shapes Codex sends: a bare
+/// string, `{"patch"|"input"|"command": "<patch>"}`, or a `command` argv array
+/// such as `["apply_patch", "<patch>"]`. All of them are collected so a decoy
+/// candidate cannot hide a protected target.
+fn patch_texts(input: &serde_json::Value) -> Vec<&str> {
+    let mut texts = Vec::new();
     if let Some(text) = input.as_str() {
-        return Some(text);
+        texts.push(text);
     }
-    ["patch", "input", "command"].iter().find_map(|key| {
-        let value = input.get(key)?;
-        value.as_str().or_else(|| {
-            let all: Vec<&str> = value
-                .as_array()?
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect();
-            all.iter()
-                .copied()
-                .find(|text| text.contains("*** Begin Patch"))
-                .or_else(|| all.last().copied())
-        })
-    })
+    for key in ["patch", "input", "command"] {
+        match input.get(key) {
+            Some(serde_json::Value::String(text)) => texts.push(text),
+            Some(serde_json::Value::Array(items)) => {
+                texts.extend(items.iter().filter_map(serde_json::Value::as_str));
+            }
+            _ => {}
+        }
+    }
+    texts
 }
 
 fn patch_targets(patch: &str) -> Vec<&str> {
@@ -120,8 +118,12 @@ fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> 
     let targets = payload
         .tool_input
         .as_ref()
-        .and_then(patch_text)
-        .map(patch_targets)
+        .map(|input| {
+            patch_texts(input)
+                .into_iter()
+                .flat_map(patch_targets)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     if targets.is_empty() {
         return Some(UNVERIFIABLE_PATCH.into());
@@ -129,9 +131,11 @@ fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> 
     let Some(home) = home else {
         return Some(NO_HOME.into());
     };
+    let cwd = payload.cwd.to_string_lossy();
+    // Codex trims header lines, so the trimmed spelling is what gets written.
     targets
         .iter()
-        .any(|path| protected_file(path, &payload.cwd.to_string_lossy(), home))
+        .any(|path| protected_file(path, &cwd, home) || protected_file(path.trim(), &cwd, home))
         .then(|| REFUSAL.into())
 }
 
@@ -516,6 +520,55 @@ mod tests {
                     "{patch}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_on_a_protected_target_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        for pad in [" ", "\t", "  \t "] {
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: {}{pad}\n@@\n-a\n+b\n*** End Patch",
+                settings.display()
+            );
+            assert_eq!(
+                patch_reason(home.path(), serde_json::json!(patch)).as_deref(),
+                Some(REFUSAL),
+                "{pad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decoy_candidates_do_not_hide_a_protected_target() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        let protected = format!("*** Update File: {}\n@@\n-a\n+b", settings.display());
+        let wrapped = format!("*** Begin Patch\n{protected}\n*** End Patch");
+        for input in [
+            serde_json::json!({"patch": ORDINARY, "command": wrapped}),
+            serde_json::json!({"input": ORDINARY, "patch": wrapped}),
+            serde_json::json!({"command": ["apply_patch", ORDINARY, wrapped]}),
+            serde_json::json!({"command": ["apply_patch", ORDINARY, protected]}),
+        ] {
+            assert_eq!(
+                patch_reason(home.path(), input.clone()).as_deref(),
+                Some(REFUSAL),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_ordinary_candidates_are_still_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let other = "*** Begin Patch\n*** Add File: src/other.rs\n+x\n*** End Patch";
+        for input in [
+            serde_json::json!({"patch": ORDINARY, "command": other}),
+            serde_json::json!({"command": ["apply_patch", ORDINARY, other]}),
+        ] {
+            assert_eq!(patch_reason(home.path(), input.clone()), None, "{input}");
         }
     }
 
