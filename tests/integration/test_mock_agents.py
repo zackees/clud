@@ -22,8 +22,11 @@ from tests._subprocess_helpers import is_ctrl_c_exit
 
 from ._daemon_helpers import (
     copy_launcher,
+    describe_process_tree,
     kill_process,
     run_clud,
+    tail_file,
+    tail_text,
     wait_for_pids_to_exit,
     wait_for_tree_pids,
 )
@@ -1449,6 +1452,16 @@ class TestLoopMode:
 class TestInterruptReporting:
     """Verify Ctrl+C reports how clud was launched."""
 
+    def test_timeout_diagnostics_describe_tree_and_tails(self, tmp_path: Path) -> None:
+        log = tmp_path / "log.txt"
+        log.write_text("x" * 5000 + "end", encoding="utf-8")
+        report = describe_process_tree(os.getpid(), [os.getpid(), 2**22 + 1])
+        assert f"client pid {os.getpid()}" in report
+        assert "watched pids still alive" in report
+        assert tail_file(log).endswith("end") and len(tail_file(log)) == 2000
+        assert tail_text(b"abc") == "abc"
+        assert tail_file(tmp_path / "missing").startswith("<unreadable")
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only cmd.exe prompt repro")
     @pytest.mark.parametrize(
         ("backend_args", "backend_name"),
@@ -1515,7 +1528,18 @@ class TestInterruptReporting:
             # 30 also has to fit. The waits here are sequential, and
             # pytest-timeout caps each test at 90s (pyproject.toml); exceeding
             # that trades a diagnosable TimeoutExpired for the timeout killer.
-            stdout, stderr = proc.communicate(timeout=30)
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+            except process.TimeoutExpired as exc:
+                # Snapshot before the finally block kills the tree (#2272).
+                raise AssertionError(
+                    f"{backend_name} client {proc.pid} did not exit 30s after Ctrl-Break\n"
+                    f"{describe_process_tree(proc.pid or 0, child_pids + tree_pids)}\n"
+                    f"--- client stdout tail ---\n{tail_text(exc.output)}\n"
+                    f"--- client stderr tail ---\n{tail_text(exc.stderr)}\n"
+                    f"--- mock child pid log ---\n{tail_file(pid_log)}\n"
+                    f"--- mock tree log ---\n{tail_file(tree_log)}"
+                ) from exc
         finally:
             if proc.poll() is None:
                 kill_process(proc.pid)
