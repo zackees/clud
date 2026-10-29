@@ -555,8 +555,12 @@ worktrees.
   for PR checks, enqueue with `github/pr_merge.py --match-head-commit`, return
   the checkout to the clean default branch and report one line: PR, head SHA,
   `enqueued|pushed`. The worker may hand off at push or at enqueue.
-- **Chaperone:** no checkout, no build, cheapest capable model. One
-  deadline-bounded `pr_merge_watch.py --until merged` call (exit 0 merged, 13
+- **Chaperone:** no checkout, no build, cheapest capable model. Handed a PR
+  at push (or after a NEEDS-FIXUP push), it first waits for the PR's required
+  checks (`pr_merge_watch.py --no-merge-wait`), then enqueues with
+  `pr_merge.py --match-head-commit <head>` (or merges by repository policy
+  where there is no queue). Handed an already-enqueued PR it skips that step.
+  Then one deadline-bounded `pr_merge_watch.py --until merged` call (exit 0 merged, 13
   ejected, 14 unmergeable, 4 timeout). It self-serves once each: `gh run rerun
   --failed` for infra or flakes, a rerun of a stale aggregate from a superseded
   run, a re-enqueue after a batch-mate ejection. Code failures go back as
@@ -564,7 +568,7 @@ worktrees.
   a 90 minute cap, then `STUCK <PR> <reason>`. Success reports `MERGED <PR> <sha>`.
 - **Orchestrator:** counts work done only on `MERGED`. On `NEEDS-FIXUP` the
   worker checks the branch out again, fixes and pushes, then hands it back to a
-  chaperone; these queue ahead of new work and run as an ordinary worker once
+  chaperone (which waits for checks and enqueues again); these queue ahead of new work and run as an ordinary worker once
   the checkout is free. On `STUCK` it reports what remains. Review may run in
   parallel on the PR diff.
 
