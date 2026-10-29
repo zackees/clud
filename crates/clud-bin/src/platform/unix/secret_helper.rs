@@ -89,22 +89,24 @@ fn pinentry_script(title: &str, label: &str) -> String {
     )
 }
 
-fn assuan_unescape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            match u8::from_str_radix(&hex, 16) {
-                Ok(byte) => out.push(char::from(byte)),
-                Err(_) => {
-                    out.push('%');
-                    out.push_str(&hex);
-                }
+/// Decode Assuan `%XX` escapes into raw bytes (UTF-8 is validated by the caller).
+fn assuan_unescape(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let decoded = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            if let Some(byte) = decoded {
+                out.push(byte);
+                i += 3;
+                continue;
             }
-        } else {
-            out.push(c);
         }
+        out.push(bytes[i]);
+        i += 1;
     }
     out
 }
@@ -117,24 +119,57 @@ enum Reply {
     Unusable,
 }
 
-fn interpret(helper: Helper, exit: i32, lines: &[String]) -> Reply {
-    if helper == Helper::Pinentry {
-        if let Some(data) = lines.iter().find_map(|l| l.strip_prefix("D ")) {
-            return Reply::Secret(assuan_unescape(data));
+fn interpret_pinentry(lines: &[String]) -> Reply {
+    let mut data: Vec<u8> = Vec::new();
+    let mut seen = false;
+    for line in lines {
+        if let Some(part) = line.strip_prefix("D ") {
+            let mut piece = assuan_unescape(part);
+            data.extend_from_slice(&piece);
+            piece.zeroize();
+            seen = true;
         }
-        // 83886179 is gpg-error "Operation cancelled".
-        return if lines.iter().any(|l| l.starts_with("ERR 83886179")) {
-            Reply::Cancelled
-        } else {
-            Reply::Unusable
+    }
+    if seen {
+        return match String::from_utf8(data) {
+            Ok(secret) => Reply::Secret(secret),
+            Err(err) => {
+                let mut bytes = err.into_bytes();
+                bytes.zeroize();
+                Reply::Unusable
+            }
         };
+    }
+    // 83886179 is gpg-error "Operation cancelled".
+    if lines.iter().any(|l| l.starts_with("ERR 83886179")) {
+        Reply::Cancelled
+    } else {
+        Reply::Unusable
+    }
+}
+
+/// `stderr_text` is whether the helper wrote anything to stderr. A dismissed
+/// dialog exits 1 silently; exit 1 with diagnostics means it never worked
+/// (no display, broken toolkit plugin), so the next helper should be tried.
+fn interpret(helper: Helper, exit: i32, lines: &[String], stderr_text: bool) -> Reply {
+    if helper == Helper::Pinentry {
+        return interpret_pinentry(lines);
     }
     match (exit, lines.first()) {
         (0, Some(first)) => Reply::Secret(first.clone()),
-        // A dialog the user dismissed exits 1 with no output.
-        (1, None) => Reply::Cancelled,
+        (1, None) if !stderr_text => Reply::Cancelled,
         _ => Reply::Unusable,
     }
+}
+
+/// Keep only absolute PATH entries so a relative or empty entry (`.`, `::`)
+/// can never resolve a planted helper from the current directory.
+fn absolute_path_entries(path_env: &str) -> String {
+    path_env
+        .split(':')
+        .filter(|entry| std::path::Path::new(entry).is_absolute())
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) -> Reply {
@@ -163,7 +198,12 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
         let _ = process.kill();
         return Reply::Unusable;
     }
+    eprintln!(
+        "clud: waiting for {} to collect the secret...",
+        helper.program()
+    );
     let deadline = Instant::now() + Duration::from_secs(600);
+    let mut stderr_text = false;
     let mut lines: Vec<String> = Vec::new();
     let mut closed = [false; 2];
     while !closed.iter().all(|c| *c) && Instant::now() < deadline {
@@ -176,7 +216,9 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
             }
             match process.read_stream(stream, Some(Duration::from_millis(50))) {
                 ReadStatus::Line(mut bytes) => {
-                    if stream == StreamKind::Stdout {
+                    if stream == StreamKind::Stderr {
+                        stderr_text |= !bytes.iter().all(u8::is_ascii_whitespace);
+                    } else {
                         let text = String::from_utf8_lossy(&bytes)
                             .trim_end_matches(['\r', '\n'])
                             .to_string();
@@ -193,7 +235,7 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
         .wait(Some(deadline.saturating_duration_since(Instant::now())))
         .unwrap_or(-1);
     let _ = process.kill();
-    let reply = interpret(helper, exit, &lines);
+    let reply = interpret(helper, exit, &lines, stderr_text);
     lines.iter_mut().for_each(Zeroize::zeroize);
     reply
 }
@@ -211,7 +253,7 @@ pub fn prompt(
             .is_some_and(|value| !value.is_empty())
     };
     let display = present("WAYLAND_DISPLAY") || present("DISPLAY");
-    let path_env = std::env::var("PATH").unwrap_or_default();
+    let path_env = absolute_path_entries(&std::env::var("PATH").unwrap_or_default());
     let found = |name: &str| crate::shim_resolve::which(name, &path_env);
     for helper in select_helpers(display, |name| found(name).is_some()) {
         let Some(path) = found(helper.program()) else {
@@ -259,23 +301,60 @@ mod tests {
         assert!(script.contains("SETDESC x%0Ay\n"));
         let lines = vec!["D p%25w%0A".to_string(), "OK".to_string()];
         assert_eq!(
-            interpret(Helper::Pinentry, 0, &lines),
+            interpret(Helper::Pinentry, 0, &lines, false),
             Reply::Secret("p%w\n".into())
         );
         let cancel = vec!["ERR 83886179 Operation cancelled".to_string()];
-        assert_eq!(interpret(Helper::Pinentry, 0, &cancel), Reply::Cancelled);
-        assert_eq!(interpret(Helper::Pinentry, 0, &[]), Reply::Unusable);
+        assert_eq!(
+            interpret(Helper::Pinentry, 0, &cancel, false),
+            Reply::Cancelled
+        );
+        assert_eq!(interpret(Helper::Pinentry, 0, &[], false), Reply::Unusable);
     }
 
     #[test]
     fn simple_helper_exit_codes_map_to_outcomes() {
         let secret = vec!["hunter2".to_string()];
         assert_eq!(
-            interpret(Helper::Zenity, 0, &secret),
+            interpret(Helper::Zenity, 0, &secret, false),
             Reply::Secret("hunter2".into())
         );
-        assert_eq!(interpret(Helper::Zenity, 1, &[]), Reply::Cancelled);
-        assert_eq!(interpret(Helper::Kdialog, 127, &[]), Reply::Unusable);
-        assert_eq!(interpret(Helper::Ksshaskpass, 0, &[]), Reply::Unusable);
+        assert_eq!(interpret(Helper::Zenity, 1, &[], false), Reply::Cancelled);
+        assert_eq!(interpret(Helper::Kdialog, 127, &[], false), Reply::Unusable);
+        assert_eq!(
+            interpret(Helper::Ksshaskpass, 0, &[], false),
+            Reply::Unusable
+        );
+    }
+
+    #[test]
+    fn exit_one_with_stderr_is_unusable_not_cancel() {
+        assert_eq!(interpret(Helper::Zenity, 1, &[], true), Reply::Unusable);
+        assert_eq!(interpret(Helper::Kdialog, 1, &[], true), Reply::Unusable);
+    }
+
+    #[test]
+    fn relative_and_empty_path_entries_are_dropped() {
+        assert_eq!(
+            absolute_path_entries(".:/usr/bin::bin:/opt/x:"),
+            "/usr/bin:/opt/x"
+        );
+        assert_eq!(absolute_path_entries(":"), "");
+    }
+
+    #[test]
+    fn pinentry_utf8_and_multi_line_data_round_trip() {
+        // "pässwörd" split over two D lines, UTF-8 bytes percent-escaped.
+        let lines = vec![
+            "D p%C3%A4ssw".to_string(),
+            "D %C3%B6rd".to_string(),
+            "OK".to_string(),
+        ];
+        assert_eq!(
+            interpret(Helper::Pinentry, 0, &lines, false),
+            Reply::Secret("pässwörd".into())
+        );
+        let bad = vec!["D %FF".to_string()];
+        assert_eq!(interpret(Helper::Pinentry, 0, &bad, false), Reply::Unusable);
     }
 }
