@@ -79,6 +79,8 @@ or infer from `git remote get-url origin` for bare-number inputs.
      read the `log_path` file only when `exit_code` is non-zero. If stdout
      is not a JSON object, the installed soldr predates the mode - read the
      output normally. Never wrap the call in a grep/sed filter.
+     If several crates need targeted tests, use one
+     `SOLDR_PORCELAIN=1 soldr cargo test -p a -p b` call with the targeted filters.
    - **Python**: `pytest -k <pattern>` matching the changed file or
      test name.
    - **JS/TS**: `npm test -- -t <pattern>` matching the changed file
