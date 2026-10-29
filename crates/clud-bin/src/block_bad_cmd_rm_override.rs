@@ -237,7 +237,8 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
     };
     let settings = crate::clud_settings::settings_path_at(home);
     let canonical = |path: &Path| {
-        crate::path_norm::display_slash(&canonical_creation_target(path)).to_ascii_lowercase()
+        let path = crate::path_norm::win32_file_name(path);
+        crate::path_norm::display_slash(&canonical_creation_target(&path)).to_ascii_lowercase()
     };
     canonical(&destination) == canonical(&settings)
 }
