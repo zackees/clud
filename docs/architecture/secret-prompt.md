@@ -43,6 +43,13 @@ serialization surface. No credential value is accepted on the command line.
 A missing desktop or unavailable graphics context fails clearly; this command
 does not fall back to echoing input in a terminal or asking through chat.
 
+On Linux, when the native window cannot load (#2197, e.g. KDE Wayland), a
+single-line prompt falls back to the first of `zenity --password`,
+`kdialog --password`, `ksshaskpass`, `pinentry` (Assuan `GETPIN`) that is on
+PATH with a display present (`platform/unix/secret_helper.rs`). The value
+returns on the helper's stdout to the same sink and is never logged. Multiline
+input has no fallback. Dismissing a helper is `cancelled`.
+
 On Linux, the desktop runtime needs libxkbcommon; X11 additionally needs
 libxkbcommon-x11. clud checks these before entering winit, whose X11 keyboard
 loader otherwise panics on a missing library. A Wayland session does not
