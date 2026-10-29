@@ -184,3 +184,97 @@ fn from_path_refuses_an_oversized_rules_file() {
     assert_eq!(rules.filter.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_query_selector_targets_one_array_element_by_field() {
+    let rules = rules(serde_json::json!({
+        "filter": [{"params": ["tools.#(name==\"apply_patch\")"]}],
+        "override": [{"params": {
+            "tools.#(name==\"WebSearch\").type": "disabled"
+        }}]
+    }));
+    let mut payload = serde_json::json!({
+        "tools": [{"name": "WebSearch"}, {"name": "apply_patch"}]
+    });
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(outcome.filtered, 1);
+    assert_eq!(outcome.problems, Vec::<String>::new());
+    assert_eq!(
+        payload["tools"],
+        serde_json::json!([{"name": "WebSearch", "type": "disabled"}])
+    );
+}
+
+#[test]
+fn an_all_matches_chain_removes_the_nested_tool_upstream_filters() {
+    // CLIProxyAPI's own example (`config.example.yaml:334`): Codex's
+    // `input[]` additional_tools envelope, all matches at every level.
+    let rules = rules(serde_json::json!({
+        "filter": [{"models": [{"name": "gpt-*", "protocol": "codex"}],
+                    "params": [
+                        "input.#(type==\"additional_tools\")#.tools.#(name==\"functions\")#.tools.#(name==\"apply_patch\")#"
+                    ]}]
+    }));
+    let mut payload = serde_json::json!({
+        "input": [
+            {"type": "message"},
+            {"type": "additional_tools", "tools": [
+                {"name": "functions", "tools": [{"name": "apply_patch"}, {"name": "shell"}]}
+            ]}
+        ]
+    });
+    let outcome = apply(&rules, "gpt-6-sol", "codex", &mut payload);
+    assert_eq!(outcome.filtered, 1);
+    assert_eq!(outcome.problems, Vec::<String>::new());
+    assert_eq!(
+        payload["input"][1]["tools"][0]["tools"],
+        serde_json::json!([{"name": "shell"}])
+    );
+    assert_eq!(payload["input"][0], serde_json::json!({"type": "message"}));
+}
+
+#[test]
+fn a_selector_that_matches_nothing_changes_nothing_and_is_not_a_problem() {
+    let rules = rules(serde_json::json!({
+        "filter": [{"params": ["tools.#(name==\"absent\")"]}],
+        "override": [{"params": {"tools.#(name==\"absent\").type": "x"}}]
+    }));
+    let mut payload = serde_json::json!({"tools": [{"name": "WebSearch"}]});
+    let outcome = apply(&rules, "m", "claude", &mut payload);
+    assert_eq!((outcome.filtered, outcome.overridden), (0, 0));
+    assert_eq!(payload["tools"], serde_json::json!([{"name": "WebSearch"}]));
+}
+
+#[test]
+fn a_malformed_selector_in_a_write_rule_is_refused_when_the_file_is_loaded() {
+    let refused = parse(
+        serde_json::to_vec(&serde_json::json!({
+            "override": [{"params": {"tools.#(name)": "x"}}]
+        }))
+        .expect("fixture serializes")
+        .as_slice(),
+    );
+    let reason = refused.expect_err("a malformed write path is refused");
+    assert!(reason.contains("must compare one field"), "{reason}");
+}
+
+#[test]
+fn a_malformed_selector_in_a_filter_is_reported_per_request_and_skipped() {
+    // A filter path that cannot be parsed removes nothing; it must not turn a
+    // client request into a 400.
+    let rules = rules(serde_json::json!({
+        "filter": [{"params": ["tools.#(name)"]}],
+        "override": [{"params": {"temperature": 0.1}}]
+    }));
+    let mut payload = serde_json::json!({"tools": [{"name": "WebSearch"}]});
+    let outcome = apply(&rules, "m", "claude", &mut payload);
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(outcome.filtered, 0);
+    assert_eq!(outcome.problems.len(), 1);
+    assert!(
+        outcome.problems[0].contains("must compare one field"),
+        "{:?}",
+        outcome.problems
+    );
+    assert_eq!(payload["temperature"], serde_json::json!(0.1));
+}

@@ -17,10 +17,14 @@
 //! are read from the JSON file named by [`RULES_ENV`], re-read when the file
 //! changes, and applied to `POST /v1/messages` before a route is chosen.
 //!
-//! Deliberately NOT ported in this slice (see `FEATURES.json` sub-rows):
-//! gjson query syntax (`tools.#(name=="x")`), the header/`match`/`not-match`/
-//! `exist` conditions, the `*-raw` variants, the OpenAI-shaped ingress path,
-//! and a `~/.clud/settings.json` owner for the rules.
+//! Paths are the grammar in [`crate::payload_query`]: dotted keys, numeric
+//! array indices, and gjson query selectors (`tools.#(name=="apply_patch")`,
+//! `...#.tools.#(name=="functions")#`).
+//!
+//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the
+//! header/`match`/`not-match`/`exist` conditions, the `*-raw` variants, the
+//! OpenAI-shaped ingress path, and a `~/.clud/settings.json` owner for the
+//! rules.
 //!
 //! A rule that cannot be applied never fails a client request: the payload is
 //! forwarded as far as the good rules got it and the problem is reported to
@@ -32,6 +36,8 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
+
+use crate::payload_query::{self, Step};
 
 /// Points at the JSON rules file. Unset means "no rules".
 pub const RULES_ENV: &str = "CLUD_PAYLOAD_RULES";
@@ -162,110 +168,25 @@ pub fn wildcard_matches(pattern: &str, text: &str) -> bool {
     p == pattern.len()
 }
 
-fn segments(path: &str) -> Result<Vec<&str>, String> {
-    if path.is_empty() {
-        return Err("empty JSON path".to_string());
-    }
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.iter().any(|part| part.is_empty()) {
-        return Err(format!("`{path}` has an empty path segment"));
-    }
-    Ok(parts)
+fn segments(path: &str) -> Result<Vec<Step>, String> {
+    payload_query::steps(path)
 }
 
 /// True when `path` resolves to a value that is present and not null. A null
 /// counts as missing, which is what makes a `default` rule able to fill it.
 pub fn path_present(payload: &Value, path: &str) -> bool {
-    let Ok(parts) = segments(path) else {
-        return false;
-    };
-    let mut current = payload;
-    for part in parts {
-        current = match current {
-            Value::Object(map) => match map.get(part) {
-                Some(next) => next,
-                None => return false,
-            },
-            Value::Array(items) => match part.parse::<usize>().ok().and_then(|i| items.get(i)) {
-                Some(next) => next,
-                None => return false,
-            },
-            _ => return false,
-        };
-    }
-    !current.is_null()
-}
-
-fn set_in(current: &mut Value, parts: &[&str], value: Value) -> Result<(), String> {
-    let Some((head, rest)) = parts.split_first() else {
-        return Ok(());
-    };
-    if rest.is_empty() {
-        match current {
-            Value::Object(map) => {
-                map.insert((*head).to_string(), value);
-                return Ok(());
-            }
-            Value::Array(items) => {
-                let index = array_index(head, items.len())?;
-                items[index] = value;
-                return Ok(());
-            }
-            _ => return Err(format!("`{head}` has no containing object")),
-        }
-    }
-    match current {
-        Value::Object(map) => {
-            let entry = map
-                .entry((*head).to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            if entry.is_null() {
-                *entry = Value::Object(Map::new());
-            }
-            set_in(entry, rest, value)
-        }
-        Value::Array(items) => {
-            let len = items.len();
-            let index = array_index(head, len)?;
-            set_in(&mut items[index], rest, value)
-        }
-        _ => Err(format!("`{head}` has no containing object")),
+    match segments(path) {
+        Ok(steps) => payload_query::present(payload, &steps),
+        Err(_) => false,
     }
 }
 
-fn array_index(head: &str, len: usize) -> Result<usize, String> {
-    let index = head
-        .parse::<usize>()
-        .map_err(|_| format!("`{head}` is not an array index"))?;
-    if index >= len {
-        // Growing an array would invent elements nobody asked for.
-        return Err(format!("array index {index} is past the end ({len} items)"));
-    }
-    Ok(index)
+fn set_in(current: &mut Value, parts: &[Step], value: Value) -> Result<usize, String> {
+    payload_query::set(current, parts, value)
 }
 
-fn remove_in(current: &mut Value, parts: &[&str]) -> bool {
-    let Some((head, rest)) = parts.split_first() else {
-        return false;
-    };
-    match current {
-        Value::Object(map) if rest.is_empty() => map.remove(*head).is_some(),
-        Value::Object(map) => map
-            .get_mut(*head)
-            .is_some_and(|child| remove_in(child, rest)),
-        Value::Array(items) => match head.parse::<usize>() {
-            Ok(index) if index < items.len() => {
-                if rest.is_empty() {
-                    items.remove(index);
-                    true
-                } else {
-                    remove_in(&mut items[index], rest)
-                }
-            }
-            _ => false,
-        },
-        _ => false,
-    }
+fn remove_in(current: &mut Value, parts: &[Step]) -> usize {
+    payload_query::remove(current, parts)
 }
 
 /// Apply every rule that selects `model` on `protocol`, in `default` ->
@@ -285,7 +206,7 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
                 continue;
             }
             match segments(path).and_then(|parts| set_in(payload, &parts, value.clone())) {
-                Ok(()) => outcome.defaulted += 1,
+                Ok(count) => outcome.defaulted += count,
                 Err(reason) => outcome.problems.push(format!("default {path}: {reason}")),
             }
         }
@@ -296,7 +217,7 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
         }
         for (path, value) in &rule.params {
             match segments(path).and_then(|parts| set_in(payload, &parts, value.clone())) {
-                Ok(()) => outcome.overridden += 1,
+                Ok(count) => outcome.overridden += count,
                 Err(reason) => outcome.problems.push(format!("override {path}: {reason}")),
             }
         }
@@ -307,8 +228,7 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
         }
         for path in &rule.params {
             match segments(path) {
-                Ok(parts) if remove_in(payload, &parts) => outcome.filtered += 1,
-                Ok(_) => {}
+                Ok(parts) => outcome.filtered += remove_in(payload, &parts),
                 Err(reason) => outcome.problems.push(format!("filter {path}: {reason}")),
             }
         }
@@ -354,7 +274,15 @@ fn validate(rules: &PayloadRules) -> Result<(), String> {
     // that is not well formed removes nothing, and is reported per request.
     for rule in rules.default.iter().chain(&rules.override_rules) {
         for path in rule.params.keys() {
-            segments(path).map_err(|reason| format!("rules: {reason}"))?;
+            let steps = segments(path).map_err(|reason| format!("rules: {reason}"))?;
+            // A selector names an array element, not a member of it: without a
+            // trailing key there is nothing to set, and the operator should
+            // hear about it when the file loads, not per request.
+            if matches!(steps.last(), Some(Step::Query(_))) {
+                return Err(format!(
+                    "rules: `{path}` ends in a selector; add the field to set"
+                ));
+            }
         }
     }
     Ok(())
