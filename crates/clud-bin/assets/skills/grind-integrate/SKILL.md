@@ -120,7 +120,8 @@ You hold the run's build lock, so nothing else builds while you do.
    run in remote CI (a native lane), push, then run
    `clud tool run github/pr_merge_watch.py <PR> --timeout 540` with
    `run_in_background` and judge by its exit code; on exit 1 read the failing
-   job's log from its report. Never `sleep N; gh run view` (#1894).
+   job's log from its report. Never `sleep N; gh run view` (#1894). For a one-off read ask only for unresolved
+   jobs: [Reading CI status](https://github.com/zackees/clud/blob/main/docs/architecture/ci.md#reading-ci-status-without-flooding-context-2312).
 
 **Fix round.** When the prompt carries a failure from the lander: read it,
 reproduce locally when possible, fix, rerun the verify commands (and the run

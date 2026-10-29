@@ -47,7 +47,8 @@ server and merge.
      bosn -> act gate. Every `coderabbit=` note (`suppressed`, `absent`,
      `completed`, `rate_limited`, `skipped`, `pending`, `timeout`) is still
      `0`: merge.
-   - `1` (a required check failed): `gh pr checks --repo <github-repo> <n>` and
+   - `1` (a required check failed): `gh pr checks --repo <github-repo> <n> --json name,state --jq '[.[]|select(.state!="SUCCESS" and .state!="SKIPPED")]'`
+     (unresolved checks only; see [Reading CI status](https://github.com/zackees/clud/blob/main/docs/architecture/ci.md#reading-ci-status-without-flooding-context-2312)) and
      `clud tool run github/ci_failure_report.py -- --repo <github-repo> --run <run> --job <job>`
      for the failing job. Use the returned artifact and line-range continuation to inspect more. Return
      `status=needs_fix` with the failing job and the relevant log lines in

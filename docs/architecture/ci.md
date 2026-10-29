@@ -320,6 +320,26 @@ soldr cargo test -p clud --test integration diagnostics::tier_refresh_probe -- -
 Any new test file that is `#[ignore]`d and says "run manually" must be added to
 this list; `tests/test_manual_windows_probes.py` enforces it.
 
+### Reading CI status without flooding context (#2312)
+
+This section owns the rule; skills link here. Every CI read re-enters the
+agent's context, and hand-polling repeats near-identical output.
+
+- To **wait** on CI, use `clud tool run github/pr_merge_watch.py -- <PR>`
+  (background or bounded, never a hand-written loop; DD-168). Its output is
+  already compact.
+- For a **one-off** read, ask only for what is unresolved:
+
+  ```bash
+  gh pr checks N --json name,state --jq '[.[]|select(.state!="SUCCESS" and .state!="SKIPPED")]'
+  gh run view ID --json status,conclusion,jobs --jq '[.jobs[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]'
+  ```
+
+  An empty list means nothing is unresolved. Drop the filter only when you
+  need the full job list.
+- Do not repeat an identical read; a status that has not changed is not new
+  information.
+
 ## The problem
 
 Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,

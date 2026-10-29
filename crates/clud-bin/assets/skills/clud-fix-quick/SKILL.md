@@ -187,6 +187,8 @@ for review purposes; run the source gates.
     `github/pr_merge_watch.py` in the background and wait for completion
     notification. Report failures and carry the fix forward in a new PR; do
     not stop at "pushed" or claim validation while checks remain pending.
+    To wait use `pr_merge_watch`; for a one-off read ask only for unresolved
+    items ([Reading CI status](https://github.com/zackees/clud/blob/main/docs/architecture/ci.md#reading-ci-status-without-flooding-context-2312)).
     Repository rules, required checks/reviews and merge queues override the
     immediate admin-merge shortcut above; never bypass protections. In those
     repositories use the [shared landing contract](https://github.com/talos-hq/clud/blob/main/docs/architecture/launch-plan.md#landing-preference).
