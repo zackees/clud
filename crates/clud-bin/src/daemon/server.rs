@@ -250,34 +250,6 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     // its requested file inline, so daemon bringup no longer blocks callers
     // on a full bundled-tool scan.
 
-    let info = DaemonInfo {
-        pid: std::process::id(),
-        pid_start: crate::process_identity::self_start_time(),
-        port,
-        dashboard_port,
-        dashboard_token: dashboard_port.map(|_| dashboard_token),
-        api_token: dashboard_port.map(|_| api_token),
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    };
-    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
-        return phases.fail(
-            "daemon_info_write",
-            &format!("failed to persist daemon info: {err}"),
-        );
-    }
-    phases.mark("daemon_info_write");
-    daemon_events::log_event(
-        state_dir,
-        "daemon_started",
-        [
-            ("port", json!(port)),
-            ("dashboard_port", json!(dashboard_port)),
-            ("version", json!(env!("CARGO_PKG_VERSION"))),
-            ("event_log", json!(daemon_events_path(state_dir))),
-        ],
-    );
-    spawn_tool_installer();
-
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let client_leases = ClientLeaseRegistry::default();
     let checkout_claims = CheckoutClaimRegistry::new(Duration::from_secs(2));
@@ -327,6 +299,38 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         activity.clone(),
         Arc::clone(&api_lifecycle),
     );
+
+    // #2239: daemon.json is the readiness signal clients and tests poll, so
+    // it is published only after the frame lane has written its identity
+    // sidecar. Publishing it earlier let a loaded host observe a ready
+    // daemon whose sidecar did not exist yet.
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        pid_start: crate::process_identity::self_start_time(),
+        port,
+        dashboard_port,
+        dashboard_token: dashboard_port.map(|_| dashboard_token),
+        api_token: dashboard_port.map(|_| api_token),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    };
+    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
+        return phases.fail(
+            "daemon_info_write",
+            &format!("failed to persist daemon info: {err}"),
+        );
+    }
+    phases.mark("daemon_info_write");
+    daemon_events::log_event(
+        state_dir,
+        "daemon_started",
+        [
+            ("port", json!(port)),
+            ("dashboard_port", json!(dashboard_port)),
+            ("version", json!(env!("CARGO_PKG_VERSION"))),
+            ("event_log", json!(daemon_events_path(state_dir))),
+        ],
+    );
+    spawn_tool_installer();
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
     // originator clud was SIGKILL'd and never ran its own exit hook (so
