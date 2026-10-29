@@ -431,8 +431,10 @@ Use the project's standard test runner, inferred from the file
 extension and the repo's CI script (`ci/test*.sh`, `bash test`,
 `scripts/test`, etc.):
 
-- Rust: `soldr cargo test -p <crate> --lib <test-name>` or
-  `--test <file>`.
+- Rust: `SOLDR_PORCELAIN=1 soldr cargo test -p <crate> --lib <test-name>`
+  or `--test <file>`. One JSON line carries the verdict and `log_path`; open
+  the log only for a non-zero `exit_code`. A non-JSON first line means the
+  installed soldr predates the mode, so read the output as usual.
 - Python: `pytest tests/ -k <test-name>`.
 - JS/TS: `npm test -- -t <test-name>` or `pnpm test -t <test-name>`.
 

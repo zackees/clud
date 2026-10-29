@@ -27,6 +27,17 @@ import threading
 import time
 
 GUARDED = ("cargo", "rustc", "rustfmt")
+# cargo subcommands that are validation runs: an agent harness reads their whole
+# pass/cache stream back into its transcript, so they are the ones worth pointing
+# at Soldr's bounded `--porcelain` mode (forge-ci/soldr#3924).
+VALIDATION_VERBS = ("build", "check", "clippy", "doc", "nextest", "run", "test")
+PORCELAIN_HINT = (
+    "\nAgent validation runs: SOLDR_PORCELAIN=1 soldr cargo test ... prints "
+    "ONE JSON line (verdict/exit_code/counts) plus a durable log_path instead "
+    "of the full pass and cache relay; read log_path for the complete output "
+    "when exit_code != 0. Soldr builds that predate the mode ignore the "
+    "variable, so the command stays correct either way."
+)
 INSTALL_HINT = (
     "Install it with: ./install   "
     "(or ./install --global for a system-wide install)."
@@ -51,6 +62,40 @@ def first_command(cmd: str) -> str | None:
 def normalize(token: str) -> str:
     base = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return base.split(".", 1)[0]
+
+
+def cargo_verb(cmd: str) -> str | None:
+    """Return the cargo subcommand being invoked, skipping global options.
+
+    Only used to decide whether to append the porcelain hint, so a miss
+    (a wrapper, a quoted payload) simply means no hint.
+    """
+    tokens = cmd.split()
+    for index, token in enumerate(tokens):
+        if normalize(token) == "cargo":
+            rest = tokens[index + 1 :]
+            break
+    else:
+        return None
+    skip_value = False
+    for token in rest:
+        if skip_value:
+            skip_value = False
+            continue
+        if token.startswith("-"):
+            # Options that take a separate value; anything else flag-like is
+            # ignored rather than misread as the subcommand.
+            skip_value = token in ("--color", "--config", "--target", "--target-dir")
+            continue
+        return token
+    return None
+
+
+def porcelain_hint(cmd: str) -> str:
+    verb = cargo_verb(cmd)
+    if verb in VALIDATION_VERBS:
+        return PORCELAIN_HINT
+    return ""
 
 
 def extract_command(payload: dict) -> str | None:
@@ -158,6 +203,7 @@ def main() -> int:
         f"`{base}` is blocked: prefix Rust toolchain calls with `soldr` so "
         "they resolve through the rustup-managed toolchain. "
         f"Re-run as: soldr {base} ... (preserves remaining args)."
+        + porcelain_hint(command)
     )
 
 
