@@ -5617,12 +5617,14 @@ mod tests {
         for _ in 0..2000 {
             command = format!("$({command})");
         }
-        let start = Instant::now();
-        let _ = eval_with_rules(&command, &rules);
-        // This is a regression guard against unbounded recursion, not a
-        // microbenchmark.  The previous 500 ms ceiling flakes on loaded
-        // Intel macOS CI runners while the full unit suite completes quickly.
-        assert!(start.elapsed() < Duration::from_secs(2));
+        // Regression guard against unbounded recursion. Assert the depth cap
+        // fired rather than a wall-clock bound, which flakes under load (#2301).
+        let result = eval_with_rules(&command, &rules);
+        assert!(result.reason.is_none(), "must fail open past the cap");
+        assert!(result
+            .log_messages
+            .iter()
+            .any(|m| m.contains("recursion depth")));
     }
 
     #[test]
