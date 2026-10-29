@@ -57,13 +57,15 @@ fn args(helper: Helper, title: &str, label: &str) -> Vec<String> {
             format!("--title={title}"),
             format!("--text={label}"),
         ],
+        // `--` ends option parsing so a label starting with `-` stays text.
         Helper::Kdialog => vec![
             "--title".into(),
             title.into(),
             "--password".into(),
+            "--".into(),
             label.into(),
         ],
-        Helper::Ksshaskpass => vec![label.into()],
+        Helper::Ksshaskpass => vec!["--".into(), label.into()],
         Helper::Pinentry => Vec::new(),
     }
 }
@@ -112,51 +114,101 @@ fn assuan_unescape(text: &str) -> Vec<u8> {
 }
 
 /// What a helper's stdout lines mean once it has exited.
-#[derive(Debug, PartialEq, Eq)]
 enum Reply {
-    Secret(String),
+    Secret(Zeroizing<String>),
     Cancelled,
+    /// The helper never answered within the deadline; ends the chain.
+    TimedOut,
     Unusable,
 }
 
-fn interpret_pinentry(lines: &[String]) -> Reply {
-    let mut data: Vec<u8> = Vec::new();
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reply::Secret(_) => f.write_str("Secret(<redacted>)"),
+            Reply::Cancelled => f.write_str("Cancelled"),
+            Reply::TimedOut => f.write_str("TimedOut"),
+            Reply::Unusable => f.write_str("Unusable"),
+        }
+    }
+}
+
+impl PartialEq for Reply {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Reply::Secret(a), Reply::Secret(b)) => a.as_bytes() == b.as_bytes(),
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
+type Line = Zeroizing<String>;
+
+fn interpret_pinentry(lines: &[Line]) -> Reply {
+    let total: usize = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("D "))
+        .map(str::len)
+        .sum();
+    let mut data: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(total));
     let mut seen = false;
     for line in lines {
         if let Some(part) = line.strip_prefix("D ") {
-            let mut piece = assuan_unescape(part);
+            let piece = Zeroizing::new(assuan_unescape(part));
+            // Decoded bytes never exceed the escaped length, so `data` never
+            // reallocates (which would leave an unwiped copy behind).
             data.extend_from_slice(&piece);
-            piece.zeroize();
             seen = true;
         }
     }
     if seen {
-        return match String::from_utf8(data) {
-            Ok(secret) => Reply::Secret(secret),
-            Err(err) => {
-                let mut bytes = err.into_bytes();
-                bytes.zeroize();
-                Reply::Unusable
-            }
+        return match std::str::from_utf8(&data) {
+            Ok(secret) => Reply::Secret(Zeroizing::new(secret.to_owned())),
+            Err(_) => Reply::Unusable,
         };
     }
-    // 83886179 is gpg-error "Operation cancelled".
-    if lines.iter().any(|l| l.starts_with("ERR 83886179")) {
+    // 83886179 is gpg-error "Operation cancelled"; 83886278 is
+    // GPG_ERR_FULLY_CANCELED.
+    if lines
+        .iter()
+        .any(|l| l.starts_with("ERR 83886179") || l.starts_with("ERR 83886278"))
+    {
         Reply::Cancelled
     } else {
         Reply::Unusable
     }
 }
 
-/// `stderr_text` is whether the helper wrote anything to stderr. A dismissed
-/// dialog exits 1 silently; exit 1 with diagnostics means it never worked
-/// (no display, broken toolkit plugin), so the next helper should be tried.
-fn interpret(helper: Helper, exit: i32, lines: &[String], stderr_text: bool) -> Reply {
+/// Toolkit chatter that a working helper prints even on a normal Cancel
+/// (for example zenity's `Gtk-WARNING ... mapped without a transient parent`).
+const HARMLESS_STDERR: [&str; 8] = [
+    "Gtk-WARNING",
+    "Gtk-Message",
+    "Gdk-",
+    "GLib-",
+    "qt.qpa.",
+    "QStandardPaths",
+    "dbind-WARNING",
+    "Fontconfig",
+];
+
+/// Whether a stderr line is real diagnostics rather than blank or known
+/// harmless toolkit noise.
+fn is_diagnostic(line: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(line);
+    !text.trim().is_empty() && !HARMLESS_STDERR.iter().any(|m| text.contains(m))
+}
+
+/// `stderr_text` is whether the helper wrote real diagnostics to stderr. A
+/// dismissed dialog exits 1 silently (or with only toolkit warnings); exit 1
+/// with other diagnostics means it never worked (no display, broken toolkit
+/// plugin), so the next helper should be tried.
+fn interpret(helper: Helper, exit: i32, lines: &[Line], stderr_text: bool) -> Reply {
     if helper == Helper::Pinentry {
         return interpret_pinentry(lines);
     }
     match (exit, lines.first()) {
-        (0, Some(first)) => Reply::Secret(first.clone()),
+        (0, Some(first)) => Reply::Secret(Zeroizing::new(first.to_string())),
         (1, None) if !stderr_text => Reply::Cancelled,
         _ => Reply::Unusable,
     }
@@ -198,13 +250,9 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
         let _ = process.kill();
         return Reply::Unusable;
     }
-    eprintln!(
-        "clud: waiting for {} to collect the secret...",
-        helper.program()
-    );
     let deadline = Instant::now() + Duration::from_secs(600);
     let mut stderr_text = false;
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
     let mut closed = [false; 2];
     while !closed.iter().all(|c| *c) && Instant::now() < deadline {
         for (i, stream) in [StreamKind::Stdout, StreamKind::Stderr]
@@ -217,11 +265,11 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
             match process.read_stream(stream, Some(Duration::from_millis(50))) {
                 ReadStatus::Line(mut bytes) => {
                     if stream == StreamKind::Stderr {
-                        stderr_text |= !bytes.iter().all(u8::is_ascii_whitespace);
+                        stderr_text |= is_diagnostic(&bytes);
                     } else {
-                        let text = String::from_utf8_lossy(&bytes)
-                            .trim_end_matches(['\r', '\n'])
-                            .to_string();
+                        let trimmed = bytes.trim_ascii_end();
+                        // Owned either way, so the temporary is wiped on drop.
+                        let text = Zeroizing::new(String::from_utf8_lossy(trimmed).into_owned());
                         lines.push(text);
                     }
                     bytes.zeroize();
@@ -231,16 +279,22 @@ fn run_helper(helper: Helper, path: &std::path::Path, title: &str, label: &str) 
             }
         }
     }
+    // Best effort: drop the crate's retained copies of the secret. The crate
+    // does not wipe them (zackees/running-process#1357).
+    process.clear_captured_stream(StreamKind::Stdout);
+    process.clear_captured_combined();
+    if !closed.iter().all(|c| *c) {
+        let _ = process.kill();
+        return Reply::TimedOut;
+    }
     let exit = process
         .wait(Some(deadline.saturating_duration_since(Instant::now())))
         .unwrap_or(-1);
     let _ = process.kill();
-    let reply = interpret(helper, exit, &lines, stderr_text);
-    lines.iter_mut().for_each(Zeroize::zeroize);
-    reply
+    interpret(helper, exit, &lines, stderr_text)
 }
 
-/// Try each available helper. `Cancelled` ends the chain; an unusable helper
+/// Try each available helper. `Cancelled` and a timeout end the chain; an unusable helper
 /// moves on to the next one.
 pub fn prompt(
     title: &str,
@@ -255,13 +309,17 @@ pub fn prompt(
     let display = present("WAYLAND_DISPLAY") || present("DISPLAY");
     let path_env = absolute_path_entries(&std::env::var("PATH").unwrap_or_default());
     let found = |name: &str| crate::shim_resolve::which(name, &path_env);
-    for helper in select_helpers(display, |name| found(name).is_some()) {
+    let helpers = select_helpers(display, |name| found(name).is_some());
+    if !helpers.is_empty() {
+        eprintln!("clud: waiting for a desktop prompt to collect the secret...");
+    }
+    for helper in helpers {
         let Some(path) = found(helper.program()) else {
             continue;
         };
         match run_helper(helper, &path, title, label) {
-            Reply::Secret(value) => return Ok(Zeroizing::new(value)),
-            Reply::Cancelled => return Err(ExternalFailure::Cancelled),
+            Reply::Secret(value) => return Ok(value),
+            Reply::Cancelled | Reply::TimedOut => return Err(ExternalFailure::Cancelled),
             Reply::Unusable => {}
         }
     }
@@ -271,6 +329,10 @@ pub fn prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn l(text: &str) -> Line {
+        Zeroizing::new(text.to_string())
+    }
 
     #[test]
     fn selection_follows_fixed_order_and_requires_path_and_display() {
@@ -288,9 +350,9 @@ mod tests {
     fn prompt_text_is_never_a_secret_and_goes_to_the_right_argument() {
         assert_eq!(
             args(Helper::Ksshaskpass, "t", "Token for host"),
-            vec!["Token for host"]
+            vec!["--", "Token for host"]
         );
-        assert!(args(Helper::Zenity, "t", "l").contains(&"--password".to_string()));
+        assert!(args(Helper::Zenity, "t", "l").contains(&l("--password")));
         assert!(args(Helper::Pinentry, "t", "l").is_empty());
     }
 
@@ -299,12 +361,12 @@ mod tests {
         let script = pinentry_script("a%b", "x\ny");
         assert!(script.contains("SETTITLE a%25b\n"));
         assert!(script.contains("SETDESC x%0Ay\n"));
-        let lines = vec!["D p%25w%0A".to_string(), "OK".to_string()];
+        let lines = vec![l("D p%25w%0A"), l("OK")];
         assert_eq!(
             interpret(Helper::Pinentry, 0, &lines, false),
-            Reply::Secret("p%w\n".into())
+            Reply::Secret(l("p%w\n"))
         );
-        let cancel = vec!["ERR 83886179 Operation cancelled".to_string()];
+        let cancel = vec![l("ERR 83886179 Operation cancelled")];
         assert_eq!(
             interpret(Helper::Pinentry, 0, &cancel, false),
             Reply::Cancelled
@@ -314,10 +376,10 @@ mod tests {
 
     #[test]
     fn simple_helper_exit_codes_map_to_outcomes() {
-        let secret = vec!["hunter2".to_string()];
+        let secret = vec![l("hunter2")];
         assert_eq!(
             interpret(Helper::Zenity, 0, &secret, false),
-            Reply::Secret("hunter2".into())
+            Reply::Secret(l("hunter2"))
         );
         assert_eq!(interpret(Helper::Zenity, 1, &[], false), Reply::Cancelled);
         assert_eq!(interpret(Helper::Kdialog, 127, &[], false), Reply::Unusable);
@@ -334,6 +396,29 @@ mod tests {
     }
 
     #[test]
+    fn real_gtk_warning_on_cancel_is_still_a_cancel() {
+        let gtk = b"(zenity:4242): Gtk-WARNING **: 12:00:00.000: GtkDialog mapped without a transient parent. This is discouraged.";
+        assert!(!is_diagnostic(gtk));
+        assert!(!is_diagnostic(b"   "));
+        assert!(!is_diagnostic(
+            b"qt.qpa.plugin: Could not find the Qt platform plugin"
+        ));
+        assert!(is_diagnostic(b"cannot open display:"));
+        assert_eq!(interpret(Helper::Zenity, 1, &[], false), Reply::Cancelled);
+    }
+
+    #[test]
+    fn fully_canceled_and_debug_redaction() {
+        let cancel = vec![l("ERR 83886278 Operation fully canceled")];
+        assert_eq!(
+            interpret(Helper::Pinentry, 0, &cancel, false),
+            Reply::Cancelled
+        );
+        let shown = format!("{:?}", Reply::Secret(l("hunter2")));
+        assert!(!shown.contains("hunter2"));
+    }
+
+    #[test]
     fn relative_and_empty_path_entries_are_dropped() {
         assert_eq!(
             absolute_path_entries(".:/usr/bin::bin:/opt/x:"),
@@ -345,16 +430,12 @@ mod tests {
     #[test]
     fn pinentry_utf8_and_multi_line_data_round_trip() {
         // "pässwörd" split over two D lines, UTF-8 bytes percent-escaped.
-        let lines = vec![
-            "D p%C3%A4ssw".to_string(),
-            "D %C3%B6rd".to_string(),
-            "OK".to_string(),
-        ];
+        let lines = vec![l("D p%C3%A4ssw"), l("D %C3%B6rd"), l("OK")];
         assert_eq!(
             interpret(Helper::Pinentry, 0, &lines, false),
-            Reply::Secret("pässwörd".into())
+            Reply::Secret(l("pässwörd"))
         );
-        let bad = vec!["D %FF".to_string()];
+        let bad = vec![l("D %FF")];
         assert_eq!(interpret(Helper::Pinentry, 0, &bad, false), Reply::Unusable);
     }
 }
