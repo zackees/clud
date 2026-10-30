@@ -211,16 +211,25 @@ fn cd_ignores_cdpath(cd: &Invocation) -> bool {
     let Some(target) = target.as_literal() else {
         return false;
     };
+    target_ignores_cdpath(target)
+}
+
+/// Platform-aware core of [`cd_ignores_cdpath`]: bash skips `CDPATH` for any
+/// target that begins with `/` or `.`; a drive-letter or UNC path is absolute.
+fn target_ignores_cdpath(target: &str) -> bool {
     let bytes = target.as_bytes();
     let drive_absolute = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\');
-    target.starts_with('/')
+    Path::new(target).is_absolute()
         || drive_absolute
+        || target.starts_with("\\\\")
+        || target.starts_with('/')
         || matches!(target, "." | "..")
-        || target.starts_with("./")
-        || target.starts_with("../")
+        || [r"./", r"../", r".\", r"..\"]
+            .iter()
+            .any(|p| target.starts_with(p))
 }
 
 /// The `apply_patch` of a command that is exactly a bare patch or a single
@@ -1354,8 +1363,9 @@ mod tests {
         let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
             -// reads ~/.clud/settings.json and extra_roots\n+// ok\n*** End Patch";
         let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        // Single-quoted so a Windows `C:\...` path keeps its backslashes.
         let with_cd = format!(
-            "cd {} && apply_patch <<'EOF'\n{source}\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n{source}\nEOF",
             home.path().display()
         );
         for (tool, key, command) in [
@@ -1388,7 +1398,7 @@ mod tests {
         );
         // A relative target resolves against the `cd` directory, not the payload cwd.
         let relative = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
             settings.parent().unwrap().display()
         );
         assert_protected(nested(
@@ -1429,12 +1439,29 @@ mod tests {
             );
         }
         let ok = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(
             nested(home.path(), "exec_command", serde_json::json!({"cmd": ok})),
             None
+        );
+    }
+
+    #[test]
+    fn cdpath_immunity_follows_platform_absolute_paths() {
+        for t in [
+            "/x", "./x", "../x", ".", "..", "C:/x", "C:\\x", ".\\x", "..\\x",
+        ] {
+            assert!(target_ignores_cdpath(t), "{t}");
+        }
+        assert!(target_ignores_cdpath("\\\\srv\\share"));
+        for t in ["x", ".clud", "x/y", "C:x"] {
+            assert!(!target_ignores_cdpath(t), "{t}");
+        }
+        assert_eq!(
+            Path::new("C:\\x").is_absolute(),
+            crate::platform::host::WINDOWS
         );
     }
 
@@ -1484,7 +1511,7 @@ mod tests {
             "{protected}"
         );
         let abs = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(
