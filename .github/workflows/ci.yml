@@ -289,7 +289,17 @@ jobs:
         uses: zackees/setup-soldr@v0
         env:
           SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Remote S3 build cache credentials; absent secrets disable it.
+          SOLDR_S3_CACHE_ACCESS_KEY: ${{ secrets.SOLDR_S3_CACHE_ACCESS_KEY }}
+          SOLDR_S3_CACHE_SECRET_KEY: ${{ secrets.SOLDR_S3_CACHE_SECRET_KEY }}
         with:
+          # Remote S3 build cache: bucket forge-ci in DigitalOcean Spaces nyc3.
+          # The 50G high watermark is enforced only on the merge-queue
+          # (merge_group) singleton; unset bucket/creds disables it entirely.
+          s3-bucket: forge-ci
+          s3-endpoint: nyc3.digitaloceanspaces.com
+          s3-region: nyc3
+          s3-cache-limit: 50G
           cache: true
           # setup-soldr#559: a failed or cancelled job saves no build outputs
           # (its store may be partial; an exact-hit key is never re-saved).
@@ -386,6 +396,9 @@ jobs:
     uses: ./.github/workflows/_dylint.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
+    # Reusable workflows get no secrets by default; the remote S3 build cache
+    # in _dylint.yml needs SOLDR_S3_CACHE_ACCESS_KEY / _SECRET_KEY.
+    secrets: inherit
 
   # ----------------------------------------------------------------- core ---
   # Minimal runs Linux x64 unit tests. The Linux integration suite alone cost
