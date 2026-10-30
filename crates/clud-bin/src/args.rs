@@ -1075,6 +1075,11 @@ pub enum Command {
         /// Repeatable; mirrors the headers a real request carries.
         #[arg(long = "header", value_name = "NAME: VALUE")]
         headers: Vec<String>,
+        /// Read the rules from `requests.payload` in this settings file instead
+        /// of the stdin document — the owner the gateway uses when
+        /// `CLUD_PAYLOAD_RULES` is unset.
+        #[arg(long = "settings-file", conflicts_with = "rules")]
+        settings_file: Option<PathBuf>,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {

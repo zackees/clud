@@ -520,3 +520,65 @@ fn an_empty_from_protocol_selector_is_refused_at_load() {
     .expect_err("an empty from-protocol is a typo");
     assert!(error.contains("empty from-protocol"), "{error}");
 }
+
+#[test]
+fn settings_own_the_rules_under_the_upstream_key() {
+    let document = serde_json::json!({
+        "model_contexts": {"windows": {}},
+        "requests": {"payload": {
+            "default": [{"models": [{"name": "claude-*"}], "params": {"thinking.budget_tokens": 2048}}]
+        }}
+    });
+    let rules = from_settings_document(&document)
+        .expect("a well-formed section parses")
+        .expect("the key is present");
+    let mut payload = serde_json::json!({"model": "claude-sonnet"});
+    let outcome = apply(&rules, "claude-sonnet", "claude", &mut payload);
+    assert_eq!(outcome.defaulted, 1);
+    assert_eq!(payload["thinking"]["budget_tokens"], 2048);
+}
+
+#[test]
+fn settings_without_the_key_mean_no_rules_rather_than_an_error() {
+    for document in [
+        serde_json::json!({}),
+        serde_json::json!({"requests": {}}),
+        serde_json::json!({"request": {"payload": {"default": []}}}),
+        serde_json::json!({"requests": {"payload": null}}),
+    ] {
+        assert_eq!(
+            from_settings_document(&document).expect("absence is not an error"),
+            None,
+            "{document} must not select any rules"
+        );
+    }
+}
+
+#[test]
+fn a_settings_section_that_is_not_an_object_is_refused() {
+    let error = from_settings_document(&serde_json::json!({"requests": {"payload": []}}))
+        .expect_err("a list is not a rules document");
+    assert!(error.contains(SETTINGS_KEY), "{error}");
+    let error =
+        from_settings_document(&serde_json::json!({"requests": {"payload": {"defualt": []}}}))
+            .expect_err("a typo must not silently no-op");
+    assert!(error.contains(SETTINGS_KEY), "{error}");
+}
+
+#[test]
+fn an_explicit_rules_file_outranks_the_settings_document() {
+    // `resolve_source` is the precedence rule: the env var names the file when
+    // it is set and non-empty, and only an unset/empty variable falls through
+    // to the user-level settings file.
+    assert_eq!(
+        source_for(Some("/tmp/rules.json".into()), Some(Path::new("/home/x"))),
+        Some(Source::EnvFile(PathBuf::from("/tmp/rules.json")))
+    );
+    assert_eq!(
+        source_for(Some("".into()), Some(Path::new("/home/x"))),
+        Some(Source::Settings(
+            Path::new("/home/x").join(".clud").join("settings.json")
+        ))
+    );
+    assert_eq!(source_for(None, None), None);
+}

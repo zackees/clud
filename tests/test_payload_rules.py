@@ -449,3 +449,74 @@ def test_from_protocol_selects_on_the_shape_the_client_spoke() -> None:
     assert unknown["payload"]["max_tokens"] == 1024
     assert "metadata" not in unknown["payload"]
     assert unknown["outcome"]["changed"] is False
+
+
+def _apply_from_settings(
+    settings: dict[str, Any], payload: dict[str, Any], model: str, tmp_path: Path
+) -> tuple[int, str, dict[str, Any] | None]:
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(json.dumps(settings))
+    completed = process.run(
+        [
+            str(_clud_binary()),
+            "__apply-payload-rules",
+            "--settings-file",
+            str(settings_file),
+            "--model",
+            model,
+        ],
+        input=json.dumps({"payload": payload}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    parsed = json.loads(completed.stdout) if completed.returncode == 0 else None
+    return completed.returncode, completed.stderr, parsed
+
+
+def test_settings_json_owns_the_rules_under_requests_payload(tmp_path: Path) -> None:
+    """`~/.clud/settings.json` is the owner when CLUD_PAYLOAD_RULES is unset.
+
+    The key mirrors upstream's own config section, so a rules file an operator
+    already has can be pasted under `requests.payload` unchanged.
+    """
+    settings = {
+        "requests": {
+            "payload": {
+                "override": [
+                    {"models": [{"name": "claude-*"}], "params": {"temperature": 0.3}}
+                ]
+            }
+        },
+        "model_contexts": {"windows": {"claude-sonnet-4": 200000}},
+    }
+    code, stderr, result = _apply_from_settings(
+        settings, {"model": "claude-sonnet-4", "temperature": 1.0}, "claude-sonnet-4", tmp_path
+    )
+    assert code == 0, stderr
+    assert result is not None
+    assert result["payload"]["temperature"] == 0.3
+    assert result["outcome"]["overridden"] == 1
+
+
+def test_settings_without_the_payload_key_is_a_named_refusal(tmp_path: Path) -> None:
+    """A settings file that carries no rules must say so, not silently pass."""
+    code, stderr, _ = _apply_from_settings(
+        {"model_contexts": {"windows": {}}},
+        {"model": "claude-sonnet-4"},
+        "claude-sonnet-4",
+        tmp_path,
+    )
+    assert code == 2
+    assert "requests.payload" in stderr, stderr
+
+
+def test_settings_payload_with_a_typo_is_refused_rather_than_ignored(tmp_path: Path) -> None:
+    code, stderr, _ = _apply_from_settings(
+        {"requests": {"payload": {"defualt": []}}},
+        {"model": "claude-sonnet-4"},
+        "claude-sonnet-4",
+        tmp_path,
+    )
+    assert code == 2
+    assert "requests.payload" in stderr, stderr

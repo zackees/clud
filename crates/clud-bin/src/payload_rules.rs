@@ -40,8 +40,14 @@
 //! one that clud itself translates (`payload_helpers.go`: `protocol` is the
 //! executor's target protocol, `fromProtocol` the source format).
 //!
-//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): a
-//! `~/.clud/settings.json` owner for the rules.
+//! Rules come from one of two places. An explicit file named by
+//! [`RULES_ENV`] wins, which is what an A/B experiment or a test uses. With the
+//! variable unset the document lives in the user-level settings file under
+//! [`SETTINGS_KEY`], mirroring upstream, where `requests.payload` sits beside
+//! its other request knobs. Only `~/.clud/settings.json` is read — never a
+//! repo's `.clud/settings.json`, for the same reason DD-137 gives for
+//! `safe_rm`: an agent can edit files in its checkout, so a repo layer would
+//! let it rewrite its own requests.
 //!
 //! A rule that cannot be applied never fails a client request: the payload is
 //! forwarded as far as the good rules got it and the problem is reported to
@@ -59,6 +65,12 @@ use crate::payload_query::{self, Step};
 
 /// Points at the JSON rules file. Unset means "no rules".
 pub const RULES_ENV: &str = "CLUD_PAYLOAD_RULES";
+
+/// Dotted key inside `~/.clud/settings.json` that carries the same document
+/// when [`RULES_ENV`] is unset. Named after upstream's own config section
+/// (`config.example.yaml` `requests.payload`), so an operator's rules file
+/// can be pasted under this key unchanged.
+pub const SETTINGS_KEY: &str = "requests.payload";
 
 /// A rules file larger than this is refused rather than parsed: the file is a
 /// hand-edited switch, not a data feed.
@@ -643,9 +655,88 @@ pub fn from_path(path: &Path) -> Result<PayloadRules, String> {
     parse(&bytes)
 }
 
+/// Read the rules document out of a parsed settings file.
+///
+/// `Ok(None)` when the key is absent or null: an install that never configured
+/// payload rules must behave exactly like one without the feature. A present
+/// but malformed value is an error the caller reports once, not per request.
+pub fn from_settings_document(document: &Value) -> Result<Option<PayloadRules>, String> {
+    let mut node = document;
+    for segment in SETTINGS_KEY.split('.') {
+        match node.get(segment) {
+            Some(next) => node = next,
+            None => return Ok(None),
+        }
+    }
+    if node.is_null() {
+        return Ok(None);
+    }
+    if !node.is_object() {
+        return Err(format!("settings `{SETTINGS_KEY}` is not an object"));
+    }
+    serde_json::from_value::<PayloadRules>(node.clone())
+        .map(Some)
+        .map_err(|error| format!("settings `{SETTINGS_KEY}` do not parse: {error}"))
+}
+
+/// Where [`active`] reads the rules document from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// The file named by [`RULES_ENV`].
+    EnvFile(PathBuf),
+    /// [`SETTINGS_KEY`] inside the user-level settings file.
+    Settings(PathBuf),
+}
+
+impl Source {
+    fn path(&self) -> &Path {
+        match self {
+            Source::EnvFile(path) | Source::Settings(path) => path,
+        }
+    }
+
+    /// A settings file that was never created means "no rules" silently;
+    /// only an explicitly named env file earns a complaint when it is missing.
+    fn is_env(&self) -> bool {
+        matches!(self, Source::EnvFile(_))
+    }
+
+    fn load(&self) -> Result<Option<PayloadRules>, String> {
+        match self {
+            Source::EnvFile(path) => from_path(path).map(Some),
+            Source::Settings(path) => {
+                let document = crate::clud_settings::read_settings_json_file(path)
+                    .map_err(|error| format!("{} is unreadable: {error}", path.display()))?;
+                from_settings_document(&document)
+            }
+        }
+    }
+}
+
+/// [`RULES_ENV`] when it names a file, else the user-level settings file.
+/// Seamed so the precedence rule can be tested without touching the process
+/// environment.
+fn source_for(env: Option<std::ffi::OsString>, home: Option<&Path>) -> Option<Source> {
+    match env {
+        Some(raw) if !raw.is_empty() => return Some(Source::EnvFile(PathBuf::from(raw))),
+        _ => {}
+    }
+    let home = home?;
+    Some(Source::Settings(crate::clud_settings::settings_path_at(
+        home,
+    )))
+}
+
+fn resolve_source() -> Option<Source> {
+    source_for(
+        std::env::var_os(RULES_ENV),
+        crate::home::user_home().as_deref(),
+    )
+}
+
 /// The rules [`active`] last parsed, keyed by what it observed on disk.
 struct Cached {
-    path: PathBuf,
+    source: Source,
     modified: Option<SystemTime>,
     len: u64,
     rules: Arc<PayloadRules>,
@@ -660,40 +751,47 @@ fn fingerprint(path: &Path) -> (Option<SystemTime>, u64) {
     }
 }
 
-/// The rules named by [`RULES_ENV`], re-read whenever the file changes.
+/// The active rules, re-read whenever their document changes.
 ///
-/// `None` means "no rules": the variable is unset, or the file could not be
-/// read or parsed. A parse failure is reported on stderr once per change rather
-/// than per request, and the previous rules stay out of the way — forwarding
-/// the caller's own bytes is the safe behavior.
+/// `None` means "no rules": no source could be resolved, the settings file has
+/// no [`SETTINGS_KEY`], or the document could not be read or parsed. A problem
+/// is reported on stderr once per change rather than per request, and the
+/// previous rules stay out of the way — forwarding the caller's own bytes is
+/// the safe behavior.
 pub fn active() -> Option<Arc<PayloadRules>> {
-    let path = PathBuf::from(std::env::var_os(RULES_ENV)?);
-    let (modified, len) = fingerprint(&path);
+    let source = resolve_source()?;
+    let (modified, len) = fingerprint(source.path());
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
     if let Some(cached) = guard.as_ref() {
-        if cached.path == path && cached.modified == modified && cached.len == len {
+        if cached.source == source && cached.modified == modified && cached.len == len {
             return Some(Arc::clone(&cached.rules));
         }
     }
     if modified.is_none() {
-        eprintln!(
-            "payload rules: {} is unreadable; forwarding request bodies unchanged",
-            path.display()
-        );
+        if source.is_env() {
+            eprintln!(
+                "payload rules: {} is unreadable; forwarding request bodies unchanged",
+                source.path().display()
+            );
+        }
         *guard = None;
         return None;
     }
-    match from_path(&path) {
-        Ok(rules) => {
+    match source.load() {
+        Ok(Some(rules)) => {
             let rules = Arc::new(rules);
             *guard = Some(Cached {
-                path,
+                source,
                 modified,
                 len,
                 rules: Arc::clone(&rules),
             });
             Some(rules)
+        }
+        Ok(None) => {
+            *guard = None;
+            None
         }
         Err(reason) => {
             eprintln!("payload rules: {reason}; forwarding request bodies unchanged");
@@ -778,13 +876,15 @@ fn parse_header(raw: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.trim().to_string()))
 }
 
-/// `clud __apply-payload-rules [--rules <path>] [--model M] [--protocol P]
-/// [--from-protocol P] [--header "Name: value"]...` — the process seam behind
-/// the Python subprocess test. Reads `{"rules": {...}, "payload": {...}}` on
-/// stdin (or the rules from `--rules` and just the payload on stdin) and writes
-/// `{"payload": ..., "outcome": ...}`.
+/// `clud __apply-payload-rules [--rules <path> | --settings-file <path>]
+/// [--model M] [--protocol P] [--from-protocol P] [--header "Name: value"]...`
+/// — the process seam behind the Python subprocess test. Reads
+/// `{"rules": {...}, "payload": {...}}` on stdin (or the rules from `--rules`,
+/// or [`SETTINGS_KEY`] from `--settings-file`, and just the payload on stdin)
+/// and writes `{"payload": ..., "outcome": ...}`.
 pub fn run_apply_stdin(
     rules_path: Option<&Path>,
+    settings_file: Option<&Path>,
     model: &str,
     protocol: &str,
     from_protocol: &str,
@@ -804,15 +904,35 @@ pub fn run_apply_stdin(
             return 2;
         }
     };
-    let rules = match rules_path {
-        Some(path) => match from_path(path) {
+    let rules = match (rules_path, settings_file) {
+        (Some(path), _) => match from_path(path) {
             Ok(rules) => rules,
             Err(reason) => {
                 eprintln!("{reason}");
                 return 2;
             }
         },
-        None => match document.get("rules") {
+        (None, Some(path)) => {
+            let settings = match crate::clud_settings::read_settings_json_file(path) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("{} is unreadable: {error}", path.display());
+                    return 2;
+                }
+            };
+            match from_settings_document(&settings) {
+                Ok(Some(rules)) => rules,
+                Ok(None) => {
+                    eprintln!("{} has no `{SETTINGS_KEY}` object", path.display());
+                    return 2;
+                }
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    return 2;
+                }
+            }
+        }
+        (None, None) => match document.get("rules") {
             Some(rules) => match serde_json::from_value::<PayloadRules>(rules.clone()) {
                 Ok(rules) => rules,
                 Err(error) => {
