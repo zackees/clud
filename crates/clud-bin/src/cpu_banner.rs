@@ -55,6 +55,34 @@ pub const CPU_TOAST_KEY: &str = "cpu";
 /// How long "cpu back to normal" stays visible before expiring (#1189).
 pub const CLEAR_TOAST_TTL: Duration = Duration::from_secs(10);
 
+/// #2367: how long one CPU episode's live reading stays on screen. After
+/// this the toast expires and the per-tick heartbeats stop re-showing it, so
+/// a long burn cannot keep covering the harness header. The "back to
+/// normal" notice still appears when the episode ends. Opt out entirely with
+/// `--no-cpu-banner` or `[foreground.cpu_banner] enabled = false`.
+pub const CPU_LIVE_VISIBLE: Duration = Duration::from_secs(20);
+
+/// Tracks the visible window of the current episode's live toast (#2367).
+#[derive(Debug, Default)]
+pub struct LiveWindow {
+    started: Option<Instant>,
+}
+
+impl LiveWindow {
+    /// Time the live toast may still stay up, or `None` when no episode is
+    /// running or the window is spent. An ended episode re-arms the window.
+    pub fn remaining(&mut self, in_episode: bool, now: Instant) -> Option<Duration> {
+        if !in_episode {
+            self.started = None;
+            return None;
+        }
+        let started = *self.started.get_or_insert(now);
+        CPU_LIVE_VISIBLE
+            .checked_sub(now.saturating_duration_since(started))
+            .filter(|left| !left.is_zero())
+    }
+}
+
 /// Default tick cadence. 2 s matches the parent #463 default. Crossover
 /// fires after `DEFAULT_SUSTAINED_TICKS * DEFAULT_TICK` (= 6 s), which is
 /// inside the acceptance criterion's 6 s bound.
@@ -801,13 +829,15 @@ impl Drop for BannerWatcher {
 ///
 /// - a Clear banner shows "cpu back to normal", expiring after
 ///   [`CLEAR_TOAST_TTL`];
-/// - while an episode runs, the live reading replaces the toast every tick;
+/// - while an episode runs, the live reading replaces the toast every tick,
+///   expiring with the episode's remaining visible window (`live_ttl`, #2367);
 /// - an episode that ended silently (shorter than the clear threshold)
 ///   closes the toast.
 pub fn toast_events(
     was_in_episode: bool,
     line: Option<&BannerLine>,
     live: Option<&BannerLine>,
+    live_ttl: Option<Duration>,
     now: Instant,
 ) -> Vec<ToastEvent> {
     if let Some(line) = line.filter(|line| line.kind == BannerKind::Clear) {
@@ -817,12 +847,11 @@ pub fn toast_events(
         )];
     }
     if let Some(live) = live {
-        return vec![ToastEvent::Show(Toast::new(
-            CPU_TOAST_KEY,
-            live.toast_text(),
-            live.severity(),
-            now,
-        ))];
+        let toast = Toast::new(CPU_TOAST_KEY, live.toast_text(), live.severity(), now);
+        return vec![ToastEvent::Show(match live_ttl {
+            Some(ttl) => toast.expiring_after(ttl),
+            None => toast,
+        })];
     }
     if was_in_episode {
         return vec![ToastEvent::Close {
@@ -844,6 +873,7 @@ fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>, sink: ToastS
     // which matches what `sample_interval` would return for a small
     // subtree anyway.
     let mut interval = cfg.tick;
+    let mut window = LiveWindow::default();
     loop {
         if stop_rx.recv_timeout(interval).is_ok() {
             return;
@@ -862,7 +892,16 @@ fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>, sink: ToastS
         let was_in_episode = state.in_episode();
         let line = state.poll(sample, &cfg);
         let live = state.live_line(sample, &cfg);
-        for event in toast_events(was_in_episode, line.as_ref(), live.as_ref(), sample.at) {
+        // #2367: past the visible window the heartbeat stops re-showing it.
+        let live_ttl = window.remaining(live.is_some(), sample.at);
+        let live = live.filter(|_| live_ttl.is_some());
+        for event in toast_events(
+            was_in_episode,
+            line.as_ref(),
+            live.as_ref(),
+            live_ttl,
+            sample.at,
+        ) {
             sink.publish(event);
         }
     }

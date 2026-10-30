@@ -261,16 +261,25 @@ fn cd_ignores_cdpath(cd: &Invocation) -> bool {
     let Some(target) = target.as_literal() else {
         return false;
     };
+    target_ignores_cdpath(target)
+}
+
+/// Platform-aware core of [`cd_ignores_cdpath`]: bash skips `CDPATH` for any
+/// target that begins with `/` or `.`; a drive-letter or UNC path is absolute.
+fn target_ignores_cdpath(target: &str) -> bool {
     let bytes = target.as_bytes();
     let drive_absolute = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\');
-    target.starts_with('/')
+    Path::new(target).is_absolute()
         || drive_absolute
+        || target.starts_with("\\\\")
+        || target.starts_with('/')
         || matches!(target, "." | "..")
-        || target.starts_with("./")
-        || target.starts_with("../")
+        || [r"./", r"../", r".\", r"..\"]
+            .iter()
+            .any(|p| target.starts_with(p))
 }
 
 /// The `apply_patch` of a command that is exactly a bare patch or a single
@@ -1383,7 +1392,14 @@ mod tests {
         }
     }
 
-    fn nested(home: &Path, tool: &str, input: serde_json::Value) -> Option<String> {
+    /// Pins the shell dialect: on a Windows host `exec_command` and
+    /// `shell_command` default to PowerShell, which has no heredoc, so a
+    /// nested `apply_patch <<EOF` is only recognised when the call declares
+    /// bash (`exec_command` takes a `shell` field; Git-Bash on Windows).
+    fn nested(home: &Path, tool: &str, mut input: serde_json::Value) -> Option<String> {
+        if tool == "exec_command" && input.get("shell").is_none() {
+            input["shell"] = "bash".into();
+        }
         let mut payload = patch_payload(home, input);
         payload.tool_name = tool.into();
         payload.command = payload
@@ -1445,14 +1461,14 @@ mod tests {
         let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
             -// reads ~/.clud/settings.json and extra_roots\n+// ok\n*** End Patch";
         let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        // Single-quoted so a Windows `C:\...` path keeps its backslashes.
         let with_cd = format!(
-            "cd {} && apply_patch <<'EOF'\n{source}\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n{source}\nEOF",
             home.path().display()
         );
         for (tool, key, command) in [
             ("exec_command", "cmd", &ordinary),
             ("exec_command", "cmd", &with_cd),
-            ("shell_command", "command", &ordinary),
             ("apply_patch", "command", &ordinary),
         ] {
             let input = serde_json::json!({ key: command });
@@ -1479,7 +1495,7 @@ mod tests {
         );
         // A relative target resolves against the `cd` directory, not the payload cwd.
         let relative = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
             settings.parent().unwrap().display()
         );
         assert_protected(nested(
@@ -1487,6 +1503,38 @@ mod tests {
             "exec_command",
             serde_json::json!({"cmd": relative}),
         ));
+    }
+
+    /// `shell_command` has no `shell` field, so its dialect is the host's:
+    /// PowerShell on Windows (no heredoc, so the nested patch is unparseable
+    /// and fails closed to the general rule), POSIX elsewhere.
+    #[test]
+    fn nested_shell_command_patch_follows_the_host_dialect() {
+        let home = tempfile::tempdir().unwrap();
+        let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+            -// reads ~/.clud/settings.json\n+// ok\n*** End Patch";
+        let command = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let got = nested(
+            home.path(),
+            "shell_command",
+            serde_json::json!({"command": command}),
+        );
+        // Host-independent simulation of the Windows default: PowerShell does
+        // not recognise the heredoc, so the nested path declines.
+        assert_eq!(
+            nested_patch_reason(
+                &command,
+                crate::block_bad_cmd::ShellDialect::PowerShell,
+                home.path(),
+                Some(home.path())
+            ),
+            None
+        );
+        if crate::platform::host::WINDOWS {
+            assert_eq!(got.as_deref(), Some(REFUSAL));
+        } else {
+            assert_eq!(got, None);
+        }
     }
 
     #[test]
@@ -1520,12 +1568,29 @@ mod tests {
             );
         }
         let ok = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(
             nested(home.path(), "exec_command", serde_json::json!({"cmd": ok})),
             None
+        );
+    }
+
+    #[test]
+    fn cdpath_immunity_follows_platform_absolute_paths() {
+        for t in [
+            "/x", "./x", "../x", ".", "..", "C:/x", "C:\\x", ".\\x", "..\\x",
+        ] {
+            assert!(target_ignores_cdpath(t), "{t}");
+        }
+        assert!(target_ignores_cdpath("\\\\srv\\share"));
+        for t in ["x", ".clud", "x/y", "C:x"] {
+            assert!(!target_ignores_cdpath(t), "{t}");
+        }
+        assert_eq!(
+            Path::new("C:\\x").is_absolute(),
+            crate::platform::host::WINDOWS
         );
     }
 
@@ -1575,7 +1640,7 @@ mod tests {
             "{protected}"
         );
         let abs = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(
