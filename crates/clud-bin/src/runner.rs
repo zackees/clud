@@ -775,7 +775,7 @@ pub fn run_plan_subprocess(
                 .and_then(crate::toast::launch::injection_for)
         })
         .flatten();
-    let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
+    let (runtime, _) = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
         plan,
         child_env_for_backend(plan.backend),
         statusline.as_ref(),

@@ -470,6 +470,18 @@ fn claude_status_line_carries_the_cpu_toast_instead_of_a_grid_overlay() {
     assert!(read_live_toast(&path, crate::toast::statusline::now_ms()).is_none());
 }
 
+#[test]
+fn without_an_injected_status_line_the_cpu_reading_gets_the_grid_hud() {
+    // #2395: the fallback is `None` when injection failed, so the CPU toast
+    // must not be suppressed into an unread status file.
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 150 %", now);
+    let out = c.on_tick(now);
+    assert!(!out.is_empty(), "the grid HUD draws the CPU reading");
+    assert!(c.input().cpu_rect().is_some());
+}
+
 // ── dismiss, resize, off ──────────────────────────────────────────────────
 
 #[test]

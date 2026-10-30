@@ -147,26 +147,27 @@ pub fn run_plan_pty(
                 .and_then(crate::toast::launch::injection_for)
         })
         .flatten();
-    let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
-        plan,
-        child_env_for_backend(plan.backend),
-        statusline.as_ref(),
-        status_writer.as_ref(),
-    ) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            // #998: see the subprocess runner -- same named failure, same
-            // record.
-            crate::launch_log::record_failure_reason(format_args!(
-                "failed to start provider bridge: {error}"
-            ));
-            eprintln!("[clud] failed to start provider bridge: {error}");
-            if verbose {
-                verbose_log::log("[clud] provider bridge startup failed (pty)");
+    let (runtime, statusline_injected) =
+        match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
+            plan,
+            child_env_for_backend(plan.backend),
+            statusline.as_ref(),
+            status_writer.as_ref(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                // #998: see the subprocess runner -- same named failure, same
+                // record.
+                crate::launch_log::record_failure_reason(format_args!(
+                    "failed to start provider bridge: {error}"
+                ));
+                eprintln!("[clud] failed to start provider bridge: {error}");
+                if verbose {
+                    verbose_log::log("[clud] provider bridge startup failed (pty)");
+                }
+                return 1;
             }
-            return 1;
-        }
-    };
+        };
     let mut last_exit = 0i32;
     let terminal_capabilities = (plan.graphics.mode != crate::graphics::GraphicsMode::Off)
         .then(crate::graphics::detect_current_terminal);
@@ -193,12 +194,15 @@ pub fn run_plan_pty(
             reason: "toasts disabled".to_string(),
         }
     };
-    let toast_fallback = crate::toast::launch::fallback_for(
+    // #2395: the status file is only read when the status line was actually
+    // composed; otherwise the grid HUD must show the CPU reading.
+    let toast_fallback = crate::toast::launch::fallback_after_injection(
         plan,
         toast_cfg
             .claude_statusline
             .then_some(status_writer.as_ref())
             .flatten(),
+        statusline_injected,
     );
     if verbose {
         verbose_log::log(format_args!(
