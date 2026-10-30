@@ -1050,6 +1050,17 @@ pub enum Command {
         #[arg(long, requires = "response")]
         http: bool,
     },
+    /// Test seam for the Claude -> Gemini egress translator: read one
+    /// Anthropic Messages request body on stdin, write the translated Gemini
+    /// `generateContent` request body to stdout. `--model` names the target
+    /// Gemini model; without it the request's own model is kept.
+    /// Never used by a launched session.
+    #[command(name = "__claude-gemini-translate", hide = true)]
+    InternalClaudeGeminiTranslate {
+        /// Target Gemini model id.
+        #[arg(long)]
+        model: Option<String>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1613,6 +1624,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "__worker",
     "__start-cmd",
     "__openai-chat-translate",
+    "__claude-gemini-translate",
 ];
 
 impl Args {
