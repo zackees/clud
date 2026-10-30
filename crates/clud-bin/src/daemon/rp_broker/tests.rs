@@ -91,19 +91,64 @@ fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
     }
 }
 
+/// Waits for the sidecar with a load-tolerant deadline. The daemon publishes
+/// `daemon.json` only after the sidecar exists (#2239), so callers that have
+/// already seen readiness normally return on the first read; the deadline only
+/// matters for a sidecar that is genuinely never written, and then the
+/// failure names the path and what the state dir holds.
 fn wait_for_identity_sidecar(state_dir: &Path) -> DaemonProcess {
     let path = daemon_identity_path(state_dir);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(identity) = read_daemon_identity_file(&path) {
             return identity;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for daemon identity sidecar"
+            "timed out waiting for daemon identity sidecar: path={} parent_exists={} \
+             state_dir_entries={:?}",
+            path.display(),
+            path.parent().is_some_and(Path::exists),
+            path.parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|rd| rd
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()),
         );
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// #2239 regression: the moment `daemon.json` is readable and the TCP port
+/// accepts, the identity sidecar must already exist. No polling allowed.
+#[test]
+fn identity_sidecar_exists_by_the_time_daemon_reports_ready() {
+    let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().to_path_buf();
+    let daemon_state_dir = state_dir.clone();
+    let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
+
+    let info = wait_for_daemon_ready(&state_dir);
+    let sidecar = read_daemon_identity_file(&daemon_identity_path(&state_dir));
+    let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+    use std::io::{BufRead, BufReader, Write as _};
+    let request = serde_json::to_string(&DaemonRequest::Shutdown {
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        expected_daemon: Some(info.identity()),
+    })
+    .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let joined = daemon_thread.join().unwrap();
+    assert!(
+        sidecar.is_some(),
+        "daemon.json was published before the identity sidecar (exit={joined})"
+    );
 }
 
 /// FROZEN golden bytes for clud's Frame v1 wire (#385 adoption).
