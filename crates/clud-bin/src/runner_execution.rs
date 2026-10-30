@@ -2,6 +2,7 @@ use super::runner_exit::normalize_exit_code;
 use super::runner_terminal;
 use super::*;
 use super::{lease_shared_rx, merge_extra_rx};
+use crate::foreground_runtime::ForegroundRuntime;
 
 pub(super) fn run_with_inherited_stdio(
     process: &subprocess::ManagedSubprocess,
@@ -147,7 +148,7 @@ pub fn run_plan_pty(
                 .and_then(crate::toast::launch::injection_for)
         })
         .flatten();
-    let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
+    let (runtime, statusline_injected) = match ForegroundRuntime::start_with_statusline(
         plan,
         child_env_for_backend(plan.backend),
         statusline.as_ref(),
@@ -193,12 +194,10 @@ pub fn run_plan_pty(
             reason: "toasts disabled".to_string(),
         }
     };
-    let toast_fallback = crate::toast::launch::fallback_for(
+    let toast_fallback = crate::toast::launch::fallback_after_injection(
         plan,
-        toast_cfg
-            .claude_statusline
-            .then_some(status_writer.as_ref())
-            .flatten(),
+        status_writer.as_ref(),
+        toast_cfg.claude_statusline && statusline_injected,
     );
     if verbose {
         verbose_log::log(format_args!(

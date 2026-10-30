@@ -87,6 +87,17 @@ pub fn fallback_for(plan: &LaunchPlan, writer: Option<&Arc<StatusStateWriter>>) 
     fallback_for_harness(plan.effective_harness(), writer)
 }
 
+/// [`fallback_for`] gated on the injection having really happened (#2395):
+/// the status file is only read by a `clud statusline` Claude was told to run,
+/// so when composing it failed the grid HUD must keep the CPU reading.
+pub fn fallback_after_injection(
+    plan: &LaunchPlan,
+    writer: Option<&Arc<StatusStateWriter>>,
+    injected: bool,
+) -> Fallback {
+    fallback_for_harness(plan.effective_harness(), writer.filter(|_| injected))
+}
+
 fn fallback_for_harness(harness: Backend, writer: Option<&Arc<StatusStateWriter>>) -> Fallback {
     match (harness, writer) {
         (Backend::Claude, Some(writer)) => Fallback::StatusFile(Arc::clone(writer)),
@@ -138,6 +149,24 @@ mod tests {
         assert_eq!(injection.session_pid, 4321);
         assert_eq!(injection.state_dir, dir.path());
         assert_eq!(injection.exe, PathBuf::from("/bin/clud"));
+    }
+
+    #[test]
+    fn a_failed_injection_drops_the_status_file_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 1)));
+        let plan = crate::foreground_runtime::tests::plan(
+            crate::backend::ModelProvider::Claude,
+            Backend::Claude,
+        );
+        assert!(matches!(
+            fallback_after_injection(&plan, Some(&writer), true),
+            Fallback::StatusFile(_)
+        ));
+        assert!(matches!(
+            fallback_after_injection(&plan, Some(&writer), false),
+            Fallback::None
+        ));
     }
 
     #[test]
