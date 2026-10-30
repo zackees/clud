@@ -13,9 +13,16 @@ fn session(root: &Path, rel: &str, len: u64, age: Duration, now: SystemTime) -> 
     fs::write(&file, vec![0u8; len as usize]).unwrap();
     let when = now - age;
     for path in [&file, &dir] {
-        fs::File::open(path).unwrap().set_modified(when).unwrap();
+        set_mtime(path, when);
     }
     dir
+}
+
+/// Set a path's mtime, directories included. `filetime`, not
+/// `File::set_modified`: Windows refuses `File::open` on a directory and a
+/// read-only handle cannot change times ("Access is denied", #2403).
+fn set_mtime(path: &Path, when: SystemTime) {
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
 }
 
 fn hours(n: u64) -> Duration {
@@ -90,10 +97,7 @@ fn old_dir_mtime_with_a_fresh_file_inside_is_live() {
     let nested = s.join("deep");
     fs::create_dir_all(&nested).unwrap();
     fs::write(nested.join("fresh"), b"x").unwrap();
-    fs::File::open(&s)
-        .unwrap()
-        .set_modified(now - hours(80))
-        .unwrap();
+    set_mtime(&s, now - hours(80));
     enforce_cap_at(tmp.path(), KIB, now, false, LiveSignals::nothing_live);
     assert!(s.exists());
 }
@@ -103,10 +107,7 @@ fn a_future_mtime_is_treated_as_live() {
     let tmp = tempfile::tempdir().unwrap();
     let now = SystemTime::now();
     let s = session(tmp.path(), "claude-1/p/s", 50 * KIB, Duration::ZERO, now);
-    fs::File::open(s.join("data"))
-        .unwrap()
-        .set_modified(now + hours(5))
-        .unwrap();
+    set_mtime(&s.join("data"), now + hours(5));
     enforce_cap_at(tmp.path(), KIB, now, false, LiveSignals::nothing_live);
     assert!(s.exists());
 }
@@ -135,10 +136,7 @@ fn flat_files_are_units_and_siblings_of_live_sessions_go() {
     );
     let flat = tmp.path().join("scratch.bin");
     fs::write(&flat, vec![0u8; 50 * KIB as usize]).unwrap();
-    fs::File::open(&flat)
-        .unwrap()
-        .set_modified(now - hours(40))
-        .unwrap();
+    set_mtime(&flat, now - hours(40));
     enforce_cap_at(tmp.path(), 10 * KIB, now, false, LiveSignals::nothing_live);
     assert!(!flat.exists());
     assert!(live.exists());
