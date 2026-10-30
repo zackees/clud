@@ -267,19 +267,8 @@ fn reason_in(
     cwd: Option<&Path>,
     home: Option<&Path>,
 ) -> Option<String> {
-    let normalized: String = command
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect();
-    // A repo's own `.clud/settings.json` is never read for the override, so
-    // only a spelling that can reach the user's home counts.
-    let reaches_home = ["~", "home", "userprofile", "/users/", "/root/"]
-        .iter()
-        .any(|marker| normalized.contains(marker));
-    let names_override = normalized.contains("extra_roots")
-        || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
     let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
+    let names_override = names_override(command, &script);
     let alts = pre_cd_cwds(command, &script.invocations, cwd);
     let writes_settings = script.invocations.iter().any(|invocation| {
         protected_operand(invocation, home, &alts)
@@ -300,6 +289,87 @@ fn reason_in(
     } else {
         None
     }
+}
+
+/// Lowercased text with quotes and backslashes dropped, so spellings such as
+/// `.cl"ud"` compare equal to the plain name.
+fn normalize_text(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
+}
+
+/// Programs whose operands are only read and whose output never echoes an
+/// operand name, so a protected name passed to them is not a write.
+const CONTENT_READERS: &[&str] = &["cat", "head", "tail", "bat", "jq", "less", "more"];
+
+/// Programs besides [`READ_ONLY`] that cannot interpret a heredoc body as
+/// code. `tee` is still judged by its operands, never by the body.
+const BODY_INERT: &[&str] = &["cd", "mkdir", "touch", "tee"];
+
+fn program_in(invocation: &Invocation, names: &[&str]) -> bool {
+    invocation.env.is_empty()
+        && invocation
+            .effective_program()
+            .is_some_and(|program| names.contains(&program.as_str()))
+}
+
+fn body_inert(invocation: &Invocation) -> bool {
+    invocation.words.is_empty()
+        || program_in(invocation, READ_ONLY)
+        || program_in(invocation, BODY_INERT)
+}
+
+/// Whether every heredoc marker in `command` has a quoted or escaped
+/// delimiter, so no body is expanded.
+fn heredocs_quoted(command: &str) -> bool {
+    let command = command.replace("<<<", "");
+    let quoted = command
+        .split("<<")
+        .skip(1)
+        .filter(|rest| {
+            let rest = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+            rest.starts_with(['\'', '"', '\\'])
+        })
+        .count();
+    command.matches("<<").count() == quoted
+}
+
+/// Whether the command names the protected settings (the home-reaching
+/// settings path, or `extra_roots`) anywhere that could matter. The parser
+/// attaches a heredoc body to the first command of a list, so bodies are
+/// dropped only when every command in the script is body-inert; literal
+/// operands of pure content readers are dropped too (#2353). Every other
+/// word, including any the parser could not evaluate, keeps counting, and a
+/// parse error scrubs nothing.
+fn names_override(command: &str, script: &crate::shell_ast::Script) -> bool {
+    let mut text = normalize_text(command);
+    if !script.has_error {
+        let all_inert = script.invocations.iter().all(body_inert);
+        let quoted = heredocs_quoted(command);
+        for invocation in &script.invocations {
+            let body = invocation.heredoc.as_deref();
+            if let Some(body) =
+                body.filter(|body| all_inert && (quoted || !body.contains(['$', '`'])))
+            {
+                text = text.replacen(&normalize_text(body), "", 1);
+            }
+            if program_in(invocation, CONTENT_READERS) {
+                let operands = invocation.words.iter().zip(&invocation.raw).skip(1);
+                for (_, raw) in operands.filter(|(word, _)| matches!(word, Value::Literal(_))) {
+                    text = text.replacen(&normalize_text(raw), "", 1);
+                }
+            }
+        }
+    }
+    // A repo's own `.clud/settings.json` is never read for the override, so
+    // only a spelling that can reach the user's home counts.
+    let reaches_home = ["~", "home", "userprofile", "/users/", "/root/"]
+        .iter()
+        .any(|marker| text.contains(marker));
+    text.contains("extra_roots")
+        || (text.contains(".clud") && text.contains("settings.json") && reaches_home)
 }
 
 /// Working directories a command may really run in besides the one the parser
@@ -937,6 +1007,48 @@ mod tests {
             format!("echo x > ../other/{name}"),
         ] {
             assert_eq!(relative_reason(home.path(), &command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn reads_and_prose_that_name_the_settings_file_are_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            format!("cat .clud/{name} 2>/dev/null"),
+            format!("cat /home/dev/repo/.clud/{name} 2>/dev/null"),
+            format!("cat ~/repo/.clud/{name} 2>/dev/null"),
+            format!("cat > scratchpad/issues/x.md <<'EOF'\nsee .clud/{name} in ~/home\nEOF"),
+            format!("cat > scratchpad/issues/x.md <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+            format!("cat > scratchpad/issues/x.md <<EOF\nsee ~/.clud/{name}\nEOF"),
+            format!("cat ~/.clud/{name} > /tmp/x"),
+            format!("cat ~/r/.clud/{name} 2>/dev/null | python -c 'import sys'"),
+            format!("mkdir -p s/i && cat > s/i/x.md <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+        ] {
+            assert_eq!(relative_reason(home.path(), &command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn writes_hidden_near_prose_or_reads_are_still_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            format!("cat > ~/.clud/{name} <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+            format!("cat > x.md <<EOF\n$(echo x > ~/.clud/{name})\nEOF"),
+            format!("cat > x.md <<EOF\n`echo x > ~/.clud/{name}`\nEOF"),
+            format!("cp /tmp/x ~/.clud/{name}"),
+            format!("cat a && python - <<'EOF'\nopen('~/.clud/{name}', 'w')\nEOF"),
+            format!("python - <<EOF\nopen('~/.clud/{name}', 'w')\nEOF"),
+            format!("echo ~/.clud/{name} | xargs cp /tmp/x"),
+            format!("X=~/.clud/{name}; cp /tmp/x $X"),
+            format!("cat $(python -c \"open('~/.clud/{name}','w')\")"),
+            format!("cat ~/.clud/{name} 2>/dev/null > ~/.clud/{name}"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
         }
     }
 
