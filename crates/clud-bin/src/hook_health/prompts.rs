@@ -274,6 +274,7 @@ fn backend_prompt_launch_plan(
         codex_config_overrides: args.codex_config_overrides.clone(),
         resolved_model_selection: args.resolved_model_selection.clone(),
         raw_argv: Vec::new(),
+        continue_index: None,
         inline_api_key: None,
     };
     command::build_launch_plan_for_target(&launch_args, launch_target, backend_path)
