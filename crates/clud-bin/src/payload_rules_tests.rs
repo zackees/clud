@@ -385,3 +385,72 @@ fn a_condition_path_resolves_selectors_and_missing_values_are_false() {
     let mut missed = serde_json::json!({"tools": [{"name": "apply_patch", "type": null}]});
     assert!(!apply(&rules, "m", "claude", &mut missed).changed());
 }
+
+#[test]
+fn default_raw_sets_parsed_json_only_where_nothing_is() {
+    // Upstream keeps raw values as JSON bytes (`sjson.SetRawBytes`), so the
+    // operator can paste a document the rules file has no shape for. Here the
+    // raw text must arrive as an object, not as a JSON string.
+    let rules = rules(serde_json::json!({
+        "default-raw": [{
+            "models": [{"name": "gemini-*"}],
+            "params": {
+                "generationConfig.responseJsonSchema": "{\"type\":\"object\"}",
+                "generationConfig.thinkingConfig.thinkingBudget": "32768"
+            }
+        }]
+    }));
+    let mut payload = serde_json::json!({
+        "generationConfig": {"responseJsonSchema": {"type": "string"}}
+    });
+    let outcome = apply(&rules, "gemini-2.5-pro", "gemini", &mut payload);
+    assert_eq!(outcome.defaulted, 1, "only the absent path is written");
+    assert_eq!(outcome.problems, Vec::<String>::new());
+    assert_eq!(
+        payload["generationConfig"]["responseJsonSchema"],
+        serde_json::json!({"type": "string"}),
+        "an existing value is never replaced by a default"
+    );
+    assert_eq!(
+        payload["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        serde_json::json!(32768)
+    );
+
+    let mut other = serde_json::json!({"generationConfig": {}});
+    let untouched = apply(&rules, "claude-sonnet-4", "claude", &mut other);
+    assert!(!untouched.changed(), "the model selector still gates raw rules");
+}
+
+#[test]
+fn override_raw_runs_after_the_typed_override() {
+    let rules = rules(serde_json::json!({
+        "override": [{"params": {"response_format": "typed"}}],
+        "override-raw": [{
+            "params": {"response_format": "{\"type\":\"json_schema\"}"}
+        }]
+    }));
+    let mut payload = serde_json::json!({});
+    let outcome = apply(&rules, "any", "codex", &mut payload);
+    assert_eq!(outcome.overridden, 2);
+    assert_eq!(
+        payload["response_format"],
+        serde_json::json!({"type": "json_schema"}),
+        "the raw rule runs last, as upstream's OverrideRaw does"
+    );
+}
+
+#[test]
+fn a_raw_value_that_is_not_json_is_refused_when_the_file_loads() {
+    let error = parse(
+        serde_json::to_vec(&serde_json::json!({
+            "default-raw": [{"params": {"response_format": "{not json"}}]
+        }))
+        .expect("fixture serializes")
+        .as_slice(),
+    )
+    .expect_err("invalid raw JSON must be refused at load");
+    assert!(
+        error.contains("raw value is not JSON"),
+        "unexpected error: {error}"
+    );
+}

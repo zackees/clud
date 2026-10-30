@@ -354,3 +354,54 @@ def test_a_header_without_a_colon_is_refused_by_the_seam() -> None:
     )
     assert completed.returncode == 2
     assert "not a header" in completed.stderr
+
+
+def test_raw_rules_set_json_text_and_are_refused_when_unparsable(tmp_path: Path) -> None:
+    """``default-raw``/``override-raw`` keep the value as JSON, not as a string.
+
+    CLIProxyAPI's own example (``config.example.yaml:296-321``) pastes a JSON
+    schema into a parameter; a plain string value would reach the provider as
+    text, which is the bug this pins.
+    """
+    rules = {
+        "default-raw": [
+            {
+                "models": [{"name": "gemini-*"}],
+                "params": {"generationConfig.responseJsonSchema": '{"type":"object"}'},
+            }
+        ],
+        "override-raw": [
+            {"models": [{"name": "gemini-*"}], "params": {"candidateCount": "2"}}
+        ],
+    }
+    result = _apply(
+        rules,
+        {"model": "gemini-2.5-pro", "candidateCount": 1},
+        "gemini-2.5-pro",
+        protocol="gemini",
+    )
+    payload = result["payload"]
+    assert payload["generationConfig"]["responseJsonSchema"] == {"type": "object"}
+    assert payload["candidateCount"] == 2
+    assert result["outcome"] == {
+        "defaulted": 1,
+        "overridden": 1,
+        "filtered": 0,
+        "problems": [],
+        "changed": True,
+    }
+
+    broken = tmp_path / "raw-broken.json"
+    broken.write_text(
+        json.dumps({"default-raw": [{"params": {"schema": "{not json"}}]}),
+        encoding="utf-8",
+    )
+    refused = process.run(
+        [str(_clud_binary()), "__apply-payload-rules", "--rules", str(broken)],
+        input=json.dumps({"payload": {}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert refused.returncode == 2, "an unparsable raw value must fail the file, not the request"
+    assert "raw value is not JSON" in refused.stderr

@@ -27,9 +27,16 @@
 //! or must not equal a value), and `exist`/`not-exist` (paths that must or must
 //! not resolve to a non-null value). All of them must hold.
 //!
-//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the `*-raw`
-//! variants, the OpenAI-shaped ingress path, and a `~/.clud/settings.json`
-//! owner for the rules.
+//! `default-raw` / `override-raw` are the same two kinds whose parameter
+//! values are JSON *text* (`"{\"type\":\"object\"}"`) parsed into a value when
+//! the file loads, so an operator can paste a document the rules file has no
+//! shape for. They run after their typed counterpart, as upstream does
+//! (`payload_helpers.go`: `Default` then `DefaultRaw`, `Override` then
+//! `OverrideRaw`).
+//!
+//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the
+//! `from-protocol` selector, the OpenAI-shaped ingress path, and a
+//! `~/.clud/settings.json` owner for the rules.
 //!
 //! A rule that cannot be applied never fails a client request: the payload is
 //! forwarded as far as the good rules got it and the problem is reported to
@@ -62,6 +69,21 @@ pub struct SetRule {
     /// Dotted JSON path -> the value to set, verbatim.
     #[serde(default)]
     pub params: Map<String, Value>,
+}
+
+/// One `default-raw`/`override-raw` rule: the same selection as [`SetRule`],
+/// but every parameter value is JSON text parsed into a value when the file
+/// loads (`sjson.SetRawBytes` upstream, `payload_helpers.go`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RawSetRule {
+    /// Empty selects every model.
+    #[serde(default)]
+    pub models: Vec<ModelMatch>,
+    /// Dotted JSON path -> JSON text. Invalid JSON is refused at load time, so
+    /// a typo cannot silently forward a string where an object was meant.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
 }
 
 /// One `filter` rule: which models it selects and which paths it removes.
@@ -206,8 +228,12 @@ impl<'a> Request<'a> {
 pub struct PayloadRules {
     #[serde(default)]
     pub default: Vec<SetRule>,
+    #[serde(default, rename = "default-raw")]
+    pub default_raw: Vec<RawSetRule>,
     #[serde(default, rename = "override")]
     pub override_rules: Vec<SetRule>,
+    #[serde(default, rename = "override-raw")]
+    pub override_raw: Vec<RawSetRule>,
     #[serde(default)]
     pub filter: Vec<FilterRule>,
 }
@@ -215,7 +241,11 @@ pub struct PayloadRules {
 impl PayloadRules {
     /// True when no rule could ever fire, so a caller can skip the work.
     pub fn is_empty(&self) -> bool {
-        self.default.is_empty() && self.override_rules.is_empty() && self.filter.is_empty()
+        self.default.is_empty()
+            && self.default_raw.is_empty()
+            && self.override_rules.is_empty()
+            && self.override_raw.is_empty()
+            && self.filter.is_empty()
     }
 }
 
@@ -342,43 +372,121 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
 /// in [`Outcome::problems`] and skipped; nothing here can fail the request.
 pub fn apply_request(rules: &PayloadRules, request: &Request<'_>, payload: &mut Value) -> Outcome {
     let mut outcome = Outcome::default();
-    for rule in &rules.default {
-        if !rule_applies(&rule.models, request, payload, &mut outcome, "default") {
+    outcome.defaulted += apply_set_rules(&rules.default, "default", true, request, payload, &mut outcome);
+    outcome.defaulted += apply_raw_rules(
+        &rules.default_raw,
+        "default-raw",
+        true,
+        request,
+        payload,
+        &mut outcome,
+    );
+    outcome.overridden += apply_set_rules(
+        &rules.override_rules,
+        "override",
+        false,
+        request,
+        payload,
+        &mut outcome,
+    );
+    outcome.overridden += apply_raw_rules(
+        &rules.override_raw,
+        "override-raw",
+        false,
+        request,
+        payload,
+        &mut outcome,
+    );
+    outcome.filtered += apply_filter_rules(&rules.filter, request, payload, &mut outcome);
+    outcome
+}
+
+/// Set every parameter of every matching rule; `fill_missing` makes this a
+/// `default` (only when the path is absent or null) rather than an `override`.
+fn apply_set_rules(
+    rules: &[SetRule],
+    kind: &str,
+    fill_missing: bool,
+    request: &Request<'_>,
+    payload: &mut Value,
+    outcome: &mut Outcome,
+) -> usize {
+    let mut applied = 0;
+    for rule in rules {
+        if !rule_applies(&rule.models, request, payload, outcome, kind) {
             continue;
         }
         for (path, value) in &rule.params {
-            if path_present(payload, path) {
+            if fill_missing && path_present(payload, path) {
                 continue;
             }
             match segments(path).and_then(|parts| set_in(payload, &parts, value.clone())) {
-                Ok(count) => outcome.defaulted += count,
-                Err(reason) => outcome.problems.push(format!("default {path}: {reason}")),
+                Ok(count) => applied += count,
+                Err(reason) => outcome.problems.push(format!("{kind} {path}: {reason}")),
             }
         }
     }
-    for rule in &rules.override_rules {
-        if !rule_applies(&rule.models, request, payload, &mut outcome, "override") {
+    applied
+}
+
+/// [`apply_set_rules`] for `default-raw`/`override-raw`: the parameter value is
+/// JSON text, set as the parsed value. `validate` already refused an unparsable
+/// value at load time; a bad value here is still reported per rule, never fatal.
+fn apply_raw_rules(
+    rules: &[RawSetRule],
+    kind: &str,
+    fill_missing: bool,
+    request: &Request<'_>,
+    payload: &mut Value,
+    outcome: &mut Outcome,
+) -> usize {
+    let mut applied = 0;
+    for rule in rules {
+        if !rule_applies(&rule.models, request, payload, outcome, kind) {
             continue;
         }
-        for (path, value) in &rule.params {
-            match segments(path).and_then(|parts| set_in(payload, &parts, value.clone())) {
-                Ok(count) => outcome.overridden += count,
-                Err(reason) => outcome.problems.push(format!("override {path}: {reason}")),
+        for (path, text) in &rule.params {
+            if fill_missing && path_present(payload, path) {
+                continue;
+            }
+            let value = match serde_json::from_str::<Value>(text) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcome
+                        .problems
+                        .push(format!("{kind} {path}: raw value is not JSON: {error}"));
+                    continue;
+                }
+            };
+            match segments(path).and_then(|parts| set_in(payload, &parts, value)) {
+                Ok(count) => applied += count,
+                Err(reason) => outcome.problems.push(format!("{kind} {path}: {reason}")),
             }
         }
     }
-    for rule in &rules.filter {
-        if !rule_applies(&rule.models, request, payload, &mut outcome, "filter") {
+    applied
+}
+
+/// Remove every path of every matching `filter` rule.
+fn apply_filter_rules(
+    rules: &[FilterRule],
+    request: &Request<'_>,
+    payload: &mut Value,
+    outcome: &mut Outcome,
+) -> usize {
+    let mut removed = 0;
+    for rule in rules {
+        if !rule_applies(&rule.models, request, payload, outcome, "filter") {
             continue;
         }
         for path in &rule.params {
             match segments(path) {
-                Ok(parts) => outcome.filtered += remove_in(payload, &parts),
+                Ok(parts) => removed += remove_in(payload, &parts),
                 Err(reason) => outcome.problems.push(format!("filter {path}: {reason}")),
             }
         }
     }
-    outcome
+    removed
 }
 
 /// Parse a rules document. Refuses a non-object and any unknown key, so a typo
@@ -399,9 +507,12 @@ pub fn parse(bytes: &[u8]) -> Result<PayloadRules, String> {
 
 fn validate(rules: &PayloadRules) -> Result<(), String> {
     let set_rules = rules.default.iter().chain(&rules.override_rules);
+    let raw_rules = rules.default_raw.iter().chain(&rules.override_raw);
     let filter_models = rules.filter.iter().flat_map(|rule| rule.models.iter());
     for model in set_rules
+        .clone()
         .flat_map(|rule| rule.models.iter())
+        .chain(raw_rules.clone().flat_map(|rule| rule.models.iter()))
         .chain(filter_models)
     {
         if model.name.trim().is_empty() {
@@ -415,18 +526,29 @@ fn validate(rules: &PayloadRules) -> Result<(), String> {
             return Err("a model selector has an empty protocol".to_string());
         }
     }
-    // Only `default`/`override` paths must be well formed here: a filter path
-    // that is not well formed removes nothing, and is reported per request.
-    for rule in rules.default.iter().chain(&rules.override_rules) {
-        for path in rule.params.keys() {
-            let steps = segments(path).map_err(|reason| format!("rules: {reason}"))?;
-            // A selector names an array element, not a member of it: without a
-            // trailing key there is nothing to set, and the operator should
-            // hear about it when the file loads, not per request.
-            if matches!(steps.last(), Some(Step::Query(_))) {
-                return Err(format!(
-                    "rules: `{path}` ends in a selector; add the field to set"
-                ));
+    // Only `default`/`override` (typed and raw) paths must be well formed here:
+    // a filter path that is not well formed removes nothing, and is reported
+    // per request.
+    for path in set_rules
+        .flat_map(|rule| rule.params.keys())
+        .chain(raw_rules.flat_map(|rule| rule.params.keys()))
+    {
+        let steps = segments(path).map_err(|reason| format!("rules: {reason}"))?;
+        // A selector names an array element, not a member of it: without a
+        // trailing key there is nothing to set, and the operator should hear
+        // about it when the file loads, not per request.
+        if matches!(steps.last(), Some(Step::Query(_))) {
+            return Err(format!(
+                "rules: `{path}` ends in a selector; add the field to set"
+            ));
+        }
+    }
+    // A `*-raw` value is JSON text: refuse it now, when the operator is looking,
+    // rather than forwarding a string where an object was meant.
+    for rule in rules.default_raw.iter().chain(&rules.override_raw) {
+        for (path, text) in &rule.params {
+            if serde_json::from_str::<Value>(text).is_err() {
+                return Err(format!("rules: `{path}` raw value is not JSON: {text}"));
             }
         }
     }
