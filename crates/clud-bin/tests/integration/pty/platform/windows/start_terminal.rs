@@ -120,9 +120,27 @@ fn check_started_terminal(request: &str) {
         "opened Command Prompt died with PTY close"
     );
     drop(fixture.tracker.take());
+    // Collect before asserting so a failure explains itself (#2384).
+    let live_after_cleanup = terminal.is_live();
+    let diagnostics = if live_after_cleanup {
+        String::new()
+    } else {
+        let facts = clud::reaper_facts::collect_host_facts(
+            &[terminal.pid],
+            &Default::default(),
+            Vec::new(),
+        );
+        let declared = clud::process_scan::scan_env("CLUD")
+            .declared_daemons
+            .contains(&terminal.pid);
+        format!(
+            " (terminal pid {}, declared_daemons contains it: {declared}, host facts: {facts:?})",
+            terminal.pid
+        )
+    };
     assert!(
-        terminal.is_live(),
-        "explicitly opened Command Prompt died with clud cleanup"
+        live_after_cleanup,
+        "explicitly opened Command Prompt died with clud cleanup{diagnostics}"
     );
     let facts =
         clud::reaper_facts::collect_host_facts(&[terminal.pid], &Default::default(), Vec::new());

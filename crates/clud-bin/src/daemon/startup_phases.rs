@@ -60,6 +60,37 @@ impl<'a> StartupPhases<'a> {
     }
 }
 
+/// Chain a panic hook that appends the panic to `daemon.stderr.log` (#2386),
+/// then calls the previous hook. The detached daemon's stderr is discarded, so
+/// without this a panic leaves no trace outside the crash reporter. Installs at
+/// most once per process; call it only from the real daemon entry point.
+pub(super) fn install_panic_hook(state_dir: &Path) {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    let path = state_dir.join(STDERR_LOG_NAME);
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            let backtrace = std::backtrace::Backtrace::capture();
+            let report = panic_report(thread.name(), info, &backtrace);
+            append_stderr_log(&path, &report);
+            previous(info);
+        }));
+    });
+}
+
+/// Pure formatter for the panic log entry (message + location come from `info`).
+fn panic_report(
+    thread: Option<&str>,
+    info: &dyn std::fmt::Display,
+    backtrace: &dyn std::fmt::Display,
+) -> String {
+    format!(
+        "[clud] daemon panic in thread '{}': {info}\n{backtrace}",
+        thread.unwrap_or("<unnamed>")
+    )
+}
+
 fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -116,6 +147,20 @@ mod tests {
         assert_eq!(got[0]["error"], "boom");
         let log = fs::read_to_string(tmp.path().join(STDERR_LOG_NAME)).unwrap();
         assert_eq!(log, "[clud] boom\n");
+    }
+
+    #[test]
+    fn panic_report_keeps_message_location_and_thread_when_appended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(STDERR_LOG_NAME);
+        let info = "panicked at src/x.rs:1:2:\ndaemon-boom-2386";
+        append_stderr_log(&path, &panic_report(Some("worker"), &info, &"<bt>"));
+        let log = fs::read_to_string(&path).unwrap();
+        assert!(log.contains("daemon-boom-2386"), "{log}");
+        assert!(log.contains("src/x.rs:1:2"), "{log}");
+        assert!(log.contains("daemon panic in thread 'worker'"), "{log}");
+        assert!(log.contains("<bt>"), "{log}");
+        assert!(panic_report(None, &"m", &"").contains("<unnamed>"));
     }
 
     #[test]
