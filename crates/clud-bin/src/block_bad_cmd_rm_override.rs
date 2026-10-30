@@ -317,7 +317,7 @@ fn program_in(invocation: &Invocation, names: &[&str]) -> bool {
 
 fn body_inert(invocation: &Invocation) -> bool {
     invocation.words.is_empty()
-        || program_in(invocation, READ_ONLY)
+        || (program_in(invocation, READ_ONLY) && !less_writes_log(invocation))
         || program_in(invocation, BODY_INERT)
 }
 
@@ -336,32 +336,120 @@ fn heredocs_quoted(command: &str) -> bool {
     command.matches("<<").count() == quoted
 }
 
+/// `less` options that open a log file for writing (`-o`, `-O`,
+/// `--log-file`, `--LOG-FILE`, and their unambiguous abbreviations).
+fn less_writes_log(invocation: &Invocation) -> bool {
+    if !program_in(invocation, &["less"]) {
+        return false;
+    }
+    invocation.words.iter().skip(1).any(|word| {
+        let text = word.text();
+        if let Some(long) = text.strip_prefix("--") {
+            let name = long
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            return name.len() >= 2 && "log-file".starts_with(&name);
+        }
+        text.starts_with('-') && text.contains(['o', 'O'])
+    })
+}
+
+/// A pure content reader whose operands are only read.
+fn content_reader(invocation: &Invocation) -> bool {
+    program_in(invocation, CONTENT_READERS) && !less_writes_log(invocation)
+}
+
+/// The byte range of the only occurrence of `needle` in `text[from..to]`.
+fn unique_span(text: &str, needle: &str, from: usize, to: usize) -> Option<(usize, usize)> {
+    let window = text.get(from..to)?;
+    if needle.is_empty() || window.matches(needle).count() != 1 {
+        return None;
+    }
+    let start = from + window.find(needle)?;
+    Some((start, start + needle.len()))
+}
+
+/// Spans of the literal operands of a content reader, each located at its own
+/// position inside the command's own source text (never by a global first
+/// match). Any word that cannot be placed leaves the operands unscrubbed.
+fn operand_spans(text: &str, invocation: &Invocation) -> Vec<(usize, usize)> {
+    let Some((from, to)) = unique_span(text, &normalize_text(&invocation.source), 0, text.len())
+    else {
+        return Vec::new();
+    };
+    let mut cursor = from;
+    let mut spans = Vec::new();
+    for (index, (word, raw)) in invocation.words.iter().zip(&invocation.raw).enumerate() {
+        let raw = normalize_text(raw);
+        let Some(found) = text.get(cursor..to).and_then(|window| window.find(&raw)) else {
+            return Vec::new();
+        };
+        let start = cursor + found;
+        cursor = start + raw.len();
+        if index > 0 && !raw.is_empty() && matches!(word, Value::Literal(_)) {
+            spans.push((start, cursor));
+        }
+    }
+    spans
+}
+
+/// Whether `reader`'s operands may be dropped: every command that could use
+/// them as a write target (through `$_`, a later `"$@"` or the like) must be
+/// body-inert, except stages of the reader's own pipeline, which run in
+/// subshells and never see its last argument.
+fn operands_scrubbable(reader: &Invocation, script: &crate::shell_ast::Script) -> bool {
+    script.invocations.iter().all(|other| {
+        body_inert(other)
+            || reader
+                .pipeline
+                .is_some_and(|slot| other.pipeline.is_some_and(|o| o.id == slot.id))
+    })
+}
+
+/// `text` with the heredoc bodies and read-only operands that cannot name a
+/// write target removed.
+fn scrubbed(text: &str, command: &str, script: &crate::shell_ast::Script) -> String {
+    let quoted = heredocs_quoted(command);
+    let all_inert = script.invocations.iter().all(body_inert);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    for invocation in &script.invocations {
+        let body = invocation.heredoc.as_deref();
+        let body = body.filter(|body| all_inert && (quoted || !body.contains(['$', '`'])));
+        if let Some(body) = body {
+            cuts.extend(unique_span(text, &normalize_text(body), 0, text.len()));
+        }
+        if content_reader(invocation) && operands_scrubbable(invocation, script) {
+            cuts.extend(operand_spans(text, invocation));
+        }
+    }
+    cuts.sort_unstable();
+    let mut out = String::new();
+    let mut at = 0;
+    for (start, end) in cuts {
+        if start >= at {
+            out.push_str(&text[at..start]);
+            at = end;
+        }
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// Whether the command names the protected settings (the home-reaching
-/// settings path, or `extra_roots`) anywhere that could matter. The parser
-/// attaches a heredoc body to the first command of a list, so bodies are
-/// dropped only when every command in the script is body-inert; literal
-/// operands of pure content readers are dropped too (#2353). Every other
-/// word, including any the parser could not evaluate, keeps counting, and a
-/// parse error scrubs nothing.
+/// settings path, or `extra_roots`) anywhere that could matter. Heredoc
+/// bodies and literal operands of pure content readers are dropped (#2353),
+/// but only when every command that could reuse an operand (through `$_`) is
+/// body-inert or a stage of the same pipeline, and bodies only when every command is body-inert, since
+/// the parser attaches a body to the first command of a list. Each operand is removed at its own
+/// position, never by first match. Every other word, including any the
+/// parser could not evaluate, keeps counting, and a parse error scrubs
+/// nothing.
 fn names_override(command: &str, script: &crate::shell_ast::Script) -> bool {
     let mut text = normalize_text(command);
     if !script.has_error {
-        let all_inert = script.invocations.iter().all(body_inert);
-        let quoted = heredocs_quoted(command);
-        for invocation in &script.invocations {
-            let body = invocation.heredoc.as_deref();
-            if let Some(body) =
-                body.filter(|body| all_inert && (quoted || !body.contains(['$', '`'])))
-            {
-                text = text.replacen(&normalize_text(body), "", 1);
-            }
-            if program_in(invocation, CONTENT_READERS) {
-                let operands = invocation.words.iter().zip(&invocation.raw).skip(1);
-                for (_, raw) in operands.filter(|(word, _)| matches!(word, Value::Literal(_))) {
-                    text = text.replacen(&normalize_text(raw), "", 1);
-                }
-            }
-        }
+        text = scrubbed(&text, command, script);
     }
     // A repo's own `.clud/settings.json` is never read for the override, so
     // only a spelling that can reach the user's home counts.
@@ -740,7 +828,7 @@ fn read_only_invocation(invocation: &Invocation) -> bool {
         return false;
     };
     let name = super::block_bad_cmd_shell::program_name(program);
-    READ_ONLY.contains(&name.as_str())
+    (READ_ONLY.contains(&name.as_str()) && !less_writes_log(invocation))
         || program == "["
         || forge_read(&name, words)
         || numeric_sed_read(&name, words)
@@ -1477,6 +1565,52 @@ mod tests {
             "jq '.bash.block_cd=false' .clud/settings.json > t && mv t .clud/settings.json",
         ] {
             assert_eq!(reason(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn scrubbed_operands_cannot_hide_a_later_write() {
+        let n = "settings.json";
+        for command in [
+            format!("cat a >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\" ~/.clud/{n}"),
+            format!("cat ~/.clud/{n} >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\""),
+            format!("cat ~/.clud/{n} >/dev/null; sed -i s/a/b/ \"$_\""),
+            format!("cat ~/.clud/{n} > /dev/null; perl -pi -e s/a/b/ \"$_\""),
+            format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\"; cat clud/{n}"),
+            format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\""),
+            format!("tee ~/.clud/{n} <<'EOF'\nx\nEOF"),
+            format!("cat <<EOF > ~/.clud/{n}\nx\nEOF"),
+            format!("touch ~/.clud/{n}"),
+            format!("mkdir -p ~/.clud && touch ~/.clud/{n}"),
+            format!("less -o ~/.clud/{n} /tmp/x"),
+            format!("less -O ~/.clud/{n} /tmp/x"),
+            format!("less --log-file=~/.clud/{n} /tmp/x"),
+            format!("head -c 9 /tmp/x > ~/.clud/{n}"),
+            format!("jq . /tmp/x > ~/.clud/{n}"),
+            format!("cat <<-'EOF' > ~/.clud/{n}\n\tx\n\tEOF"),
+            format!("cat <<< x > ~/.clud/{n}"),
+            format!("cat \"$(cp x ~/.clud/{n})\""),
+            format!("cat <(cp x ~/.clud/{n})"),
+            format!("cat a; cp b ~/.clud/{n}"),
+            format!("tee x.md <<EOF\n$(python -c \"open('~/.clud/{n}','w')\")\nEOF"),
+            format!("tee x.md <<'EOF'\n~/.clud/{n}\nEOF\npython -c 'import sys' x.md"),
+            format!("cd ~/.clud && tee {n} <<'EOF'\nx\nEOF"),
+        ] {
+            assert!(reason(&command).is_some(), "{command}");
+        }
+    }
+
+    #[test]
+    fn read_only_scripts_that_name_the_file_stay_allowed() {
+        let n = "settings.json";
+        for command in [
+            format!("cat .clud/{n} 2>/dev/null"),
+            format!("cat <<E\\OF\nsee ~/.clud/{n}\nEOF"),
+            format!("cat > scratchpad/x.md <<'EOF'\nsee ~/.clud/{n}\nEOF"),
+            format!("mkdir -p out && cat ~/.clud/{n} 2>/dev/null"),
+            "less -N notes.txt".to_string(),
+        ] {
+            assert_eq!(reason(&command), None, "{command}");
         }
     }
 }
