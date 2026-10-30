@@ -202,6 +202,14 @@ runs:
         for tool in cargo rustc rustup soldr; do
           rm -f "$cargo_bin/$tool" "$cargo_bin/$tool.exe"
         done
+        # Runner images also ship toolchains outside CARGO_HOME (macOS arm:
+        # Homebrew rustup at /opt/homebrew/opt/rustup/bin). Delete every
+        # real copy still on PATH.
+        for tool in cargo rustc rustup; do
+          for found in $(type -ap "$tool" || true); do
+            rm -f "$found"
+          done
+        done
         shim_dir="${RUNNER_TEMP}/no-cargo"
         mkdir -p "$shim_dir"
         for tool in cargo rustc soldr; do
