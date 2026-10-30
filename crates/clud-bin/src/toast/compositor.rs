@@ -175,7 +175,7 @@ pub struct Compositor {
     cpu_drawn: bool,
     cpu_transmitted: Option<(String, super::Severity, u16, u16, u8)>,
     /// The CPU toast last mirrored into Claude's status line (#2367).
-    status_cpu: Option<(String, super::Severity, Instant)>,
+    status_cpu: Option<(String, super::Severity, Instant, Option<Instant>)>,
 }
 
 impl Compositor {
@@ -366,7 +366,7 @@ impl Compositor {
         let Fallback::StatusFile(writer) = &self.fallback else {
             return;
         };
-        let next = toast.map(|t| (t.text.clone(), t.severity, t.shown_at));
+        let next = toast.map(|t| (t.text.clone(), t.severity, t.shown_at, t.expires_at));
         if next == self.status_cpu {
             return;
         }
