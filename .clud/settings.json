@@ -9,5 +9,8 @@
   "rust": {
     "use_soldr": true,
     "install": true
+  },
+  "gh": {
+    "backend": "ghd"
   }
 }
