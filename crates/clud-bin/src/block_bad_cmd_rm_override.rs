@@ -201,6 +201,28 @@ fn plain_redirects(invocation: &Invocation) -> bool {
     invocation.redirects.iter().all(|r| !r.writes_file())
 }
 
+/// Whether `cd` has a single literal target that bash resolves without
+/// consulting `CDPATH`: absolute, `./`, `../`, `.` or `..`. Any other target
+/// (`.clud`, `foo`) may land elsewhere than the tracked cwd.
+fn cd_ignores_cdpath(cd: &Invocation) -> bool {
+    let [_, target] = cd.effective_argv() else {
+        return false;
+    };
+    let Some(target) = target.as_literal() else {
+        return false;
+    };
+    let bytes = target.as_bytes();
+    let drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    target.starts_with('/')
+        || drive_absolute
+        || matches!(target, "." | "..")
+        || target.starts_with("./")
+        || target.starts_with("../")
+}
+
 /// The `apply_patch` of a command that is exactly a bare patch or a single
 /// `cd DIR && apply_patch`. Only `&&` guarantees the patch runs in the `cd`
 /// directory the parser tracked: after `;`, a newline or `||` a failed `cd`
@@ -219,7 +241,10 @@ fn nested_patch_invocation<'a>(
     match invocations {
         [patch] if is_patch(patch) => Some(patch),
         [cd, patch] if is_patch(patch) => {
-            let is_cd = cd.effective_program().as_deref() == Some("cd") && plain_redirects(cd);
+            let is_cd = cd.effective_program().as_deref() == Some("cd")
+                && cd.env.is_empty()
+                && plain_redirects(cd)
+                && cd_ignores_cdpath(cd);
             let rest = command.trim_start().strip_prefix(cd.source.trim())?;
             let rest = rest.trim_start().strip_prefix("&&")?;
             (is_cd && rest.trim_start().starts_with(patch.source.trim())).then_some(patch)
@@ -785,6 +810,61 @@ mod tests {
         );
         assert_eq!(
             nested(home.path(), "exec_command", serde_json::json!({"cmd": ok})),
+            None
+        );
+    }
+
+    #[test]
+    fn nested_cd_is_trusted_only_when_cdpath_cannot_apply() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("proj");
+        let body = "<<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF";
+        for command in [
+            format!("CDPATH=x cd .clud && apply_patch {body}"),
+            format!("CDPATH=x cd ./.clud && apply_patch {body}"),
+            format!("cd .clud && apply_patch {body}"),
+        ] {
+            assert_eq!(
+                nested_patch_reason(
+                    &command,
+                    super::super::ShellDialect::Posix,
+                    &cwd,
+                    Some(home.path())
+                ),
+                None,
+                "{command}"
+            );
+        }
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        let name = settings.file_name().unwrap().to_string_lossy().into_owned();
+        let dir = settings
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let protected = format!(
+            "cd ./{dir} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: {name}\n@@\n-a\n+b\n*** End Patch\nEOF"
+        );
+        let reason = nested_patch_reason(
+            &protected,
+            super::super::ShellDialect::Posix,
+            home.path(),
+            Some(home.path()),
+        );
+        assert!(
+            reason
+                .flatten()
+                .is_some_and(|r| r.contains("[protected-target]")),
+            "{protected}"
+        );
+        let abs = format!(
+            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            cwd.display()
+        );
+        assert_eq!(
+            nested(home.path(), "exec_command", serde_json::json!({"cmd": abs})),
             None
         );
     }
