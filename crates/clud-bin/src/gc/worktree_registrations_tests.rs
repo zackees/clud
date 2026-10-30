@@ -23,7 +23,11 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     }
     git(
         &repo,
-        &["worktree", "lock", dir.path().join("locked").to_str().unwrap()],
+        &[
+            "worktree",
+            "lock",
+            dir.path().join("locked").to_str().unwrap(),
+        ],
     );
     fs::remove_dir_all(dir.path().join("dead")).unwrap();
     fs::remove_dir_all(dir.path().join("locked")).unwrap();

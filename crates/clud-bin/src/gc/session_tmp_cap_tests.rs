@@ -37,7 +37,13 @@ fn cap_zero_disables() {
     let now = SystemTime::now();
     let s = session(tmp.path(), "claude-1/p/old", 10 * KIB, hours(100), now);
     let report = enforce_cap_at(tmp.path(), 0, now, false);
-    assert_eq!(report, CapReport { cap: 0, ..Default::default() });
+    assert_eq!(
+        report,
+        CapReport {
+            cap: 0,
+            ..Default::default()
+        }
+    );
     assert!(s.exists());
 }
 
@@ -59,7 +65,13 @@ fn a_live_session_survives_even_when_far_over_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let now = SystemTime::now();
     // Huge and actively written: must never be evicted.
-    let live = session(tmp.path(), "claude-1/p/live", 500 * KIB, Duration::from_secs(30), now);
+    let live = session(
+        tmp.path(),
+        "claude-1/p/live",
+        500 * KIB,
+        Duration::from_secs(30),
+        now,
+    );
     let idle = session(tmp.path(), "claude-1/p/idle", 10 * KIB, hours(50), now);
     let report = enforce_cap_at(tmp.path(), KIB, now, false);
     assert!(live.join("data").exists(), "live session data deleted");
@@ -77,7 +89,10 @@ fn old_dir_mtime_with_a_fresh_file_inside_is_live() {
     let nested = s.join("deep");
     fs::create_dir_all(&nested).unwrap();
     fs::write(nested.join("fresh"), b"x").unwrap();
-    fs::File::open(&s).unwrap().set_modified(now - hours(80)).unwrap();
+    fs::File::open(&s)
+        .unwrap()
+        .set_modified(now - hours(80))
+        .unwrap();
     enforce_cap_at(tmp.path(), KIB, now, false);
     assert!(s.exists());
 }
@@ -87,7 +102,10 @@ fn a_future_mtime_is_treated_as_live() {
     let tmp = tempfile::tempdir().unwrap();
     let now = SystemTime::now();
     let s = session(tmp.path(), "claude-1/p/s", 50 * KIB, Duration::ZERO, now);
-    fs::File::open(s.join("data")).unwrap().set_modified(now + hours(5)).unwrap();
+    fs::File::open(s.join("data"))
+        .unwrap()
+        .set_modified(now + hours(5))
+        .unwrap();
     enforce_cap_at(tmp.path(), KIB, now, false);
     assert!(s.exists());
 }
@@ -107,10 +125,19 @@ fn dry_run_reports_without_deleting() {
 fn flat_files_are_units_and_siblings_of_live_sessions_go() {
     let tmp = tempfile::tempdir().unwrap();
     let now = SystemTime::now();
-    let live = session(tmp.path(), "claude-1/p/live", 5 * KIB, Duration::from_secs(1), now);
+    let live = session(
+        tmp.path(),
+        "claude-1/p/live",
+        5 * KIB,
+        Duration::from_secs(1),
+        now,
+    );
     let flat = tmp.path().join("scratch.bin");
     fs::write(&flat, vec![0u8; 50 * KIB as usize]).unwrap();
-    fs::File::open(&flat).unwrap().set_modified(now - hours(40)).unwrap();
+    fs::File::open(&flat)
+        .unwrap()
+        .set_modified(now - hours(40))
+        .unwrap();
     enforce_cap_at(tmp.path(), 10 * KIB, now, false);
     assert!(!flat.exists());
     assert!(live.exists());

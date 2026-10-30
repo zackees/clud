@@ -69,15 +69,24 @@ where
         // fall back to recursive deletion after Git refuses the removal.
         git(Path::new(&main_root), &["worktree", "remove", &entry.path]).map(|_| ())
     } else if entry.kind == "trash" {
-        std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())
+        remove_tree_summarized(Path::new(&entry.path))
     } else {
         let p = Path::new(&entry.path);
         if p.exists() {
-            std::fs::remove_dir_all(p).map_err(|e| e.to_string())
+            remove_tree_summarized(p)
         } else {
             Ok(())
         }
     }
+}
+
+/// Remove one tree; every failure collapses into a single summary line
+/// (#2397): a container-built tree owned by root fails per file, and the entry
+/// should read as one problem, not thousands of errors.
+fn remove_tree_summarized(path: &Path) -> Result<(), String> {
+    let mut undeletable = crate::gc::undeletable::Undeletable::default();
+    crate::rm_tool::remove_dir_tree_collecting(path, &mut |p, e| undeletable.record(p, e));
+    undeletable.summary_line().map_or(Ok(()), Err)
 }
 
 /// Synchronous "remove filesystem entry, then drop redb row" — used by
@@ -139,6 +148,7 @@ pub(super) fn reap_trash_entries_at(
         .map_err(|err| err.to_string())?;
     let mut removed = 0usize;
     let mut failed = 0usize;
+    let mut undeletable = crate::gc::undeletable::Undeletable::default();
     for entry in entries {
         if crate::rm_tool::keep_trash_entry(Path::new(&entry.path), now) {
             continue;
@@ -155,28 +165,31 @@ pub(super) fn reap_trash_entries_at(
         }
         // Audit before acting (#893).
         crate::gc::delete_audit::record("gc.trash-reap", path, "trash");
-        match remove_trash_dir(path) {
-            Ok(()) => {
-                registry.delete(entry.id).map_err(|err| err.to_string())?;
-                eprintln!("[gc] trash: reaped {}", entry.path);
-                removed += 1;
-            }
-            Err(err) => {
-                // #1672: this used to be silent; one root-owned entry was
-                // "reaped" 373 times with no trace of why it stayed.
-                eprintln!("[gc] trash: could not remove {}: {err}", entry.path);
-                failed += 1;
-            }
+        if remove_trash_dir(path, &mut undeletable) {
+            registry.delete(entry.id).map_err(|err| err.to_string())?;
+            eprintln!("[gc] trash: reaped {}", entry.path);
+            removed += 1;
+        } else {
+            // #1672: this used to be silent; one root-owned entry was
+            // "reaped" 373 times with no trace of why it stayed.
+            failed += 1;
         }
+    }
+    // #2397: one line for the whole pass, not one error per file.
+    if let Some(line) = undeletable.summary_line() {
+        eprintln!("[gc] trash: {line}");
     }
     Ok((removed, failed))
 }
 
-/// `remove_dir_all` after making the tree owner-writable, as safe-rm's own
-/// purge does (#1573): sealed build output is read-only. Files owned by
-/// another user (root, from a Docker bind mount) still fail, loudly.
-fn remove_trash_dir(path: &Path) -> std::io::Result<()> {
-    crate::rm_tool::remove_dir_tree_writable(path)
+/// Remove a trash tree after making it owner-writable, as safe-rm's own purge
+/// does (#1573): sealed build output is read-only. Files owned by another user
+/// (root, from a Docker bind mount) still fail; each failure is recorded in
+/// `undeletable` for one summary line (#2397). `true` when the tree is gone.
+fn remove_trash_dir(path: &Path, undeletable: &mut crate::gc::undeletable::Undeletable) -> bool {
+    let before = undeletable.count();
+    crate::rm_tool::remove_dir_tree_collecting(path, &mut |p, e| undeletable.record(p, e));
+    undeletable.count() == before
 }
 
 /// Remove expired `safe-rm` trash entries under `trash_root` that
@@ -184,16 +197,17 @@ fn remove_trash_dir(path: &Path) -> std::io::Result<()> {
 /// Registered ones are removed by [`reap_trash_entries`] first.
 pub(super) fn reap_unregistered_rm_trash(trash_root: &Path, now: std::time::SystemTime) -> usize {
     let mut removed = 0usize;
+    let mut undeletable = crate::gc::undeletable::Undeletable::default();
     for dir in crate::rm_tool::expired_trash_entries(trash_root, now) {
         // Audit before acting (#893).
         crate::gc::delete_audit::record("gc.rm-trash-reap", &dir, "rm-trash expired");
-        match remove_trash_dir(&dir) {
-            Ok(()) => {
-                eprintln!("[gc] trash: reaped {}", dir.display());
-                removed += 1;
-            }
-            Err(err) => eprintln!("[gc] trash: could not remove {}: {err}", dir.display()),
+        if remove_trash_dir(&dir, &mut undeletable) {
+            eprintln!("[gc] trash: reaped {}", dir.display());
+            removed += 1;
         }
+    }
+    if let Some(line) = undeletable.summary_line() {
+        eprintln!("[gc] trash: {line}");
     }
     removed
 }

@@ -49,6 +49,9 @@ fn enforce_size_cap(state_dir: Option<&Path>) {
         return;
     }
     eprintln!("[clud] gc: {}", report.summary_line());
+    if let Some(line) = report.undeletable.summary_line() {
+        eprintln!("[clud] gc: tmp: {line}");
+    }
     if let Some(state_dir) = state_dir {
         daemon_events::log_event(
             state_dir,

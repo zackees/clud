@@ -1318,6 +1318,63 @@ pub(crate) fn remove_dir_tree_writable(path: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(path)
 }
 
+/// [`remove_dir_tree_writable`] that keeps going past undeletable entries and
+/// hands each failure (a leaf, never a parent left non-empty by one) to `fail`,
+/// so a caller can print one summary (`gc::undeletable`) instead of an error
+/// per file. Still the same single deleter: the fast path is the plain call.
+pub(crate) fn remove_dir_tree_collecting(
+    path: &Path,
+    fail: &mut dyn FnMut(&Path, &std::io::Error),
+) {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        _ => {}
+    }
+    if remove_dir_tree_writable(path).is_ok() {
+        return;
+    }
+    if remove_children_collecting(path, fail) {
+        if let Err(error) = std::fs::remove_dir(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                fail(path, &error);
+            }
+        }
+    }
+}
+
+/// Remove everything under `dir`; `true` when nothing under it failed.
+fn remove_children_collecting(dir: &Path, fail: &mut dyn FnMut(&Path, &std::io::Error)) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            fail(dir, &error);
+            return false;
+        }
+    };
+    let mut clean = true;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        let is_dir = std::fs::symlink_metadata(&child).is_ok_and(|m| m.is_dir());
+        let result = if is_dir {
+            if remove_children_collecting(&child, fail) {
+                std::fs::remove_dir(&child)
+            } else {
+                clean = false;
+                continue;
+            }
+        } else {
+            remove_link_or_file(&child)
+        };
+        if let Err(error) = result {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                fail(&child, &error);
+                clean = false;
+            }
+        }
+    }
+    clean
+}
+
 fn purge(target: &Target) -> Result<(), String> {
     if target.is_dir {
         make_writable(&target.path);

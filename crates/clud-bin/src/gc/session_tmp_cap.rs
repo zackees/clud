@@ -30,7 +30,6 @@
 //! sorted oldest first, so the first live unit ends the pass.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -62,6 +61,8 @@ pub struct CapReport {
     pub kept_live: usize,
     /// Units whose removal failed.
     pub failed: usize,
+    /// Every path that could not be removed, for one summary line (#2397).
+    pub undeletable: super::undeletable::Undeletable,
 }
 
 impl CapReport {
@@ -166,12 +167,17 @@ fn is_idle(newest: Option<SystemTime>, now: SystemTime) -> bool {
         .is_some_and(|age| age >= MIN_IDLE)
 }
 
-fn remove_unit(unit: &Unit) -> io::Result<()> {
+/// Remove one unit, recording each undeletable path; `true` when it is gone.
+fn remove_unit(unit: &Unit, undeletable: &mut super::undeletable::Undeletable) -> bool {
+    let before = undeletable.count();
     if unit.is_dir {
-        crate::rm_tool::remove_dir_tree_writable(&unit.path)
-    } else {
-        crate::rm_tool::remove_link_or_file(&unit.path)
+        crate::rm_tool::remove_dir_tree_collecting(&unit.path, &mut |p, e| {
+            undeletable.record(p, e);
+        });
+    } else if let Err(error) = crate::rm_tool::remove_link_or_file(&unit.path) {
+        undeletable.record(&unit.path, &error);
     }
+    undeletable.count() == before
 }
 
 /// Evict the oldest idle units under `root` until it is within `cap` bytes.
@@ -211,7 +217,7 @@ pub fn enforce_cap_at(root: &Path, cap: u64, now: SystemTime, dry_run: bool) -> 
         }
         if !dry_run {
             delete_audit::record(SITE, &unit.path, "session-tmp over tmp.max_bytes");
-            if remove_unit(unit).is_err() {
+            if !remove_unit(unit, &mut report.undeletable) {
                 report.failed += 1;
                 continue;
             }

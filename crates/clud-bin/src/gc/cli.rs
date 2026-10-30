@@ -663,6 +663,9 @@ fn run_fs_kind(state_dir: &Path, spec: GcKindSpec, dry_run: bool) -> Option<i32>
 fn cmd_prune_tmp(dry_run: bool) -> i32 {
     let report = super::session_tmp_cap::enforce_cap(dry_run);
     println!("{}", report.summary_line());
+    if let Some(line) = report.undeletable.summary_line() {
+        eprintln!("tmp: {line}");
+    }
     i32::from(report.failed > 0)
 }
 

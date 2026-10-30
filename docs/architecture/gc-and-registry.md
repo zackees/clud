@@ -642,6 +642,15 @@ the tree is. The daemon runs it right after each age pass (`daemon/session_tmp_s
 `session_tmp_cap`); `clud gc prune tmp` (and `prune all`) runs it on demand, honouring `--dry-run`.
 Removal goes through `rm_tool::remove_dir_tree_writable`, the shared tree deleter.
 
+**Undeletable paths are one line (#2397).** Container builds leave `root:root` trees (47 GB of CEF
+under one `*-extern`) that the owning user cannot unlink. The gc deleters (`~/.clud/tmp` eviction,
+trash reaping, tracked-entry removal) go through `rm_tool::remove_dir_tree_collecting`, which keeps
+going past undeletable entries and reports each failed leaf to `gc::undeletable::Undeletable`. The
+pass prints `Undeletable::summary_line()` once: `N paths could not be removed (permission denied),
+e.g. <path>; owned by root — remove with sudo` (the owner clause comes from
+`platform::rm_tool::file_owner`; mixed causes read `(D permission denied, O other)`). A tracked
+entry whose tree failed returns that line as its error instead of one error per file.
+
 **Dead worktree registrations (#2397).** A repo's `<common-dir>/worktrees/<name>/` entry
 outlives its worktree directory when a container, a crash or a hand `rm` removes it; `git worktree
 list` keeps printing it. `clud gc prune worktree-registrations` (also part of `prune all`) walks
