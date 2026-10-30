@@ -174,11 +174,53 @@ fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> 
 /// judged by the patch's targets, not by whether its text mentions the settings
 /// file: a source file may legitimately discuss it. `None` means the command is
 /// not a plain nested patch and the general shell rules apply.
+///
+/// Codex recognizes the heredoc form itself, with POSIX rules, before any
+/// shell runs, so where `exec_command` defaults to the PowerShell dialect
+/// (which has no heredocs) a POSIX parse is tried as well (#2378). That
+/// fallback only accepts a patch that carries a heredoc: `<<` is a PowerShell
+/// and cmd syntax error, so such a command never runs in those shells.
 fn nested_patch_reason(
     command: &str,
     dialect: super::ShellDialect,
     cwd: &Path,
     home: Option<&Path>,
+) -> Option<Option<String>> {
+    nested_patch_reason_as(command, dialect, cwd, home, false).or_else(|| {
+        (dialect != super::ShellDialect::Posix)
+            .then(|| {
+                let command = literal_backslash_cd(command);
+                nested_patch_reason_as(&command, super::ShellDialect::Posix, cwd, home, true)
+            })
+            .flatten()
+    })
+}
+
+/// A Windows `cd C:\dir && apply_patch` names its directory with backslashes
+/// that Codex takes literally, while a POSIX parse would drop them as escapes
+/// and lose the directory (#2378). Doubling them in a plain, unquoted `cd`
+/// prefix keeps the path; any other command is returned unchanged.
+fn literal_backslash_cd(command: &str) -> String {
+    let trimmed = command.trim_start();
+    let Some((prefix, rest)) = trimmed.split_once("&&") else {
+        return command.to_string();
+    };
+    let plain = prefix.starts_with("cd ")
+        && prefix.contains('\\')
+        && !prefix.contains(['\n', '\'', '"', '$', '`']);
+    if plain {
+        format!("{}&&{rest}", prefix.replace('\\', "\\\\"))
+    } else {
+        command.to_string()
+    }
+}
+
+fn nested_patch_reason_as(
+    command: &str,
+    dialect: super::ShellDialect,
+    cwd: &Path,
+    home: Option<&Path>,
+    require_heredoc: bool,
 ) -> Option<Option<String>> {
     let script =
         super::block_bad_cmd_shell::parse_command_with_home(command, dialect, Some(cwd), home);
@@ -186,6 +228,14 @@ fn nested_patch_reason(
         return None;
     }
     let patch = nested_patch_invocation(command, &script.invocations)?;
+    if require_heredoc
+        && !script
+            .invocations
+            .iter()
+            .any(|invocation| invocation.heredoc.is_some())
+    {
+        return None;
+    }
     let work = patch.cwd.as_literal()?;
     // The parser may attach the heredoc body to the `cd` that precedes the patch.
     let mut texts: Vec<&str> = script
@@ -211,16 +261,25 @@ fn cd_ignores_cdpath(cd: &Invocation) -> bool {
     let Some(target) = target.as_literal() else {
         return false;
     };
+    target_ignores_cdpath(target)
+}
+
+/// Platform-aware core of [`cd_ignores_cdpath`]: bash skips `CDPATH` for any
+/// target that begins with `/` or `.`; a drive-letter or UNC path is absolute.
+fn target_ignores_cdpath(target: &str) -> bool {
     let bytes = target.as_bytes();
     let drive_absolute = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\');
-    target.starts_with('/')
+    Path::new(target).is_absolute()
         || drive_absolute
+        || target.starts_with("\\\\")
+        || target.starts_with('/')
         || matches!(target, "." | "..")
-        || target.starts_with("./")
-        || target.starts_with("../")
+        || [r"./", r"../", r".\", r"..\"]
+            .iter()
+            .any(|p| target.starts_with(p))
 }
 
 /// The `apply_patch` of a command that is exactly a bare patch or a single
@@ -1333,7 +1392,14 @@ mod tests {
         }
     }
 
-    fn nested(home: &Path, tool: &str, input: serde_json::Value) -> Option<String> {
+    /// Pins the shell dialect: on a Windows host `exec_command` and
+    /// `shell_command` default to PowerShell, which has no heredoc, so a
+    /// nested `apply_patch <<EOF` is only recognised when the call declares
+    /// bash (`exec_command` takes a `shell` field; Git-Bash on Windows).
+    fn nested(home: &Path, tool: &str, mut input: serde_json::Value) -> Option<String> {
+        if tool == "exec_command" && input.get("shell").is_none() {
+            input["shell"] = "bash".into();
+        }
         let mut payload = patch_payload(home, input);
         payload.tool_name = tool.into();
         payload.command = payload
@@ -1347,6 +1413,47 @@ mod tests {
     }
 
     #[test]
+    fn windows_cd_backslashes_survive_the_posix_fallback() {
+        assert_eq!(
+            literal_backslash_cd("cd C:\\a\\b && apply_patch <<'EOF'\nx\\y\nEOF"),
+            "cd C:\\\\a\\\\b && apply_patch <<'EOF'\nx\\y\nEOF"
+        );
+        for unchanged in [
+            "cd \"C:\\a\" && x",
+            "apply_patch <<'EOF'\nEOF",
+            "cd /a && x",
+        ] {
+            assert_eq!(literal_backslash_cd(unchanged), unchanged);
+        }
+    }
+
+    #[test]
+    fn non_posix_dialect_heredoc_patches_are_judged_by_their_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        let name = settings_name(home.path());
+        let source = format!(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+             -// reads ~/.clud/{name}\n+// ok\n*** End Patch"
+        );
+        let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let hit = format!(
+            "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch\nEOF",
+            settings.display()
+        );
+        for dialect in [
+            crate::block_bad_cmd::ShellDialect::PowerShell,
+            crate::block_bad_cmd::ShellDialect::Cmd,
+        ] {
+            let judge = |command: &str| {
+                nested_patch_reason(command, dialect, home.path(), Some(home.path()))
+            };
+            assert_eq!(judge(&ordinary), Some(None), "{dialect:?}");
+            assert!(judge(&hit).flatten().is_some(), "{dialect:?}");
+        }
+    }
+
+    #[test]
     fn nested_exec_command_patches_are_judged_by_their_targets() {
         let home = tempfile::tempdir().unwrap();
         let settings = crate::clud_settings::settings_path_at(home.path());
@@ -1354,14 +1461,14 @@ mod tests {
         let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
             -// reads ~/.clud/settings.json and extra_roots\n+// ok\n*** End Patch";
         let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        // Single-quoted so a Windows `C:\...` path keeps its backslashes.
         let with_cd = format!(
-            "cd {} && apply_patch <<'EOF'\n{source}\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n{source}\nEOF",
             home.path().display()
         );
         for (tool, key, command) in [
             ("exec_command", "cmd", &ordinary),
             ("exec_command", "cmd", &with_cd),
-            ("shell_command", "command", &ordinary),
             ("apply_patch", "command", &ordinary),
         ] {
             let input = serde_json::json!({ key: command });
@@ -1388,7 +1495,7 @@ mod tests {
         );
         // A relative target resolves against the `cd` directory, not the payload cwd.
         let relative = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
             settings.parent().unwrap().display()
         );
         assert_protected(nested(
@@ -1396,6 +1503,35 @@ mod tests {
             "exec_command",
             serde_json::json!({"cmd": relative}),
         ));
+    }
+
+    /// `shell_command` has no `shell` field, so its dialect is the host's:
+    /// PowerShell on Windows (no heredoc, so the nested patch is unparseable
+    /// and fails closed to the general rule), POSIX elsewhere.
+    #[test]
+    fn nested_shell_command_patch_follows_the_host_dialect() {
+        let home = tempfile::tempdir().unwrap();
+        let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+            -// reads ~/.clud/settings.json\n+// ok\n*** End Patch";
+        let command = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let got = nested(
+            home.path(),
+            "shell_command",
+            serde_json::json!({"command": command}),
+        );
+        // Host-independent simulation of the Windows default: PowerShell has
+        // no heredoc, so the POSIX fallback judges the patch by its targets
+        // (#2378) and the result is the same on every host.
+        assert_eq!(
+            nested_patch_reason(
+                &command,
+                crate::block_bad_cmd::ShellDialect::PowerShell,
+                home.path(),
+                Some(home.path())
+            ),
+            Some(None)
+        );
+        assert_eq!(got, None);
     }
 
     #[test]
@@ -1429,12 +1565,29 @@ mod tests {
             );
         }
         let ok = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(
             nested(home.path(), "exec_command", serde_json::json!({"cmd": ok})),
             None
+        );
+    }
+
+    #[test]
+    fn cdpath_immunity_follows_platform_absolute_paths() {
+        for t in [
+            "/x", "./x", "../x", ".", "..", "C:/x", "C:\\x", ".\\x", "..\\x",
+        ] {
+            assert!(target_ignores_cdpath(t), "{t}");
+        }
+        assert!(target_ignores_cdpath("\\\\srv\\share"));
+        for t in ["x", ".clud", "x/y", "C:x"] {
+            assert!(!target_ignores_cdpath(t), "{t}");
+        }
+        assert_eq!(
+            Path::new("C:\\x").is_absolute(),
+            crate::platform::host::WINDOWS
         );
     }
 
@@ -1484,7 +1637,7 @@ mod tests {
             "{protected}"
         );
         let abs = format!(
-            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            "cd '{}' && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
             cwd.display()
         );
         assert_eq!(

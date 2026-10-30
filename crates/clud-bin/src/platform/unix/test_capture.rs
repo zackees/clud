@@ -165,9 +165,9 @@ mod tests {
         let command = vec![
             "sh".into(),
             "-c".into(),
-            "setsid sh -c 'sleep 2' & printf ready".into(),
+            "setsid sh -c 'sleep 30' & printf ready".into(),
         ];
-        let result = capture(root.path(), Duration::from_millis(250), &command).unwrap();
+        let result = capture(root.path(), Duration::from_secs(2), &command).unwrap();
         assert_eq!(result.state, "timeout");
         assert!(!result.pipe_eof);
         assert_eq!(result.tree_cleanup, "unverified");
@@ -177,8 +177,8 @@ mod tests {
     #[test]
     fn retained_pipe_writer_causes_bounded_incomplete_result() {
         let root = private_root();
-        let command = vec!["sh".into(), "-c".into(), "(sleep 5) & printf ready".into()];
-        let result = capture(root.path(), Duration::from_millis(250), &command).unwrap();
+        let command = vec!["sh".into(), "-c".into(), "(sleep 30) & printf ready".into()];
+        let result = capture(root.path(), Duration::from_secs(2), &command).unwrap();
         assert_eq!(result.state, "timeout");
         assert_eq!(fs::read(result.artifact).unwrap(), b"ready");
     }

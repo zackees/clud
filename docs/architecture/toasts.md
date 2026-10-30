@@ -110,6 +110,24 @@ opacity to 90% without changing content or lifetime. The image is re-pinned
 after child bursts, re-uploaded after terminal image-dropping events, and
 deleted when hidden or at session exit.
 
+### CPU HUD lifetime and opt-out (#2367)
+
+A CPU episode's live reading stays up for `cpu_banner::CPU_LIVE_VISIBLE`
+(20 s), then the toast expires and later heartbeats of the same episode do not
+re-show it, so a long burn stops covering the harness header. The "cpu back to
+normal" notice still appears when the episode ends, and a new episode gets a
+fresh window. To never show the overlay, pass `--no-cpu-banner` or set
+`[foreground.cpu_banner] enabled = false` in clud settings. The HUD has no
+close button or hotkey by design: it never consumes the child's input.
+
+When Claude's status line is injected (`Fallback::StatusFile`, every Claude
+PTY launch with a status writer), the compositor does not draw the CPU HUD at
+all, in any tier: `Compositor::mirror_cpu_to_status` publishes the keyed `cpu`
+toast to the status line instead. The reading therefore never covers header
+text and needs no dismissal, including on Linux/kitty. Non-Claude harnesses
+(title fallback) still get the grid HUD, which remains non-dismissable except
+by the opt-outs above.
+
 ### CPU HUD hover
 
 Hover is observed only when the child has already selected DECSET 1003

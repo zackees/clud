@@ -75,7 +75,7 @@ pub enum Session {
     Python {
         target: PathBuf,
     },
-    Gh(GhSession),
+    Gh(Box<GhSession>),
     /// #1486: the real binary behind the in-session clone/worktree policy.
     Git {
         target: PathBuf,
@@ -170,7 +170,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
             target(registry::PYTHON_TARGET_KEY).map(|target| Session::Python { target })
         }
         ShimKind::Gh => target(registry::GH_TARGET_KEY).map(|target| {
-            Session::Gh(GhSession {
+            Session::Gh(Box::new(GhSession {
                 read_broker: read_broker(&target, facts),
                 route: gh_route(facts),
                 target,
@@ -178,7 +178,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
                     .map(PathBuf::from)
                     .filter(|path| path.is_absolute() && path.is_file()),
                 fail_fast: var(registry::GH_FAIL_FAST_KEY).as_deref() != Some(OsStr::new("0")),
-            })
+            }))
         }),
         ShimKind::Git => target(registry::GIT_TARGET_KEY).map(|target| Session::Git { target }),
         // `--unsafe` opts this session out of clud's catastrophe floor. The

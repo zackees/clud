@@ -36,6 +36,16 @@ def _events(state_dir: Path) -> list[dict[str, object]]:
     return events
 
 
+def _phase_timings_line(state_dir: Path) -> str:
+    """One compact line of per-phase startup ms from the event log (#2333)."""
+    parts = [
+        f"{e.get('phase')}={e.get('elapsed_ms')}"
+        for e in _events(state_dir)
+        if e.get("op") == "daemon_startup_phase"
+    ]
+    return "daemon_phase_ms " + " ".join(parts)
+
+
 # Generous, Windows-scaled deadlines (#2268). A hosted Windows runner has been
 # seen to take longer than 10s between `daemon_starting` and the listener
 # being ready, so a fixed 10s lease deadline expired with the client still
@@ -233,11 +243,14 @@ def test_direct_client_holds_one_lease_and_releases_on_normal_exit(
     clud_binary: Path,
     mock_env: dict[str, str],
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_dir = tmp_path / "daemon-state"
     env = managed_env(mock_env, state_dir)
     with _managed_client(clud_binary, env, 2_000, state_dir) as proc:
         _wait_for_lease_event(state_dir, "daemon_started", None, DAEMON_READY_TIMEOUT, proc=proc)
+        with capsys.disabled():
+            print(_phase_timings_line(state_dir), flush=True)
         acquired = _wait_for_lease_event(state_dir, "client_lease_acquired", proc.pid, proc=proc)
         assert acquired["lease_count"] == 1
         assert proc.wait(timeout=10) == 0
