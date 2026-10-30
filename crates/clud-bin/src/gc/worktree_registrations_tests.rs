@@ -129,3 +129,14 @@ fn an_entry_git_keeps_is_reported_pending_not_pruned() {
     };
     assert!(!clean.summary_line().contains("pending"));
 }
+
+#[test]
+fn empty_parent_is_unreachable_not_dead() {
+    let (dir, repo) = fixture();
+    let mount = dir.path().join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let admin = forge_entry(&repo, "mounted", &mount.join("wt"));
+    let found = classify_entries(&common_dir(&repo).unwrap());
+    assert!(!found.dead.contains(&admin));
+    assert_eq!(found.unreachable, vec![admin]);
+}

@@ -7,12 +7,15 @@
 //!
 //! - a running process whose cwd, or `TMPDIR`/`TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR`
 //!   value, lies inside the unit; or
+//! - a unit path component equal to the Claude-encoded form of a running
+//!   process's cwd (or any ancestor of it): the whole `claude-<uid>/<project>/`
+//!   subtree is live while a process works in that project; or
 //! - a unit path component equal to a session id the daemon still tracks (a
 //!   non-exited snapshot under `<state>/sessions`, a non-terminated record
 //!   under `<state>/api-sessions`).
 //!
-//! Fail safe: when a source cannot be consulted (the process scan cannot even
-//! read this process's own cwd, or the session records are unreadable) every
+//! Fail safe: when a source cannot be consulted (the process scan cannot read this process's own cwd or environ, or a
+//! process of ours returned neither, or the session records are unreadable) every
 //! unit counts as live, so the cap simply stays exceeded.
 
 use std::collections::HashSet;
@@ -27,13 +30,27 @@ const SCRATCH_ENV: &[&str] = &["TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR"];
 #[derive(Debug, Clone, Default)]
 pub struct LiveSignals {
     paths: Option<Vec<PathBuf>>,
+    /// Claude project-dir names of every process cwd and each of its
+    /// ancestors (see [`crate::session_history::import::project_slug`]).
+    project_slugs: HashSet<String>,
     session_ids: Option<HashSet<String>>,
 }
 
 impl LiveSignals {
     /// Signals from explicit parts (production scan results, or a test).
     pub fn new(paths: Option<Vec<PathBuf>>, session_ids: Option<HashSet<String>>) -> Self {
-        Self { paths, session_ids }
+        let project_slugs = paths
+            .iter()
+            .flatten()
+            .flat_map(|p| p.ancestors())
+            .filter(|a| a.parent().is_some())
+            .map(|a| crate::session_history::import::project_slug(&a.to_string_lossy()))
+            .collect();
+        Self {
+            paths,
+            project_slugs,
+            session_ids,
+        }
     }
 
     /// Both sources consulted and nothing found.
@@ -63,8 +80,13 @@ impl LiveSignals {
             return true;
         }
         let rel = unit.strip_prefix(root).unwrap_or(unit);
-        rel.components()
-            .any(|c| ids.contains(c.as_os_str().to_string_lossy().as_ref()))
+        // `TMPDIR` is the tmp root and Claude's cwd is the project dir, so
+        // neither matches a unit; the project-dir name does (Claude names
+        // `claude-<uid>/<project>` after the encoded cwd).
+        rel.components().any(|c| {
+            let name = c.as_os_str().to_string_lossy();
+            ids.contains(name.as_ref()) || self.project_slugs.contains(name.as_ref())
+        })
     }
 }
 
@@ -78,33 +100,69 @@ fn env_value<'a>(environ: &'a [std::ffi::OsString], key: &str) -> Option<&'a str
     })
 }
 
-/// Every process cwd and scratch-env path on the host; `None` when cwd reading
-/// does not work here (our own cwd is unreadable), so absence proves nothing.
+/// What the process scan learned about one process. Plain data so the
+/// fail-safe rules are testable without a live process table.
+#[derive(Debug, Clone, Default)]
+pub struct ProcFacts {
+    /// Working directory, when the OS let us read it.
+    pub cwd: Option<PathBuf>,
+    /// `KEY=value` environment entries, empty when unreadable.
+    pub environ: Vec<std::ffi::OsString>,
+    /// Zombies have neither cwd nor environ by design; they prove nothing.
+    pub zombie: bool,
+    /// Owned by the user running this scan.
+    pub same_user: bool,
+}
+
+/// Turn process facts into in-use paths. `None` (unconsulted, everything
+/// live) when this process cannot read its own cwd or environ, or when any
+/// live process of ours returned neither: a denied read looks exactly like
+/// "no process here", so absence would prove nothing.
+pub fn paths_from_facts(own: &ProcFacts, procs: &[ProcFacts]) -> Option<Vec<PathBuf>> {
+    let has_cwd = |p: &ProcFacts| p.cwd.as_ref().is_some_and(|c| !c.as_os_str().is_empty());
+    if !has_cwd(own) || own.environ.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for process in procs {
+        if process.same_user && !process.zombie && !has_cwd(process) && process.environ.is_empty() {
+            return None;
+        }
+        if has_cwd(process) {
+            paths.extend(process.cwd.clone());
+        }
+        for key in SCRATCH_ENV {
+            paths.extend(env_value(&process.environ, key).map(PathBuf::from));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
+/// Every process cwd and scratch-env path on the host (see
+/// [`paths_from_facts`] for when this is `None`).
 fn process_paths() -> Option<Vec<PathBuf>> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing()
             .with_cwd(UpdateKind::Always)
-            .with_environ(UpdateKind::Always),
+            .with_environ(UpdateKind::Always)
+            .with_user(UpdateKind::Always),
     );
-    let own = system.process(Pid::from_u32(std::process::id()))?;
-    if own.cwd().is_none_or(|c| c.as_os_str().is_empty()) {
-        return None;
-    }
-    let mut paths = Vec::new();
-    for process in system.processes().values() {
-        let cwd = process.cwd().filter(|c| !c.as_os_str().is_empty());
-        paths.extend(cwd.map(Path::to_path_buf));
-        for key in SCRATCH_ENV {
-            paths.extend(env_value(process.environ(), key).map(PathBuf::from));
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Some(paths)
+    let me = system.process(Pid::from_u32(std::process::id()))?;
+    let uid = me.user_id().cloned();
+    let facts = |p: &sysinfo::Process| ProcFacts {
+        cwd: p.cwd().map(Path::to_path_buf),
+        environ: p.environ().to_vec(),
+        zombie: p.status() == ProcessStatus::Zombie,
+        same_user: p.user_id().cloned() == uid,
+    };
+    let procs: Vec<ProcFacts> = system.processes().values().map(facts).collect();
+    paths_from_facts(&facts(me), &procs)
 }
 
 /// Ids of sessions the daemon still tracks, from its state directory.

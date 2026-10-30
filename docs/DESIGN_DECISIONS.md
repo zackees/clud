@@ -7407,3 +7407,5 @@ Supersedes DD-141's "never a deletion trigger"; the warning stays.
 **Consequences:** the tree can stay over the cap while sessions are live; that
 is reported, not forced. Contract:
 [gc-and-registry.md](architecture/gc-and-registry.md#filesystem-sweeps-non-registry).
+
+Amendment: claude sessions are matched by project dir, not TMPDIR (which is the tmp root): a unit is live when a process cwd, or an ancestor of it, encodes (`project_slug`) to a path component of the unit. The process scan fails safe (everything live) when any same-user non-zombie process yields neither cwd nor environ, or this process cannot read its own. Worktree registrations count as dead only when the worktree's parent exists and is non-empty.

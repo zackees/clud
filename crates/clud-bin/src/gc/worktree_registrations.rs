@@ -143,11 +143,14 @@ pub fn classify_entries(common: &Path) -> Classified {
         if target.exists() {
             continue;
         }
-        // `target` is `<worktree>/.git`; the worktree's parent must be there.
+        // `target` is `<worktree>/.git`; the worktree's parent must be there
+        // and non-empty. An empty parent is most likely an unmounted mount
+        // point, so it proves nothing about the worktree.
         let parent_present = target
             .parent()
             .and_then(Path::parent)
-            .is_some_and(Path::is_dir);
+            .and_then(|p| fs::read_dir(p).ok())
+            .is_some_and(|mut entries| entries.next().is_some());
         if parent_present {
             out.dead.push(admin);
         } else {

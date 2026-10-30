@@ -57,3 +57,56 @@ fn process_path_inside_unit_or_matching_id_is_live() {
     let ids = HashSet::from(["sess-9".to_string()]);
     assert!(LiveSignals::new(Some(vec![]), Some(ids)).is_live(root, unit));
 }
+
+#[test]
+fn claude_project_dir_is_live_while_a_process_works_in_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let unit = root.join("claude-1000").join("-home-u-proj").join("uuid-1");
+    fs::create_dir_all(&unit).unwrap();
+    // TMPDIR is the root itself; cwd is the project dir (or below it).
+    for cwd in ["/home/u/proj", "/home/u/proj/src/deep"] {
+        let paths = vec![root.to_path_buf(), PathBuf::from(cwd)];
+        let live = LiveSignals::new(Some(paths), Some(HashSet::new()));
+        assert!(live.is_live(root, &unit), "{cwd}");
+    }
+    let other = vec![root.to_path_buf(), PathBuf::from("/home/u/other")];
+    let live = LiveSignals::new(Some(other), Some(HashSet::new()));
+    assert!(!live.is_live(root, &unit));
+}
+
+fn facts(cwd: Option<&str>, env: &[&str]) -> ProcFacts {
+    ProcFacts {
+        cwd: cwd.map(PathBuf::from),
+        environ: env.iter().map(Into::into).collect(),
+        zombie: false,
+        same_user: true,
+    }
+}
+
+#[test]
+fn denied_reads_make_the_scan_unconsulted() {
+    let own = facts(Some("/a"), &["X=1"]);
+    let ok = facts(Some("/b"), &[]);
+    assert_eq!(
+        paths_from_facts(&own, std::slice::from_ref(&ok))
+            .unwrap()
+            .len(),
+        1
+    );
+    // A process of ours with neither cwd nor environ: read denied.
+    assert!(paths_from_facts(&own, &[ok.clone(), facts(None, &[])]).is_none());
+    // Zombies and other users' processes prove nothing either way.
+    let zombie = ProcFacts {
+        zombie: true,
+        ..facts(None, &[])
+    };
+    let other_user = ProcFacts {
+        same_user: false,
+        ..facts(None, &[])
+    };
+    assert!(paths_from_facts(&own, &[ok, zombie, other_user]).is_some());
+    // Our own environ unreadable: the API is not working here.
+    assert!(paths_from_facts(&facts(Some("/a"), &[]), &[]).is_none());
+    assert!(paths_from_facts(&facts(None, &["X=1"]), &[]).is_none());
+}

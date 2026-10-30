@@ -638,9 +638,9 @@ directories are recursed into, never removed whole) and evicts oldest-first unti
 **Liveness** is process/session signals plus idle mtime (it is not the age sweep's activity-only
 rule): a unit is evicted only if its newest mtime is at least `MIN_IDLE` (6 h) old (unreadable,
 oversized-walk or future-dated counts as live; re-measured right before removal) **and** no running
-process has a cwd or `TMPDIR`/`TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR` inside it **and** no session id the
+process has a cwd or `TMPDIR`/`TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR` inside it, and no running process has a cwd (or ancestor of it) whose Claude-encoded form (`session_history::import::project_slug`) names a path component of the unit, so the whole `claude-<uid>/<project>/` subtree is live while anything works in that project (`TMPDIR` is the tmp root and claude's cwd the project dir, so only the encoded name links them) **and** no session id the
 daemon tracks (`state/sessions` not exited, `state/api-sessions` not terminated) is a component of
-its path (`gc::session_tmp_live`). An unconsultable source makes every unit live. A parked session
+its path (`gc::session_tmp_live`). An unconsultable source makes every unit live, including a process scan where this process cannot read its own cwd/environ or any non-zombie process of the same user returned neither (a denied read looks like absence). A parked session
 therefore survives however far over the cap the tree is, and `tmp.warn_bytes` (default = the cap)
 warns when live sessions keep it above. The daemon runs it right after each age pass (`daemon/session_tmp_sweep.rs`, event
 `session_tmp_cap`); `clud gc prune tmp` (and `prune all`) runs it on demand, honouring `--dry-run`.
