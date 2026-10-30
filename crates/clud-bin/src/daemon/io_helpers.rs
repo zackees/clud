@@ -398,7 +398,14 @@ mod tests {
         use crate::shell::nounset::{BASH_ENV_KEY, OPT_OUT_KEY};
 
         let theirs = "/home/someone/their-bash-env.sh";
-        let guard = EnvGuard::set_all(&[(OPT_OUT_KEY, Some("1")), (BASH_ENV_KEY, Some(theirs))]);
+        // An ambient rm-shim dir (present in every clud-launched shell) makes the
+        // opted-out builders chain `BASH_ENV` through the PATH-only file, which
+        // is a different, intended contract. Pin it absent (#2358).
+        let guard = EnvGuard::set_all(&[
+            (OPT_OUT_KEY, Some("1")),
+            (BASH_ENV_KEY, Some(theirs)),
+            (crate::shim_session::RM_SHIM_DIR_KEY, None),
+        ]);
         let daemon = child_env_from(&[]);
         let runner = crate::runner::child_env();
         drop(guard);
