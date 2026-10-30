@@ -68,7 +68,7 @@ frontend; `/v1/responses` and `/v1/chat/completions` are not exposed.
 
 ## MCP discovery for Hermes
 
-Install the optional MCP extra (`pip install 'clud[mcp]'`) and register
+Install clud (the MCP SDK is a base dependency; no extra needed) and register
 `python -m clud.mcp_server` as a stdio MCP server in Hermes. Its tool list now
 includes `serve_start`, `serve_status`, and `serve_stop` alongside agent-session
 tools. `serve_start` defaults to Codex; pass `backend="claude"` for Claude,
