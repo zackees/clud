@@ -156,7 +156,8 @@ pub fn prepare(
     pick: impl FnOnce(Vec<Candidate>) -> std::io::Result<PickOutcome>,
 ) -> Result<Option<String>, String> {
     // Scripts: a non-TTY `clud -c` keeps Claude's native continue (#922).
-    if !env.interactive && !args.last {
+    let direct = args.last || args.continue_index.is_some();
+    if !env.interactive && !direct {
         return Ok(None);
     }
     if let Err(error) = import::import_once(&env.state_dir, &env.claude_dir, &env.cwd) {
@@ -165,14 +166,21 @@ pub fn prepare(
     let cwd = canonical_cwd(&env.cwd);
     let candidates = candidates(&env.state_dir, &cwd);
     if candidates.is_empty() {
-        if args.last {
+        if direct {
             return Err("no earlier Claude sessions were found for this directory".to_string());
         }
         return Ok(None);
     }
 
-    let (session_id, choice) = if args.last {
-        (candidates[0].entry.session_id.clone(), RecoveryChoice::Full)
+    let (session_id, choice) = if direct {
+        let n = args.continue_index.unwrap_or(0);
+        let Some(chosen) = candidates.get(n) else {
+            return Err(format!(
+                "no session {n} here: only {} earlier Claude session(s) found (0 is the newest)",
+                candidates.len()
+            ));
+        };
+        (chosen.entry.session_id.clone(), RecoveryChoice::Full)
     } else {
         match pick(candidates.clone()).map_err(|e| format!("session picker failed: {e}"))? {
             PickOutcome::Selected { session_id, choice } => (session_id, choice),
@@ -212,6 +220,7 @@ pub fn prepare(
     }
     args.continue_session = false;
     args.last = false;
+    args.continue_index = None;
     let title = candidate
         .entry
         .title
