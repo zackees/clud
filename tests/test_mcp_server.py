@@ -1,8 +1,9 @@
 """Unit tests for the bundled MCP bridge (`src/clud/mcp_server.py`).
 
-The bridge is opt-in (``clud[mcp]``); these tests skip when the ``mcp`` SDK
-is absent. No real clud binary or daemon is exercised — tools that spawn clud
-run against a fake ``CLUD_BIN`` script. The async session surface is covered by
+The ``mcp`` SDK is a base dependency of clud (except on Windows arm64);
+these tests skip when it is absent. No real clud binary or daemon is exercised —
+tools that spawn clud run against a fake ``CLUD_BIN`` script. The async session
+surface is covered by
 ``tests/test_mcp_bridge_sessions.py`` against a fake daemon API.
 
 The ``bridge`` fixture lives in ``tests/conftest.py`` (shared with the session

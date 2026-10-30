@@ -26,12 +26,21 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Build Tools",
 ]
-dependencies = []
+# The MCP bridge (`python -m clud.mcp_server`) ships ready to run: Hermes
+# Agent launches it from a plain `uv tool install clud`, and an opt-in extra
+# was silently dropped by any reinstall or self-upgrade that omitted it,
+# leaving `import clud.mcp_server` failing on `No module named 'anyio'`.
+# Same Windows arm64 exclusion as the test group below: `mcp` needs
+# `pyjwt[crypto]` -> `cryptography`, which has no win_arm64 wheel and cannot
+# build from sdist there without OpenSSL.
+dependencies = [
+    "mcp>=2.1; sys_platform != 'win32' or platform_machine != 'ARM64'",
+]
 
 [project.optional-dependencies]
-# The MCP bridge (`python -m clud.mcp_server`) is opt-in: the SDK is a
-# heavyweight dependency the CLI itself never needs.
-mcp = ["mcp>=2.1"]
+# Kept as an empty alias so existing `clud[mcp]` installs and docs still
+# resolve; the SDK is now a base dependency.
+mcp = []
 
 [project.urls]
 Homepage = "https://github.com/zackees/clud"
@@ -64,7 +73,9 @@ test = [
     "tree-sitter-c==0.24.2",
     "tree-sitter-cpp==0.23.4",
     # `tests/test_mcp_server.py` imports the bridge module directly, and
-    # skips itself when the SDK is absent.
+    # skips itself when the SDK is absent. CI exec jobs sync only this group
+    # (no project dependencies), so the SDK is listed here as well as in
+    # `[project] dependencies`.
     #
     # Not on Windows arm64. `mcp` requires `pyjwt[crypto]`, whose `crypto`
     # extra pulls `cryptography`, and upstream stopped publishing `win_arm64`

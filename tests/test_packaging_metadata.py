@@ -340,3 +340,13 @@ def test_ci_setup_soldr_cook_profile_matches_the_real_build() -> None:
     build_text = build.read_text(encoding="utf-8")
     assert "${{ inputs.profile == 'release' && ' --release' || '' }}" in setup_text
     assert "profile: ${{ inputs.profile }}" in build_text
+
+
+def test_mcp_sdk_is_a_base_dependency() -> None:
+    # Hermes runs `python -m clud.mcp_server` from a plain `uv tool install
+    # clud`; an opt-in extra was dropped by reinstalls and broke it silently.
+    project = _pyproject()["project"]
+    mcp = [d for d in project["dependencies"] if d.startswith("mcp")]
+    assert mcp == ["mcp>=2.1; sys_platform != 'win32' or platform_machine != 'ARM64'"]
+    # The extra stays as an empty alias so `clud[mcp]` still resolves.
+    assert project["optional-dependencies"]["mcp"] == []
