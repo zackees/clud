@@ -4,6 +4,7 @@ The host-platform boundary. This is the only place in `clud-bin`'s sources
 where a host may be named. Rules and rationale:
 [`docs/architecture/platform-boundary.md`](../../../../docs/architecture/platform-boundary.md).
 
+- `stdio` (#2386): `redirect_stderr_to(&File)` points the process stderr at a file (`dup2` / `SetStdHandle`); used by the daemon entry.
 - `mod.rs` is the selector. It declares `unix` or `windows` and re-exports
   the selected tree, so `crate::platform::<area>` resolves to the current
   host's implementation.
