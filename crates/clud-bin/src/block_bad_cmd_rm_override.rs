@@ -267,19 +267,8 @@ fn reason_in(
     cwd: Option<&Path>,
     home: Option<&Path>,
 ) -> Option<String> {
-    let normalized: String = command
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect();
-    // A repo's own `.clud/settings.json` is never read for the override, so
-    // only a spelling that can reach the user's home counts.
-    let reaches_home = ["~", "home", "userprofile", "/users/", "/root/"]
-        .iter()
-        .any(|marker| normalized.contains(marker));
-    let names_override = normalized.contains("extra_roots")
-        || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
     let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
+    let names_override = names_override(command, &script);
     let alts = pre_cd_cwds(command, &script.invocations, cwd);
     let writes_settings = script.invocations.iter().any(|invocation| {
         protected_operand(invocation, home, &alts)
@@ -300,6 +289,180 @@ fn reason_in(
     } else {
         None
     }
+}
+
+/// Lowercased text with quotes and backslashes dropped, so spellings such as
+/// `.cl"ud"` compare equal to the plain name.
+fn normalize_text(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
+}
+
+/// Programs whose operands are only read and whose output never echoes an
+/// operand name, so a protected name passed to them is not a write.
+const CONTENT_READERS: &[&str] = &["cat", "head", "tail", "bat", "jq", "less", "more"];
+
+/// Programs besides [`READ_ONLY`] that cannot interpret a heredoc body as
+/// code. `tee` is still judged by its operands, never by the body.
+const BODY_INERT: &[&str] = &["cd", "mkdir", "touch", "tee"];
+
+fn program_in(invocation: &Invocation, names: &[&str]) -> bool {
+    invocation.env.is_empty()
+        && invocation
+            .effective_program()
+            .is_some_and(|program| names.contains(&program.as_str()))
+}
+
+fn body_inert(invocation: &Invocation) -> bool {
+    invocation.words.is_empty()
+        || (program_in(invocation, READ_ONLY) && !less_writes_log(invocation))
+        || program_in(invocation, BODY_INERT)
+}
+
+/// Whether every heredoc marker in `command` has a quoted or escaped
+/// delimiter, so no body is expanded.
+fn heredocs_quoted(command: &str) -> bool {
+    let command = command.replace("<<<", "");
+    let quoted = command
+        .split("<<")
+        .skip(1)
+        .filter(|rest| {
+            let rest = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+            rest.starts_with(['\'', '"', '\\'])
+        })
+        .count();
+    command.matches("<<").count() == quoted
+}
+
+/// `less` options that open a log file for writing (`-o`, `-O`,
+/// `--log-file`, `--LOG-FILE`, and their unambiguous abbreviations).
+fn less_writes_log(invocation: &Invocation) -> bool {
+    if !program_in(invocation, &["less"]) {
+        return false;
+    }
+    invocation.words.iter().skip(1).any(|word| {
+        let text = word.text();
+        if let Some(long) = text.strip_prefix("--") {
+            let name = long
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            return name.len() >= 2 && "log-file".starts_with(&name);
+        }
+        text.starts_with('-') && text.contains(['o', 'O'])
+    })
+}
+
+/// A pure content reader whose operands are only read.
+fn content_reader(invocation: &Invocation) -> bool {
+    program_in(invocation, CONTENT_READERS) && !less_writes_log(invocation)
+}
+
+/// The byte range of the only occurrence of `needle` in `text[from..to]`.
+fn unique_span(text: &str, needle: &str, from: usize, to: usize) -> Option<(usize, usize)> {
+    let window = text.get(from..to)?;
+    if needle.is_empty() || window.matches(needle).count() != 1 {
+        return None;
+    }
+    let start = from + window.find(needle)?;
+    Some((start, start + needle.len()))
+}
+
+/// Spans of the literal operands of a content reader, each located at its own
+/// position inside the command's own source text (never by a global first
+/// match). Any word that cannot be placed leaves the operands unscrubbed.
+fn operand_spans(text: &str, invocation: &Invocation) -> Vec<(usize, usize)> {
+    let Some((from, to)) = unique_span(text, &normalize_text(&invocation.source), 0, text.len())
+    else {
+        return Vec::new();
+    };
+    let mut cursor = from;
+    let mut spans = Vec::new();
+    for (index, (word, raw)) in invocation.words.iter().zip(&invocation.raw).enumerate() {
+        let raw = normalize_text(raw);
+        let Some(found) = text.get(cursor..to).and_then(|window| window.find(&raw)) else {
+            return Vec::new();
+        };
+        let start = cursor + found;
+        cursor = start + raw.len();
+        if index > 0 && !raw.is_empty() && matches!(word, Value::Literal(_)) {
+            spans.push((start, cursor));
+        }
+    }
+    spans
+}
+
+/// Whether `reader`'s operands may be dropped: every command that could use
+/// them as a write target (through `$_`, a later `"$@"` or the like) must be
+/// body-inert, except other stages of the reader's own pipeline, which run in
+/// subshells and never see its last argument. Commands in the reader's own
+/// stage (`( cat F; sed -i x "$_" ) | cat`, `{ ...; } | cat`) run
+/// sequentially in one shell, so `$_` carries the path and they get no
+/// exemption.
+fn operands_scrubbable(reader: &Invocation, script: &crate::shell_ast::Script) -> bool {
+    script.invocations.iter().all(|other| {
+        body_inert(other)
+            || reader.pipeline.is_some_and(|slot| {
+                other
+                    .pipeline
+                    .is_some_and(|o| o.id == slot.id && o.stage != slot.stage)
+            })
+    })
+}
+
+/// `text` with the heredoc bodies and read-only operands that cannot name a
+/// write target removed.
+fn scrubbed(text: &str, command: &str, script: &crate::shell_ast::Script) -> String {
+    let quoted = heredocs_quoted(command);
+    let all_inert = script.invocations.iter().all(body_inert);
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    for invocation in &script.invocations {
+        let body = invocation.heredoc.as_deref();
+        let body = body.filter(|body| all_inert && (quoted || !body.contains(['$', '`'])));
+        if let Some(body) = body {
+            cuts.extend(unique_span(text, &normalize_text(body), 0, text.len()));
+        }
+        if content_reader(invocation) && operands_scrubbable(invocation, script) {
+            cuts.extend(operand_spans(text, invocation));
+        }
+    }
+    cuts.sort_unstable();
+    let mut out = String::new();
+    let mut at = 0;
+    for (start, end) in cuts {
+        if start >= at {
+            out.push_str(&text[at..start]);
+            at = end;
+        }
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Whether the command names the protected settings (the home-reaching
+/// settings path, or `extra_roots`) anywhere that could matter. Heredoc
+/// bodies and literal operands of pure content readers are dropped (#2353),
+/// but only when every command that could reuse an operand (through `$_`) is
+/// body-inert or a stage of the same pipeline, and bodies only when every command is body-inert, since
+/// the parser attaches a body to the first command of a list. Each operand is removed at its own
+/// position, never by first match. Every other word, including any the
+/// parser could not evaluate, keeps counting, and a parse error scrubs
+/// nothing.
+fn names_override(command: &str, script: &crate::shell_ast::Script) -> bool {
+    let mut text = normalize_text(command);
+    if !script.has_error {
+        text = scrubbed(&text, command, script);
+    }
+    // A repo's own `.clud/settings.json` is never read for the override, so
+    // only a spelling that can reach the user's home counts.
+    let reaches_home = ["~", "home", "userprofile", "/users/", "/root/"]
+        .iter()
+        .any(|marker| text.contains(marker));
+    text.contains("extra_roots")
+        || (text.contains(".clud") && text.contains("settings.json") && reaches_home)
 }
 
 /// Working directories a command may really run in besides the one the parser
@@ -670,7 +833,7 @@ fn read_only_invocation(invocation: &Invocation) -> bool {
         return false;
     };
     let name = super::block_bad_cmd_shell::program_name(program);
-    READ_ONLY.contains(&name.as_str())
+    (READ_ONLY.contains(&name.as_str()) && !less_writes_log(invocation))
         || program == "["
         || forge_read(&name, words)
         || numeric_sed_read(&name, words)
@@ -937,6 +1100,48 @@ mod tests {
             format!("echo x > ../other/{name}"),
         ] {
             assert_eq!(relative_reason(home.path(), &command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn reads_and_prose_that_name_the_settings_file_are_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            format!("cat .clud/{name} 2>/dev/null"),
+            format!("cat /home/dev/repo/.clud/{name} 2>/dev/null"),
+            format!("cat ~/repo/.clud/{name} 2>/dev/null"),
+            format!("cat > scratchpad/issues/x.md <<'EOF'\nsee .clud/{name} in ~/home\nEOF"),
+            format!("cat > scratchpad/issues/x.md <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+            format!("cat > scratchpad/issues/x.md <<EOF\nsee ~/.clud/{name}\nEOF"),
+            format!("cat ~/.clud/{name} > /tmp/x"),
+            format!("cat ~/r/.clud/{name} 2>/dev/null | python -c 'import sys'"),
+            format!("mkdir -p s/i && cat > s/i/x.md <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+        ] {
+            assert_eq!(relative_reason(home.path(), &command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn writes_hidden_near_prose_or_reads_are_still_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            format!("cat > ~/.clud/{name} <<'EOF'\nsee ~/.clud/{name}\nEOF"),
+            format!("cat > x.md <<EOF\n$(echo x > ~/.clud/{name})\nEOF"),
+            format!("cat > x.md <<EOF\n`echo x > ~/.clud/{name}`\nEOF"),
+            format!("cp /tmp/x ~/.clud/{name}"),
+            format!("cat a && python - <<'EOF'\nopen('~/.clud/{name}', 'w')\nEOF"),
+            format!("python - <<EOF\nopen('~/.clud/{name}', 'w')\nEOF"),
+            format!("echo ~/.clud/{name} | xargs cp /tmp/x"),
+            format!("X=~/.clud/{name}; cp /tmp/x $X"),
+            format!("cat $(python -c \"open('~/.clud/{name}','w')\")"),
+            format!("cat ~/.clud/{name} 2>/dev/null > ~/.clud/{name}"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
         }
     }
 
@@ -1365,6 +1570,55 @@ mod tests {
             "jq '.bash.block_cd=false' .clud/settings.json > t && mv t .clud/settings.json",
         ] {
             assert_eq!(reason(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn scrubbed_operands_cannot_hide_a_later_write() {
+        let n = "settings.json";
+        for command in [
+            format!("cat a >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\" ~/.clud/{n}"),
+            format!("cat ~/.clud/{n} >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\""),
+            format!("cat ~/.clud/{n} >/dev/null; sed -i s/a/b/ \"$_\""),
+            format!("(cat ~/.clud/{n}; sed -i x \"$_\") | cat"),
+            format!("(cat ~/.clud/{n} && sed -i x \"$_\") | cat"),
+            format!("{{ cat ~/.clud/{n}; sed -i x \"$_\"; }} | cat"),
+            format!("cat ~/.clud/{n} > /dev/null; perl -pi -e s/a/b/ \"$_\""),
+            format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\"; cat clud/{n}"),
+            format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\""),
+            format!("tee ~/.clud/{n} <<'EOF'\nx\nEOF"),
+            format!("cat <<EOF > ~/.clud/{n}\nx\nEOF"),
+            format!("touch ~/.clud/{n}"),
+            format!("mkdir -p ~/.clud && touch ~/.clud/{n}"),
+            format!("less -o ~/.clud/{n} /tmp/x"),
+            format!("less -O ~/.clud/{n} /tmp/x"),
+            format!("less --log-file=~/.clud/{n} /tmp/x"),
+            format!("head -c 9 /tmp/x > ~/.clud/{n}"),
+            format!("jq . /tmp/x > ~/.clud/{n}"),
+            format!("cat <<-'EOF' > ~/.clud/{n}\n\tx\n\tEOF"),
+            format!("cat <<< x > ~/.clud/{n}"),
+            format!("cat \"$(cp x ~/.clud/{n})\""),
+            format!("cat <(cp x ~/.clud/{n})"),
+            format!("cat a; cp b ~/.clud/{n}"),
+            format!("tee x.md <<EOF\n$(python -c \"open('~/.clud/{n}','w')\")\nEOF"),
+            format!("tee x.md <<'EOF'\n~/.clud/{n}\nEOF\npython -c 'import sys' x.md"),
+            format!("cd ~/.clud && tee {n} <<'EOF'\nx\nEOF"),
+        ] {
+            assert!(reason(&command).is_some(), "{command}");
+        }
+    }
+
+    #[test]
+    fn read_only_scripts_that_name_the_file_stay_allowed() {
+        let n = "settings.json";
+        for command in [
+            format!("cat .clud/{n} 2>/dev/null"),
+            format!("cat <<E\\OF\nsee ~/.clud/{n}\nEOF"),
+            format!("cat > scratchpad/x.md <<'EOF'\nsee ~/.clud/{n}\nEOF"),
+            format!("mkdir -p out && cat ~/.clud/{n} 2>/dev/null"),
+            "less -N notes.txt".to_string(),
+        ] {
+            assert_eq!(reason(&command), None, "{command}");
         }
     }
 }
