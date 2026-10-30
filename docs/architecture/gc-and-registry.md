@@ -629,6 +629,16 @@ early-exit walk, and the daemon's maintenance sweep thread (after the age sweep,
 for size; the 72 h age sweep stays the only deleter of session temp
 ([DD-141](../DESIGN_DECISIONS.md#dd-141-session-temp-size-is-reported-never-a-deletion-trigger)).
 
+**Dead worktree registrations (#2397).** A repo's `<common-dir>/worktrees/<name>/` entry
+outlives its worktree directory when a container, a crash or a hand `rm` removes it; `git worktree
+list` keeps printing it. `clud gc prune worktree-registrations` (also part of `prune all`) walks
+every repo in the registry's `repo_visits` and runs `git worktree prune --expire=now` through
+`worktrees::run_git` (running-process). `gc::worktree_registrations::dead_entries` counts
+candidates with plain reads (the `gitdir` target is gone and the entry is not `locked`, git's own
+test) so the count is exact, `--dry-run` reports it without pruning, and two roots sharing a common
+dir count once. Metadata only: no worktree directory is ever touched. `clud gc list` prints the
+dead count on stderr (so `--json` stays parseable). `purge` runs the same pass.
+
 **Cache size warning (#1691).** `cache.warn_bytes` (seeded 20 GiB, `0` disables) applies the
 same mechanism to `~/.clud/cache`, which is almost entirely uv's own cache under `cache/uv`:
 `clud gc list` walks it (bounded), the maintenance sweep thread writes `~/.clud/cache-size.json`,

@@ -13,12 +13,15 @@ use crate::worktrees;
 /// uv-cache handlers instead of the redb-tracked daemon path.
 const UV_CACHE_KIND: &str = "uv-cache";
 const TRASH_KIND: &str = "trash";
+const WORKTREE_REGISTRATIONS_KIND: &str = "worktree-registrations";
 const TRACKED_PRUNE_DURATION: &str = "48h";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcKindBackend {
     Tracked,
     UvCache,
+    /// Dead `git worktree` administrative entries in every visited repo (#2397).
+    WorktreeRegistrations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +55,12 @@ const MANAGED_KINDS: &[GcKindSpec] = &[
         name: TRASH_KIND,
         summary: "quarantined paths under ~/.clud/trash/",
         backend: GcKindBackend::Tracked,
+        prune_duration: None,
+    },
+    GcKindSpec {
+        name: WORKTREE_REGISTRATIONS_KIND,
+        summary: "dead git worktree registrations in repos clud has visited",
+        backend: GcKindBackend::WorktreeRegistrations,
         prune_duration: None,
     },
     GcKindSpec {
@@ -237,6 +246,9 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
                 run_all_kinds(&state_dir, false, dry_run, false, older_than.as_deref())
             } else {
                 let spec = find_kind(&kind).expect("validated kind");
+                if let Some(code) = run_fs_kind(&state_dir, spec, dry_run) {
+                    return code;
+                }
                 cmd_prune_tracked(&state_dir, spec, dry_run, older_than.as_deref())
             }
         }
@@ -251,6 +263,9 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
                 run_all_kinds(&state_dir, true, dry_run, yes, older_than.as_deref())
             } else {
                 let spec = find_kind(&kind).expect("validated kind");
+                if let Some(code) = run_fs_kind(&state_dir, spec, dry_run) {
+                    return code;
+                }
                 cmd_purge_tracked(&state_dir, spec, dry_run, yes, older_than.as_deref())
             }
         }
@@ -323,7 +338,7 @@ fn validate_pre_daemon(action: &GcAction) -> Option<i32> {
             older_than: Some(_),
             kind: Some(k),
             ..
-        } if k == UV_CACHE_KIND => {
+        } if is_older_than_unsupported(k) => {
             eprintln!("{}", unsupported_older_than_error(k));
             Some(2)
         }
@@ -543,12 +558,14 @@ fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
         warn_if_worktree_root_oversized();
         warn_if_session_tmp_oversized();
         warn_if_clud_cache_oversized();
+        warn_if_dead_worktree_registrations(state_dir);
         return 0;
     }
     print_table_from_rows(&rows);
     warn_if_worktree_root_oversized();
     warn_if_session_tmp_oversized();
     warn_if_clud_cache_oversized();
+    warn_if_dead_worktree_registrations(state_dir);
     0
 }
 
@@ -609,6 +626,70 @@ fn warn_if_worktree_root_oversized() {
     let check = check_tree_size(&root, warn_bytes, SIZE_SCAN_ENTRY_BUDGET);
     if let Some(line) = size_warning(&root, warn_bytes, check) {
         eprintln!("{line}");
+    }
+}
+
+/// Kinds whose handlers take no duration (filesystem-managed, not registry rows).
+fn is_older_than_unsupported(kind: &str) -> bool {
+    kind == UV_CACHE_KIND || kind == WORKTREE_REGISTRATIONS_KIND
+}
+
+/// Run a filesystem-managed kind that is neither tracked nor uv-cache.
+/// `None` means `spec` is an ordinary tracked kind. These kinds only ever
+/// remove metadata or already-idle data, so `purge` runs the same pass as
+/// `prune` (it never widens what is deleted).
+fn run_fs_kind(state_dir: &Path, spec: GcKindSpec, dry_run: bool) -> Option<i32> {
+    match spec.backend {
+        GcKindBackend::WorktreeRegistrations => {
+            Some(cmd_prune_worktree_registrations(state_dir, dry_run))
+        }
+        _ => None,
+    }
+}
+
+/// Repo roots clud has run in (the registry's `repo_visits`).
+fn visited_repos(state_dir: &Path) -> Result<Vec<String>, String> {
+    crate::daemon::gc_client_list_repo_visits(state_dir)
+        .map(|rows| rows.into_iter().map(|row| row.repo_root).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// #2397: `git worktree prune` every visited repo and report the count.
+fn cmd_prune_worktree_registrations(state_dir: &Path, dry_run: bool) -> i32 {
+    let repos = match visited_repos(state_dir) {
+        Ok(repos) => repos,
+        Err(e) => {
+            eprintln!("error: worktree-registrations: cannot list visited repos: {e}");
+            return 1;
+        }
+    };
+    let report = super::worktree_registrations::prune_repos(&repos, dry_run);
+    println!("{}", report.summary_line());
+    let mut status = 0;
+    for failed in report.repos.iter().filter(|r| r.error.is_some()) {
+        eprintln!(
+            "worktree-registrations: {}: {}",
+            failed.repo,
+            failed.error.as_deref().unwrap_or_default()
+        );
+        if failed.dead > 0 {
+            status = 1;
+        }
+    }
+    status
+}
+
+/// #2397: `clud gc list` hint (stderr, so `--json` stays parseable) when
+/// visited repos hold dead worktree registrations.
+fn warn_if_dead_worktree_registrations(state_dir: &Path) {
+    let Ok(repos) = visited_repos(state_dir) else {
+        return;
+    };
+    let dead = super::worktree_registrations::count_dead(&repos);
+    if dead > 0 {
+        eprintln!(
+            "worktree-registrations: {dead} dead registration(s); run `clud gc prune worktree-registrations` to drop them"
+        );
     }
 }
 
@@ -699,6 +780,9 @@ fn run_all_kinds(
         let code = match (spec.backend, purge) {
             (GcKindBackend::UvCache, false) => cmd_prune_uv_cache(dry_run),
             (GcKindBackend::UvCache, true) => cmd_purge_uv_cache(dry_run, yes),
+            (GcKindBackend::WorktreeRegistrations, _) => {
+                cmd_prune_worktree_registrations(state_dir, dry_run)
+            }
             (GcKindBackend::Tracked, false) => {
                 let duration = older_than.or(spec.prune_duration);
                 run_tracked_gc(state_dir, *spec, "prune", duration, dry_run)
