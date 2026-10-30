@@ -150,6 +150,7 @@ pub(super) fn spawn_cpu_alert_publisher(
                 if shutdown_requested.load(Ordering::SeqCst) {
                     return;
                 }
+                super::startup_phases::rotate_redirected_log(&state_dir);
                 let cpu_pct = sample();
                 if !should_publish(published, cpu_pct) {
                     continue;

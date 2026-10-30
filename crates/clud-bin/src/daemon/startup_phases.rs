@@ -10,6 +10,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde_json::json;
@@ -18,6 +19,11 @@ use super::daemon_events;
 
 const STDERR_LOG_NAME: &str = "daemon.stderr.log";
 const MAX_STDERR_LOG_BYTES: u64 = 256 * 1024;
+
+/// Set once fd 2 / `STD_ERROR_HANDLE` points at `daemon.stderr.log`. From then
+/// on anything written to stderr already lands in the log, so the explicit
+/// appends in `fail` and the panic hook would record every line twice.
+static STDERR_REDIRECTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct StartupPhases<'a> {
     state_dir: &'a Path,
@@ -46,7 +52,9 @@ impl<'a> StartupPhases<'a> {
     pub(super) fn fail(&self, phase: &'static str, error: &str) -> i32 {
         let message = format!("[clud] {error}");
         eprintln!("{message}");
-        append_stderr_log(&self.state_dir.join(STDERR_LOG_NAME), &message);
+        if !STDERR_REDIRECTED.load(Ordering::SeqCst) {
+            append_stderr_log(&self.state_dir.join(STDERR_LOG_NAME), &message);
+        }
         daemon_events::log_event(
             self.state_dir,
             "daemon_start_failed",
@@ -73,27 +81,51 @@ pub(super) fn install_panic_hook(state_dir: &Path) {
             let thread = std::thread::current();
             let backtrace = std::backtrace::Backtrace::capture();
             let report = panic_report(thread.name(), info, &backtrace);
-            append_stderr_log(&path, &report);
+            // Once redirected, `previous` (the default hook) writes to the log
+            // through stderr; appending here too would duplicate the panic.
+            if !STDERR_REDIRECTED.load(Ordering::SeqCst) {
+                append_stderr_log(&path, &report);
+            }
             previous(info);
         }));
     });
 }
 
 /// Send the detached daemon's own stderr to `daemon.stderr.log` (#2386), so
-/// stray non-panic output is kept instead of discarded. Rotates first; the
-/// open handle is later renamed with the file if `append_stderr_log` rolls it
-/// (output then follows the `.1` backup until the next daemon start). A
-/// failure is reported once and never stops the daemon.
+/// stray non-panic output is kept instead of discarded. Call it at startup.
 pub(super) fn redirect_stderr_to_log(state_dir: &Path) {
+    rotate_and_redirect(state_dir);
+}
+
+/// Redirect-aware rotation. If the live log is past the cap, roll it to the
+/// `.1` backup, open a fresh `daemon.stderr.log` and point stderr at it again,
+/// so fd 2 never follows the backup or an unlinked inode. When stderr is
+/// already redirected and the log is under the cap this is one `metadata()`
+/// call, so the daemon's periodic tasks can call it freely. A failure is
+/// reported once and never stops the daemon.
+pub(super) fn rotate_and_redirect(state_dir: &Path) {
     let path = state_dir.join(STDERR_LOG_NAME);
+    let redirected = STDERR_REDIRECTED.load(Ordering::SeqCst);
+    if redirected && std::fs::metadata(&path).is_ok_and(|meta| meta.len() < MAX_STDERR_LOG_BYTES) {
+        return;
+    }
     let _ = daemon_events::rotate_if_needed(&path, MAX_STDERR_LOG_BYTES);
     let result = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .and_then(|file| crate::platform::stdio::redirect_stderr_to(&file));
-    if let Err(error) = result {
-        eprintln!("[clud] daemon stderr redirect to {path:?} failed: {error}");
+    match result {
+        Ok(()) => STDERR_REDIRECTED.store(true, Ordering::SeqCst),
+        Err(error) => eprintln!("[clud] daemon stderr redirect to {path:?} failed: {error}"),
+    }
+}
+
+/// Cheap periodic hook: keep a redirected log bounded. No-op before the
+/// redirect succeeded (the append path rotates in that case).
+pub(super) fn rotate_redirected_log(state_dir: &Path) {
+    if STDERR_REDIRECTED.load(Ordering::SeqCst) {
+        rotate_and_redirect(state_dir);
     }
 }
 

@@ -42,7 +42,9 @@ mod tests {
         redirect_fd(&file, target).unwrap();
         drop(file);
         // SAFETY: `scratch` owns `target`; borrow it via a dup'd handle.
-        let mut out = unsafe { File::from_raw_fd(libc::dup(target)) };
+        let dup = unsafe { libc::dup(target) };
+        assert!(dup >= 0, "dup failed: {}", io::Error::last_os_error());
+        let mut out = unsafe { File::from_raw_fd(dup) };
         writeln!(out, "stray-2386").unwrap();
         drop(out);
         let mut text = String::new();
