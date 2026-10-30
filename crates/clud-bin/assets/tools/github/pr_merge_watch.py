@@ -830,6 +830,14 @@ def judge_check_runs(  # noqa: C901
         own = _run_order(runs_by_id[run_id])
         return [r for r in siblings(key, run_id) if not _is_cancelled(r) or _run_order(r) > own]
 
+    def has_live_newer(key: str, run_id: int) -> bool:
+        """A newer run of the same workflow on the head is still going (#2338):
+        a pass from an older run is not the verdict until that run reports."""
+        return any(
+            _lower(r.get("status")) != "completed" and not _is_cancelled(r)
+            for r in newer_runs(key, run_id)
+        )
+
     def resolve_replaced(key: str, run_id: int) -> str | None:
         """pending/superseded when a replacement exists, else None."""
         found = replacements(key, run_id)
@@ -933,6 +941,8 @@ def judge_check_runs(  # noqa: C901
                 for s in siblings(key, run_id)
             ):
                 state = "pending"
+        if state == "pass" and run_id is not None and has_live_newer(key, run_id):
+            state = "pending"
         judgments.append(
             CheckJudgment(
                 name=name,
