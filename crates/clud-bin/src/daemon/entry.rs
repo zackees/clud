@@ -757,6 +757,7 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
         }
         Some(Command::InternalDaemon { state_dir }) => {
             super::startup_phases::install_panic_hook(state_dir);
+            super::startup_phases::redirect_stderr_to_log(state_dir);
             Some(run_daemon(state_dir, interrupted))
         }
         Some(Command::InternalWorker {

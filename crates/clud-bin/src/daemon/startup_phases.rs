@@ -79,6 +79,24 @@ pub(super) fn install_panic_hook(state_dir: &Path) {
     });
 }
 
+/// Send the detached daemon's own stderr to `daemon.stderr.log` (#2386), so
+/// stray non-panic output is kept instead of discarded. Rotates first; the
+/// open handle is later renamed with the file if `append_stderr_log` rolls it
+/// (output then follows the `.1` backup until the next daemon start). A
+/// failure is reported once and never stops the daemon.
+pub(super) fn redirect_stderr_to_log(state_dir: &Path) {
+    let path = state_dir.join(STDERR_LOG_NAME);
+    let _ = daemon_events::rotate_if_needed(&path, MAX_STDERR_LOG_BYTES);
+    let result = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|file| crate::platform::stdio::redirect_stderr_to(&file));
+    if let Err(error) = result {
+        eprintln!("[clud] daemon stderr redirect to {path:?} failed: {error}");
+    }
+}
+
 /// Pure formatter for the panic log entry (message + location come from `info`).
 fn panic_report(
     thread: Option<&str>,
