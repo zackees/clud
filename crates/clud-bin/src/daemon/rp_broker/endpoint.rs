@@ -10,7 +10,7 @@ use super::RUNNING_PROCESS_SERVICE_NAME;
 /// identity sidecar, written next to `daemon.json` at startup and
 /// removed on clean shutdown. Clients read it and verify the daemon
 /// with `BackendHandle::probe_with_service` before trusting it.
-pub(super) fn daemon_identity_path(state_dir: &Path) -> PathBuf {
+pub(in crate::daemon) fn daemon_identity_path(state_dir: &Path) -> PathBuf {
     state_dir.join("daemon-identity.json")
 }
 

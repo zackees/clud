@@ -2443,6 +2443,44 @@ mod tests {
         assert_eq!(after.pid, info.pid, "successor's daemon.json must survive");
     }
 
+    /// #2142: a shutdown request and the interrupted flag both finish well
+    /// inside `clud daemon restart`'s 10s wait, even with an idle client
+    /// connection held open against the daemon.
+    #[test]
+    fn shutdown_and_signal_flag_finish_within_the_restart_timeout() {
+        let bound = Duration::from_secs(5);
+        for use_flag in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state_dir = tmp.path().to_path_buf();
+            let flag = Arc::new(AtomicBool::new(false));
+            let (dir, thread_flag) = (state_dir.clone(), Arc::clone(&flag));
+            let daemon_thread = thread::spawn(move || run_daemon(&dir, &thread_flag));
+            let info = wait_for_daemon_ready(&state_dir);
+            let _idle = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+
+            let started = Instant::now();
+            if use_flag {
+                flag.store(true, Ordering::SeqCst);
+            } else {
+                let (response, _) = send_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::Shutdown {
+                        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                        expected_daemon: Some(info.identity()),
+                    },
+                    DaemonWireFormat::Json,
+                );
+                assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
+            }
+            assert_eq!(daemon_thread.join().unwrap(), 0);
+            assert!(
+                started.elapsed() < bound,
+                "daemon took {:?} to stop (use_flag={use_flag})",
+                started.elapsed()
+            );
+        }
+    }
+
     #[test]
     fn supersede_check_compares_recorded_pid() {
         assert!(!is_superseded(7, 7));

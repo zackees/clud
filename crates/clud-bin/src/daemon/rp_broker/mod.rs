@@ -40,7 +40,7 @@ mod payload;
 mod tests;
 mod wire_mode;
 
-use endpoint::daemon_identity_path;
+pub(in crate::daemon) use endpoint::daemon_identity_path;
 use errors::log_adopt_miss;
 pub(super) use frame_lane::spawn_frame_lane;
 #[cfg(test)]
