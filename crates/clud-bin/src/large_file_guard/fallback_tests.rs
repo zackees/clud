@@ -140,11 +140,11 @@ fn classifying_a_hundred_thousand_entries_stays_inside_the_budget() {
         !out.qualifying.is_empty(),
         "the fixture must produce work, or the timing is meaningless"
     );
-    // Generous against the 25 ms budget for an unoptimized test build. An
-    // order-of-magnitude regression still trips it, and a quadratic one (10^10
-    // steps at 100k entries) overshoots it by orders of magnitude.
+    // Generous against the 25 ms budget for an unoptimized test build on the
+    // slowest lane (hosted macos-x64 measured 258 ms). A quadratic regression
+    // (10^10 steps at 100k entries) still overshoots it by orders of magnitude.
     assert!(
-        cpu < std::time::Duration::from_millis(250),
+        cpu < std::time::Duration::from_secs(1),
         "classifying 100k entries took {cpu:?} of CPU; #556 budgets 25 ms for \
          the whole pass on a real index"
     );
