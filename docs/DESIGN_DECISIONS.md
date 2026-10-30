@@ -7383,3 +7383,22 @@ gate `bash lint` / `ci/lint.py` keeps running `soldr cargo fmt` and
 The context cost #2313 measured came from agents fanning out ad-hoc calls,
 not from the gate. The gate runs once per change, so the steering doc fixes
 the cost without touching the CI of record.
+
+## DD-194: session temp is capped by size, evicting only idle units oldest-first
+
+**Context:** #2397 measured `~/.clud/tmp` at 64 GB. DD-141 declined a size
+trigger because a cap that fires mid-session deletes a live agent's scratch.
+The age sweep alone left a day of heavy sessions on disk until it aged out.
+
+**Decision:** `tmp.max_bytes` (default 10 GiB, `0` disables) evicts the oldest
+eviction units (session dirs, or loose files) until the tree fits, but only a
+unit whose newest mtime anywhere beneath it is at least `MIN_IDLE` (6 h) old,
+re-measured immediately before removal. Any unreadable, oversized or
+future-dated walk counts as live. This is the same signal the age sweep uses
+for liveness (activity, not a session registry), with a shorter window.
+Supersedes DD-141's "never a deletion trigger"; the warning stays.
+
+**Why not delete past the cap regardless:** that is exactly DD-141's failure.
+**Consequences:** the tree can stay over the cap while sessions are live; that
+is reported, not forced. Contract:
+[gc-and-registry.md](architecture/gc-and-registry.md#filesystem-sweeps-non-registry).

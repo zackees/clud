@@ -262,6 +262,9 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
         tmp.entry("warn_bytes".to_string()).or_insert(json!(
             crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES
         ));
+        // #2397 (DD-194): size cap, oldest idle sessions evicted first; 0 disables.
+        tmp.entry("max_bytes".to_string())
+            .or_insert(json!(crate::gc::session_tmp_cap::DEFAULT_TMP_MAX_BYTES));
     }
 
     if let Some(cache) = seed_object_entry(document, "cache") {
@@ -1000,6 +1003,31 @@ pub fn tmp_warn_bytes_from(document: &Value) -> u64 {
         .and_then(|item| item.get("warn_bytes"))
         .and_then(Value::as_u64)
         .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES)
+}
+
+/// `tmp.max_bytes` (#2397, DD-194): when `~/.clud/tmp` holds more than this,
+/// the oldest idle session directories are evicted (never one written to
+/// within `MIN_IDLE`). `0` disables; absent or not a non-negative integer
+/// means the default.
+pub fn load_tmp_max_bytes() -> Result<u64, SettingsError> {
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
+    load_tmp_max_bytes_at(&home)
+}
+
+pub fn load_tmp_max_bytes_at(home: &Path) -> Result<u64, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(tmp_max_bytes_from(&document))
+}
+
+/// Pure reader for `tmp.max_bytes`.
+pub fn tmp_max_bytes_from(document: &Value) -> u64 {
+    document
+        .get("tmp")
+        .and_then(|item| item.get("max_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::gc::session_tmp_cap::DEFAULT_TMP_MAX_BYTES)
 }
 
 /// `trash.max_bytes` (#1672): when `~/.clud/trash` holds more than this, the

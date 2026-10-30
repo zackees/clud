@@ -13,6 +13,7 @@ use crate::worktrees;
 /// uv-cache handlers instead of the redb-tracked daemon path.
 const UV_CACHE_KIND: &str = "uv-cache";
 const TRASH_KIND: &str = "trash";
+const TMP_KIND: &str = "tmp";
 const WORKTREE_REGISTRATIONS_KIND: &str = "worktree-registrations";
 const TRACKED_PRUNE_DURATION: &str = "48h";
 
@@ -22,6 +23,8 @@ enum GcKindBackend {
     UvCache,
     /// Dead `git worktree` administrative entries in every visited repo (#2397).
     WorktreeRegistrations,
+    /// The `~/.clud/tmp` size cap (#2397, DD-194).
+    SessionTmp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +64,12 @@ const MANAGED_KINDS: &[GcKindSpec] = &[
         name: WORKTREE_REGISTRATIONS_KIND,
         summary: "dead git worktree registrations in repos clud has visited",
         backend: GcKindBackend::WorktreeRegistrations,
+        prune_duration: None,
+    },
+    GcKindSpec {
+        name: TMP_KIND,
+        summary: "~/.clud/tmp session scratch, capped by tmp.max_bytes (idle sessions only)",
+        backend: GcKindBackend::SessionTmp,
         prune_duration: None,
     },
     GcKindSpec {
@@ -484,7 +493,7 @@ fn print_uv_cache_repair_report(report: &uv_cache_repair::RepairReport) {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
@@ -631,7 +640,7 @@ fn warn_if_worktree_root_oversized() {
 
 /// Kinds whose handlers take no duration (filesystem-managed, not registry rows).
 fn is_older_than_unsupported(kind: &str) -> bool {
-    kind == UV_CACHE_KIND || kind == WORKTREE_REGISTRATIONS_KIND
+    kind == UV_CACHE_KIND || kind == WORKTREE_REGISTRATIONS_KIND || kind == TMP_KIND
 }
 
 /// Run a filesystem-managed kind that is neither tracked nor uv-cache.
@@ -643,8 +652,18 @@ fn run_fs_kind(state_dir: &Path, spec: GcKindSpec, dry_run: bool) -> Option<i32>
         GcKindBackend::WorktreeRegistrations => {
             Some(cmd_prune_worktree_registrations(state_dir, dry_run))
         }
+        GcKindBackend::SessionTmp => Some(cmd_prune_tmp(dry_run)),
         _ => None,
     }
+}
+
+/// #2397: evict the oldest idle `~/.clud/tmp` units while over `tmp.max_bytes`.
+/// A live session's directory is never touched (see `gc::session_tmp_cap`).
+/// The age sweep stays the daemon's job: it owns the resumable work queue.
+fn cmd_prune_tmp(dry_run: bool) -> i32 {
+    let report = super::session_tmp_cap::enforce_cap(dry_run);
+    println!("{}", report.summary_line());
+    i32::from(report.failed > 0)
 }
 
 /// Repo roots clud has run in (the registry's `repo_visits`).
@@ -780,6 +799,7 @@ fn run_all_kinds(
         let code = match (spec.backend, purge) {
             (GcKindBackend::UvCache, false) => cmd_prune_uv_cache(dry_run),
             (GcKindBackend::UvCache, true) => cmd_purge_uv_cache(dry_run, yes),
+            (GcKindBackend::SessionTmp, _) => cmd_prune_tmp(dry_run),
             (GcKindBackend::WorktreeRegistrations, _) => {
                 cmd_prune_worktree_registrations(state_dir, dry_run)
             }

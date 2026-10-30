@@ -1309,6 +1309,15 @@ pub(crate) fn make_writable(path: &Path) {
     }
 }
 
+/// Remove a directory tree after making it owner-writable: sealed build output
+/// is read-only (#1573). The one recursive deleter shared by every gc path that
+/// owns a tree (trash reaping, `~/.clud/tmp` eviction). Files owned by another
+/// user (root, from a container bind mount) still fail.
+pub(crate) fn remove_dir_tree_writable(path: &Path) -> std::io::Result<()> {
+    make_writable(path);
+    std::fs::remove_dir_all(path)
+}
+
 fn purge(target: &Target) -> Result<(), String> {
     if target.is_dir {
         make_writable(&target.path);

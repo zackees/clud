@@ -629,6 +629,19 @@ early-exit walk, and the daemon's maintenance sweep thread (after the age sweep,
 for size; the 72 h age sweep stays the only deleter of session temp
 ([DD-141](../DESIGN_DECISIONS.md#dd-141-session-temp-size-is-reported-never-a-deletion-trigger)).
 
+**Session temp size cap (#2397).** `tmp.max_bytes` (seeded 10 GiB, `0` disables) adds a size
+trigger, superseding DD-141's warn-only stance for the over-cap case
+([DD-194](../DESIGN_DECISIONS.md#dd-194-session-temp-is-capped-by-size-evicting-only-idle-units-oldest-first)).
+`gc::session_tmp_cap::enforce_cap_at` splits the tree into eviction units with the age sweep's depth
+rule (a depth-3 directory, i.e. `claude-<uid>/<project>/<session>/`, or a loose file; shallower
+directories are recursed into, never removed whole) and evicts oldest-first until the tree fits.
+**Liveness** is the age sweep's own signal, activity: a unit whose newest mtime anywhere beneath it
+is under `MIN_IDLE` (6 h) is kept, an unreadable, oversized-walk or future-dated unit counts as live,
+and idleness is re-measured right before removal, so a live session survives however far over the cap
+the tree is. The daemon runs it right after each age pass (`daemon/session_tmp_sweep.rs`, event
+`session_tmp_cap`); `clud gc prune tmp` (and `prune all`) runs it on demand, honouring `--dry-run`.
+Removal goes through `rm_tool::remove_dir_tree_writable`, the shared tree deleter.
+
 **Dead worktree registrations (#2397).** A repo's `<common-dir>/worktrees/<name>/` entry
 outlives its worktree directory when a container, a crash or a hand `rm` removes it; `git worktree
 list` keeps printing it. `clud gc prune worktree-registrations` (also part of `prune all`) walks

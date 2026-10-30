@@ -176,8 +176,7 @@ pub(super) fn reap_trash_entries_at(
 /// purge does (#1573): sealed build output is read-only. Files owned by
 /// another user (root, from a Docker bind mount) still fail, loudly.
 fn remove_trash_dir(path: &Path) -> std::io::Result<()> {
-    crate::rm_tool::make_writable(path);
-    std::fs::remove_dir_all(path)
+    crate::rm_tool::remove_dir_tree_writable(path)
 }
 
 /// Remove expired `safe-rm` trash entries under `trash_root` that
