@@ -2844,6 +2844,10 @@ def _summarize_job(j: dict, now: float, warnings: list[str]) -> dict:
     }
 
 
+# `--quiet` (#2368): no per-poll progress lines, only the final verdict.
+QUIET = False
+
+
 def emit_progress_report(
     pr: int, repo: str | None, snapshot: PRSnapshot, checks: list[CheckRow]
 ) -> None:
@@ -2851,7 +2855,9 @@ def emit_progress_report(
     associated with the PR's head SHA.
 
     JSONL line on stdout (schema-versioned), human-readable per-job
-    rows on stderr."""
+    rows on stderr. `--quiet` suppresses it (#2368)."""
+    if QUIET:
+        return
     seen_runs: set[str] = set()
     for c in checks:
         if c.bucket != "pending":
@@ -4254,6 +4260,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--no-ignore-permission-errors", dest="ignore_perm", action="store_false")
     p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress per-poll progress lines; print only the final verdict (#2368)",
+    )
+    p.add_argument(
         "--no-retry", action="store_true", help="disable backoff/retry on cancel API calls"
     )
     # #1839: the tool runner forwards a `--` placed after the PR number as
@@ -4309,8 +4320,9 @@ def _print_triggers(repo: str | None, base: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global FOLLOW, MERGE_WAIT, EXPLICIT_MERGE_WAIT
+    global FOLLOW, MERGE_WAIT, EXPLICIT_MERGE_WAIT, QUIET
     ns = parse_args(argv if argv is not None else sys.argv[1:])
+    QUIET = ns.quiet
     if ns.triggers_for_base is not None:
         return _print_triggers(ns.repo, ns.triggers_for_base)
     opts = _resolve_cancel_options(ns)
