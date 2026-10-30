@@ -423,6 +423,64 @@ def gh_error_note(text: str) -> None:
         LAST_GH_ERROR = text.strip()[-2000:]
 
 
+# GitHub secondary (burst/concurrency) rate limit backoff (#2368). A 403/429
+# with this wording is not an outage: the caller sleeps and retries within
+# --timeout instead of counting it toward GITHUB_UNREACHABLE.
+RATE_LIMIT_BASE_SEC = 30.0
+RATE_LIMIT_MAX_SEC = 300.0
+_RATE_LIMIT_RETRY_AFTER = re.compile(
+    r"retry[- ]after[:=]?\s*(\d+)|try again in (\d+)\s*second", re.I
+)
+PENDING_RATE_LIMIT: str | None = None
+RATE_LIMIT_STREAK = 0
+
+
+def is_secondary_rate_limit(text: str) -> bool:
+    low = text.lower()
+    if "secondary rate limit" in low or "abuse detection" in low:
+        return True
+    return "rate limit" in low and ("http 403" in low or "http 429" in low)
+
+
+def note_rate_limit(stderr: str) -> None:
+    """Remember that the latest failed gh call was a secondary rate limit."""
+    global PENDING_RATE_LIMIT
+    if is_secondary_rate_limit(stderr):
+        PENDING_RATE_LIMIT = stderr
+
+
+def rate_limit_delay(text: str, streak: int) -> float:
+    """`Retry-After` when gh's output carries it, else capped exponential."""
+    match = _RATE_LIMIT_RETRY_AFTER.search(text)
+    if match:
+        seconds = float(next(g for g in match.groups() if g))
+        return min(max(seconds, 1.0), RATE_LIMIT_MAX_SEC)
+    return min(RATE_LIMIT_BASE_SEC * 2 ** max(streak - 1, 0), RATE_LIMIT_MAX_SEC)
+
+
+def rate_limit_backoff(deadline: float, log: WatchLog | None) -> bool:
+    """Sleep out a pending secondary rate limit; True when one was handled.
+
+    The sleep never passes `deadline`, so the overall --timeout still rules.
+    """
+    global PENDING_RATE_LIMIT, RATE_LIMIT_STREAK
+    text, PENDING_RATE_LIMIT = PENDING_RATE_LIMIT, None
+    if text is None:
+        RATE_LIMIT_STREAK = 0
+        return False
+    RATE_LIMIT_STREAK += 1
+    delay = min(rate_limit_delay(text, RATE_LIMIT_STREAK), max(0.0, deadline - time.monotonic()))
+    print(
+        f"NOTE  GitHub secondary rate limit; retrying after {delay:.0f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    if log:
+        log.emit("rate_limited", retry_after_sec=round(delay, 1), consecutive=RATE_LIMIT_STREAK)
+    time.sleep(delay)
+    return True
+
+
 def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResult:
     """Run gh with the supplied args; return the captured outcome.
 
@@ -455,6 +513,11 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
         STALE_READS += 1
     if res.returncode != 0:
         gh_error_note(stderr or f"gh {' '.join(args)} exited {res.returncode}")
+        note_rate_limit(stderr)
+    else:
+        # A later success means the limit has lifted; drop a stale marker.
+        global PENDING_RATE_LIMIT
+        PENDING_RATE_LIMIT = None
     if check and res.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {stderr.strip()}")
     return GhResult(res.returncode, stdout, stderr)
@@ -3147,6 +3210,8 @@ def watch(  # noqa: C901
             ),
         )
         if gate is None:
+            if rate_limit_backoff(deadline, log):
+                continue
             api_failures += 1
             print(
                 f"NOTE  gate snapshot unavailable ({LAST_SNAPSHOT_FAILURE}); retrying",
