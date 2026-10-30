@@ -424,6 +424,8 @@ fn dashboard_state_surfaces_api_sessions_as_nonattachable_rows() {
     assert!(row.command.is_empty());
 }
 
+/// Needs the built `mock-agent`, so every caller is a `tier1_` test that
+/// `bash test --host` skips (#2356).
 fn http_test_mock_agent() -> std::path::PathBuf {
     let extension = if crate::platform::host::WINDOWS {
         ".exe"
@@ -565,7 +567,7 @@ fn wait_for_no_activity(activity: &super::super::activity::DaemonActivity) {
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
 )]
-fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
+fn tier1_authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("cwd");
     std::fs::create_dir(&cwd).unwrap();
@@ -681,7 +683,7 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
 }
 
 #[test]
-fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
+fn tier1_authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("cwd");
     std::fs::create_dir(&cwd).unwrap();
@@ -778,7 +780,7 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
 )]
-fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
+fn tier1_authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("cwd");
     std::fs::create_dir(&cwd).unwrap();

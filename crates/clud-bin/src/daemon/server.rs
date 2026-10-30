@@ -2343,6 +2343,8 @@ mod tests {
         }
     }
 
+    /// Starts-and-waits on a live daemon, so callers are `tier1_` tests that
+    /// `bash test --host` skips (#2356).
     fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -2413,7 +2415,7 @@ mod tests {
     /// #2142: SIGTERM/SIGHUP/SIGQUIT only flip `interrupted`; the daemon must
     /// poll it and exit instead of ignoring the signal.
     #[test]
-    fn daemon_exits_when_interrupted_flag_is_set() {
+    fn tier1_daemon_exits_when_interrupted_flag_is_set() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let flag = Arc::new(AtomicBool::new(false));
@@ -2429,7 +2431,7 @@ mod tests {
     /// #2142: a daemon whose `daemon.json` now names another pid exits, and
     /// leaves the successor's file alone.
     #[test]
-    fn superseded_daemon_exits_and_keeps_successor_info() {
+    fn tier1_superseded_daemon_exits_and_keeps_successor_info() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let dir = state_dir.clone();
@@ -2450,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
+    fn tier1_daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2521,7 +2523,7 @@ mod tests {
     /// Keep this fixture raw so it cannot accidentally acquire current-client
     /// credentials through a helper.
     #[test]
-    fn daemon_accepts_previous_release_raw_json_shutdown() {
+    fn tier1_daemon_accepts_previous_release_raw_json_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2621,7 +2623,7 @@ mod tests {
     }
 
     #[test]
-    fn prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
+    fn tier1_prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2679,7 +2681,7 @@ mod tests {
     }
 
     #[test]
-    fn adopt_kill_request_writes_jsonl_events() {
+    fn tier1_adopt_kill_request_writes_jsonl_events() {
         let tmp = tempfile::tempdir().unwrap();
         let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
 
@@ -2720,7 +2722,7 @@ mod tests {
     }
 
     #[test]
-    fn reap_orphans_request_writes_jsonl_events() {
+    fn tier1_reap_orphans_request_writes_jsonl_events() {
         let tmp = tempfile::tempdir().unwrap();
         let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
 

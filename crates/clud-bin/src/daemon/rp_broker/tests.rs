@@ -124,7 +124,7 @@ fn wait_for_identity_sidecar(state_dir: &Path) -> DaemonProcess {
 /// #2239 regression: the moment `daemon.json` is readable and the TCP port
 /// accepts, the identity sidecar must already exist. No polling allowed.
 #[test]
-fn identity_sidecar_exists_by_the_time_daemon_reports_ready() {
+fn tier1_identity_sidecar_exists_by_the_time_daemon_reports_ready() {
     let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
@@ -193,7 +193,7 @@ fn payload_protocol_is_frozen_registered_consumer_id() {
 /// probe via the sidecar, serves clud payload frames through
 /// `FrameClient`, and shuts down via the frame lane.
 #[test]
-fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
+fn tier1_frame_lane_serves_probe_and_clud_requests_end_to_end() {
     let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
@@ -252,7 +252,7 @@ fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
 /// RUNNING_PROCESS_DISABLE=1 must restore pre-adoption behavior:
 /// no identity sidecar, no frame endpoint, TCP wire untouched.
 #[test]
-fn disable_env_skips_frame_lane_entirely() {
+fn tier1_disable_env_skips_frame_lane_entirely() {
     let _env = EnvGuard::set(RUNNING_PROCESS_DISABLE_ENV, "1");
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
@@ -291,7 +291,7 @@ fn disable_env_skips_frame_lane_entirely() {
 /// honors the disable hatch and degrades to `None` (TCP fallback)
 /// when the sidecar is missing.
 #[test]
-fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
+fn tier1_client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
@@ -353,7 +353,7 @@ fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
 /// The `RUNNING_PROCESS_FAKE_BACKEND` seam redirects the client to
 /// the seam endpoint even when the cached sidecar endpoint is bogus.
 #[test]
-fn fake_backend_seam_overrides_cached_endpoint() {
+fn tier1_fake_backend_seam_overrides_cached_endpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
