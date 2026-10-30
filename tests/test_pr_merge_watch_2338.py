@@ -105,3 +105,24 @@ def test_cancelled_newer_run_does_not_hide_the_older_pass(watcher) -> None:
         _check(4, "build", 2, "completed", "cancelled"),
     ]
     assert _judge(watcher, checks, runs, {"CI OK"}).state == "pass"
+
+
+def test_same_run_rerun_in_progress_holds_attempt_one_pass_pending(watcher) -> None:
+    run = _run(1, "in_progress")
+    run["run_attempt"] = 2
+    run["run_started_at"] = "2026-10-29T10:05:00Z"
+    check = _check(1, "CI OK", 1, "completed", "success")
+    check["completed_at"] = "2026-10-29T10:01:00Z"
+    assert _judge(watcher, [check], [run], {"CI OK"}).state == "pending"
+
+
+def test_same_second_runs_are_ordered_by_run_number(watcher) -> None:
+    old = _run(2948, "completed", "success")
+    new = _run(2949, "in_progress")
+    old["created_at"] = new["created_at"] = "2026-10-29T10:00:00Z"
+    old["run_number"], new["run_number"] = 10, 11
+    checks = [
+        _check(1, "CI OK", 2948, "completed", "success"),
+        _check(2, "build", 2949, "in_progress", None),
+    ]
+    assert _judge(watcher, checks, [old, new], {"CI OK"}).state == "pending"
