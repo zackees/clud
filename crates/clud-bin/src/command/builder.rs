@@ -11,8 +11,8 @@ use crate::provider_catalog;
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, push_prompt,
-    push_prompt_interactive, REBASE_PROMPT,
+    build_claude_do_goal, build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt,
+    do_procedure, push_prompt, push_prompt_interactive, REBASE_PROMPT,
 };
 use super::types::{HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule};
 
@@ -579,6 +579,17 @@ fn build_launch_plan_for_target_at(
         }
     }
 
+    if let (Backend::Claude, Some(Command::Do { target: Some(_) }), true) =
+        (backend, &args.command, seed_interactive_builtin)
+    {
+        // Claude caps the `/goal` condition at 4000 chars (#2372); the full
+        // rendered procedure rides in the appended system prompt instead.
+        if !deletion_instructions.is_empty() {
+            deletion_instructions.push_str("\n\n");
+        }
+        deletion_instructions.push_str(do_procedure(args.do_rendered_prompt.as_deref()));
+    }
+
     if matches!(backend, Backend::Claude) && !deletion_instructions.is_empty() {
         cmd.push("--append-system-prompt".into());
         cmd.push(deletion_instructions);
@@ -823,7 +834,15 @@ fn build_launch_plan_for_target_at(
             // follow-up input, so both Claude and Codex seed an interactive
             // session. `main` resolves the optional target before plan building.
             if seed_interactive_builtin && target.is_some() {
-                let prompt = build_do_prompt(args.do_rendered_prompt.as_deref());
+                let prompt = match (backend, target.as_deref()) {
+                    (Backend::Claude, Some(target)) => build_claude_do_goal(
+                        target,
+                        args.do_rendered_prompt
+                            .as_deref()
+                            .is_some_and(|text| !text.trim().is_empty()),
+                    ),
+                    _ => build_do_prompt(args.do_rendered_prompt.as_deref()),
+                };
                 push_prompt_interactive(&mut cmd, prompt);
             }
         }
