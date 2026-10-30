@@ -240,6 +240,28 @@ def _cli_system(command: list[str]) -> list[str]:
     return command[at : at + 2]
 
 
+def _cli_launch_prompt(harness: Harness, target: str) -> str:
+    """The `/goal` seed plus the appended system prompt that carries the contract.
+
+    The seed stays under Claude's 4000-char cap (#2372); the mock harness only
+    records user messages, so prepend the system prompt to see both.
+    """
+    launch = process.run(
+        [str(harness.clud), "--dry-run", "--claude", "do", target],
+        cwd=str(harness.repo),
+        capture_output=True,
+        text=True,
+        env=harness.env(),
+        timeout=60,
+    )
+    assert launch.returncode == 0, launch.stderr
+    command = json.loads(launch.stdout)["command"]
+    seed = command[-1]
+    assert len(seed) < 4000
+    appended = command[command.index("--append-system-prompt") + 1]
+    return f"{appended}\n\n{seed}"
+
+
 @pytest.mark.parametrize(
     "target",
     [

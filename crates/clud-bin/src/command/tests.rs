@@ -4,8 +4,8 @@ use super::builder::{
     plan_mode_suppression_notice, repeat_implies_no_done_warning, video_launch_error,
 };
 use super::prompts::{
-    build_claude_do_goal, build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt,
-    is_github_url, CLAUDE_GOAL_CONDITION_LIMIT, FIX_PROMPT,
+    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt,
+    is_github_url, FIX_PROMPT,
 };
 use super::types::LaunchPlan;
 use crate::args::Args;

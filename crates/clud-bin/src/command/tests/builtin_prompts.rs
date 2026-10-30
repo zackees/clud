@@ -116,12 +116,61 @@ fn test_do_command_resolves_goal_prompt() {
     // positional (no `-p`). Claude caps the /goal condition (#2372), so the
     // seed is short and the live contract rides in the appended system prompt.
     let seed = last_arg(&p);
-    assert!(seed.starts_with("/goal Complete `clud do`"));
+    assert!(seed.starts_with("/goal "));
     assert!(seed.contains("https://github.com/zackees/clud/issues/866"));
-    let system = appended_system_prompt(&p);
-    assert!(system.contains("# /do: rendered"));
-    assert!(system.contains("Verdict: `default`"));
-    assert!(system.contains("Read the issue and implement it"));
+    assert!(seed.chars().count() < crate::command::prompts::GOAL_SEED_CAP);
+    assert!(!seed.contains("# /do: rendered for this checkout by"));
+    let appended = appended_system_prompt(&p);
+    assert!(appended.contains("# /do: rendered for this checkout by"));
+    assert!(appended.contains("Verdict: `default`"));
+    assert!(appended.contains("Read the issue and implement it"));
+}
+
+fn appended_system_prompt(p: &LaunchPlan) -> &str {
+    let idx = p
+        .command
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .expect("claude plan carries --append-system-prompt");
+    &p.command[idx + 1]
+}
+
+#[test]
+fn test_do_goal_seed_stays_under_claude_cap_for_long_target_and_contract() {
+    let target = format!("refactor {}", "x".repeat(6000));
+    let args = parse(&["clud", "do", &target]);
+    let mut args = args;
+    args.do_rendered_prompt = Some("procedure line\n".repeat(1000));
+    let backend = crate::backend::resolve_backend(args.claude, args.codex);
+    let p = build_launch_plan(&args, backend, backend.executable_name());
+    let seed = last_arg(&p);
+    assert!(seed.starts_with("/goal "));
+    assert!(
+        seed.chars().count() < crate::command::prompts::GOAL_SEED_CAP,
+        "got {}",
+        seed.chars().count()
+    );
+    assert!(seed.contains("target truncated"));
+    assert!(appended_system_prompt(&p).contains(&"procedure line\n".repeat(1000)));
+}
+
+#[test]
+fn test_do_codex_delivers_contract_via_developer_instructions() {
+    let p = plan(&[
+        "clud",
+        "--codex",
+        "do",
+        "https://github.com/zackees/clud/issues/866",
+    ]);
+    let seed = last_arg(&p);
+    assert!(seed.starts_with("/goal "));
+    assert!(seed.chars().count() < crate::command::prompts::GOAL_SEED_CAP);
+    let dev = p
+        .command
+        .iter()
+        .find(|a| a.starts_with("developer_instructions="))
+        .expect("developer_instructions override");
+    assert!(dev.contains("rendered for this checkout by"));
 }
 
 #[test]
@@ -139,53 +188,28 @@ fn test_do_command_on_a_meta_issue_seeds_grind() {
     ));
     let backend = crate::backend::resolve_backend(args.claude, args.codex);
     let p = build_launch_plan(&args, backend, backend.executable_name());
-    assert!(last_arg(&p).starts_with("/goal Complete `clud do`"));
-    let seed = appended_system_prompt(&p);
-    assert!(seed.contains("# /do: rendered"));
-    assert!(seed.contains("This is a meta issue"));
-    assert!(seed.contains("Workflow tool"));
-    assert!(seed.contains("use Read to read the complete grind router"));
-    assert!(!seed.contains("Read the issue and implement it"));
-}
-
-#[test]
-fn test_build_do_prompt_preserves_the_whole_rendered_contract() {
-    let procedure = "Verdict: stale_merged\nrepair \"quotes\"; $(touch sentinel) &\nFinish";
-    assert_eq!(
-        build_do_prompt(Some(procedure)),
-        format!("/goal {procedure}")
-    );
-}
-
-fn appended_system_prompt(p: &LaunchPlan) -> &str {
-    let at = p
-        .command
-        .iter()
-        .position(|arg| arg == "--append-system-prompt")
-        .expect("claude plan appends a system prompt");
-    &p.command[at + 1]
-}
-
-#[test]
-fn test_claude_do_goal_stays_under_the_goal_condition_cap() {
-    // #2372: Claude Code rejects a longer condition without sending a request.
-    let target = "x".repeat(10_000);
-    let mut args = parse(&["clud", "do", &target]);
-    args.do_rendered_prompt = Some(format!("# /do: rendered\n{}", "y".repeat(8_000)));
-    let backend = crate::backend::resolve_backend(args.claude, args.codex);
-    let p = build_launch_plan(&args, backend, backend.executable_name());
     let seed = last_arg(&p);
     assert!(seed.starts_with("/goal "));
-    assert!(seed.chars().count() - "/goal ".len() < CLAUDE_GOAL_CONDITION_LIMIT);
-    assert!(appended_system_prompt(&p).contains(&"y".repeat(8_000)));
-    let unprepared = build_claude_do_goal(&target, false);
-    assert!(unprepared.starts_with("/goal Stop:"));
+    assert!(seed.chars().count() < crate::command::prompts::GOAL_SEED_CAP);
+    let appended = appended_system_prompt(&p);
+    assert!(appended.contains("This is a meta issue"));
+    assert!(appended.contains("Workflow tool"));
+    assert!(appended.contains("use Read to read the complete grind router"));
+    assert!(!appended.contains("Read the issue and implement it"));
+}
+
+#[test]
+fn test_build_do_prompt_is_short_and_names_the_target() {
+    let seed = build_do_prompt(Some("Verdict: x\nFinish"), "fix \"quotes\" $(touch s)");
+    assert!(seed.starts_with("/goal "));
+    assert!(seed.contains("fix \"quotes\" $(touch s)"));
+    assert!(!seed.contains("Verdict: x"));
 }
 
 #[test]
 fn test_do_plan_without_a_prepared_contract_fails_closed() {
     for rendered in [None, Some(""), Some("  ")] {
-        let seed = build_do_prompt(rendered);
+        let seed = build_do_prompt(rendered, "t");
         assert!(seed.starts_with("/goal Stop:"));
         assert!(seed.contains("do not start work"));
     }

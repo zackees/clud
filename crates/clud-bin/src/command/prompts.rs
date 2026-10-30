@@ -28,48 +28,47 @@ After downloading and analyzing the logs:
 Then proceed with the validation process:
 {validation}";
 
-const DO_NOT_PREPARED: &str =
-    "Stop: the live /do procedure was not prepared. Tell the user and do not start work.";
+/// Claude Code rejects a `/goal` condition over 4000 characters (#2372), so
+/// the seed stays far below it; the full contract rides in the system prompt.
+#[cfg(test)]
+pub(super) const GOAL_SEED_CAP: usize = 4000;
+const GOAL_TARGET_CAP: usize = 500;
 
-/// Claude Code rejects a `/goal` condition over this many characters with a
-/// request-free reply, so the session silently does nothing (#2372).
-pub(super) const CLAUDE_GOAL_CONDITION_LIMIT: usize = 4000;
-
-/// Longest target quoted in the short Claude `/goal` condition. The full
-/// target always reaches the model inside the rendered procedure.
-const DO_GOAL_TARGET_MAX_CHARS: usize = 1000;
-
-/// The rendered `clud do-prompt` contract, or a fail-closed stop instruction.
-pub(super) fn do_procedure(rendered: Option<&str>) -> &str {
-    rendered
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or(DO_NOT_PREPARED)
+/// The prepared `/do` contract, when this launch seeds one. Delivered through
+/// the appended system prompt (Claude) or developer instructions (Codex).
+pub(super) fn do_contract(args: &crate::args::Args) -> Option<&str> {
+    match &args.command {
+        Some(crate::args::Command::Do { target: Some(_) }) => args
+            .do_rendered_prompt
+            .as_deref()
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    }
 }
 
-/// Keep the rendered contract as goal text. Neither nested slash-command
-/// expansion nor a model-side Skill invocation is supported here (#2013).
-/// Used for Codex; Claude caps the condition, see [`build_claude_do_goal`].
-pub(super) fn build_do_prompt(rendered: Option<&str>) -> String {
-    format!("/goal {}", do_procedure(rendered))
+fn truncate_target(target: &str) -> String {
+    let target = target.trim();
+    if target.chars().count() <= GOAL_TARGET_CAP {
+        return target.to_string();
+    }
+    let kept: String = target.chars().take(GOAL_TARGET_CAP).collect();
+    format!("{kept} [target truncated; the full target is in the /do contract]")
 }
 
-/// Claude's `/goal` seed: a short condition naming the target. The rendered
-/// procedure travels in the appended system prompt, so the first request
-/// still carries it while the condition stays under Claude Code's cap (#2372).
-pub(super) fn build_claude_do_goal(target: &str, prepared: bool) -> String {
-    if !prepared {
-        return format!("/goal {DO_NOT_PREPARED}");
+/// Short `/goal` seed (target and done criteria). The whole rendered contract
+/// is carried by the system prompt, not the goal text (#2013, #2372). Without
+/// a prepared contract the seed fails closed.
+pub(super) fn build_do_prompt(rendered: Option<&str>, target: &str) -> String {
+    if rendered.is_none_or(|text| text.trim().is_empty()) {
+        return "/goal Stop: the live /do procedure was not prepared. Tell the user and do not start work."
+            .to_string();
     }
-    let mut quoted: String = target.chars().take(DO_GOAL_TARGET_MAX_CHARS).collect();
-    if quoted.len() < target.len() {
-        quoted.push_str("...");
-    }
-    let goal = format!(
-        "/goal Complete `clud do` for the target below by following the /do procedure \
-rendered by `clud do-prompt` in your system prompt, through its Finish step. Target: {quoted}"
-    );
-    debug_assert!(goal.chars().count() - "/goal ".len() < CLAUDE_GOAL_CONDITION_LIMIT);
-    goal
+    format!(
+        "/goal Complete the /do procedure for this target: {}. The full rendered procedure \
+(titled \"# /do: rendered for this checkout\") is in your system prompt; follow it exactly. \
+Done when that procedure's final step is complete and its stated completion criteria hold.",
+        truncate_target(target)
+    )
 }
 
 pub(super) const REBASE_PROMPT: &str = "\

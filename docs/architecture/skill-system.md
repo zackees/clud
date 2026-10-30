@@ -59,10 +59,13 @@ continues.
 
 `clud do` classifies its target and calls `command::do_prompt::render_current`
 before launch setup. That is also the renderer used by `clud do-prompt` for
-an explicitly entered `/do`. The CLI passes the resulting procedure as the
-text of `/goal`, preserving the harness's persistent goal without asking it
-to expand a nested slash command or invoke an explicit-only Skill tool.
-Missing preparation yields a stop instruction.
+an explicitly entered `/do`. Claude Code rejects a `/goal` condition over 4000
+characters (#2372), so the `/goal` seed is short (target, truncated at 500
+characters, plus done criteria) and the full rendered procedure rides in the
+appended system prompt (Claude, `--append-system-prompt`) or developer
+instructions (Codex). That keeps the persistent goal without asking the
+harness to expand a nested slash command or invoke an explicit-only Skill
+tool. Missing preparation yields a stop-only seed and no contract.
 
 A meta issue keeps the live starting-branch verdict and hands off through
 Read to the installed grind router, using the install registry's absolute
