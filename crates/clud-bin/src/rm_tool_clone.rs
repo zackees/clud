@@ -84,6 +84,14 @@ pub(crate) fn normalize_origin(url: &str) -> String {
     strip(url)
 }
 
+/// Whether `rev` holds commits that no `refs/remotes/*` ref reaches. A git
+/// failure is an error, never "no". Shared with the worktree trash schedule.
+pub(crate) fn has_unpushed(dir: &Path, rev: &str) -> Result<bool, String> {
+    let count =
+        crate::worktrees::run_git(dir, &["rev-list", "--count", rev, "--not", "--remotes"])?;
+    Ok(count.trim() != "0")
+}
+
 /// The facts for the clone at `dir`, reading origins lazily: the other checks
 /// run only when the origin matches. A git failure is an error, never a pass.
 pub(crate) fn probe(dir: &Path, allowed_origins: &[String]) -> Result<CloneFacts, String> {
@@ -108,8 +116,7 @@ pub(crate) fn probe(dir: &Path, allowed_origins: &[String]) -> Result<CloneFacts
     facts.dirty = !status.trim().is_empty();
     let branches = git(&["for-each-ref", "--format=%(refname)", "refs/heads"])?;
     for branch in branches.lines().map(str::trim).filter(|b| !b.is_empty()) {
-        let count = git(&["rev-list", "--count", branch, "--not", "--remotes"])?;
-        if count.trim() != "0" {
+        if has_unpushed(dir, branch)? {
             let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
             facts.unpushed_branches.push(short.to_string());
         }

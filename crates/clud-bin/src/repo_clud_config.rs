@@ -48,6 +48,10 @@
 //!     "block_cd": "auto"        // "auto" | true | false — pin the session
 //!                               // cwd to a registered repo root. See
 //!                               // `block_bad_cmd_cd.rs` and DD-047.
+//!   },
+//!   "gh": {
+//!     "backend": "ghd"          // "gh" (default) | "ghd" — the session's
+//!                               // `gh` shim runs `ghd gh ARGS` (#2352).
 //!   }
 //! }
 //! ```
@@ -74,6 +78,7 @@ pub struct RawRepoCludConfig {
     pub rust: RawRustConfig,
     pub optimize: RawOptimizeConfig,
     pub bash: RawBashConfig,
+    pub gh: RawGhConfig,
     pub hook_roots: RawHookRootsConfig,
     #[serde(deserialize_with = "deserialize_bad_commands")]
     pub bad_commands: Vec<BadCommandRule>,
@@ -99,6 +104,15 @@ pub struct RawRustConfig {
 #[serde(default)]
 pub struct RawBashConfig {
     pub block_cd: Option<Value>,
+}
+
+/// The `gh` section. `backend` is a raw [`Value`] for the same reason as
+/// [`RawBashConfig::block_cd`]: a typo is dropped with a warning instead of
+/// discarding the whole document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RawGhConfig {
+    pub backend: Option<Value>,
 }
 
 /// The `hook_roots` section — which other repos this session's hooks know
@@ -710,6 +724,7 @@ fn concat_dedupe_bad_pipelines(
 pub struct RepoCludConfig {
     pub rust: RustConfig,
     pub bash: BashConfig,
+    pub gh: GhConfig,
     pub hook_roots: HookRootsConfig,
     pub bad_commands: Vec<BadCommandRule>,
     pub bad_pipelines: Vec<BadPipelineRule>,
@@ -720,6 +735,33 @@ pub struct RepoCludConfig {
 pub struct HookRootsConfig {
     /// Declared organizational children of this repo.
     pub children: Vec<String>,
+}
+
+/// The `gh` section of `.clud/settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GhConfig {
+    pub backend: GhBackend,
+}
+
+/// `gh.backend` (#2352): what the session's `gh` shim runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GhBackend {
+    /// The real gh (plus the read broker and the watch upgrade).
+    #[default]
+    Gh,
+    /// Every call goes to `ghd gh ARGS`, which serves what it can and
+    /// relays the rest to the real gh. ghd is then required.
+    Ghd,
+}
+
+impl GhBackend {
+    pub fn from_json(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "gh" => Some(Self::Gh),
+            "ghd" => Some(Self::Ghd),
+            _ => None,
+        }
+    }
 }
 
 /// The `bash` section of `.clud/settings.json`.
@@ -862,6 +904,7 @@ fn has_directive(raw: &RawRepoCludConfig) -> bool {
         || raw.optimize.rust.install_soldr.is_some()
         || raw.optimize.rust.soldr_version.is_some()
         || raw.bash.block_cd.is_some()
+        || raw.gh.backend.is_some()
         || raw.hook_roots.children.is_some()
         || !raw.bad_commands.is_empty()
         || !raw.bad_pipelines.is_empty()
@@ -999,6 +1042,14 @@ pub fn parse_raw_repo_clud_config(text: &str) -> Result<RawRepoCludConfig, Strin
             ),
         }
     }
+    if let Some(value) = parsed.gh.backend.take() {
+        match GhBackend::from_json(&value) {
+            Some(_) => parsed.gh.backend = Some(value),
+            None => eprintln!(
+                "clud: ignoring unrecognized gh.backend value {value}; expected \"gh\" or \"ghd\""
+            ),
+        }
+    }
     Ok(parsed)
 }
 
@@ -1025,6 +1076,8 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
     let lower_bad_pipelines = lower.bad_pipelines.clone();
     let upper_bash = upper.bash.clone();
     let lower_bash = lower.bash.clone();
+    let upper_gh = upper.gh.clone();
+    let lower_gh = lower.gh.clone();
     let upper_hook_roots = upper.hook_roots.clone();
     let lower_hook_roots = lower.hook_roots.clone();
     let upper_rust = normalize_raw_rust(upper);
@@ -1042,6 +1095,9 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
         optimize: RawOptimizeConfig::default(),
         bash: RawBashConfig {
             block_cd: upper_bash.block_cd.or(lower_bash.block_cd),
+        },
+        gh: RawGhConfig {
+            backend: upper_gh.backend.or(lower_gh.backend),
         },
         hook_roots: RawHookRootsConfig {
             children: upper_hook_roots.children.or(lower_hook_roots.children),
@@ -1065,6 +1121,7 @@ fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
         rust,
         optimize,
         bash: _,
+        gh: _,
         hook_roots: _,
         bad_commands: _,
         bad_pipelines: _,
@@ -1095,6 +1152,14 @@ pub fn resolve(raw: RawRepoCludConfig) -> RepoCludConfig {
                 .block_cd
                 .as_ref()
                 .and_then(BlockCd::from_json)
+                .unwrap_or_default(),
+        },
+        gh: GhConfig {
+            backend: raw
+                .gh
+                .backend
+                .as_ref()
+                .and_then(GhBackend::from_json)
                 .unwrap_or_default(),
         },
         hook_roots: HookRootsConfig {

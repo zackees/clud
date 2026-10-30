@@ -164,6 +164,10 @@ struct Wire {
     warn_bytes: u64,
     state: String,
     bytes: u64,
+    /// True when the walk stopped early (`state` is `over`): `bytes` is then
+    /// just past the limit, not the true size. Absent in older files.
+    #[serde(default)]
+    bytes_is_lower_bound: bool,
 }
 
 /// Failure-silent read: missing or malformed means `None`.
@@ -195,6 +199,7 @@ pub fn write_cache(path: &Path, entry: &CachedTreeSize) -> std::io::Result<()> {
         warn_bytes: entry.warn_bytes,
         state: state.to_string(),
         bytes,
+        bytes_is_lower_bound: matches!(entry.check, SizeCheck::Over(_)),
     };
     let text = serde_json::to_string(&wire).map_err(std::io::Error::other)?;
     if let Some(parent) = path.parent() {

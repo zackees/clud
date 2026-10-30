@@ -1949,12 +1949,17 @@ def _run_do_with_kind(
 def test_dry_run_do_delivers_meta_handoff_through_claude() -> None:
     result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1", harness="claude")
     assert result.returncode == 0, result.stderr
-    seed = json.loads(result.stdout)["command"][-1]
-    assert seed.startswith("/goal ")
+    command = json.loads(result.stdout)["command"]
+    goal = command[-1]
+    assert goal.startswith("/goal ")
+    # Claude caps the /goal condition at 4000 chars (#2372); the rendered
+    # procedure rides in the appended system prompt instead.
+    assert len(goal) - len("/goal ") < 4000
+    assert not goal.startswith("/goal /grind ")
+    seed = command[command.index("--append-system-prompt") + 1]
     assert "rendered for this checkout" in seed
     assert "This is a meta issue" in seed
     assert "Workflow" in seed
-    assert not seed.startswith("/goal /grind ")
 
 
 @pytest.mark.parametrize("harness", ["codex", "deepseek"])

@@ -10,7 +10,7 @@ use super::RUNNING_PROCESS_SERVICE_NAME;
 /// identity sidecar, written next to `daemon.json` at startup and
 /// removed on clean shutdown. Clients read it and verify the daemon
 /// with `BackendHandle::probe_with_service` before trusting it.
-pub(super) fn daemon_identity_path(state_dir: &Path) -> PathBuf {
+pub(in crate::daemon) fn daemon_identity_path(state_dir: &Path) -> PathBuf {
     state_dir.join("daemon-identity.json")
 }
 
@@ -33,7 +33,7 @@ fn state_dir_token(state_dir: &Path) -> String {
 /// Unix: a socket path inside the state dir, falling back to a short
 /// temp-dir path when the state dir would overflow `sun_path` (~104
 /// bytes on macOS).
-pub(super) fn endpoint_for_state_dir(state_dir: &Path) -> io::Result<Endpoint> {
+pub(in crate::daemon) fn endpoint_for_state_dir(state_dir: &Path) -> io::Result<Endpoint> {
     let token = state_dir_token(state_dir);
     if crate::platform::host::WINDOWS {
         Endpoint::windows_pipe(RUNNING_PROCESS_SERVICE_NAME, format!("clud-rp-{token}"))

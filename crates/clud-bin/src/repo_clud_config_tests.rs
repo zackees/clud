@@ -846,3 +846,44 @@ fn a_block_cd_only_file_counts_as_a_directive() {
     let raw = parse_raw_repo_clud_config(r#"{"bash":{"block_cd":true}}"#).unwrap();
     assert!(has_directive(&raw));
 }
+
+// #2352: `gh.backend` routes the session's gh shim to ghd.
+#[test]
+fn gh_backend_defaults_to_gh_and_accepts_ghd() {
+    assert_eq!(
+        parse_repo_clud_config("{}").unwrap().gh.backend,
+        GhBackend::Gh
+    );
+    for (body, expected) in [
+        (r#"{"gh":{"backend":"gh"}}"#, GhBackend::Gh),
+        (r#"{"gh":{"backend":"ghd"}}"#, GhBackend::Ghd),
+    ] {
+        assert_eq!(
+            parse_repo_clud_config(body).unwrap().gh.backend,
+            expected,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn an_unrecognized_gh_backend_is_dropped_without_losing_the_file() {
+    let config = parse_repo_clud_config(
+        r#"{"gh":{"backend":"ghdd"},"bad_commands":[{"id":"soldr","match":"cargo","replacement":"soldr cargo"}]}"#,
+    )
+    .expect("document still parses");
+    assert_eq!(config.gh.backend, GhBackend::Gh);
+    assert_eq!(config.bad_commands.len(), 1);
+}
+
+#[test]
+fn gh_backend_layers_repo_over_user() {
+    let user = parse_raw_repo_clud_config(r#"{"gh":{"backend":"gh"}}"#).unwrap();
+    let repo = parse_raw_repo_clud_config(r#"{"gh":{"backend":"ghd"}}"#).unwrap();
+    assert_eq!(
+        resolve(merge(repo, user.clone())).gh.backend,
+        GhBackend::Ghd
+    );
+    let silent = parse_raw_repo_clud_config(r#"{"bash":{"block_cd":true}}"#).unwrap();
+    assert_eq!(resolve(merge(silent, user)).gh.backend, GhBackend::Gh);
+}

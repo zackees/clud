@@ -297,7 +297,10 @@ jobs:
           build-cache-mode: thin
           shims: true
           preserve-source-mtimes: true
-          solo-toolchain-cache: true
+          # #2342 / #2316: the shared solo-toolchain cache entry is poisoned
+          # (key says rustc1.95.0, archive ships 1.98.0-nightly) and setup-soldr
+          # cannot repair it without actions: write. Off until #2316 re-enables it.
+          solo-toolchain-cache: false
           cache-key-suffix: static
           prebuild-deps: none
       # `.venv/bin/python`, not `uv run`: pyproject sets build-backend = "soldr",

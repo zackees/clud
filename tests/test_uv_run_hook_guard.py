@@ -24,6 +24,9 @@ from pathlib import Path
 
 import pytest
 
+# Tier 1 (#2356): conftest's session_rm_path copies the built clud-shim onto PATH.
+pytestmark = pytest.mark.daemon
+
 TOOL_DIR = (
     Path(__file__).resolve().parents[1]
     / "crates"

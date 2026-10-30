@@ -963,6 +963,84 @@ pub(super) fn nearest_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Top-level commands that intend to affect the session itself (or are
+/// opaque to a parse), so a subshell wrap would change what they mean.
+const SESSION_AFFECTING: &[&str] = &[
+    "exit", "exec", "export", "set", "source", ".", "alias", "unalias", "unset", "pushd", "popd",
+    "eval", "trap", "shopt", "umask", "declare", "typeset", "readonly", "local", "return", "shift",
+    "ulimit", "wait", "disown", "fg", "bg",
+];
+
+/// A `cd DIR && CMD` (or `cd DIR; CMD`) that would be refused only for
+/// moving the session cwd, rewritten as `(cd DIR && CMD)` (#2354).
+///
+/// Faithful only when the wrap provably cannot change what the call does
+/// besides the cwd, so it declines (the caller keeps the deny) on anything
+/// doubtful: a non-POSIX dialect, a parse error, a `cd` that is not the very
+/// first command, a top-level builtin that targets the session
+/// ([`SESSION_AFFECTING`]), a top-level `&`, a function definition, a script
+/// variable assignment, or text a closing `)` could break (newlines, `#`
+/// comments, here-docs, a trailing backslash).
+pub(super) fn subshell_substitute(command_text: &str, dialect: ShellDialect) -> Option<String> {
+    if dialect != ShellDialect::Posix {
+        return None;
+    }
+    let text = command_text.trim();
+    if text.is_empty()
+        || text.contains(['\n', '\r', '#', '`'])
+        || text.contains("<<")
+        || text.ends_with('\\')
+    {
+        return None;
+    }
+    let script = parse_command_with_home(text, dialect, None, None);
+    if script.has_error
+        || script.depth_capped
+        || !script.assigned.is_empty()
+        || script
+            .constructs
+            .contains(&crate::shell_ast::Construct::FunctionDefinition)
+    {
+        return None;
+    }
+    let first = script.invocations.first()?;
+    if !runs_in_session_shell(first) || first.in_error || !is_cd(first, dialect) {
+        return None;
+    }
+    let unsafe_top_level = script.top_level().any(|inv| {
+        // Raw argv, not `rule_words`: that unwraps `exec ls` to `ls`.
+        let argv = inv.argv();
+        inv.background
+            || inv.in_error
+            || inv.heredoc.is_some()
+            || argv.first().is_none_or(|word| {
+                SESSION_AFFECTING.contains(&word.trim_matches(&['\'', '"'][..]))
+                    || SESSION_AFFECTING.contains(&program_name(word).as_str())
+            })
+    });
+    if unsafe_top_level {
+        return None;
+    }
+    Some(format!("({text})"))
+}
+
+fn is_cd(invocation: &crate::shell_ast::Invocation, dialect: ShellDialect) -> bool {
+    let words = rule_words(invocation);
+    words
+        .first()
+        .is_some_and(|word| cd_builtins(dialect).contains(&program_name(word).as_str()))
+}
+
+/// The message the agent sees when [`subshell_substitute`] applied.
+pub(super) fn substitution_notice(original: &str, rewritten: &str) -> String {
+    format!(
+        "[clud] ran {} instead of {}: cd would move the session cwd out of its pinned root(s) \
+         (bash.block_cd); the subshell runs the same commands and leaves the session where it was",
+        truncate_command(rewritten),
+        truncate_command(original),
+    )
+}
+
 #[cfg(test)]
 #[path = "block_bad_cmd_cd_tests.rs"]
 mod block_bad_cmd_cd_tests;

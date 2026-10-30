@@ -254,6 +254,7 @@ pub(super) fn spawn_registry_worker_for_state(
         .then(gc_tick_cadence_from_env)
         .flatten();
     let reconcile_dir = state_dir.clone();
+    let evict_dir = state_dir.clone();
     let config = RegistryWorkerConfig {
         tick_cadence,
         live_cwds_provider: Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
@@ -270,7 +271,19 @@ pub(super) fn spawn_registry_worker_for_state(
                 "[clud] note: gc registry unavailable ({err}); retrying every {}s",
                 REGISTRY_OPEN_RETRY.as_secs()
             );
-            spawn_deferred_registry_worker(Registry::open_default, config, REGISTRY_OPEN_RETRY)
+            // Issue #2142: when the holder is a stale clud daemon, ask it to
+            // stop on the worker thread (never on the startup path) and
+            // retry the open for a bounded time before the 30s cadence.
+            let mut first = Some(evict_dir);
+            let open = move || match first.take() {
+                Some(dir) => super::registry_holder::open_after_eviction(
+                    Registry::open_default,
+                    || super::registry_holder::evict_stale_holders(&dir),
+                    super::registry_holder::EVICT_WAIT,
+                ),
+                None => Registry::open_default(),
+            };
+            spawn_deferred_registry_worker(open, config, REGISTRY_OPEN_RETRY)
         }
     }
 }

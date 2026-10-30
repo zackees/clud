@@ -852,3 +852,127 @@ fn the_pwd_walk_remedy_names_the_root_and_the_reason() {
     assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains("CLAUDE_PROJECT_DIR"));
     assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains(".extern-repos"));
 }
+
+// ---------------------------------------------------------------------
+// #2354: a blocked `cd DIR && CMD` runs in a subshell instead.
+// ---------------------------------------------------------------------
+
+fn sub(command: &str) -> Option<String> {
+    subshell_substitute(command, ShellDialect::Posix)
+}
+
+#[test]
+fn a_leading_cd_chain_is_wrapped_in_a_subshell() {
+    assert_eq!(sub("cd x && ls").as_deref(), Some("(cd x && ls)"));
+    assert_eq!(sub("  cd x; ls -la  ").as_deref(), Some("(cd x; ls -la)"));
+    assert_eq!(
+        sub("cd x && ls | wc -l").as_deref(),
+        Some("(cd x && ls | wc -l)")
+    );
+}
+
+#[test]
+fn unsafe_forms_keep_the_denial() {
+    for command in [
+        "cd x && exit 3",
+        "cd x && exec ls",
+        "cd x && export A=1",
+        "cd x && set -e",
+        "cd x && source env.sh",
+        "cd x && . env.sh",
+        "cd x && alias l=ls",
+        "cd x && unset A",
+        "cd x && pushd y",
+        "cd x && popd",
+        "cd x && sleep 5 &",
+        "cd x && ls # note",
+        "cd x && cat <<EOF\nhi\nEOF",
+        "cd x && echo hi \\",
+        "cd x &&\nls",
+        "ls && cd x",
+        "A=1; cd x && ls",
+        "f() { :; }; cd x && ls",
+        "cd x && (ls",
+        "",
+    ] {
+        assert_eq!(sub(command), None, "{command:?}");
+    }
+    assert_eq!(
+        subshell_substitute("cd x && ls", ShellDialect::PowerShell),
+        None
+    );
+}
+
+fn substitution_response(
+    input: serde_json::Value,
+    mode: Option<&str>,
+) -> Option<serde_json::Value> {
+    let raw = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "cwd": "/repo",
+        "tool_input": input,
+    })
+    .to_string();
+    let payload =
+        crate::block_bad_cmd::parse_payload(&raw, Path::new("/repo")).expect("payload parses");
+    let rewritten = sub(&payload.command)?;
+    let notice = substitution_notice(&payload.command, &rewritten);
+    crate::block_bad_cmd::cd_substitution_output(&payload, rewritten, &notice, "PreToolUse", mode)
+}
+
+fn bash_input() -> serde_json::Value {
+    serde_json::json!({"command": "cd x && ls", "description": "d"})
+}
+
+#[test]
+fn bypass_permissions_substitutes_with_allow() {
+    let out = substitution_response(bash_input(), Some("bypassPermissions")).unwrap();
+    let specific = &out["hookSpecificOutput"];
+    assert_eq!(specific["permissionDecision"], "allow");
+    assert_eq!(specific["updatedInput"]["command"], "(cd x && ls)");
+    assert_eq!(specific["updatedInput"]["description"], "d");
+    let context = specific["additionalContext"].as_str().unwrap();
+    assert!(context.starts_with("[clud] ran `(cd x && ls)` instead of `cd x && ls`"));
+}
+
+#[test]
+fn other_permission_modes_substitute_with_ask() {
+    for mode in ["default", "acceptEdits", "plan"] {
+        let out = substitution_response(bash_input(), Some(mode)).unwrap();
+        let specific = &out["hookSpecificOutput"];
+        assert_eq!(specific["permissionDecision"], "ask", "{mode}");
+        assert_eq!(
+            specific["updatedInput"]["command"], "(cd x && ls)",
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_permission_mode_keeps_the_deny() {
+    assert_eq!(substitution_response(bash_input(), None), None);
+}
+
+#[test]
+fn a_non_object_tool_input_keeps_the_deny() {
+    let out = substitution_response(serde_json::json!("cd x && ls"), Some("bypassPermissions"));
+    assert_eq!(out, None);
+}
+
+#[test]
+fn a_codex_session_is_one_without_a_claude_project_dir() {
+    assert!(crate::block_bad_cmd::codex_without_project_dir(None));
+    assert!(!crate::block_bad_cmd::codex_without_project_dir(Some(
+        "/repo".as_ref()
+    )));
+}
+
+#[test]
+fn a_repeat_denial_is_still_shortened() {
+    let dir = TempDir::new().unwrap();
+    let full = || deny("cd /elsewhere && make", CdPolicy::Strict).expect("denied");
+    let first = condense_at(Some(dir.path()), Some("s2"), full());
+    let second = condense_at(Some(dir.path()), Some("s2"), full());
+    assert!(second.len() < first.len());
+}

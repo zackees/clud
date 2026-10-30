@@ -9,8 +9,8 @@ use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::ListenerOptions;
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_sdk::{
-    remove_daemon_identity_file, write_daemon_identity_file, BackendEndpointMux,
-    LegacyClassification, MuxPoll,
+    read_daemon_identity_file, remove_daemon_identity_file, write_daemon_identity_file,
+    BackendEndpointMux, LegacyClassification, MuxPoll,
 };
 use running_process::broker::builders::{CacheManifestBuilder, ServiceDefinitionBuilder};
 use running_process::broker::protocol::CacheRootKind;
@@ -37,17 +37,86 @@ use super::{
 pub(in crate::daemon) struct FrameLane {
     identity_path: PathBuf,
     endpoint_path: String,
+    /// Identity this lane wrote to the sidecar: `(pid, started_at_unix_ms)`.
+    owner: (u32, u64),
+    /// `(dev, inode)` of the sidecar right after this lane wrote it. A
+    /// superseding daemon replaces the file by atomic rename, so its inode
+    /// differs. `None` where the host has no file identity.
+    sidecar_id: Option<(u64, u64)>,
+    /// `(dev, inode)` of the socket file right after this lane bound it.
+    socket_id: Option<(u64, u64)>,
 }
 
 impl FrameLane {
-    pub(in crate::daemon) fn cleanup(&self) {
-        remove_daemon_identity_file(&self.identity_path);
-        if crate::platform::host::WINDOWS {
-            // Named pipes vanish with their last handle; nothing on disk.
-            let _ = &self.endpoint_path;
-        } else {
-            let _ = std::fs::remove_file(&self.endpoint_path);
+    pub(super) fn new(
+        identity_path: PathBuf,
+        endpoint_path: String,
+        daemon: &DaemonProcess,
+        sidecar_id: Option<(u64, u64)>,
+        socket_id: Option<(u64, u64)>,
+    ) -> Self {
+        Self {
+            identity_path,
+            endpoint_path,
+            owner: (daemon.pid, daemon.started_at_unix_ms),
+            sidecar_id,
+            socket_id,
         }
+    }
+
+    /// Remove the sidecar and socket path, but only while the sidecar is
+    /// still ours (pid + start time, and its inode when recorded). A
+    /// successor always writes its sidecar before it binds, so a sidecar that
+    /// is not ours means the socket at the endpoint is not ours either, even
+    /// when the filesystem reused our socket's `(dev, inode)` for it (#2340).
+    /// An unreadable sidecar removes neither file. The socket inode compare
+    /// stays as an extra guard. There is no connect probe: our own listener
+    /// is still live here, so a probe would always see "a listener".
+    ///
+    /// The stat-then-unlink window remains: a successor that replaces a file
+    /// between our check and our `remove_file` loses it. The consequence is
+    /// bounded: clients fall back to the TCP wire.
+    pub(in crate::daemon) fn cleanup(&self) {
+        if crate::platform::host::WINDOWS {
+            // Named pipes vanish with their last handle; only the sidecar
+            // is on disk, and without inodes the identity read is the guard.
+            if sidecar_is_ours(&self.identity_path, self.owner, None) {
+                remove_daemon_identity_file(&self.identity_path);
+            }
+            return;
+        }
+        if !sidecar_is_ours(&self.identity_path, self.owner, self.sidecar_id) {
+            return;
+        }
+        let path = Path::new(&self.endpoint_path);
+        if self.socket_id.is_some()
+            && crate::platform::file_identity::file_identity(path) == self.socket_id
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        remove_daemon_identity_file(&self.identity_path);
+    }
+}
+
+/// Whether the sidecar is still ours: its inode (when recorded) matches
+/// `sidecar_id` and it carries `owner`'s identity. Reads the file once.
+fn sidecar_is_ours(
+    identity_path: &Path,
+    owner: (u32, u64),
+    sidecar_id: Option<(u64, u64)>,
+) -> bool {
+    if sidecar_id.is_some()
+        && crate::platform::file_identity::file_identity(identity_path) != sidecar_id
+    {
+        return false;
+    }
+    read_daemon_identity_file(identity_path).is_some_and(|d| (d.pid, d.started_at_unix_ms) == owner)
+}
+
+/// Remove the sidecar only while it is ours.
+fn remove_sidecar_if_ours(identity_path: &Path, owner: (u32, u64), sidecar_id: Option<(u64, u64)>) {
+    if sidecar_is_ours(identity_path, owner, sidecar_id) {
+        remove_daemon_identity_file(identity_path);
     }
 }
 
@@ -163,6 +232,40 @@ pub(in crate::daemon) fn publish_cache_manifest(state_dir: &Path) -> io::Result<
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+fn bind_listener(endpoint_path: &str) -> io::Result<interprocess::local_socket::Listener> {
+    if !crate::platform::host::WINDOWS {
+        // A previous daemon that died uncleanly leaves the socket file
+        // behind; binding fails with AddrInUse unless it is removed.
+        let _ = std::fs::remove_file(endpoint_path);
+    }
+    let name = local_socket_name(endpoint_path)?;
+    ListenerOptions::new().name(name).create_sync()
+}
+
+/// Claim the endpoint for `daemon`: write the sidecar first (the ownership
+/// claim, so a superseded daemon's cleanup never sees its own identity while
+/// our socket is bound), then bind, recording both files' identities.
+pub(super) fn claim_endpoint(
+    state_dir: &Path,
+    daemon: &DaemonProcess,
+    endpoint_path: String,
+) -> io::Result<(FrameLane, interprocess::local_socket::Listener)> {
+    let identity_path = daemon_identity_path(state_dir);
+    write_daemon_identity_file(&identity_path, daemon)?;
+    let sidecar_id = crate::platform::file_identity::file_identity(&identity_path);
+    let owner = (daemon.pid, daemon.started_at_unix_ms);
+    let listener = match bind_listener(&endpoint_path) {
+        Ok(listener) => listener,
+        Err(err) => {
+            remove_sidecar_if_ours(&identity_path, owner, sidecar_id);
+            return Err(err);
+        }
+    };
+    let socket_id = crate::platform::file_identity::file_identity(Path::new(&endpoint_path));
+    let lane = FrameLane::new(identity_path, endpoint_path, daemon, sidecar_id, socket_id);
+    Ok((lane, listener))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_frame_lane(
     state_dir: &Path,
@@ -177,19 +280,9 @@ pub(super) fn start_frame_lane(
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
 
-    if !crate::platform::host::WINDOWS {
-        // A previous daemon that died uncleanly leaves the socket file
-        // behind; binding fails with AddrInUse unless it is removed.
-        let _ = std::fs::remove_file(&endpoint_path);
-    }
-
-    let name = local_socket_name(&endpoint_path)?;
-    let listener = ListenerOptions::new().name(name).create_sync()?;
-
     let daemon = DaemonProcess::current_process(endpoint, None)
         .map_err(|err| io::Error::other(err.to_string()))?;
-    let identity_path = daemon_identity_path(state_dir);
-    write_daemon_identity_file(&identity_path, &daemon)?;
+    let (lane, listener) = claim_endpoint(state_dir, &daemon, endpoint_path)?;
 
     let mux = Arc::new(BackendEndpointMux::new(
         daemon,
@@ -244,10 +337,7 @@ pub(super) fn start_frame_lane(
             }
         })?;
 
-    Ok(FrameLane {
-        identity_path,
-        endpoint_path,
-    })
+    Ok(lane)
 }
 
 /// Serve one accepted connection through the mux until the peer

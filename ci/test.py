@@ -168,6 +168,59 @@ def _marked_test_env(env: dict[str, str]) -> dict[str, str]:
     return marked
 
 
+HOST_TIER_FLAG = "--host"
+TIER_ENV_VAR = "CLUD_TEST_TIER"
+# A library test that needs a built binary is named `tier1_*` (#2356).
+RUST_TIER1_PREFIX = "tier1_"
+# #2356: Tier 0 builds no workspace binary. Every binary variable points here,
+# so a test that runs one without the `daemon` marker fails loudly instead of
+# reaching the host's installed clud or its daemon.
+TIER0_ABSENT_BINARY = "tier0-builds-no-binary--mark-the-test-daemon"
+_BINARY_ENV_VARS = (
+    "CLUD_TEST_BINARY",
+    "CLUD_TEST_BLOCK_BAD_CMD_BINARY",
+    "CLUD_TEST_MOCK_AGENT_BINARY",
+)
+
+
+def host_tier_env(env: dict[str, str]) -> dict[str, str]:
+    """Tier 0 environment: every test-binary variable names a missing file."""
+    tier0 = env.copy()
+    # tests/conftest.py skips importing `daemon` modules under this flag:
+    # some resolve their binary at import time, before markers deselect.
+    tier0[TIER_ENV_VAR] = "0"
+    missing = str(ROOT / "target" / TIER0_ABSENT_BINARY)
+    for name in _BINARY_ENV_VARS:
+        tier0[name] = missing
+    return tier0
+
+
+def run_host_tier(env: dict[str, str], pytest_args: list[str]) -> int:
+    """Tier 0 (#2356): Rust library tests and pytest, no binary and no daemon.
+
+    Integration-target crates and `daemon`-marked Python tests spawn a built
+    clud; they are Tier 1 and run under `bash test` or bosn.
+    """
+    cargo_test = _cargo(["test", "--workspace", "--lib"], env=env)
+    cargo_test += ["--", "--skip", RUST_TIER1_PREFIX]
+    if sys.platform == "win32":
+        cargo_test += ["--test-threads=1"]
+    tracked_before = tracked_files.snapshot(ROOT)
+    if run(cargo_test, env=env) != 0:
+        return 1
+    if _tracked_files_changed(tracked_before, during="the Rust library tests"):
+        return 1
+    pytest_cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-m",
+        "not integration and not daemon",
+        *pytest_args,
+    ]
+    return 0 if _pytest_ok(run(pytest_cmd, env=host_tier_env(env))) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     from ci.env import activate, suite_env
 
@@ -175,6 +228,12 @@ def main(argv: list[str] | None = None) -> int:
     env = suite_env()
 
     argv = list(sys.argv[1:] if argv is None else argv)
+    if HOST_TIER_FLAG in argv:
+        return run_host_tier(env, [a for a in argv if a != HOST_TIER_FLAG])
+    return _run_suites(env, argv)
+
+
+def _run_suites(env: dict[str, str], argv: list[str]) -> int:
     run_unit, run_integration, pytest_args = _select_suites(argv)
 
     # Rust and Python tests need workspace binaries on disk, but

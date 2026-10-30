@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,14 +36,70 @@ def _events(state_dir: Path) -> list[dict[str, object]]:
     return events
 
 
+# Generous, Windows-scaled deadlines (#2268). A hosted Windows runner has been
+# seen to take longer than 10s between `daemon_starting` and the listener
+# being ready, so a fixed 10s lease deadline expired with the client still
+# blocked inside `ensure_daemon`. The waits are event-driven and return as soon
+# as the event lands, so the generous bound costs nothing on a healthy run.
+_WINDOWS = sys.platform == "win32"
+DAEMON_READY_TIMEOUT = 120.0 if _WINDOWS else 30.0
+LEASE_TIMEOUT = 60.0 if _WINDOWS else 15.0
+PRUNE_TIMEOUT = 60.0 if _WINDOWS else 20.0
+_TAIL_BYTES = 4096
+
+
+def _tail_text(path: Path, limit: int = _TAIL_BYTES) -> str:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            return stream.read().decode("utf-8", "replace")
+    except OSError as error:
+        return f"<unreadable: {error}>"
+
+
+def _log_tails(state_dir: Path) -> str:
+    """Bounded tails of the client's captured output and any daemon log."""
+    parts: list[str] = []
+    candidates = [
+        state_dir.parent / "client.stdout.log",
+        state_dir.parent / "client.stderr.log",
+    ]
+    for root in (state_dir, state_dir / "logs"):
+        try:
+            candidates.extend(sorted(root.glob("*.log"))[:5])
+        except OSError:
+            continue
+    for path in candidates:
+        if path.is_file():
+            parts.append(f"--- {path.name} (tail) ---\n{_tail_text(path)}")
+    return "\n".join(parts) or "<no client or daemon logs>"
+
+
+def _pid_alive(pid: int | None) -> bool | None:
+    if pid is None:
+        return None
+    try:
+        return psutil.pid_exists(pid)
+    except psutil.Error:
+        return None
+
+
 def _wait_for_lease_event(
     state_dir: Path,
     op: str,
-    client_pid: int,
-    timeout: float = 10.0,
+    client_pid: int | None,
+    timeout: float = LEASE_TIMEOUT,
     *,
     proc: process.Popen[str] | None = None,
 ) -> dict[str, object]:
+    """Wait for ``op`` (for ``client_pid``, or any client when ``None``).
+
+    Returns as soon as the event is logged; ``timeout`` is only an upper bound.
+    On failure the assertion carries bounded diagnostics: event list, whether
+    the client is alive, and the client/daemon log tails.
+    """
     deadline = time.monotonic() + timeout
     event_error = None
     while time.monotonic() < deadline:
@@ -55,7 +112,9 @@ def _wait_for_lease_event(
             event_error = "event log unreadable or incomplete"
             events = []
         for event in events:
-            if event.get("op") == op and event.get("client_pid") == client_pid:
+            if event.get("op") == op and (
+                client_pid is None or event.get("client_pid") == client_pid
+            ):
                 return event
         if proc is not None and proc.poll() is not None:
             break
@@ -69,18 +128,22 @@ def _wait_for_lease_event(
         events = []
         event_error = "event log unreadable or incomplete"
     stderr = ""
-    if proc is not None and proc.stderr is not None:
+    if proc is not None and proc.poll() is not None and proc.stderr is not None:
+        # Only drain a pipe once the process is gone; reading a live one blocks.
         captured = proc.stderr.read()
         stderr = (
-            captured[-4096:]
+            captured[-_TAIL_BYTES:]
             if isinstance(captured, str)
-            else captured[-4096:].decode("utf-8", "replace")
+            else captured[-_TAIL_BYTES:].decode("utf-8", "replace")
         )
     status = proc.poll() if proc is not None else None
+    client_alive = _pid_alive(proc.pid) if proc is not None else None
     raise AssertionError(
-        f"waiting for {op} for client {client_pid} failed; "
-        f"exit status: {status}; event error: {event_error}; event count: {len(events)}; "
-        f"recent events: {str(events[-10:])[-2048:]}; stderr tail: {stderr}"
+        f"waiting for {op} for client {client_pid} failed after {timeout}s; "
+        f"exit status: {status}; client alive: {client_alive}; "
+        f"event error: {event_error}; event count: {len(events)}; "
+        f"all events: {str(events)[-8192:]}; stderr tail: {stderr}\n"
+        f"{_log_tails(state_dir)}"
     )
 
 
@@ -88,23 +151,37 @@ def _launch_direct_client(
     clud_binary: Path,
     env: dict[str, str],
     sleep_ms: int,
+    log_dir: Path | None = None,
 ) -> process.Popen[str]:
-    return process.Popen(
-        [
-            str(clud_binary),
-            "--codex",
-            "--subprocess",
-            "-p",
-            "lease-probe",
-            "--",
-            "--mock-sleep-ms",
-            str(sleep_ms),
-        ],
-        stdout=process.DEVNULL,
-        stderr=process.PIPE,
-        text=True,
-        env=env,
-    )
+    # Capture to files, not pipes: a file can be tailed while the client is
+    # still running, a pipe cannot without blocking.
+    stdout: object = process.DEVNULL
+    stderr: object = process.PIPE
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stdout = (log_dir / "client.stdout.log").open("wb")
+        stderr = (log_dir / "client.stderr.log").open("wb")
+    try:
+        return process.Popen(
+            [
+                str(clud_binary),
+                "--codex",
+                "--subprocess",
+                "-p",
+                "lease-probe",
+                "--",
+                "--mock-sleep-ms",
+                str(sleep_ms),
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            text=log_dir is None,
+            env=env,
+        )
+    finally:
+        if log_dir is not None:
+            stdout.close()  # type: ignore[attr-defined]
+            stderr.close()  # type: ignore[attr-defined]
 
 
 def _kill_client_tree(proc: process.Popen[str], daemon_pid: int) -> None:
@@ -141,7 +218,7 @@ def _kill_client_tree(proc: process.Popen[str], daemon_pid: int) -> None:
 
 @contextmanager
 def _managed_client(clud_binary: Path, env: dict[str, str], sleep_ms: int, state_dir: Path):
-    proc = _launch_direct_client(clud_binary, env, sleep_ms)
+    proc = _launch_direct_client(clud_binary, env, sleep_ms, state_dir.parent)
     try:
         yield proc
     finally:
@@ -160,10 +237,11 @@ def test_direct_client_holds_one_lease_and_releases_on_normal_exit(
     state_dir = tmp_path / "daemon-state"
     env = managed_env(mock_env, state_dir)
     with _managed_client(clud_binary, env, 2_000, state_dir) as proc:
+        _wait_for_lease_event(state_dir, "daemon_started", None, DAEMON_READY_TIMEOUT, proc=proc)
         acquired = _wait_for_lease_event(state_dir, "client_lease_acquired", proc.pid, proc=proc)
         assert acquired["lease_count"] == 1
         assert proc.wait(timeout=10) == 0
-        released = _wait_for_lease_event(state_dir, "client_lease_released", proc.pid)
+        released = _wait_for_lease_event(state_dir, "client_lease_released", proc.pid, 30.0)
 
         assert released["lease_count"] == 0
         client_events = [
@@ -183,6 +261,7 @@ def test_forcibly_killed_client_is_pruned_without_release_rpc(
     state_dir = tmp_path / "daemon-state"
     env = managed_env(mock_env, state_dir)
     with _managed_client(clud_binary, env, 30_000, state_dir) as proc:
+        _wait_for_lease_event(state_dir, "daemon_started", None, DAEMON_READY_TIMEOUT, proc=proc)
         acquired = _wait_for_lease_event(state_dir, "client_lease_acquired", proc.pid, proc=proc)
 
         daemon_pid = acquired["daemon_pid"]
@@ -191,7 +270,7 @@ def test_forcibly_killed_client_is_pruned_without_release_rpc(
             state_dir,
             "client_lease_pruned",
             proc.pid,
-            timeout=15,
+            timeout=PRUNE_TIMEOUT,
         )
 
         assert pruned["lease_count"] == 0

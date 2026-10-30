@@ -75,6 +75,32 @@ useful, then push and require every selected hosted check to pass. Bosn is
 optional: publishing and PR validation require no local receipt or commit
 trailer. PRs and merge groups execute their selected hosted jobs.
 
+### Two local test tiers (#2356)
+
+| Tier | Command | Runs | When |
+| --- | --- | --- | --- |
+| 0 | `bash test --host` | `soldr cargo test --workspace --lib -- --skip tier1_` plus pytest `-m "not integration and not daemon"` | Constantly, on the host |
+| 1 | `bash test` / `bash test --integration`, or `clud ci` | The `integration` test target, which spawns a built `clud`, plus every `daemon`-marked Python test | After Tier 0 passes, at most once per PR before push, preferably in bosn |
+
+Tier 0 builds no workspace binary and starts no daemon, so it cannot touch
+the installed `clud` or its daemon. It keeps the host's build cache warm
+across edits. A pilot on 2026-10-29 measured the full bosn PR plan at
+26.7 min cold and 9.5 min warm, mostly test execution, which no cache removes.
+
+`tests/conftest.py` marks every test in a module that refers to a built
+binary (`CLUD_TEST_BINARY`, `CLUD_TEST_MOCK_AGENT_BINARY`,
+`CLUD_TEST_BLOCK_BAD_CMD_BINARY`, `target/debug`) as `daemon`. Tier 0 points
+those variables at a path that does not exist. An unclassified test that
+runs a binary therefore fails loudly instead of quietly reaching the
+host's `clud`; the fix is to refer to the binary through one of those
+variables, or to mark the module `daemon` explicitly
+(`pytestmark = pytest.mark.daemon`). On the Rust side, the `integration`
+harness is Tier 1 because Tier 0 runs `--lib` only. A library test that needs
+a built binary is named with a `tier1_` prefix, and Tier 0 passes
+`--skip tier1_` (the `daemon::http` turn tests that drive `mock-agent`
+are an example). GitHub Actions still runs both tiers and remains the CI of
+record.
+
 For an isolated local replay, `bosn ci` runs supported workflow jobs under
 [act2](https://github.com/zackees/act2), with a snapshot of the checkout,
 including uncommitted work. It cannot prove native behavior on another OS.

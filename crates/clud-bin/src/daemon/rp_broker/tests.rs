@@ -2,6 +2,7 @@ use super::super::io_helpers::read_json_file;
 use super::super::paths::daemon_info_path;
 use super::super::server::run_daemon_uninterrupted;
 use super::super::types::DaemonInfo;
+use super::endpoint::endpoint_for_state_dir;
 use super::*;
 use running_process::broker::backend_handle::{BackendHandle, DaemonProcess};
 use running_process::broker::backend_sdk::{
@@ -91,19 +92,64 @@ fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
     }
 }
 
+/// Waits for the sidecar with a load-tolerant deadline. The daemon publishes
+/// `daemon.json` only after the sidecar exists (#2239), so callers that have
+/// already seen readiness normally return on the first read; the deadline only
+/// matters for a sidecar that is genuinely never written, and then the
+/// failure names the path and what the state dir holds.
 fn wait_for_identity_sidecar(state_dir: &Path) -> DaemonProcess {
     let path = daemon_identity_path(state_dir);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(identity) = read_daemon_identity_file(&path) {
             return identity;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for daemon identity sidecar"
+            "timed out waiting for daemon identity sidecar: path={} parent_exists={} \
+             state_dir_entries={:?}",
+            path.display(),
+            path.parent().is_some_and(Path::exists),
+            path.parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|rd| rd
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()),
         );
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// #2239 regression: the moment `daemon.json` is readable and the TCP port
+/// accepts, the identity sidecar must already exist. No polling allowed.
+#[test]
+fn tier1_identity_sidecar_exists_by_the_time_daemon_reports_ready() {
+    let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().to_path_buf();
+    let daemon_state_dir = state_dir.clone();
+    let daemon_thread = thread::spawn(move || run_daemon_uninterrupted(&daemon_state_dir));
+
+    let info = wait_for_daemon_ready(&state_dir);
+    let sidecar = read_daemon_identity_file(&daemon_identity_path(&state_dir));
+    let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+    use std::io::{BufRead, BufReader, Write as _};
+    let request = serde_json::to_string(&DaemonRequest::Shutdown {
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        expected_daemon: Some(info.identity()),
+    })
+    .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let joined = daemon_thread.join().unwrap();
+    assert!(
+        sidecar.is_some(),
+        "daemon.json was published before the identity sidecar (exit={joined})"
+    );
 }
 
 /// FROZEN golden bytes for clud's Frame v1 wire (#385 adoption).
@@ -147,7 +193,7 @@ fn payload_protocol_is_frozen_registered_consumer_id() {
 /// probe via the sidecar, serves clud payload frames through
 /// `FrameClient`, and shuts down via the frame lane.
 #[test]
-fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
+fn tier1_frame_lane_serves_probe_and_clud_requests_end_to_end() {
     let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
@@ -206,7 +252,7 @@ fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
 /// RUNNING_PROCESS_DISABLE=1 must restore pre-adoption behavior:
 /// no identity sidecar, no frame endpoint, TCP wire untouched.
 #[test]
-fn disable_env_skips_frame_lane_entirely() {
+fn tier1_disable_env_skips_frame_lane_entirely() {
     let _env = EnvGuard::set(RUNNING_PROCESS_DISABLE_ENV, "1");
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
@@ -245,7 +291,7 @@ fn disable_env_skips_frame_lane_entirely() {
 /// honors the disable hatch and degrades to `None` (TCP fallback)
 /// when the sidecar is missing.
 #[test]
-fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
+fn tier1_client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
@@ -307,7 +353,7 @@ fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
 /// The `RUNNING_PROCESS_FAKE_BACKEND` seam redirects the client to
 /// the seam endpoint even when the cached sidecar endpoint is bogus.
 #[test]
-fn fake_backend_seam_overrides_cached_endpoint() {
+fn tier1_fake_backend_seam_overrides_cached_endpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().to_path_buf();
     let daemon_state_dir = state_dir.clone();
@@ -480,4 +526,147 @@ fn running_process_disabled_requires_exact_value() {
     drop(_env);
     let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
     assert!(!running_process_disabled());
+}
+
+/// Build a lane that owns a freshly written sidecar and a placeholder
+/// socket file at the shared endpoint path (#2340).
+fn lane_with_sidecar(state_dir: &Path, started_at_unix_ms: u64) -> super::frame_lane::FrameLane {
+    let endpoint = endpoint_for_state_dir(state_dir).expect("endpoint");
+    let endpoint_path = endpoint.path.clone();
+    let mut daemon = DaemonProcess::current_process(endpoint, None).expect("identity");
+    daemon.started_at_unix_ms = started_at_unix_ms;
+    let identity_path = daemon_identity_path(state_dir);
+    write_daemon_identity_file(&identity_path, &daemon).expect("write sidecar");
+    // Replace, as a bind does, so a successor gets a new inode.
+    let _ = std::fs::remove_file(&endpoint_path);
+    std::fs::write(&endpoint_path, b"").expect("socket placeholder");
+    let sidecar_id = crate::platform::file_identity::file_identity(&identity_path);
+    let socket_id = crate::platform::file_identity::file_identity(Path::new(&endpoint_path));
+    super::frame_lane::FrameLane::new(identity_path, endpoint_path, &daemon, sidecar_id, socket_id)
+}
+
+/// A lane over a really bound listener, as `start_frame_lane` builds it.
+fn real_lane(
+    state_dir: &Path,
+    started_at_unix_ms: u64,
+) -> (
+    super::frame_lane::FrameLane,
+    interprocess::local_socket::Listener,
+) {
+    let endpoint = endpoint_for_state_dir(state_dir).expect("endpoint");
+    let endpoint_path = endpoint.path.clone();
+    let mut daemon = DaemonProcess::current_process(endpoint, None).expect("identity");
+    daemon.started_at_unix_ms = started_at_unix_ms;
+    super::frame_lane::claim_endpoint(state_dir, &daemon, endpoint_path).expect("claim")
+}
+
+#[test]
+fn lane_cleanup_removes_its_own_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lane = lane_with_sidecar(tmp.path(), 1_000);
+    let identity_path = daemon_identity_path(tmp.path());
+    assert!(identity_path.exists());
+    lane.cleanup();
+    assert!(!identity_path.exists());
+    if !crate::platform::host::WINDOWS {
+        let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+        assert!(!Path::new(&endpoint.path).exists());
+    }
+}
+
+#[test]
+fn superseded_lane_cleanup_keeps_the_newer_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let older = lane_with_sidecar(tmp.path(), 1_000);
+    // The superseding daemon rewrites the sidecar at the same path.
+    let _newer = lane_with_sidecar(tmp.path(), 2_000);
+    older.cleanup();
+    let identity_path = daemon_identity_path(tmp.path());
+    let kept = read_daemon_identity_file(&identity_path).expect("newer sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
+    if !crate::platform::host::WINDOWS {
+        let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+        assert!(Path::new(&endpoint.path).exists());
+    }
+}
+
+#[test]
+fn live_lane_cleanup_removes_its_own_socket_and_sidecar() {
+    if crate::platform::host::WINDOWS {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (lane, _listener) = real_lane(tmp.path(), 1_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    assert!(Path::new(&endpoint.path).exists());
+    lane.cleanup();
+    assert!(!Path::new(&endpoint.path).exists(), "own socket kept");
+    assert!(
+        !daemon_identity_path(tmp.path()).exists(),
+        "own sidecar kept"
+    );
+}
+
+#[test]
+fn superseded_lane_cleanup_keeps_the_newer_bound_socket() {
+    use interprocess::local_socket::traits::{Listener as _, Stream as _};
+    use running_process::broker::server::local_socket_name;
+    if crate::platform::host::WINDOWS {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (older, _older_listener) = real_lane(tmp.path(), 1_000);
+    let (_newer, listener) = real_lane(tmp.path(), 2_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    older.cleanup();
+    assert!(Path::new(&endpoint.path).exists(), "newer socket removed");
+    let kept = read_daemon_identity_file(&daemon_identity_path(tmp.path()))
+        .expect("newer sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
+    let connect = thread::spawn({
+        let path = endpoint.path.clone();
+        move || interprocess::local_socket::Stream::connect(local_socket_name(&path).unwrap())
+    });
+    listener.accept().expect("accept");
+    connect.join().unwrap().expect("connect to newer socket");
+}
+
+/// Inode reuse: A's recorded socket identity equals B's real socket, but the
+/// sidecar belongs to B, so A's cleanup must remove nothing (#2340).
+#[test]
+fn cleanup_keeps_a_socket_whose_inode_was_reused_by_the_successor() {
+    use interprocess::local_socket::traits::{Listener as _, Stream as _};
+    use running_process::broker::server::local_socket_name;
+    if crate::platform::host::WINDOWS {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_b, listener) = real_lane(tmp.path(), 2_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    let identity_path = daemon_identity_path(tmp.path());
+    let mut daemon_a = DaemonProcess::current_process(endpoint.clone(), None).expect("identity");
+    daemon_a.started_at_unix_ms = 1_000;
+    let a = super::frame_lane::FrameLane::new(
+        identity_path.clone(),
+        endpoint.path.clone(),
+        &daemon_a,
+        crate::platform::file_identity::file_identity(&identity_path),
+        crate::platform::file_identity::file_identity(Path::new(&endpoint.path)),
+    );
+    a.cleanup();
+    assert!(
+        Path::new(&endpoint.path).exists(),
+        "successor socket removed"
+    );
+    let kept = read_daemon_identity_file(&identity_path).expect("successor sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
+    let connect = thread::spawn({
+        let path = endpoint.path.clone();
+        move || interprocess::local_socket::Stream::connect(local_socket_name(&path).unwrap())
+    });
+    listener.accept().expect("accept");
+    connect
+        .join()
+        .unwrap()
+        .expect("connect to successor socket");
 }

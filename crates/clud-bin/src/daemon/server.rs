@@ -1,3 +1,4 @@
+use super::startup_phases::StartupPhases;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -90,6 +91,19 @@ pub(super) fn run_daemon_uninterrupted(state_dir: &Path) -> i32 {
     run_daemon(state_dir, &AtomicBool::new(false))
 }
 
+/// Bind the IPC listener on an ephemeral loopback port (`loopback_bind`).
+fn bind_loopback(phases: &StartupPhases) -> Result<(TcpListener, u16), i32> {
+    let fail = |what: &str, err: io::Error| phases.fail("loopback_bind", &format!("{what}: {err}"));
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| fail("failed to bind daemon listener", err))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| fail("failed to read daemon listener addr", err))?
+        .port();
+    phases.mark("loopback_bind");
+    Ok((listener, port))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
@@ -114,6 +128,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
+    let phases = StartupPhases::new(state_dir, daemon_started_at);
     daemon_events::log_event(state_dir, "daemon_starting", []);
     daemon_events::log_event(
         state_dir,
@@ -148,6 +163,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     );
 
     cleanup_stale_state(state_dir);
+    phases.mark("stale_state_cleanup");
     // A new daemon never adopts a persisted provider PID. Seal active turns
     // before accepting either HTTP or RPC lifecycle mutations.
     let api_lifecycle = Arc::new(
@@ -165,20 +181,11 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
             [("error", json!(error.to_string()))],
         );
     }
+    phases.mark("api_session_reconcile");
 
-    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("[clud] failed to bind daemon listener: {}", err);
-            return 1;
-        }
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => {
-            eprintln!("[clud] failed to read daemon listener addr: {}", err);
-            return 1;
-        }
+    let (listener, port) = match bind_loopback(&phases) {
+        Ok(bound) => bound,
+        Err(code) => return code,
     };
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
@@ -194,6 +201,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
             None
         }
     };
+    phases.mark("gc_registry_worker");
 
     // Issue #183: in-process HTTP dashboard. Bind a second loopback port
     // alongside the IPC listener and run a `tiny_http` server on a worker
@@ -222,6 +230,7 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         Some(activity.clone()),
         Arc::clone(&api_lifecycle),
     );
+    phases.mark("dashboard_bind");
 
     // Workers inherit these private capability values and use them for their
     // telemetry POSTs. The value is never returned by a dashboard endpoint.
@@ -240,31 +249,6 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     // Tool installation is deferred until after readiness. `clud tool` self-heals
     // its requested file inline, so daemon bringup no longer blocks callers
     // on a full bundled-tool scan.
-
-    let info = DaemonInfo {
-        pid: std::process::id(),
-        pid_start: crate::process_identity::self_start_time(),
-        port,
-        dashboard_port,
-        dashboard_token: dashboard_port.map(|_| dashboard_token),
-        api_token: dashboard_port.map(|_| api_token),
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    };
-    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
-        eprintln!("[clud] failed to persist daemon info: {}", err);
-        return 1;
-    }
-    daemon_events::log_event(
-        state_dir,
-        "daemon_started",
-        [
-            ("port", json!(port)),
-            ("dashboard_port", json!(dashboard_port)),
-            ("version", json!(env!("CARGO_PKG_VERSION"))),
-            ("event_log", json!(daemon_events_path(state_dir))),
-        ],
-    );
-    spawn_tool_installer();
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let client_leases = ClientLeaseRegistry::default();
@@ -315,6 +299,38 @@ pub(super) fn run_daemon(state_dir: &Path, interrupted: &AtomicBool) -> i32 {
         activity.clone(),
         Arc::clone(&api_lifecycle),
     );
+
+    // #2239: daemon.json is the readiness signal clients and tests poll, so
+    // it is published only after the frame lane has written its identity
+    // sidecar. Publishing it earlier let a loaded host observe a ready
+    // daemon whose sidecar did not exist yet.
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        pid_start: crate::process_identity::self_start_time(),
+        port,
+        dashboard_port,
+        dashboard_token: dashboard_port.map(|_| dashboard_token),
+        api_token: dashboard_port.map(|_| api_token),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    };
+    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
+        return phases.fail(
+            "daemon_info_write",
+            &format!("failed to persist daemon info: {err}"),
+        );
+    }
+    phases.mark("daemon_info_write");
+    daemon_events::log_event(
+        state_dir,
+        "daemon_started",
+        [
+            ("port", json!(port)),
+            ("dashboard_port", json!(dashboard_port)),
+            ("version", json!(env!("CARGO_PKG_VERSION"))),
+            ("event_log", json!(daemon_events_path(state_dir))),
+        ],
+    );
+    spawn_tool_installer();
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
     // originator clud was SIGKILL'd and never ran its own exit hook (so
@@ -1758,6 +1774,45 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn startup_failure_in_daemon_info_write_records_start_failed_after_phases() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where daemon.json belongs forces the write to fail.
+        fs::create_dir_all(daemon_info_path(tmp.path())).unwrap();
+        assert_eq!(run_daemon(tmp.path(), &AtomicBool::new(false)), 1);
+        let log = fs::read_to_string(daemon_events_path(tmp.path())).unwrap();
+        let ops: Vec<(String, String)> = log
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|e| {
+                matches!(
+                    e["op"].as_str(),
+                    Some("daemon_starting" | "daemon_startup_phase" | "daemon_start_failed")
+                )
+            })
+            .map(|e| {
+                (
+                    e["op"].as_str().unwrap().to_string(),
+                    e["phase"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let phases: Vec<&str> = ops.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(
+            phases,
+            [
+                "",
+                "stale_state_cleanup",
+                "api_session_reconcile",
+                "loopback_bind",
+                "gc_registry_worker",
+                "dashboard_bind",
+                "daemon_info_write",
+            ]
+        );
+        assert_eq!(ops.last().unwrap().0, "daemon_start_failed");
+    }
+
+    #[test]
     fn checkout_claim_round_trips_through_daemon_tcp_handler() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -2288,6 +2343,8 @@ mod tests {
         }
     }
 
+    /// Starts-and-waits on a live daemon, so callers are `tier1_` tests that
+    /// `bash test --host` skips (#2356).
     fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -2358,7 +2415,7 @@ mod tests {
     /// #2142: SIGTERM/SIGHUP/SIGQUIT only flip `interrupted`; the daemon must
     /// poll it and exit instead of ignoring the signal.
     #[test]
-    fn daemon_exits_when_interrupted_flag_is_set() {
+    fn tier1_daemon_exits_when_interrupted_flag_is_set() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let flag = Arc::new(AtomicBool::new(false));
@@ -2374,7 +2431,7 @@ mod tests {
     /// #2142: a daemon whose `daemon.json` now names another pid exits, and
     /// leaves the successor's file alone.
     #[test]
-    fn superseded_daemon_exits_and_keeps_successor_info() {
+    fn tier1_superseded_daemon_exits_and_keeps_successor_info() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let dir = state_dir.clone();
@@ -2388,6 +2445,44 @@ mod tests {
         assert_eq!(after.pid, info.pid, "successor's daemon.json must survive");
     }
 
+    /// #2142: a shutdown request and the interrupted flag both finish well
+    /// inside `clud daemon restart`'s 10s wait, even with an idle client
+    /// connection held open against the daemon.
+    #[test]
+    fn shutdown_and_signal_flag_finish_within_the_restart_timeout() {
+        let bound = Duration::from_secs(5);
+        for use_flag in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state_dir = tmp.path().to_path_buf();
+            let flag = Arc::new(AtomicBool::new(false));
+            let (dir, thread_flag) = (state_dir.clone(), Arc::clone(&flag));
+            let daemon_thread = thread::spawn(move || run_daemon(&dir, &thread_flag));
+            let info = wait_for_daemon_ready(&state_dir);
+            let _idle = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+
+            let started = Instant::now();
+            if use_flag {
+                flag.store(true, Ordering::SeqCst);
+            } else {
+                let (response, _) = send_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::Shutdown {
+                        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                        expected_daemon: Some(info.identity()),
+                    },
+                    DaemonWireFormat::Json,
+                );
+                assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
+            }
+            assert_eq!(daemon_thread.join().unwrap(), 0);
+            assert!(
+                started.elapsed() < bound,
+                "daemon took {:?} to stop (use_flag={use_flag})",
+                started.elapsed()
+            );
+        }
+    }
+
     #[test]
     fn supersede_check_compares_recorded_pid() {
         assert!(!is_superseded(7, 7));
@@ -2395,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
+    fn tier1_daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2466,7 +2561,7 @@ mod tests {
     /// Keep this fixture raw so it cannot accidentally acquire current-client
     /// credentials through a helper.
     #[test]
-    fn daemon_accepts_previous_release_raw_json_shutdown() {
+    fn tier1_daemon_accepts_previous_release_raw_json_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2566,7 +2661,7 @@ mod tests {
     }
 
     #[test]
-    fn prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
+    fn tier1_prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2624,7 +2719,7 @@ mod tests {
     }
 
     #[test]
-    fn adopt_kill_request_writes_jsonl_events() {
+    fn tier1_adopt_kill_request_writes_jsonl_events() {
         let tmp = tempfile::tempdir().unwrap();
         let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
 
@@ -2665,7 +2760,7 @@ mod tests {
     }
 
     #[test]
-    fn reap_orphans_request_writes_jsonl_events() {
+    fn tier1_reap_orphans_request_writes_jsonl_events() {
         let tmp = tempfile::tempdir().unwrap();
         let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
 

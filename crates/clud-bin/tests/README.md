@@ -2,6 +2,9 @@
 
 Rust integration tests for the `clud-bin` crate. Unlike the `#[test]` units inside `src/`, these tests spawn the workspace `mock-agent` binary through `running_process_core::pty::NativePtyProcess` and exercise the real PTY pump used by `clud --codex`. They lock down platform-specific contracts (Windows ConPTY vs POSIX), cross-platform regressions from issues #28/#31/#46, and the voice/F3 + resize hooks implemented in `clud::session`. A `pty_canary()` probe runs first and skips the test if the host's stdout isn't a real console (typical in nested shells or captured `cargo test` runs).
 
+This harness is **Tier 1**: it spawns a built binary, so `bash test --host`
+skips it ([test tiers](../../../docs/architecture/ci.md#two-local-test-tiers-2356)).
+
 ## Layout: one harness (#1726)
 
 Everything here compiles into **one** test binary, `integration`
@@ -60,6 +63,7 @@ table and the cooperative-marker caveat:
 From the repo root:
 
 ```bash
+bash test --host                            # Tier 0: library tests only, no binary (#2356)
 bash test                                   # Rust + Python unit tests
 bash test --integration                     # adds mock-agent integration tests
 soldr cargo test -p clud-bin                # all clud-bin tests (unit + integration)

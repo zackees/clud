@@ -47,9 +47,11 @@ fn run_child(
     path: &Path,
     args: &[OsString],
     recorder: &crate::shim_telemetry::Recorder,
+    env: &[(&str, &std::ffi::OsStr)],
 ) -> i32 {
     let mut command = std::process::Command::new(path);
     command.args(args);
+    command.envs(env.iter().copied());
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -88,7 +90,7 @@ mod git_shim {
 
     pub fn run(target: &Path, args: &[OsString]) -> i32 {
         super::recorded("git", args, |recorder| {
-            super::run_child("git", target, args, recorder)
+            super::run_child("git", target, args, recorder, &[])
         })
     }
 }
@@ -165,7 +167,7 @@ pub(crate) mod gh_shim {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use super::dispatch::GhSession;
+    use super::dispatch::{GhRoute, GhSession};
     use crate::shim_telemetry::Recorder;
 
     pub fn run(session: &GhSession, args: &[OsString]) -> i32 {
@@ -179,6 +181,10 @@ pub(crate) mod gh_shim {
                 Ok(None) => {}
                 Err(code) => return code,
             }
+        }
+        // #2352: dispatch already refused a missing ghd (`GhdMissing`).
+        if let GhRoute::Ghd(ghd) = &session.route {
+            return via_ghd(ghd, &session.target, args, recorder);
         }
         let Some(broker) = session.read_broker.as_ref() else {
             return exec(&session.target, args, recorder);
@@ -321,8 +327,21 @@ pub(crate) mod gh_shim {
     }
 
     fn exec(path: &Path, args: &[OsString], recorder: &Recorder) -> i32 {
-        super::run_child("gh", path, args, recorder)
+        super::run_child("gh", path, args, recorder, &[])
     }
+
+    /// #2352: `ghd gh ARGS`. ghd serves what it can and relays the rest to
+    /// `real_gh`, which is passed explicitly so the relay never resolves
+    /// back to this shim.
+    fn via_ghd(ghd: &Path, real_gh: &Path, args: &[OsString], recorder: &Recorder) -> i32 {
+        let mut ghd_args = vec![OsString::from("gh")];
+        ghd_args.extend(args.iter().cloned());
+        let env = [(GHD_REAL_GH, real_gh.as_os_str())];
+        super::run_child("gh", ghd, &ghd_args, recorder, &env)
+    }
+
+    /// ghd's variable naming the real gh (forge-ci/ghd#24).
+    pub(crate) const GHD_REAL_GH: &str = "GHD_REAL_GH";
 }
 
 /// The central contract (#1546): dispatch alone reads session keys, and no

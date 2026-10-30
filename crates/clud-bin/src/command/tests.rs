@@ -4,8 +4,8 @@ use super::builder::{
     plan_mode_suppression_notice, repeat_implies_no_done_warning, video_launch_error,
 };
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, is_github_url,
-    FIX_PROMPT,
+    build_claude_do_goal, build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt,
+    is_github_url, CLAUDE_GOAL_CONDITION_LIMIT, FIX_PROMPT,
 };
 use super::types::LaunchPlan;
 use crate::args::Args;
@@ -996,5 +996,23 @@ fn landing_instructions_cover_both_backends_and_no_land() {
             .any(|arg| arg.contains("Land the work") && !arg.contains(['\r', '\n'])));
         let off = plan(&["clud", backend, "--no-land", "-p", "hello"]);
         assert!(off.command.iter().all(|arg| !arg.contains("Land the work")));
+    }
+}
+
+#[test]
+fn tool_call_rules_reach_both_backends_even_without_landing() {
+    for backend in ["--claude", "--codex"] {
+        for extra in [None, Some("--no-land")] {
+            let mut argv = vec!["clud", backend];
+            argv.extend(extra);
+            argv.extend(["-p", "hello"]);
+            let p = plan(&argv);
+            assert!(
+                p.command
+                    .iter()
+                    .any(|arg| arg.contains(super::builder::TOOL_CALL_RULES)),
+                "{backend} {extra:?} is missing the tool-call rules"
+            );
+        }
     }
 }

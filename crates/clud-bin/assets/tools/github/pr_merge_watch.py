@@ -743,6 +743,32 @@ def _from_older_attempt(check: dict, run: dict | None) -> bool:
     return completed is not None and started is not None and completed < started
 
 
+def _pass_is_superseded(check: dict, run: dict | None, head_runs: list[dict]) -> bool:
+    """A passing check that a still-unfinished run may overturn (#2338).
+
+    True when a newer run of the same workflow on the head has not completed,
+    or when the check's own run is being re-run (`gh run rerun`: attempt >= 2,
+    not completed) and the pass is from the older attempt. Newer runs are
+    ordered by `_run_order` (created_at, then run_number), so a same-second
+    tie is broken correctly. An unfinished newer run (queued, waiting for
+    approval, concurrency-queued) holds the pass at pending until it finishes
+    or --timeout; this never yields a wrong GREEN.
+    """
+    if run is None:
+        return False
+    if _lower(run.get("status")) != "completed" and _from_older_attempt(check, run):
+        return True
+    key = _workflow_key(run)
+    own = _run_order(run)
+    return any(
+        r["id"] != run["id"]
+        and _workflow_key(r) == key
+        and _run_order(r) > own
+        and _lower(r.get("status")) != "completed"
+        for r in head_runs
+    )
+
+
 def _effective(entries: list[tuple[dict, dict | None]]) -> tuple[dict, dict | None]:
     """The entry that stands for a group, in check-run id order.
 
@@ -933,6 +959,8 @@ def judge_check_runs(  # noqa: C901
                 for s in siblings(key, run_id)
             ):
                 state = "pending"
+        if state == "pass" and _pass_is_superseded(check, run, head_runs):
+            state = "pending"
         judgments.append(
             CheckJudgment(
                 name=name,

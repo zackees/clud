@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -63,8 +64,66 @@ def checkout_tracked_files_unchanged():
         pytest.fail(tracked_files.describe(changed, during="the pytest run"), pytrace=False)
 
 
+# #2356: a module that refers to one of these runs a built binary, so its tests
+# are Tier 1 (`daemon`) and stay out of the host-only `bash test --host` lane.
+_BINARY_REFERENCES = (
+    "CLUD_TEST_BINARY",
+    "CLUD_TEST_BLOCK_BAD_CMD_BINARY",
+    "CLUD_TEST_MOCK_AGENT_BINARY",
+    "target/debug",
+    '"target", "debug"',
+    # Explicit opt-in for a module whose binary use the scan cannot see,
+    # such as a tool under test that spawns clud itself.
+    "pytestmark = pytest.mark.daemon",
+)
+_module_runs_binary: dict[Path, bool] = {}
+# `from test_hello import CLUD`, `from tests.test_x import y`, `import _helpers`.
+_LOCAL_IMPORT = re.compile(r"^\s*(?:from|import)\s+(?:tests\.)?(_?[A-Za-z0-9_]+)", re.MULTILINE)
+_TESTS_ROOT = Path(__file__).resolve().parent
+
+
+def _runs_built_binary(path: Path) -> bool:
+    """Does this module, or a sibling test/helper module it imports, run a binary?"""
+    path = path.resolve()
+    if path in _module_runs_binary:
+        return _module_runs_binary[path]
+    _module_runs_binary[path] = False  # breaks import cycles
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        source = ""
+    runs = any(ref in source for ref in _BINARY_REFERENCES) or any(
+        _runs_built_binary(sibling)
+        for name in _LOCAL_IMPORT.findall(source)
+        if name != "conftest"
+        for sibling in (_TESTS_ROOT / f"{name}.py", path.parent / f"{name}.py")
+        if sibling.is_file() and sibling.resolve() != path
+    )
+    _module_runs_binary[path] = runs
+    return runs
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Tier 0 never imports a `daemon` module (#2356).
+
+    Some resolve their binary at import time, which would fail collection
+    before the marker could deselect them.
+    """
+    if os.environ.get("CLUD_TEST_TIER") != "0" or collection_path.suffix != ".py":
+        return None
+    return True if _runs_built_binary(collection_path) else None
+
+
+def mark_binary_tests_daemon(items: list[pytest.Item]) -> None:
+    """Mark every test in a module that runs a built binary as `daemon`."""
+    for item in items:
+        if _runs_built_binary(Path(str(item.path))):
+            item.add_marker(pytest.mark.daemon)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip integration tests unless CLUD_INTEGRATION_TESTS=1."""
+    """Classify Tier 1 tests; skip integration tests unless CLUD_INTEGRATION_TESTS=1."""
+    mark_binary_tests_daemon(items)
     if os.environ.get("CLUD_INTEGRATION_TESTS", "").lower() in {"1", "true", "yes"}:
         return
     skip_integration = pytest.mark.skip(reason="set CLUD_INTEGRATION_TESTS=1 to run")
