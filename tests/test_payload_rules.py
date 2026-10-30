@@ -41,6 +41,7 @@ def _apply(
     model: str,
     protocol: str = "claude",
     headers: dict[str, str] | None = None,
+    from_protocol: str | None = None,
 ) -> dict[str, Any]:
     command = [
         str(_clud_binary()),
@@ -50,6 +51,8 @@ def _apply(
         "--protocol",
         protocol,
     ]
+    if from_protocol is not None:
+        command += ["--from-protocol", from_protocol]
     for name, value in (headers or {}).items():
         command += ["--header", f"{name}: {value}"]
     completed = process.run(
@@ -405,3 +408,44 @@ def test_raw_rules_set_json_text_and_are_refused_when_unparsable(tmp_path: Path)
     )
     assert refused.returncode == 2, "an unparsable raw value must fail the file, not the request"
     assert "raw value is not JSON" in refused.stderr
+
+
+def test_from_protocol_selects_on_the_shape_the_client_spoke() -> None:
+    """CLIProxyAPI's ``from-protocol`` selector (``config_types.go:600``).
+
+    Upstream applies payload rules in the executor with ``protocol`` = the
+    target protocol and ``fromProtocol`` = the shape the client spoke, so one
+    rules file can rewrite chat-completions callers without touching Messages
+    callers that hit the same route. The process seam must expose the same
+    distinction, including "unknown source cannot satisfy a pinned pattern".
+    """
+    rules = {
+        "override": [
+            {"models": [{"name": "claude-*", "from-protocol": "openai"}],
+             "params": {"max_tokens": 32}},
+            {"models": [{"name": "claude-*", "from-protocol": "claude"}],
+             "params": {"metadata.via": "messages"}},
+        ]
+    }
+    chat = _apply(
+        rules,
+        {"max_tokens": 1024},
+        "claude-sonnet-4",
+        from_protocol="openai",
+    )
+    assert chat["payload"]["max_tokens"] == 32
+    assert "metadata" not in chat["payload"], "the Claude-shaped rule must not fire"
+
+    messages = _apply(
+        rules,
+        {"max_tokens": 1024},
+        "claude-sonnet-4",
+        from_protocol="claude",
+    )
+    assert messages["payload"]["max_tokens"] == 1024
+    assert messages["payload"]["metadata"]["via"] == "messages"
+
+    unknown = _apply(rules, {"max_tokens": 1024}, "claude-sonnet-4")
+    assert unknown["payload"]["max_tokens"] == 1024
+    assert "metadata" not in unknown["payload"]
+    assert unknown["outcome"]["changed"] is False

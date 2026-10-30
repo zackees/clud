@@ -457,3 +457,66 @@ fn a_raw_value_that_is_not_json_is_refused_when_the_file_loads() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn from_protocol_narrows_a_rule_to_the_shape_the_client_spoke() {
+    // Upstream's `from-protocol` (`config.example.yaml:600`, matched by
+    // `payloadFromProtocolMatches`, `payload_helpers.go:436`). One rules file
+    // must be able to tell a Claude-shaped caller from an OpenAI-shaped one.
+    let rules = rules(serde_json::json!({
+        "override": [
+            {"models": [{"name": "claude-*", "from-protocol": "openai"}],
+             "params": {"max_tokens": 32}},
+            {"models": [{"name": "claude-*", "from-protocol": "claude"}],
+             "params": {"metadata.via": "messages"}},
+        ]
+    }));
+    let mut payload = serde_json::json!({"max_tokens": 1024});
+    let outcome = apply_request(
+        &rules,
+        &Request::with_source("claude-sonnet-4", "claude", "openai", &[]),
+        &mut payload,
+    );
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["max_tokens"], serde_json::json!(32));
+    assert!(
+        payload.get("metadata").is_none(),
+        "a rule pinned to another source must not fire"
+    );
+
+    let mut payload = serde_json::json!({"max_tokens": 1024});
+    let outcome = apply_request(
+        &rules,
+        &Request::with_source("claude-sonnet-4", "claude", "claude", &[]),
+        &mut payload,
+    );
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["max_tokens"], serde_json::json!(1024));
+    assert_eq!(payload["metadata"]["via"], serde_json::json!("messages"));
+}
+
+#[test]
+fn a_pinned_from_protocol_never_fires_for_an_unknown_source() {
+    // Upstream returns false when the pattern is set and the source is empty.
+    assert!(from_protocol_matches(None, ""));
+    assert!(from_protocol_matches(None, "openai"));
+    assert!(!from_protocol_matches(Some("openai"), ""));
+    assert!(from_protocol_matches(Some("OpenAI"), "openai"));
+    // Upstream spells the Responses source three ways; they are one source.
+    assert!(from_protocol_matches(Some("openai-response"), "responses"));
+    assert!(from_protocol_matches(Some("response"), "openai-responses"));
+    assert!(!from_protocol_matches(Some("claude"), "openai"));
+}
+
+#[test]
+fn an_empty_from_protocol_selector_is_refused_at_load() {
+    let error = parse(
+        serde_json::to_vec(&serde_json::json!({
+            "default": [{"models": [{"name": "claude-*", "from-protocol": " "}], "params": {}}]
+        }))
+        .expect("fixture serializes")
+        .as_slice(),
+    )
+    .expect_err("an empty from-protocol is a typo");
+    assert!(error.contains("empty from-protocol"), "{error}");
+}

@@ -1422,8 +1422,9 @@ fn route_messages(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let (body, rules_outcome) = crate::payload_rules::rewrite_body_with_headers(
+    let (body, rules_outcome) = crate::payload_rules::rewrite_body_with_source(
         &requested_model,
+        "claude",
         "claude",
         &parsed.headers,
         body,
@@ -1518,6 +1519,27 @@ fn route_chat_completions(
         }
     };
     let translated = serde_json::to_vec(&translated).unwrap_or_default();
+    // CLIProxyAPI applies payload rules in the executor, on the body it is
+    // about to forward, with `protocol` = the target protocol and
+    // `fromProtocol` = the shape the client spoke
+    // (`payload_helpers.go`: `ApplyPayloadConfigWithRequest`). Do the same on
+    // the translated Messages body so a rule can target chat callers only
+    // (`from-protocol: openai`) instead of every Messages request.
+    let (translated, rules_outcome) = match serde_json::from_slice::<serde_json::Value>(&translated)
+    {
+        Ok(mut translated_json) => crate::payload_rules::rewrite_body_with_source(
+            &model,
+            "claude",
+            "openai",
+            &parsed.headers,
+            translated,
+            &mut translated_json,
+        ),
+        Err(_) => (translated, crate::payload_rules::Outcome::default()),
+    };
+    for problem in &rules_outcome.problems {
+        eprintln!("payload rules: {problem}");
+    }
     serve_unified_messages(
         stream,
         config,

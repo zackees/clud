@@ -1067,6 +1067,10 @@ pub enum Command {
         /// Protocol the rules select on (`claude` for `POST /v1/messages`).
         #[arg(long, default_value = "claude")]
         protocol: String,
+        /// Protocol the *client* spoke (`openai` for `POST /v1/chat/completions`),
+        /// which a rule's `from-protocol` selector matches. Empty means unknown.
+        #[arg(long = "from-protocol", default_value = "")]
+        from_protocol: String,
         /// A request header the rules can select on, as `Name: value`.
         /// Repeatable; mirrors the headers a real request carries.
         #[arg(long = "header", value_name = "NAME: VALUE")]

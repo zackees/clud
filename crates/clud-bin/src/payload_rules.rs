@@ -34,8 +34,13 @@
 //! (`payload_helpers.go`: `Default` then `DefaultRaw`, `Override` then
 //! `OverrideRaw`).
 //!
-//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the
-//! `from-protocol` selector, the OpenAI-shaped ingress path, and a
+//! A selector can also be narrowed to the protocol the *client* spoke
+//! (`from-protocol`), which is how one rules file distinguishes a Claude-shaped
+//! `POST /v1/messages` caller from an OpenAI-shaped `POST /v1/chat/completions`
+//! one that clud itself translates (`payload_helpers.go`: `protocol` is the
+//! executor's target protocol, `fromProtocol` the source format).
+//!
+//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): a
 //! `~/.clud/settings.json` owner for the rules.
 //!
 //! A rule that cannot be applied never fails a client request: the payload is
@@ -113,6 +118,11 @@ pub struct ModelMatch {
     /// `POST /v1/messages`). Absent matches every protocol.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Matched against the protocol the *client* spoke: `claude` for a
+    /// `POST /v1/messages` caller, `openai` for `POST /v1/chat/completions`
+    /// (which clud translates before forwarding). Absent matches every source.
+    #[serde(default, rename = "from-protocol")]
+    pub from_protocol: Option<String>,
     /// Request header name -> value pattern with `*` wildcards. A header that
     /// is missing from the request cannot match.
     #[serde(default)]
@@ -142,7 +152,10 @@ impl ModelMatch {
             .protocol
             .as_deref()
             .is_none_or(|wanted| wanted.eq_ignore_ascii_case(request.protocol));
-        if !(protocol_fits && wildcard_matches(&self.name, request.model)) {
+        if !(protocol_fits
+            && from_protocol_matches(self.from_protocol.as_deref(), request.from_protocol)
+            && wildcard_matches(&self.name, request.model))
+        {
             return Ok(false);
         }
         for (name, pattern) in &self.headers {
@@ -183,6 +196,29 @@ impl ModelMatch {
     }
 }
 
+/// Upstream's `payloadFromProtocolMatches` + `normalizePayloadFromProtocol`
+/// (`payload_helpers.go:436-455`): absent matches every source, and a source
+/// clud does not know cannot satisfy a pinned pattern.
+fn from_protocol_matches(pattern: Option<&str>, from_protocol: &str) -> bool {
+    let Some(pattern) = pattern.map(normalize_from_protocol) else {
+        return true;
+    };
+    if pattern.is_empty() {
+        return true;
+    }
+    let from_protocol = normalize_from_protocol(from_protocol);
+    !from_protocol.is_empty() && pattern.eq_ignore_ascii_case(&from_protocol)
+}
+
+/// Upstream spells the OpenAI Responses source three ways; they are one source.
+fn normalize_from_protocol(protocol: &str) -> String {
+    let protocol = protocol.trim().to_ascii_lowercase();
+    match protocol.as_str() {
+        "openai-response" | "openai-responses" | "response" => "responses".to_string(),
+        _ => protocol,
+    }
+}
+
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -190,12 +226,16 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, value)| value.as_str())
 }
 
-/// What a rule selects against: the model, the protocol being served, and the
-/// caller's own headers (for `headers` conditions).
+/// What a rule selects against: the model, the protocol being served, the
+/// protocol the client spoke, and the caller's own headers (for `headers`
+/// conditions).
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     pub model: &'a str,
     pub protocol: &'a str,
+    /// `""` means "unknown source": every selector that pins `from-protocol`
+    /// then declines to fire (upstream's behaviour for an empty source).
+    pub from_protocol: &'a str,
     pub headers: &'a [(String, String)],
 }
 
@@ -204,6 +244,7 @@ impl<'a> Request<'a> {
         Self {
             model,
             protocol,
+            from_protocol: "",
             headers: &[],
         }
     }
@@ -216,6 +257,23 @@ impl<'a> Request<'a> {
         Self {
             model,
             protocol,
+            from_protocol: "",
+            headers,
+        }
+    }
+
+    /// A request whose client-facing protocol is known, so `from-protocol`
+    /// selectors can tell an OpenAI-shaped caller from a Claude-shaped one.
+    pub fn with_source(
+        model: &'a str,
+        protocol: &'a str,
+        from_protocol: &'a str,
+        headers: &'a [(String, String)],
+    ) -> Self {
+        Self {
+            model,
+            protocol,
+            from_protocol,
             headers,
         }
     }
@@ -532,6 +590,13 @@ fn validate(rules: &PayloadRules) -> Result<(), String> {
         {
             return Err("a model selector has an empty protocol".to_string());
         }
+        if model
+            .from_protocol
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("a model selector has an empty from-protocol".to_string());
+        }
     }
     // Only `default`/`override` (typed and raw) paths must be well formed here:
     // a filter path that is not well formed removes nothing, and is reported
@@ -659,6 +724,20 @@ pub fn rewrite_body_with_headers(
     body: Vec<u8>,
     payload: &mut Value,
 ) -> (Vec<u8>, Outcome) {
+    rewrite_body_with_source(model, protocol, "", headers, body, payload)
+}
+
+/// [`rewrite_body_with_headers`] for a request whose *client* protocol is known
+/// (`openai` for a translated `POST /v1/chat/completions`, `claude` for a
+/// Messages caller), so `from-protocol` selectors can fire.
+pub fn rewrite_body_with_source(
+    model: &str,
+    protocol: &str,
+    from_protocol: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+    payload: &mut Value,
+) -> (Vec<u8>, Outcome) {
     let Some(rules) = active() else {
         return (body, Outcome::default());
     };
@@ -667,7 +746,7 @@ pub fn rewrite_body_with_headers(
     }
     let outcome = apply_request(
         &rules,
-        &Request::with_headers(model, protocol, headers),
+        &Request::with_source(model, protocol, from_protocol, headers),
         payload,
     );
     if !outcome.changed() {
@@ -700,14 +779,15 @@ fn parse_header(raw: &str) -> Result<(String, String), String> {
 }
 
 /// `clud __apply-payload-rules [--rules <path>] [--model M] [--protocol P]
-/// [--header "Name: value"]...` — the process seam behind the Python
-/// subprocess test. Reads `{"rules": {...}, "payload": {...}}` on stdin (or the
-/// rules from `--rules` and just the payload on stdin) and writes
+/// [--from-protocol P] [--header "Name: value"]...` — the process seam behind
+/// the Python subprocess test. Reads `{"rules": {...}, "payload": {...}}` on
+/// stdin (or the rules from `--rules` and just the payload on stdin) and writes
 /// `{"payload": ..., "outcome": ...}`.
 pub fn run_apply_stdin(
     rules_path: Option<&Path>,
     model: &str,
     protocol: &str,
+    from_protocol: &str,
     headers: Vec<String>,
 ) -> i32 {
     use std::io::{Read, Write};
@@ -759,7 +839,7 @@ pub fn run_apply_stdin(
     let mut payload = document.get("payload").cloned().unwrap_or(Value::Null);
     let outcome = apply_request(
         &rules,
-        &Request::with_headers(model, protocol, &parsed_headers),
+        &Request::with_source(model, protocol, from_protocol, &parsed_headers),
         &mut payload,
     );
     let rendered = serde_json::json!({
