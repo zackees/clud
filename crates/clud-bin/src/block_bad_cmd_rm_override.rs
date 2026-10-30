@@ -1519,8 +1519,9 @@ mod tests {
             "shell_command",
             serde_json::json!({"command": command}),
         );
-        // Host-independent simulation of the Windows default: PowerShell does
-        // not recognise the heredoc, so the nested path declines.
+        // Host-independent simulation of the Windows default: PowerShell has
+        // no heredoc, so the POSIX fallback judges the patch by its targets
+        // (#2378) and the result is the same on every host.
         assert_eq!(
             nested_patch_reason(
                 &command,
@@ -1528,13 +1529,9 @@ mod tests {
                 home.path(),
                 Some(home.path())
             ),
-            None
+            Some(None)
         );
-        if crate::platform::host::WINDOWS {
-            assert_eq!(got.as_deref(), Some(REFUSAL));
-        } else {
-            assert_eq!(got, None);
-        }
+        assert_eq!(got, None);
     }
 
     #[test]
