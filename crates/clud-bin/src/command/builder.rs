@@ -11,7 +11,7 @@ use crate::provider_catalog;
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, do_contract,
+    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, push_do_contract,
     push_prompt, push_prompt_interactive, REBASE_PROMPT,
 };
 use super::types::{HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule};
@@ -392,6 +392,13 @@ fn land_instructions(args: &Args) -> &'static str {
 /// agent tries them: a refused call still costs a full round trip (#2354).
 pub(super) const TOOL_CALL_RULES: &str = "Tool-call rules clud enforces (a refused call is a wasted round trip): never wait with a while/until/sleep loop, `watch` or `tail -f`, in Bash or Monitor; use run_in_background and its completion notification, or a tool with its own deadline (pr_merge_watch, clud ci). Prefer `(cd DIR && CMD)` or absolute paths over a bare `cd`. Run one GitHub mutation (push, PR create, merge, issue or API write) per call.";
 
+/// Land instructions, tool-call rules, then the `/do` contract, in order.
+fn append_launch_rules(target: &mut String, land: &str, args: &crate::args::Args) {
+    append_instructions(target, land);
+    append_instructions(target, TOOL_CALL_RULES);
+    push_do_contract(target, args);
+}
+
 fn append_instructions(target: &mut String, text: &str) {
     if !text.is_empty() {
         if !target.is_empty() {
@@ -488,12 +495,7 @@ fn build_launch_plan_for_target_at(
     };
     let land = land_instructions(args);
     if backend == Backend::Claude {
-        append_instructions(&mut deletion_instructions, land);
-        append_instructions(&mut deletion_instructions, TOOL_CALL_RULES);
-        if let Some(contract) = do_contract(args) {
-            deletion_instructions.push_str("\n\n");
-            deletion_instructions.push_str(contract);
-        }
+        append_launch_rules(&mut deletion_instructions, land, args);
     }
     let codex_passthrough_instructions = (backend == Backend::Codex)
         .then(|| take_codex_developer_instructions(&mut passthrough))
@@ -617,12 +619,7 @@ fn build_launch_plan_for_target_at(
             }
             instructions.push_str(&crate::deletion_rules::generated().instructions);
         }
-        append_instructions(&mut instructions, land);
-        append_instructions(&mut instructions, TOOL_CALL_RULES);
-        if let Some(contract) = do_contract(args) {
-            instructions.push_str("\n\n");
-            instructions.push_str(contract);
-        }
+        append_launch_rules(&mut instructions, land, args);
         if !instructions.is_empty() || has_user_instructions {
             cmd.extend([
                 "-c".into(),

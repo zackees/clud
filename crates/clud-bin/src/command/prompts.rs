@@ -30,19 +30,29 @@ Then proceed with the validation process:
 
 /// Claude Code rejects a `/goal` condition over 4000 characters (#2372), so
 /// the seed stays far below it; the full contract rides in the system prompt.
-#[cfg(test)]
 pub(super) const GOAL_SEED_CAP: usize = 4000;
 const GOAL_TARGET_CAP: usize = 500;
 
 /// The prepared `/do` contract, when this launch seeds one. Delivered through
 /// the appended system prompt (Claude) or developer instructions (Codex).
-pub(super) fn do_contract(args: &crate::args::Args) -> Option<&str> {
+fn do_contract(args: &crate::args::Args) -> Option<&str> {
     match &args.command {
         Some(crate::args::Command::Do { target: Some(_) }) => args
             .do_rendered_prompt
             .as_deref()
             .filter(|text| !text.trim().is_empty()),
         _ => None,
+    }
+}
+
+/// Append the `/do` contract to an instructions buffer, separated by a blank
+/// line unless the buffer is empty.
+pub(super) fn push_do_contract(target: &mut String, args: &crate::args::Args) {
+    if let Some(contract) = do_contract(args) {
+        if !target.is_empty() {
+            target.push_str("\n\n");
+        }
+        target.push_str(contract);
     }
 }
 
@@ -63,12 +73,14 @@ pub(super) fn build_do_prompt(rendered: Option<&str>, target: &str) -> String {
         return "/goal Stop: the live /do procedure was not prepared. Tell the user and do not start work."
             .to_string();
     }
-    format!(
+    let seed = format!(
         "/goal Complete the /do procedure for this target: {}. The full rendered procedure \
 (titled \"# /do: rendered for this checkout\") is in your system prompt; follow it exactly. \
 Done when that procedure's final step is complete and its stated completion criteria hold.",
         truncate_target(target)
-    )
+    );
+    debug_assert!(seed.chars().count() < GOAL_SEED_CAP);
+    seed
 }
 
 pub(super) const REBASE_PROMPT: &str = "\
