@@ -280,11 +280,14 @@ fn reason_in(
     let names_override = normalized.contains("extra_roots")
         || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
     let script = super::block_bad_cmd_shell::parse_command_with_home(command, dialect, cwd, home);
+    let alts = pre_cd_cwds(command, &script.invocations, cwd);
     let writes_settings = script.invocations.iter().any(|invocation| {
-        protected_operand(invocation, home)
+        protected_operand(invocation, home, &alts)
             || invocation.redirects.iter().any(|redirect| {
                 redirect.writes_file()
-                    && home.is_none_or(|home| !safe_destination(&redirect.target, invocation, home))
+                    && home.is_none_or(|home| {
+                        !safe_destination(&redirect.target, invocation, home, &alts)
+                    })
             })
     });
     if writes_settings
@@ -299,7 +302,35 @@ fn reason_in(
     }
 }
 
-fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
+/// Working directories a command may really run in besides the one the parser
+/// tracked. The parser assumes every `cd` succeeded, but after `;`, a newline,
+/// `||`, `&` or a pipe a failed `cd` leaves the next command in the old
+/// directory (#2348). Only a chain made purely of `&&` is certain, so any other
+/// connector next to a `cd` makes the pre-`cd` and every intermediate cwd
+/// candidates as well; a path is refused if it resolves to the protected file
+/// under any of them.
+fn pre_cd_cwds(command: &str, invocations: &[Invocation], cwd: Option<&Path>) -> Vec<String> {
+    let has_cd = invocations
+        .iter()
+        .any(|inv| inv.effective_program().as_deref() == Some("cd"));
+    if !has_cd || !command.replace("&&", "").contains([';', '\n', '|', '&']) {
+        return Vec::new();
+    }
+    let mut cwds: Vec<String> = cwd
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .into_iter()
+        .collect();
+    for inv in invocations {
+        if let Some(literal) = inv.cwd.as_literal() {
+            if !cwds.iter().any(|known| known == literal) {
+                cwds.push(literal.to_string());
+            }
+        }
+    }
+    cwds
+}
+
+fn protected_operand(invocation: &Invocation, home: Option<&Path>, alts: &[String]) -> bool {
     if read_only_invocation(invocation) {
         return false;
     }
@@ -311,18 +342,263 @@ fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
         Some("cp" | "mv" | "tee" | "install" | "dd" | "set-content" | "add-content" | "out-file")
     );
     let Some(cwd) = invocation.cwd.as_literal() else {
-        return mutator;
+        return mutator || names_protected_file(invocation, home);
     };
     invocation.effective_argv().iter().skip(1).any(|word| {
         word.as_literal().map_or(mutator, |word| {
             // A known protected operand on an unknown writer is refused too:
             // passing a target to a script does not establish its authority.
-            protected_file(word.strip_prefix("of=").unwrap_or(word), cwd, home)
+            let word = word.strip_prefix("of=").unwrap_or(word);
+            std::iter::once(cwd)
+                .chain(alts.iter().map(String::as_str))
+                .any(|cwd| operand_hits(word, cwd, home))
         })
     })
 }
 
-fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> bool {
+/// Whether `word` resolves, or as a glob/brace pattern could resolve, to the
+/// protected file when run from `cwd`.
+fn operand_hits(word: &str, cwd: &str, home: &Path) -> bool {
+    protected_file(word, cwd, home) || (has_glob(word) && pattern_may_match(word, cwd, home))
+}
+
+fn has_glob(word: &str) -> bool {
+    word.contains(['*', '?', '[', '{'])
+}
+
+/// Expand `{a,b}` groups. `None` when the expansion is too large to enumerate,
+/// which callers treat as a match.
+fn expand_braces(word: &str) -> Option<Vec<String>> {
+    const LIMIT: usize = 256;
+    let mut done = Vec::new();
+    let mut pending = vec![word.to_string()];
+    while let Some(text) = pending.pop() {
+        let text = wildcard_sequences(&text);
+        let Some((open, close, commas)) = first_brace_group(&text) else {
+            done.push(text);
+            continue;
+        };
+        let (head, tail) = (&text[..open], &text[close + 1..]);
+        let mut start = open + 1;
+        for end in commas.into_iter().chain([close]) {
+            pending.push(format!("{head}{}{tail}", &text[start..end]));
+            start = end + 1;
+        }
+        if pending.len() + done.len() > LIMIT {
+            return None;
+        }
+    }
+    Some(done)
+}
+
+/// Byte offsets of the first balanced `{...,...}` group: open, close, and its
+/// top-level commas. A group with no comma is literal text in bash.
+fn first_brace_group(text: &str) -> Option<(usize, usize, Vec<usize>)> {
+    let mut from = 0;
+    while let Some(offset) = text[from..].find('{') {
+        let open = from + offset;
+        let (mut depth, mut commas) = (0_usize, Vec::new());
+        for (index, ch) in text[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                ',' if depth == 1 => commas.push(open + index),
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if !commas.is_empty() {
+                            return Some((open, open + index, commas));
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        from = open + 1;
+    }
+    None
+}
+
+/// Glob match where `*` and `?` never cross a `/` and `[...]` is a class.
+/// Iterative star-backtracking, O(n*m) worst case.
+fn glob_match(pattern: &[char], text: &[char]) -> bool {
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < text.len() {
+        if pattern.get(pi) == Some(&'*') {
+            while pattern.get(pi) == Some(&'*') {
+                pi += 1;
+            }
+            star = Some((pi, ti));
+        } else if let Some(next) = glob_step(pattern, pi, text[ti]) {
+            pi = next;
+            ti += 1;
+        } else {
+            match star {
+                Some((sp, st)) if text[st] != '/' => {
+                    star = Some((sp, st + 1));
+                    pi = sp;
+                    ti = st + 1;
+                }
+                _ => return false,
+            }
+        }
+    }
+    pattern[pi.min(pattern.len())..].iter().all(|&c| c == '*')
+}
+
+/// Match one non-`*` pattern element at `pi` against `c`; the next pattern
+/// index on success.
+fn glob_step(pattern: &[char], pi: usize, c: char) -> Option<usize> {
+    let &p = pattern.get(pi)?;
+    match p {
+        '?' => (c != '/').then_some(pi + 1),
+        '[' => {
+            let rest = &pattern[pi + 1..];
+            match class_end(rest) {
+                Some(end) => (c != '/' && class_has(&rest[..end], c)).then_some(pi + end + 2),
+                // An unterminated class is a literal `[`.
+                None => (c == '[').then_some(pi + 1),
+            }
+        }
+        _ => (c == p).then_some(pi + 1),
+    }
+}
+
+/// Index of the `]` closing a class whose `[` was just consumed. A `[:name:]`
+/// element is skipped whole so its inner `]` does not end the class.
+fn class_end(after_open: &[char]) -> Option<usize> {
+    let skip = usize::from(matches!(after_open.first(), Some('!' | '^')));
+    let mut i = skip + usize::from(after_open.get(skip) == Some(&']'));
+    while i < after_open.len() {
+        match after_open[i] {
+            ']' => return Some(i),
+            '[' if after_open.get(i + 1) == Some(&':') => {
+                let found = after_open[i + 2..].windows(2).position(|w| w == [':', ']']);
+                i += found.map_or(1, |n| n + 4);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn class_has(class: &[char], c: char) -> bool {
+    // POSIX classes (`[:alpha:]`) are not evaluated: match any char, which
+    // can only over-refuse.
+    if class.windows(2).any(|w| w == ['[', ':']) {
+        return true;
+    }
+    let (negate, class) = match class.split_first() {
+        Some((&('!' | '^'), rest)) => (true, rest),
+        _ => (false, class),
+    };
+    let mut hit = false;
+    let mut i = 0;
+    while i < class.len() {
+        if class.get(i + 1) == Some(&'-') && i + 2 < class.len() {
+            hit |= (class[i]..=class[i + 2]).contains(&c);
+            i += 3;
+        } else {
+            hit |= class[i] == c;
+            i += 1;
+        }
+    }
+    hit != negate
+}
+
+/// Replace each comma-free `{x..y}` sequence group with `*` (over-refusal is
+/// fine); other text is untouched.
+fn wildcard_sequences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find(['{', '}']) {
+            Some(close) if after[close..].starts_with('}') && after[..close].contains("..") => {
+                if !after[..close].contains(',') {
+                    out.push('*');
+                    rest = &after[close + 1..];
+                    continue;
+                }
+                out.push('{');
+                rest = after;
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn pattern_may_match(word: &str, cwd: &str, home: &Path) -> bool {
+    let Some(patterns) = expand_braces(word) else {
+        return true;
+    };
+    let settings = crate::clud_settings::settings_path_at(home);
+    let lower = |path: &Path| -> Vec<char> {
+        crate::path_norm::display_slash(path)
+            .to_ascii_lowercase()
+            .chars()
+            .collect()
+    };
+    let targets = [
+        lower(&settings),
+        lower(&canonical_creation_target(&settings)),
+    ];
+    patterns.iter().any(|pattern| {
+        let expanded = match pattern
+            .strip_prefix("~/")
+            .or_else(|| pattern.strip_prefix("~\\"))
+        {
+            Some(relative) => home.join(relative).to_string_lossy().into_owned(),
+            None => pattern.clone(),
+        };
+        let joined = crate::shell_ast::join_path(cwd, &expanded);
+        let joined: Vec<char> = crate::path_norm::display_slash(Path::new(&joined))
+            .to_ascii_lowercase()
+            .chars()
+            .collect();
+        targets.iter().any(|target| glob_match(&joined, target))
+    })
+}
+
+/// With the cwd unknown a relative spelling cannot be resolved, so any word
+/// whose final component is the protected file name fails closed (#2348).
+fn names_protected_file(invocation: &Invocation, home: &Path) -> bool {
+    let settings = crate::clud_settings::settings_path_at(home);
+    let Some(name) = settings
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
+        return true;
+    };
+    invocation.effective_argv().iter().skip(1).any(|word| {
+        let raw = match word {
+            Value::Literal(text) => text.as_str(),
+            Value::Unknown(unknown) => unknown.raw.as_str(),
+        };
+        let raw = raw.trim().trim_matches(['\'', '"']).to_lowercase();
+        let raw = raw.strip_prefix("of=").unwrap_or(&raw);
+        let last = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+        let last = last.trim_matches(['\'', '"']);
+        last == name
+            || (has_glob(last) && {
+                let name: Vec<char> = name.chars().collect();
+                expand_braces(last).is_none_or(|options| {
+                    options
+                        .iter()
+                        .any(|option| glob_match(&option.chars().collect::<Vec<_>>(), &name))
+                })
+            })
+    })
+}
+
+fn safe_destination(target: &Value, invocation: &Invocation, home: &Path, alts: &[String]) -> bool {
     let Some(target) = target.as_literal() else {
         return false;
     };
@@ -332,7 +608,9 @@ fn safe_destination(target: &Value, invocation: &Invocation, home: &Path) -> boo
     let Some(cwd) = invocation.cwd.as_literal() else {
         return false;
     };
-    !protected_file(target, cwd, home)
+    !std::iter::once(cwd)
+        .chain(alts.iter().map(String::as_str))
+        .any(|cwd| protected_file(target, cwd, home))
 }
 
 fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
@@ -354,7 +632,11 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
         let path = crate::path_norm::win32_file_name(path);
         crate::path_norm::display_slash(&canonical_creation_target(&path)).to_ascii_lowercase()
     };
-    canonical(&destination) == canonical(&settings)
+    // A `..` after a missing directory cannot be canonicalized on disk, so the
+    // lexically collapsed spelling is compared too (#2348).
+    let lexical: std::path::PathBuf = crate::shell_ast::join_path(cwd, &expanded).into();
+    let settings = canonical(&settings);
+    canonical(&destination) == settings || canonical(&lexical) == settings
 }
 
 fn canonical_creation_target(path: &Path) -> std::path::PathBuf {
@@ -518,6 +800,143 @@ mod tests {
                 .is_some(),
                 "{command}"
             );
+        }
+    }
+
+    fn relative_reason(home: &Path, command: &str) -> Option<String> {
+        let cwd = home.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        reason_in(
+            command,
+            crate::block_bad_cmd::ShellDialect::Posix,
+            Some(&cwd),
+            Some(home),
+        )
+    }
+
+    #[test]
+    fn relative_spellings_into_home_settings_are_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let name = crate::clud_settings::settings_path_at(home.path())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for command in [
+            format!("echo x > ../.clud/{name}"),
+            format!("cd proj && echo x > ../../x/../.clud/{name}"),
+            format!("cp a ../.clud/{name}"),
+            format!("tee ../.clud/{name}"),
+            format!("mv a ./../.clud/{name}"),
+            format!("cd .. && echo x > .clud/{name}"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    fn settings_name(home: &Path) -> String {
+        crate::clud_settings::settings_path_at(home)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn failed_cd_before_a_non_and_connector_keeps_the_old_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            format!("cd /nonexistent; echo x > ../.clud/{name}"),
+            format!("cd /nonexistent\necho x > ../.clud/{name}"),
+            format!("cd /nonexistent || echo x > ../.clud/{name}"),
+            format!("cd /nonexistent & echo x > ../.clud/{name}"),
+            format!("cd /nonexistent; cp a ../.clud/{name}"),
+            format!("cd /nonexistent && true; cp a ../.clud/{name}"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
+        }
+        let unrelated = format!("cd /nonexistent; echo x > ../other/{name}");
+        assert_eq!(relative_reason(home.path(), &unrelated), None);
+    }
+
+    #[test]
+    fn globs_and_braces_that_can_match_the_protected_file_are_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        let stem = name.trim_end_matches(".json");
+        for command in [
+            "cp a ../.clud/*".to_string(),
+            "sed -i s/a/b/ ../.clud/*".to_string(),
+            format!("tee ../.clud/{{{stem},x}}.json"),
+            format!("cp a ../.clud/{stem}.js?n"),
+            format!("cp a ../.clud/{stem}.[j]son"),
+            format!("cp a ../.c*/{name}"),
+            format!("cp a ../.clu[[:alpha:]]/{name}"),
+            format!("cp a ../.clu{{c..e}}/{name}"),
+            format!("cp a ../.clud/{{{stem}.j,x}}{{a..c}}son"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_match_is_not_exponential_on_star_runs() {
+        let pattern: Vec<char> = "*".repeat(40).chars().chain(['x']).collect();
+        let text: Vec<char> = "a".repeat(60).chars().collect();
+        let started = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &text));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let name: Vec<char> = "ax".chars().collect();
+        assert!(glob_match(&pattern, &name));
+        assert!(!glob_match(&['*', 'x'], &['a', '/', 'x']));
+    }
+
+    #[test]
+    fn unrelated_globs_and_lookalike_names_are_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let name = settings_name(home.path());
+        for command in [
+            "cp a ../other/*".to_string(),
+            "cp a ../.clud/other-*.txt".to_string(),
+            "tee ../other/{a,b}.json".to_string(),
+            "rm -rf target/*".to_string(),
+            "cp src/*.rs dst/".to_string(),
+            "cp a ../other/[[:alpha:]]*".to_string(),
+            format!("cp a ../.clud/foo{name}"),
+            format!("cd \"$X\"; sed -i s/a/b/ foo{name}"),
+            format!("cd \"$X\"; sed -i s/a/b/ ../.clud/{name}x"),
+        ] {
+            assert_eq!(relative_reason(home.path(), &command), None, "{command}");
+        }
+        let unknown = format!("cd \"$X\"; sed -i s/a/b/ ../.clud/{name}");
+        assert!(relative_reason(home.path(), &unknown).is_some());
+    }
+
+    #[test]
+    fn relative_reads_and_unrelated_paths_are_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let name = crate::clud_settings::settings_path_at(home.path())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for command in [
+            format!("cat ../.clud/{name}"),
+            format!("cp a ../other/{name}"),
+            format!("grep x ../.clud/{name}"),
+            format!("echo x > ../other/{name}"),
+        ] {
+            assert_eq!(relative_reason(home.path(), &command), None, "{command}");
         }
     }
 
