@@ -55,9 +55,13 @@ pub(super) const MIN_SHARE_MS: u64 = 10 * 60 * 1000;
 pub(super) const MODIFIER_REPEATS: u32 = 3;
 /// Calls awaiting their PostToolUse; older ones are dropped first.
 const MAX_PENDING: usize = 16;
+/// Recent call ids remembered for redelivery dedupe.
+const MAX_SEEN: usize = 32;
 /// A pending call older than this never reports a duration.
 const PENDING_TTL_MS: u64 = 60 * 60 * 1000;
 const DIR_NAME: &str = "verify-ratio";
+/// Sibling of [`DIR_NAME`] so ledger pruning never touches lock files.
+const LOCK_DIR_NAME: &str = "verify-ratio-locks";
 const HASH_DOMAIN: &str = "clud-verify-ratio-v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +268,10 @@ pub(super) struct Ledger {
     /// Wide runs in a row, each after single-package edits.
     #[serde(default)]
     pub wide_single: u32,
+    /// Recent `tool_use_id`s already counted, so a call delivered twice
+    /// (two hook configs, a retried hook) is counted and advised once.
+    #[serde(default)]
+    pub seen: Vec<String>,
 }
 
 /// Counts in a window, for the note.
@@ -283,6 +291,8 @@ pub(super) struct Call {
     pub package: Option<String>,
     /// `tool_use_id` of a Bash call, so its PostToolUse can be timed.
     pub id: Option<String>,
+    /// `tool_use_id` of any call (edits included), for redelivery dedupe.
+    pub dedupe_id: Option<String>,
     pub now_ms: u64,
 }
 
@@ -352,6 +362,15 @@ pub(super) fn observe(previous: &Ledger, call: &Call, limits: Limits) -> (Ledger
         return (previous.clone(), None);
     }
     let mut ledger = previous.clone();
+    if let Some(id) = &call.dedupe_id {
+        if ledger.seen.contains(id) {
+            return (ledger, None);
+        }
+        if ledger.seen.len() >= MAX_SEEN {
+            ledger.seen.remove(0);
+        }
+        ledger.seen.push(id.clone());
+    }
     ledger.totals.entry(call.kind).or_default().calls += 1;
     if let Some(id) = &call.id {
         start_pending(&mut ledger, id, call.kind, call.now_ms);
@@ -504,6 +523,50 @@ fn store(path: &Path, ledger: &Ledger, fresh: bool) -> Option<()> {
     Some(())
 }
 
+/// Lock file for a ledger. It lives in a sibling directory that [`prune`] never
+/// scans: a lock is never rewritten, so its mtime stays old and the prune would
+/// unlink a live session's lock while its ledger survives, letting two
+/// processes lock different inodes.
+fn lock_path(ledger: &Path) -> PathBuf {
+    let root = ledger.parent().and_then(Path::parent).unwrap_or(ledger);
+    root.join(LOCK_DIR_NAME)
+        .join(ledger.file_name().unwrap_or_default())
+        .with_extension("lock")
+}
+
+/// Cross-process advisory lock around one ledger read-modify-write, so two
+/// concurrent hook invocations cannot both read the same cooldown and both
+/// advise, or overwrite each other's update. Fail open: when the lock file
+/// cannot be opened or locked the call proceeds unlocked.
+struct SessionLock(Option<std::fs::File>);
+
+impl SessionLock {
+    fn acquire(path: &Path) -> Self {
+        use fs4::fs_std::FileExt;
+        let lock = lock_path(path);
+        if let Some(dir) = lock.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .ok()
+            .filter(|file| FileExt::lock_exclusive(file).is_ok());
+        Self(file)
+    }
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        use fs4::fs_std::FileExt;
+        if let Some(file) = &self.0 {
+            let _ = FileExt::unlock(file);
+        }
+    }
+}
+
 /// Record `class` for the session in `state_dir`; the counts when a note is
 /// due. Every failure returns `None`.
 #[cfg(test)]
@@ -534,6 +597,7 @@ pub(super) fn observe_call_at(
         return None;
     }
     let path = session_file(state_dir, session_id);
+    let _guard = SessionLock::acquire(&path);
     let (existing, previous) = load(&path);
     let (ledger, verdict) = observe(&previous, call, limits);
     store(&path, &ledger, existing.is_none())?;
@@ -546,6 +610,7 @@ pub(super) fn finish_at(state_dir: &Path, session_id: &str, id: &str, now_ms: u6
         return None;
     }
     let path = session_file(state_dir, session_id);
+    let _guard = SessionLock::acquire(&path);
     let (existing, previous) = load(&path);
     existing.as_ref()?;
     let ledger = finish(&previous, id, now_ms)?;
@@ -599,6 +664,7 @@ pub(super) fn verdict(payload: &super::HookPayloadView, raw: &Value) -> Option<V
         workspace_lint: is_workspace_lint(kind, &payload.command),
         package: edited_path(payload.tool_input.as_ref()).and_then(|p| package_of(&p)),
         id: timed.then(|| tool_use_id(raw)).flatten(),
+        dedupe_id: tool_use_id(raw),
         now_ms: now_ms(),
     };
     let state_dir = crate::daemon::default_state_dir().ok()?;
