@@ -1422,8 +1422,13 @@ fn route_messages(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let (body, rules_outcome) =
-        crate::payload_rules::rewrite_body(&requested_model, "claude", body, &mut json);
+    let (body, rules_outcome) = crate::payload_rules::rewrite_body_with_headers(
+        &requested_model,
+        "claude",
+        &parsed.headers,
+        body,
+        &mut json,
+    );
     // A rule that cannot be applied is an operator mistake, not a client one:
     // the request keeps going with every change that did land.
     for problem in &rules_outcome.problems {

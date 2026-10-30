@@ -36,17 +36,24 @@ def _clud_binary() -> Path:
 
 
 def _apply(
-    rules: dict[str, Any], payload: dict[str, Any], model: str, protocol: str = "claude"
+    rules: dict[str, Any],
+    payload: dict[str, Any],
+    model: str,
+    protocol: str = "claude",
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    command = [
+        str(_clud_binary()),
+        "__apply-payload-rules",
+        "--model",
+        model,
+        "--protocol",
+        protocol,
+    ]
+    for name, value in (headers or {}).items():
+        command += ["--header", f"{name}: {value}"]
     completed = process.run(
-        [
-            str(_clud_binary()),
-            "__apply-payload-rules",
-            "--model",
-            model,
-            "--protocol",
-            protocol,
-        ],
+        command,
         input=json.dumps({"rules": rules, "payload": payload}),
         capture_output=True,
         text=True,
@@ -254,3 +261,96 @@ def test_a_selector_only_write_path_is_refused_when_the_file_loads(tmp_path: Pat
     )
     assert completed.returncode == 2
     assert "add the field to set" in completed.stderr
+
+
+def test_a_header_condition_gates_a_rule_on_the_callers_own_headers() -> None:
+    """Upstream `headers` conditions: every configured header must match."""
+    rules = {
+        "override": [
+            {
+                "models": [{"name": "claude-*", "headers": {"X-Client-Tier": "tenant-*-region-*"}}],
+                "params": {"metadata.tier_seen": True},
+            }
+        ]
+    }
+    matched = _apply(
+        rules,
+        {"model": "claude-sonnet-4", "metadata": {}},
+        "claude-sonnet-4",
+        headers={"X-Client-Tier": "tenant-acme-region-eu"},
+    )
+    assert matched["payload"]["metadata"]["tier_seen"] is True
+    assert matched["outcome"]["overridden"] == 1
+
+    # A header the request does not carry cannot match, and neither can a
+    # value outside the pattern.
+    for headers in ({}, {"X-Client-Tier": "free-tier"}):
+        missed = _apply(
+            rules, {"model": "claude-sonnet-4", "metadata": {}}, "claude-sonnet-4", headers=headers
+        )
+        assert "tier_seen" not in missed["payload"]["metadata"]
+        assert missed["outcome"]["changed"] is False
+
+
+def test_match_not_match_exist_and_not_exist_select_on_payload_shape() -> None:
+    rules = {
+        "override": [
+            {"models": [{"name": "claude-*", "match": [{"metadata.client": "codex"}]}],
+             "params": {"metadata.matched": True}},
+            {"models": [{"name": "claude-*", "not-match": [{"metadata.mode": "dev"}]}],
+             "params": {"metadata.not_matched": True}},
+            {"models": [{"name": "claude-*", "exist": ["metadata.user_id"]}],
+             "params": {"metadata.existed": True}},
+            {"models": [{"name": "claude-*", "not-exist": ["metadata.disable_payload"]}],
+             "params": {"metadata.not_existed": True}},
+        ]
+    }
+    hit = _apply(
+        rules,
+        {"model": "claude-sonnet-4", "metadata": {"client": "codex", "user_id": "u"}},
+        "claude-sonnet-4",
+    )
+    metadata = hit["payload"]["metadata"]
+    assert metadata["matched"] is True
+    assert metadata["not_matched"] is True
+    assert metadata["existed"] is True
+    assert metadata["not_existed"] is True
+    assert hit["outcome"]["overridden"] == 4
+
+    missed = _apply(
+        rules,
+        {"model": "claude-sonnet-4", "metadata": {"client": "claude", "mode": "dev",
+                                                  "disable_payload": 1}},
+        "claude-sonnet-4",
+    )
+    assert missed["payload"]["metadata"] == {"client": "claude", "mode": "dev",
+                                             "disable_payload": 1}
+    assert missed["outcome"]["changed"] is False
+
+
+def test_a_malformed_condition_path_is_reported_and_skips_only_its_rule() -> None:
+    """A bad condition path must not fail the request nor the good rules."""
+    rules = {
+        "override": [
+            {"models": [{"name": "claude-*", "match": [{"a..b": 1}]}],
+             "params": {"metadata.bad": True}},
+            {"models": [{"name": "claude-*"}], "params": {"metadata.good": True}},
+        ]
+    }
+    result = _apply(rules, {"model": "claude-sonnet-4", "metadata": {}}, "claude-sonnet-4")
+    assert "bad" not in result["payload"]["metadata"]
+    assert result["payload"]["metadata"]["good"] is True
+    assert len(result["outcome"]["problems"]) == 1
+    assert "empty path segment" in result["outcome"]["problems"][0]
+
+
+def test_a_header_without_a_colon_is_refused_by_the_seam() -> None:
+    completed = process.run(
+        [str(_clud_binary()), "__apply-payload-rules", "--header", "X-Broken"],
+        input=json.dumps({"rules": {}, "payload": {}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 2
+    assert "not a header" in completed.stderr

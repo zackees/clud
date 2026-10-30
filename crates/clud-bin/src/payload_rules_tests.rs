@@ -278,3 +278,110 @@ fn a_malformed_selector_in_a_filter_is_reported_per_request_and_skipped() {
     );
     assert_eq!(payload["temperature"], serde_json::json!(0.1));
 }
+
+#[test]
+fn header_conditions_require_every_configured_header_to_match() {
+    let rules = rules(serde_json::json!({
+        "override": [{
+            "models": [{"name": "claude-*", "headers": {"X-Client-Tier": "tenant-*-region-*"}}],
+            "params": {"metadata.tier_seen": true}
+        }]
+    }));
+    let headers = vec![(
+        "x-client-tier".to_string(),
+        "tenant-acme-region-eu".to_string(),
+    )];
+    let mut payload = serde_json::json!({"metadata": {}});
+    let outcome = apply_request(
+        &rules,
+        &Request::with_headers("claude-sonnet-4", "claude", &headers),
+        &mut payload,
+    );
+    assert_eq!(outcome.overridden, 1);
+    assert_eq!(payload["metadata"]["tier_seen"], serde_json::json!(true));
+
+    // Header names are matched case-insensitively; the pattern is not the name.
+    let wrong = vec![("X-Client-Tier".to_string(), "free".to_string())];
+    let mut untouched = serde_json::json!({"metadata": {}});
+    let missed = apply_request(
+        &rules,
+        &Request::with_headers("claude-sonnet-4", "claude", &wrong),
+        &mut untouched,
+    );
+    assert!(!missed.changed());
+    assert_eq!(untouched["metadata"], serde_json::json!({}));
+
+    // A request carrying no headers cannot satisfy a header condition.
+    let mut absent = serde_json::json!({"metadata": {}});
+    assert!(!apply(&rules, "claude-sonnet-4", "claude", &mut absent).changed());
+}
+
+#[test]
+fn payload_shape_conditions_gate_a_rule() {
+    let rules = rules(serde_json::json!({
+        "override": [
+            {"models": [{"name": "claude-*", "match": [{"metadata.client": "codex"}]}],
+             "params": {"metadata.matched": true}},
+            {"models": [{"name": "claude-*", "not-match": [{"metadata.mode": "dev"}]}],
+             "params": {"metadata.not_matched": true}},
+            {"models": [{"name": "claude-*", "exist": ["metadata.user_id"]}],
+             "params": {"metadata.existed": true}},
+            {"models": [{"name": "claude-*", "not-exist": ["metadata.disable_payload"]}],
+             "params": {"metadata.not_existed": true}}
+        ]
+    }));
+    let mut payload = serde_json::json!({
+        "metadata": {"client": "codex", "user_id": "u"}
+    });
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(outcome.overridden, 4);
+    assert_eq!(payload["metadata"]["matched"], serde_json::json!(true));
+    assert_eq!(payload["metadata"]["existed"], serde_json::json!(true));
+
+    let mut refused = serde_json::json!({
+        "metadata": {"client": "claude", "mode": "dev", "disable_payload": 1}
+    });
+    let missed = apply(&rules, "claude-sonnet-4", "claude", &mut refused);
+    assert!(!missed.changed());
+    assert_eq!(
+        refused["metadata"],
+        serde_json::json!({"client": "claude", "mode": "dev", "disable_payload": 1})
+    );
+}
+
+#[test]
+fn a_malformed_condition_path_skips_only_its_own_rule() {
+    let rules = rules(serde_json::json!({
+        "override": [
+            {"models": [{"name": "claude-*", "match": [{"a..b": 1}]}],
+             "params": {"metadata.bad": true}},
+            {"models": [{"name": "claude-*"}], "params": {"metadata.good": true}}
+        ]
+    }));
+    let mut payload = serde_json::json!({"metadata": {}});
+    let outcome = apply(&rules, "claude-sonnet-4", "claude", &mut payload);
+    assert_eq!(payload["metadata"], serde_json::json!({"good": true}));
+    assert_eq!(outcome.problems.len(), 1);
+    assert!(
+        outcome.problems[0].contains("empty path segment"),
+        "{:?}",
+        outcome.problems
+    );
+}
+
+#[test]
+fn a_condition_path_resolves_selectors_and_missing_values_are_false() {
+    // `exist` on a selector: the element must be there. A null value counts as
+    // missing for `exist`, exactly as it does for a `default` rule's presence
+    // check.
+    let rules = rules(serde_json::json!({
+        "override": [{
+            "models": [{"name": "*", "exist": ["tools.#(name==\"apply_patch\").type"]}],
+            "params": {"metadata.saw_patch": true}
+        }]
+    }));
+    let mut hit = serde_json::json!({"tools": [{"name": "apply_patch", "type": "freeform"}]});
+    assert!(apply(&rules, "m", "claude", &mut hit).changed());
+    let mut missed = serde_json::json!({"tools": [{"name": "apply_patch", "type": null}]});
+    assert!(!apply(&rules, "m", "claude", &mut missed).changed());
+}

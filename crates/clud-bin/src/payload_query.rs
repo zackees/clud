@@ -137,9 +137,11 @@ fn step(part: &str, path: &str) -> Result<Step, String> {
     }))
 }
 
-/// True when `path` resolves to a value that is present and not null. A null
-/// counts as missing, which is what makes a `default` rule able to fill it.
-pub fn present(payload: &Value, steps: &[Step]) -> bool {
+/// The first value `steps` resolves to, or `None` when the path reaches
+/// nothing. An all-matches selector can resolve to several elements; the
+/// caller that needs all of them walks the payload itself (as `set`/`remove`
+/// do), while a condition compares one value.
+pub fn resolve<'a>(payload: &'a Value, steps: &[Step]) -> Option<&'a Value> {
     let mut candidates: Vec<&Value> = vec![payload];
     for step in steps {
         let mut next: Vec<&Value> = Vec::new();
@@ -147,11 +149,17 @@ pub fn present(payload: &Value, steps: &[Step]) -> bool {
             descend(candidate, step, &mut next);
         }
         if next.is_empty() {
-            return false;
+            return None;
         }
         candidates = next;
     }
-    candidates.iter().any(|value| !value.is_null())
+    candidates.first().copied()
+}
+
+/// True when `path` resolves to a value that is present and not null. A null
+/// counts as missing, which is what makes a `default` rule able to fill it.
+pub fn present(payload: &Value, steps: &[Step]) -> bool {
+    resolve(payload, steps).is_some_and(|value| !value.is_null())
 }
 
 fn descend<'a>(current: &'a Value, step: &Step, out: &mut Vec<&'a Value>) {

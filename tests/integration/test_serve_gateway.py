@@ -570,7 +570,19 @@ def test_serve_applies_payload_rules_to_the_upstream_body(
         json.dumps(
             {
                 "default": [{"models": [{"name": "claude-*"}], "params": {"temperature": 0.3}}],
-                "override": [{"models": [{"name": "claude-*"}], "params": {"max_tokens": 32}}],
+                "override": [
+                    {"models": [{"name": "claude-*"}], "params": {"max_tokens": 32}},
+                    # A `headers` condition (config.example.yaml:276-279): the
+                    # real request must carry the header for this rule to fire.
+                    {
+                        "models": [{"name": "claude-*", "headers": {"X-Clud-Probe": "run-*"}}],
+                        "params": {"metadata.client_tier": "probe"},
+                    },
+                    {
+                        "models": [{"name": "claude-*", "headers": {"X-Clud-Absent": "*"}}],
+                        "params": {"metadata.absent_header_rule": True},
+                    },
+                ],
                 "filter": [{"params": ["metadata.user_id", "messages.9.content"]}],
             }
         ),
@@ -629,7 +641,11 @@ def test_serve_applies_payload_rules_to_the_upstream_body(
                     "metadata": {"user_id": "must-not-reach-the-upstream"},
                 }
             ),
-            headers={"x-api-key": client_token, "content-type": "application/json"},
+            headers={
+                "x-api-key": client_token,
+                "content-type": "application/json",
+                "x-clud-probe": "run-42",
+            },
         )
         response = connection.getresponse()
         status = response.status
@@ -644,6 +660,11 @@ def test_serve_applies_payload_rules_to_the_upstream_body(
             "filter removes the parameter"
         )
         assert forwarded["messages"] == [{"role": "user", "content": "hello"}]
+        # The header-gated rule saw the caller's real header, and the rule
+        # gated on a header nobody sent stayed out of the way.
+        forwarded_metadata = forwarded.get("metadata", {})
+        assert forwarded_metadata.get("client_tier") == "probe", forwarded
+        assert "absent_header_rule" not in forwarded_metadata, forwarded
     finally:
         if child.poll() is None:
             child.terminate()

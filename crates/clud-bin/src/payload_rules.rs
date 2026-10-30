@@ -21,15 +21,21 @@
 //! array indices, and gjson query selectors (`tools.#(name=="apply_patch")`,
 //! `...#.tools.#(name=="functions")#`).
 //!
-//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the
-//! header/`match`/`not-match`/`exist` conditions, the `*-raw` variants, the
-//! OpenAI-shaped ingress path, and a `~/.clud/settings.json` owner for the
-//! rules.
+//! A selector can also carry the applicability conditions upstream evaluates
+//! before a rule fires (`config.example.yaml:276-287`): request `headers`
+//! (value patterns with `*`), `match`/`not-match` (payload JSON paths that must
+//! or must not equal a value), and `exist`/`not-exist` (paths that must or must
+//! not resolve to a non-null value). All of them must hold.
+//!
+//! Deliberately NOT ported yet (see `FEATURES.json` sub-rows): the `*-raw`
+//! variants, the OpenAI-shaped ingress path, and a `~/.clud/settings.json`
+//! owner for the rules.
 //!
 //! A rule that cannot be applied never fails a client request: the payload is
 //! forwarded as far as the good rules got it and the problem is reported to
 //! the bridge log by [`apply`]'s [`Outcome::problems`].
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -71,8 +77,13 @@ pub struct FilterRule {
 }
 
 /// A model selector: a name with `*` wildcards, optionally narrowed to one
-/// protocol.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+/// protocol, plus the applicability conditions upstream evaluates before a rule
+/// fires (`headers`, `match`, `not-match`, `exist`, `not-exist`).
+///
+/// All conditions must hold for the selector to select — upstream's "all
+/// configured request headers must match" / "all payload JSON paths must
+/// equal", `config.example.yaml:276-287`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelMatch {
     pub name: String,
@@ -80,6 +91,112 @@ pub struct ModelMatch {
     /// `POST /v1/messages`). Absent matches every protocol.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Request header name -> value pattern with `*` wildcards. A header that
+    /// is missing from the request cannot match.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Payload JSON path -> value; every path must resolve to that value.
+    #[serde(default, rename = "match")]
+    pub matches: Vec<BTreeMap<String, Value>>,
+    /// Payload JSON path -> value; no path may resolve to that value. A path
+    /// that is absent satisfies `not-match`.
+    #[serde(default, rename = "not-match")]
+    pub not_matches: Vec<BTreeMap<String, Value>>,
+    /// Paths that must resolve to a non-null value.
+    #[serde(default)]
+    pub exist: Vec<String>,
+    /// Paths that must be missing or null.
+    #[serde(default, rename = "not-exist")]
+    pub not_exist: Vec<String>,
+}
+
+impl ModelMatch {
+    /// True when this selector names `request` and every condition holds.
+    ///
+    /// `Err` means a condition path is malformed; the caller reports it and
+    /// skips the rule, because a bad condition must never fire a rewrite.
+    fn accepts(&self, request: &Request<'_>, payload: &Value) -> Result<bool, String> {
+        let protocol_fits = self
+            .protocol
+            .as_deref()
+            .is_none_or(|wanted| wanted.eq_ignore_ascii_case(request.protocol));
+        if !(protocol_fits && wildcard_matches(&self.name, request.model)) {
+            return Ok(false);
+        }
+        for (name, pattern) in &self.headers {
+            let Some(value) = header_value(request.headers, name) else {
+                return Ok(false);
+            };
+            if !wildcard_matches(pattern, value.trim()) {
+                return Ok(false);
+            }
+        }
+        for group in &self.matches {
+            for (path, expected) in group {
+                let steps = segments(path)?;
+                if payload_query::resolve(payload, &steps) != Some(expected) {
+                    return Ok(false);
+                }
+            }
+        }
+        for group in &self.not_matches {
+            for (path, expected) in group {
+                let steps = segments(path)?;
+                if payload_query::resolve(payload, &steps) == Some(expected) {
+                    return Ok(false);
+                }
+            }
+        }
+        for path in &self.exist {
+            if !path_present(payload, path) {
+                return Ok(false);
+            }
+        }
+        for path in &self.not_exist {
+            if path_present(payload, path) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// What a rule selects against: the model, the protocol being served, and the
+/// caller's own headers (for `headers` conditions).
+#[derive(Debug, Clone, Copy)]
+pub struct Request<'a> {
+    pub model: &'a str,
+    pub protocol: &'a str,
+    pub headers: &'a [(String, String)],
+}
+
+impl<'a> Request<'a> {
+    pub fn new(model: &'a str, protocol: &'a str) -> Self {
+        Self {
+            model,
+            protocol,
+            headers: &[],
+        }
+    }
+
+    pub fn with_headers(
+        model: &'a str,
+        protocol: &'a str,
+        headers: &'a [(String, String)],
+    ) -> Self {
+        Self {
+            model,
+            protocol,
+            headers,
+        }
+    }
 }
 
 /// The whole rules document. Every kind is optional, so `{}` is a valid file
@@ -123,17 +240,37 @@ impl Outcome {
     }
 }
 
-fn selected(models: &[ModelMatch], model: &str, protocol: &str) -> bool {
+/// True when one of `models` names `request` and its conditions hold.
+///
+/// `Err` is a malformed condition path: reported per rule, never fatal.
+fn selected(models: &[ModelMatch], request: &Request<'_>, payload: &Value) -> Result<bool, String> {
     if models.is_empty() {
-        return true;
+        return Ok(true);
     }
-    models.iter().any(|candidate| {
-        let protocol_fits = candidate
-            .protocol
-            .as_deref()
-            .is_none_or(|wanted| wanted.eq_ignore_ascii_case(protocol));
-        protocol_fits && wildcard_matches(&candidate.name, model)
-    })
+    for candidate in models {
+        if candidate.accepts(request, payload)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Evaluate a rule's selector, recording a malformed condition as a problem.
+/// A rule whose condition cannot be read never rewrites anything.
+fn rule_applies(
+    models: &[ModelMatch],
+    request: &Request<'_>,
+    payload: &Value,
+    outcome: &mut Outcome,
+    kind: &str,
+) -> bool {
+    match selected(models, request, payload) {
+        Ok(selected) => selected,
+        Err(reason) => {
+            outcome.problems.push(format!("{kind}: {reason}"));
+            false
+        }
+    }
 }
 
 /// Case-insensitive `*` glob, which is the whole wildcard language upstream
@@ -190,15 +327,23 @@ fn remove_in(current: &mut Value, parts: &[Step]) -> usize {
 }
 
 /// Apply every rule that selects `model` on `protocol`, in `default` ->
-/// `override` -> `filter` order, to `payload`.
-///
-/// `payload` must be the JSON object clud is about to forward. A rule entry
-/// that cannot be applied is recorded in [`Outcome::problems`] and skipped;
-/// nothing here can fail the request.
+/// `override` -> `filter` order, to `payload`, without request headers.
 pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Value) -> Outcome {
+    apply_request(rules, &Request::new(model, protocol), payload)
+}
+
+/// Apply every rule that selects `request`, in `default` -> `override` ->
+/// `filter` order, to `payload`.
+///
+/// `payload` must be the JSON object clud is about to forward. Conditions see
+/// the payload as it stands when their rule is evaluated, so an `override`
+/// rule sees what an earlier `default` rule wrote — the same order the caller's
+/// body would be rewritten in. A rule entry that cannot be applied is recorded
+/// in [`Outcome::problems`] and skipped; nothing here can fail the request.
+pub fn apply_request(rules: &PayloadRules, request: &Request<'_>, payload: &mut Value) -> Outcome {
     let mut outcome = Outcome::default();
     for rule in &rules.default {
-        if !selected(&rule.models, model, protocol) {
+        if !rule_applies(&rule.models, request, payload, &mut outcome, "default") {
             continue;
         }
         for (path, value) in &rule.params {
@@ -212,7 +357,7 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
         }
     }
     for rule in &rules.override_rules {
-        if !selected(&rule.models, model, protocol) {
+        if !rule_applies(&rule.models, request, payload, &mut outcome, "override") {
             continue;
         }
         for (path, value) in &rule.params {
@@ -223,7 +368,7 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
         }
     }
     for rule in &rules.filter {
-        if !selected(&rule.models, model, protocol) {
+        if !rule_applies(&rule.models, request, payload, &mut outcome, "filter") {
             continue;
         }
         for path in &rule.params {
@@ -374,13 +519,28 @@ pub fn rewrite_body(
     body: Vec<u8>,
     payload: &mut Value,
 ) -> (Vec<u8>, Outcome) {
+    rewrite_body_with_headers(model, protocol, &[], body, payload)
+}
+
+/// [`rewrite_body`] for a request whose headers a `headers` condition needs.
+pub fn rewrite_body_with_headers(
+    model: &str,
+    protocol: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+    payload: &mut Value,
+) -> (Vec<u8>, Outcome) {
     let Some(rules) = active() else {
         return (body, Outcome::default());
     };
     if rules.is_empty() {
         return (body, Outcome::default());
     }
-    let outcome = apply(&rules, model, protocol, payload);
+    let outcome = apply_request(
+        &rules,
+        &Request::with_headers(model, protocol, headers),
+        payload,
+    );
     if !outcome.changed() {
         return (body, outcome);
     }
@@ -396,11 +556,31 @@ pub fn rewrite_body(
     }
 }
 
-/// `clud __apply-payload-rules [--rules <path>] [--model M] [--protocol P]` —
-/// the process seam behind the Python subprocess test. Reads
-/// `{"rules": {...}, "payload": {...}}` on stdin (or the rules from `--rules`
-/// and just the payload on stdin) and writes `{"payload": ..., "outcome": ...}`.
-pub fn run_apply_stdin(rules_path: Option<&Path>, model: &str, protocol: &str) -> i32 {
+/// Split a `Name: value` command-line header. A header without a colon is
+/// refused: silently dropping it would make a `headers` condition select
+/// nothing and look like a bug in the rules.
+fn parse_header(raw: &str) -> Result<(String, String), String> {
+    let (name, value) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("`{raw}` is not a header; write `Name: value`"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("`{raw}` has an empty header name"));
+    }
+    Ok((name.to_string(), value.trim().to_string()))
+}
+
+/// `clud __apply-payload-rules [--rules <path>] [--model M] [--protocol P]
+/// [--header "Name: value"]...` — the process seam behind the Python
+/// subprocess test. Reads `{"rules": {...}, "payload": {...}}` on stdin (or the
+/// rules from `--rules` and just the payload on stdin) and writes
+/// `{"payload": ..., "outcome": ...}`.
+pub fn run_apply_stdin(
+    rules_path: Option<&Path>,
+    model: &str,
+    protocol: &str,
+    headers: Vec<String>,
+) -> i32 {
     use std::io::{Read, Write};
 
     let mut body = Vec::new();
@@ -437,8 +617,22 @@ pub fn run_apply_stdin(rules_path: Option<&Path>, model: &str, protocol: &str) -
             }
         },
     };
+    let mut parsed_headers = Vec::with_capacity(headers.len());
+    for raw in &headers {
+        match parse_header(raw) {
+            Ok(header) => parsed_headers.push(header),
+            Err(reason) => {
+                eprintln!("{reason}");
+                return 2;
+            }
+        }
+    }
     let mut payload = document.get("payload").cloned().unwrap_or(Value::Null);
-    let outcome = apply(&rules, model, protocol, &mut payload);
+    let outcome = apply_request(
+        &rules,
+        &Request::with_headers(model, protocol, &parsed_headers),
+        &mut payload,
+    );
     let rendered = serde_json::json!({
         "payload": payload,
         "outcome": {

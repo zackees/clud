@@ -1067,6 +1067,10 @@ pub enum Command {
         /// Protocol the rules select on (`claude` for `POST /v1/messages`).
         #[arg(long, default_value = "claude")]
         protocol: String,
+        /// A request header the rules can select on, as `Name: value`.
+        /// Repeatable; mirrors the headers a real request carries.
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {

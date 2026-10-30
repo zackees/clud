@@ -333,10 +333,12 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
             rules,
             model,
             protocol,
+            headers,
         } => clud::payload_rules::run_apply_stdin(
             rules.as_deref(),
             model.as_deref().unwrap_or_default(),
             protocol,
+            headers.to_vec(),
         ),
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),
