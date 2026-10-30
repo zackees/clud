@@ -107,7 +107,10 @@ runs:
         shims: true
         linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
         preserve-source-mtimes: true
-        solo-toolchain-cache: true
+        # #2342 / #2316: the shared solo-toolchain cache entry is poisoned
+        # (key says rustc1.95.0, archive ships 1.98.0-nightly) and setup-soldr
+        # cannot repair it without actions: write. Off until #2316 re-enables it.
+        solo-toolchain-cache: false
         cache-key-suffix: build-${{ inputs.target }}
         # Cook every dependency for this target before the build. Since
         # soldr 0.9.39 `soldr cook --target X` applies the same blessed prep
