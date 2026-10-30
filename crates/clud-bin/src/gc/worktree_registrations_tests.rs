@@ -76,3 +76,56 @@ fn missing_repo_and_duplicate_common_dirs_are_handled() {
     ];
     assert_eq!(count_dead(&repos), 1, "one repo, counted once");
 }
+
+/// Hand-write an admin entry whose worktree lives at `wt`.
+fn forge_entry(repo: &Path, name: &str, wt: &Path) -> PathBuf {
+    let admin = common_dir(repo).unwrap().join("worktrees").join(name);
+    fs::create_dir_all(&admin).unwrap();
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", wt.join(".git").display()),
+    )
+    .unwrap();
+    admin
+}
+
+#[test]
+fn missing_parent_is_unreachable_not_dead_and_blocks_the_prune() {
+    let (dir, repo) = fixture();
+    let lost = dir.path().join("unmounted").join("wt");
+    let admin = forge_entry(&repo, "lost", &lost);
+    let common = common_dir(&repo).unwrap();
+    let found = classify_entries(&common);
+    assert_eq!(found.dead.len(), 1, "only the plainly deleted worktree");
+    assert_eq!(found.unreachable, vec![admin.clone()]);
+    let repos = vec![repo.to_string_lossy().into_owned()];
+    let report = prune_repos(&repos, false);
+    assert_eq!((report.total_dead(), report.total_pruned()), (1, 0));
+    assert_eq!(report.total_unreachable(), 1);
+    assert!(admin.is_dir(), "unreachable entry must survive");
+    assert!(common.join("worktrees").join("dead").is_dir());
+    assert!(report.summary_line().contains("1 unreachable"));
+}
+
+#[test]
+fn an_entry_git_keeps_is_reported_pending_not_pruned() {
+    let mut outcome = RepoOutcome {
+        repo: "r".into(),
+        dead: 2,
+        pruned: 1,
+        pending: 1,
+        unreachable: 0,
+        error: None,
+    };
+    let report = Report {
+        repos: vec![outcome.clone()],
+        dry_run: false,
+    };
+    assert!(report.summary_line().contains("1 dead, pending git expiry"));
+    outcome.pending = 0;
+    let clean = Report {
+        repos: vec![outcome],
+        dry_run: false,
+    };
+    assert!(!clean.summary_line().contains("pending"));
+}

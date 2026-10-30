@@ -6,12 +6,17 @@
 //! `git worktree remove` on it is a no-op, so on a busy box hundreds of them
 //! pile up across repos.
 //!
-//! This module counts such entries with plain filesystem reads (an entry is
-//! dead when the path in its `gitdir` file no longer exists and the entry is
-//! not `locked`, the same test `git worktree prune` applies) and prunes them
-//! with `git worktree prune --expire=now`, run through `worktrees::run_git`
-//! (running-process). Pruning is metadata only: it never touches a worktree
-//! directory, so it needs no liveness guard.
+//! This module counts such entries with plain filesystem reads. An entry is
+//! dead only when the `.git` file named in its `gitdir` file is gone, the
+//! entry is not `locked`, **and the worktree directory's parent exists**. A
+//! missing parent (an unmounted drive, a detached volume, a container path)
+//! proves nothing about the worktree, so such an entry is "unreachable" and
+//! neither counted as dead nor pruned; a repo holding any unreachable entry is
+//! not pruned at all, because git cannot be told to skip single entries.
+//! Pruning is plain `git worktree prune` (no `--expire`), run through
+//! `worktrees::run_git` (running-process). Entries that are still dead after
+//! it are reported as "dead, pending git expiry". Pruning is metadata only: it
+//! never touches a worktree directory, so it needs no liveness guard.
 //!
 //! The repos come from the registry's `repo_visits` table, the same list `clud
 //! ui` shows; a repo clud has never run in is not visited.
@@ -30,6 +35,12 @@ pub struct RepoOutcome {
     pub dead: usize,
     /// Registrations that are gone after pruning (always 0 in a dry run).
     pub pruned: usize,
+    /// Dead registrations that survived `git worktree prune` (git's own
+    /// expiry); always 0 in a dry run.
+    pub pending: usize,
+    /// Entries whose worktree parent directory is missing (unmounted volume?):
+    /// not counted dead, and their repo is not pruned.
+    pub unreachable: usize,
     /// Why this repo was skipped or the prune failed.
     pub error: Option<String>,
 }
@@ -50,20 +61,42 @@ impl Report {
         self.repos.iter().map(|r| r.pruned).sum()
     }
 
+    pub fn total_pending(&self) -> usize {
+        self.repos.iter().map(|r| r.pending).sum()
+    }
+
+    pub fn total_unreachable(&self) -> usize {
+        self.repos.iter().map(|r| r.unreachable).sum()
+    }
+
     /// The one line `clud gc prune` prints.
     pub fn summary_line(&self) -> String {
         let repos = self.repos.iter().filter(|r| r.dead > 0).count();
-        if self.dry_run {
+        let mut line = if self.dry_run {
             format!(
-                "worktree-registrations: --dry-run would prune {} dead registration(s) in {repos} repo(s).",
+                "worktree-registrations: --dry-run would prune {} dead registration(s) in {repos} repo(s)",
                 self.total_dead()
             )
         } else {
             format!(
-                "worktree-registrations: pruned {} dead registration(s) in {repos} repo(s).",
+                "worktree-registrations: pruned {} dead registration(s) in {repos} repo(s)",
                 self.total_pruned()
             )
+        };
+        if self.total_pending() > 0 {
+            line.push_str(&format!(
+                "; {} dead, pending git expiry",
+                self.total_pending()
+            ));
         }
+        if self.total_unreachable() > 0 {
+            line.push_str(&format!(
+                "; {} unreachable (parent directory missing), skipped",
+                self.total_unreachable()
+            ));
+        }
+        line.push('.');
+        line
     }
 }
 
@@ -76,13 +109,22 @@ fn common_dir(repo: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(out.trim()))
 }
 
-/// Administrative entries under `common/worktrees` whose worktree directory is
-/// gone. A `locked` entry is spared, as `git worktree prune` spares it.
-pub fn dead_entries(common: &Path) -> Vec<PathBuf> {
+/// Registrations classified by [`classify_entries`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Classified {
+    /// Worktree gone, parent directory present, not locked.
+    pub dead: Vec<PathBuf>,
+    /// Worktree gone and its parent directory missing too: unknown, spared.
+    pub unreachable: Vec<PathBuf>,
+}
+
+/// Classify the administrative entries under `common/worktrees`. A `locked`
+/// entry is spared, as `git worktree prune` spares it.
+pub fn classify_entries(common: &Path) -> Classified {
     let Ok(entries) = fs::read_dir(common.join("worktrees")) else {
-        return Vec::new();
+        return Classified::default();
     };
-    let mut dead = Vec::new();
+    let mut out = Classified::default();
     for entry in entries.flatten() {
         let admin = entry.path();
         if !admin.is_dir() || admin.join("locked").exists() {
@@ -94,27 +136,58 @@ pub fn dead_entries(common: &Path) -> Vec<PathBuf> {
             .filter(|path| !path.as_os_str().is_empty());
         // A missing or empty `gitdir` file is prunable too ("gitdir file does
         // not exist" in git's own report).
-        if target.is_none_or(|path| !path.exists()) {
-            dead.push(admin);
+        let Some(target) = target else {
+            out.dead.push(admin);
+            continue;
+        };
+        if target.exists() {
+            continue;
+        }
+        // `target` is `<worktree>/.git`; the worktree's parent must be there.
+        let parent_present = target
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(Path::is_dir);
+        if parent_present {
+            out.dead.push(admin);
+        } else {
+            out.unreachable.push(admin);
         }
     }
-    dead.sort();
-    dead
+    out.dead.sort();
+    out.unreachable.sort();
+    out
+}
+
+/// Dead entries only (see [`classify_entries`]).
+pub fn dead_entries(common: &Path) -> Vec<PathBuf> {
+    classify_entries(common).dead
 }
 
 fn prune_one(repo: &str, common: &Path, dry_run: bool) -> RepoOutcome {
-    let dead = dead_entries(common).len();
+    let found = classify_entries(common);
+    let dead = found.dead.len();
     let mut outcome = RepoOutcome {
         repo: repo.to_string(),
         dead,
         pruned: 0,
+        pending: 0,
+        unreachable: found.unreachable.len(),
         error: None,
     };
     if dry_run || dead == 0 {
         return outcome;
     }
-    match worktrees::run_git(Path::new(repo), &["worktree", "prune", "--expire=now"]) {
-        Ok(_) => outcome.pruned = dead.saturating_sub(dead_entries(common).len()),
+    if outcome.unreachable > 0 {
+        // Plain `git worktree prune` would take the unreachable entries too.
+        outcome.error = Some("skipped: unreachable registrations present".to_string());
+        return outcome;
+    }
+    match worktrees::run_git(Path::new(repo), &["worktree", "prune"]) {
+        Ok(_) => {
+            outcome.pending = dead_entries(common).len();
+            outcome.pruned = dead.saturating_sub(outcome.pending);
+        }
         Err(err) => outcome.error = Some(err),
     }
     outcome
@@ -140,6 +213,8 @@ pub fn prune_repos(repos: &[String], dry_run: bool) -> Report {
                     repo: repo.clone(),
                     dead: 0,
                     pruned: 0,
+                    pending: 0,
+                    unreachable: 0,
                     error: Some(error),
                 });
                 continue;
