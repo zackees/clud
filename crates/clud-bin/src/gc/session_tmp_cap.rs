@@ -18,16 +18,16 @@
 //!
 //! # Liveness
 //!
-//! The age sweep has no session registry: it decides "live" purely by
-//! activity, treating any tree with an mtime newer than its threshold as in
-//! use, and every failure to establish idleness as "in use". Size eviction
-//! applies the same signal with a much shorter window,
-//! [`MIN_IDLE`]: a unit whose newest mtime anywhere beneath it is younger than
-//! that is never evicted, an unreadable or oversized walk counts as live, and
-//! the idleness is re-measured immediately before removal. A live session
-//! writes constantly, so it always stays; the cost of a too-generous window is
-//! only that the cap is exceeded until the unit goes quiet. Candidates are
-//! sorted oldest first, so the first live unit ends the pass.
+//! mtime alone is not liveness: a session idle through a long CI wait or
+//! overnight writes nothing yet expects its scratch. A unit is therefore
+//! evicted only when *all* of these hold: its newest mtime anywhere beneath it
+//! is at least [`MIN_IDLE`] old (an unreadable or oversized walk counts as
+//! live), no running process has a cwd or scratch-env path inside it, and no
+//! session id the daemon tracks matches a component of its path
+//! ([`super::session_tmp_live`]; an unconsultable source counts everything as
+//! live). Idleness is re-measured immediately before removal. The cost of
+//! caution is only that the cap is exceeded until the unit is truly dead. A
+//! live unit is skipped and the pass continues with the next oldest.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ use std::time::{Duration, SystemTime};
 
 use super::delete_audit;
 use super::session_tmp::MAX_NESTED_DEPTH;
+use super::session_tmp_live::LiveSignals;
 
 /// Default `tmp.max_bytes`: 10 GiB.
 pub const DEFAULT_TMP_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -182,7 +183,13 @@ fn remove_unit(unit: &Unit, undeletable: &mut super::undeletable::Undeletable) -
 
 /// Evict the oldest idle units under `root` until it is within `cap` bytes.
 /// `cap == 0` disables. Missing `root` is an empty, in-cap tree.
-pub fn enforce_cap_at(root: &Path, cap: u64, now: SystemTime, dry_run: bool) -> CapReport {
+pub fn enforce_cap_at(
+    root: &Path,
+    cap: u64,
+    now: SystemTime,
+    dry_run: bool,
+    live: impl FnOnce() -> LiveSignals,
+) -> CapReport {
     let mut report = CapReport {
         dry_run,
         cap,
@@ -197,6 +204,8 @@ pub fn enforce_cap_at(root: &Path, cap: u64, now: SystemTime, dry_run: bool) -> 
     if report.total_bytes <= cap {
         return report;
     }
+    // Consulted only once the tree is known to be over the cap.
+    let live = live();
     // Oldest first; an unmeasurable unit sorts last (it is live by default).
     units.sort_by_key(|u| (u.newest.is_none(), u.newest));
     let mut remaining = report.total_bytes;
@@ -205,6 +214,10 @@ pub fn enforce_cap_at(root: &Path, cap: u64, now: SystemTime, dry_run: bool) -> 
             break;
         }
         if !is_idle(unit.newest, now) {
+            report.kept_live += 1;
+            continue;
+        }
+        if live.is_live(root, &unit.path) {
             report.kept_live += 1;
             continue;
         }
@@ -235,7 +248,7 @@ pub fn enforce_cap(dry_run: bool) -> CapReport {
         return CapReport::default();
     };
     let cap = crate::clud_settings::load_tmp_max_bytes().unwrap_or(DEFAULT_TMP_MAX_BYTES);
-    enforce_cap_at(&root, cap, SystemTime::now(), dry_run)
+    enforce_cap_at(&root, cap, SystemTime::now(), dry_run, LiveSignals::collect)
 }
 
 #[cfg(test)]
