@@ -7383,3 +7383,29 @@ gate `bash lint` / `ci/lint.py` keeps running `soldr cargo fmt` and
 The context cost #2313 measured came from agents fanning out ad-hoc calls,
 not from the gate. The gate runs once per change, so the steering doc fixes
 the cost without touching the CI of record.
+
+## DD-194: session temp is capped by size, evicting only idle units oldest-first
+
+**Context:** #2397 measured `~/.clud/tmp` at 64 GB. DD-141 declined a size
+trigger because a cap that fires mid-session deletes a live agent's scratch.
+The age sweep alone left a day of heavy sessions on disk until it aged out.
+
+**Decision:** `tmp.max_bytes` (default 10 GiB, `0` disables) evicts the oldest
+eviction units (session dirs, or loose files) until the tree fits, but only a
+unit that is idle by mtime (newest mtime beneath it at least `MIN_IDLE`, 6 h,
+re-measured immediately before removal; unreadable, oversized or future-dated
+walks count as live) **and** not pointed at by a strong liveness signal: no
+running process has its cwd or `TMPDIR`/`CLAUDE_CODE_TMPDIR` inside the unit,
+and no session id the daemon tracks is a component of its path. An unconsulted
+signal source counts every unit as live. mtime alone is not enough (a session
+parked on a long CI wait or overnight is quiet but live), so this is stricter
+than, and not at parity with, the age sweep's activity-only rule. `tmp.warn_bytes`
+defaults to the cap, so a tree live sessions keep over it is warned about.
+Supersedes DD-141's "never a deletion trigger"; the warning stays.
+
+**Why not delete past the cap regardless:** that is exactly DD-141's failure.
+**Consequences:** the tree can stay over the cap while sessions are live; that
+is reported, not forced. Contract:
+[gc-and-registry.md](architecture/gc-and-registry.md#filesystem-sweeps-non-registry).
+
+Amendment: claude sessions are matched by project dir, not TMPDIR (which is the tmp root): a unit is live when a process cwd, or an ancestor of it, encodes (`project_slug`) to a path component of the unit. The process scan fails safe (everything live) when any same-user non-zombie process yields neither cwd nor environ, or this process cannot read its own. Worktree registrations count as dead only when the worktree's parent exists and is non-empty.

@@ -576,22 +576,24 @@ impl ForegroundRuntime {
     }
 
     /// [`Self::start`] plus a chained Claude `statusLine` that shows clud's
-    /// toasts (#1189). `None` behaves exactly like `start`.
+    /// toasts (#1189). `None` behaves exactly like `start`. The `bool` is
+    /// whether the status line was actually composed into the launch (#2395).
     pub fn start_with_statusline(
         plan: &LaunchPlan,
         env: Vec<(String, String)>,
         statusline: Option<&crate::toast::launch::StatuslineInjection>,
         status_writer: Option<&std::sync::Arc<crate::toast::statusline::StatusStateWriter>>,
-    ) -> Result<Self, BridgeError> {
+    ) -> Result<(Self, bool), BridgeError> {
         let mut runtime = Self::start(plan, env)?;
         if let (Some(bridge), Some(writer)) = (runtime.bridge.as_ref(), status_writer) {
             bridge.set_status_usage_writer(std::sync::Arc::clone(writer));
         }
+        let mut injected = false;
         if let Some(injection) = statusline {
             let home = crate::home::user_home();
-            runtime.inject_statusline(plan, injection, home.as_deref())?;
+            injected = runtime.inject_statusline(plan, injection, home.as_deref())?;
         }
-        Ok(runtime)
+        Ok((runtime, injected))
     }
 
     /// Compose clud's `statusLine` into this launch's Claude settings (#1189).
@@ -612,11 +614,11 @@ impl ForegroundRuntime {
         plan: &LaunchPlan,
         injection: &crate::toast::launch::StatuslineInjection,
         home: Option<&Path>,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<bool, BridgeError> {
         use crate::toast::statusline;
 
         if plan.effective_harness() != Backend::Claude {
-            return Ok(());
+            return Ok(false);
         }
         let project_dir = plan
             .cwd
@@ -624,6 +626,7 @@ impl ForegroundRuntime {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
+        let mut injected = false;
         let compose = |document: &mut serde_json::Value| -> bool {
             let user = statusline::discover_user_statusline(Some(&*document), &project_dir, home);
             let chain = statusline::chained_command(user.as_ref());
@@ -643,9 +646,11 @@ impl ForegroundRuntime {
                 "statusLine".to_string(),
                 statusline::compose_setting(user.as_ref(), command),
             );
+            injected = true;
             true
         };
-        self.merge_launch_settings(plan, compose)
+        self.merge_launch_settings(plan, compose)?;
+        Ok(injected)
     }
 
     /// Settings work on Claude clients that predate the `--effort` flag.
@@ -4749,6 +4754,32 @@ pub(crate) mod tests {
         let after = settings_document(&runtime).unwrap();
         assert_eq!(after["hooks"], before["hooks"], "hooks survive the merge");
         assert!(after["statusLine"]["command"].is_string());
+    }
+
+    #[test]
+    fn statusline_injection_reports_whether_the_status_line_was_composed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let plan = claude_plan_in(dir.path());
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        let composed = runtime
+            .inject_statusline(&plan, &statusline_injection(dir.path()), Some(home.path()))
+            .unwrap();
+        assert!(composed);
+
+        // An executable path that cannot be quoted safely yields no command.
+        let mut unquotable = statusline_injection(dir.path());
+        unquotable.exe = PathBuf::from("/opt/$clud/bin/clud");
+        let plan = claude_plan_in(dir.path());
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        let composed = runtime
+            .inject_statusline(&plan, &unquotable, Some(home.path()))
+            .unwrap();
+        assert!(!composed, "no status line was injected");
     }
 
     #[test]

@@ -470,6 +470,47 @@ fn claude_status_line_carries_the_cpu_toast_instead_of_a_grid_overlay() {
     assert!(read_live_toast(&path, crate::toast::statusline::now_ms()).is_none());
 }
 
+#[test]
+fn without_an_injected_status_line_the_cpu_reading_gets_the_grid_hud() {
+    // #2395: the fallback is `None` when injection failed, so the CPU toast
+    // must not be suppressed into an unread status file.
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 150 %", now);
+    let out = c.on_tick(now);
+    assert!(!out.is_empty(), "the grid HUD draws the CPU reading");
+    assert!(c.input().cpu_rect().is_some());
+}
+
+#[test]
+fn an_expiry_only_republish_is_mirrored_to_the_status_file() {
+    // #2395: `shown_at` survives an unchanged republish, so only
+    // `expires_at` differs and the status-line copy must still be refreshed.
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state_path(dir.path(), 4244);
+    let writer = Arc::new(StatusStateWriter::new(path.clone()));
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::StatusFile(Arc::clone(&writer)));
+    let publish = |ttl_ms: u64| {
+        let toast = Toast::new("cpu", "cpu 150 %", Severity::Warn, now)
+            .expiring_after(Duration::from_millis(ttl_ms));
+        hub.publish(ToastEvent::Show(toast));
+    };
+    publish(60_000);
+    c.on_tick(now);
+    let first = read_live_toast(&path, crate::toast::statusline::now_ms())
+        .unwrap()
+        .expires_ms
+        .unwrap();
+    publish(120_000);
+    c.on_tick(now);
+    let second = read_live_toast(&path, crate::toast::statusline::now_ms())
+        .unwrap()
+        .expires_ms
+        .unwrap();
+    assert!(second >= first + 50_000, "{first} -> {second}");
+}
+
 // ── dismiss, resize, off ──────────────────────────────────────────────────
 
 #[test]
