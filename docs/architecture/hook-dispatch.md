@@ -714,6 +714,17 @@ dispatcher roots every declared hook (cwd + `CLUD_PROJECT_DIR` = the
 declaring repo's root, D10). A sensitive raw hook keeps the repo strict even
 after migration, and an empty `hooks.json` is not an opt-in.
 
+**Repeated refusals are condensed** (#2314). The first `block_cd` denial in a
+session carries the full text: the registered roots, the settings key and the
+override. Later denials in the same session are one line that still names the
+rule id, the `(cd DIR && CMD)` escape and
+`CLUD_BAD_CMD_OVERRIDE=block-cd:<reason>`. The "already shown" marker is a file
+under the clud state dir (`block-cd-seen/<hash of session id>.seen`), pruned
+like `block_bad_cmd_repeat`'s state. It fails open to the full text when there
+is no session id or the state cannot be read or written. Condensing changes
+only the message, never what is denied. A subagent has its own session, so it
+sees the full text once (`block_bad_cmd_cd.rs` `condense_at`).
+
 **The `CwdChanged` backstop** (D12, DD-064) closes the gap the scanner
 cannot see: a session cwd moved by an alias or a script is invisible to
 PreToolUse, yet breaks exactly what pinning protects. clud registers its own
