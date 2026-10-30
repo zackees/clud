@@ -13,6 +13,7 @@ pub mod crash_report;
 pub mod credential_file;
 pub mod ctrl_c_track;
 pub mod dnd;
+pub mod file_identity;
 #[cfg(test)]
 mod foreground_runtime;
 pub mod fs_private;

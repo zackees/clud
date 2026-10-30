@@ -537,8 +537,27 @@ fn lane_with_sidecar(state_dir: &Path, started_at_unix_ms: u64) -> super::frame_
     daemon.started_at_unix_ms = started_at_unix_ms;
     let identity_path = daemon_identity_path(state_dir);
     write_daemon_identity_file(&identity_path, &daemon).expect("write sidecar");
+    // Replace, as a bind does, so a successor gets a new inode.
+    let _ = std::fs::remove_file(&endpoint_path);
     std::fs::write(&endpoint_path, b"").expect("socket placeholder");
-    super::frame_lane::FrameLane::new(identity_path, endpoint_path, &daemon)
+    let sidecar_id = crate::platform::file_identity::file_identity(&identity_path);
+    let socket_id = crate::platform::file_identity::file_identity(Path::new(&endpoint_path));
+    super::frame_lane::FrameLane::new(identity_path, endpoint_path, &daemon, sidecar_id, socket_id)
+}
+
+/// A lane over a really bound listener, as `start_frame_lane` builds it.
+fn real_lane(
+    state_dir: &Path,
+    started_at_unix_ms: u64,
+) -> (
+    super::frame_lane::FrameLane,
+    interprocess::local_socket::Listener,
+) {
+    let endpoint = endpoint_for_state_dir(state_dir).expect("endpoint");
+    let endpoint_path = endpoint.path.clone();
+    let mut daemon = DaemonProcess::current_process(endpoint, None).expect("identity");
+    daemon.started_at_unix_ms = started_at_unix_ms;
+    super::frame_lane::claim_endpoint(state_dir, &daemon, endpoint_path).expect("claim")
 }
 
 #[test]
@@ -571,28 +590,43 @@ fn superseded_lane_cleanup_keeps_the_newer_sidecar() {
     }
 }
 
-#[cfg(unix)]
+#[test]
+fn live_lane_cleanup_removes_its_own_socket_and_sidecar() {
+    if crate::platform::host::WINDOWS {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (lane, _listener) = real_lane(tmp.path(), 1_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    assert!(Path::new(&endpoint.path).exists());
+    lane.cleanup();
+    assert!(!Path::new(&endpoint.path).exists(), "own socket kept");
+    assert!(
+        !daemon_identity_path(tmp.path()).exists(),
+        "own sidecar kept"
+    );
+}
+
 #[test]
 fn superseded_lane_cleanup_keeps_the_newer_bound_socket() {
     use interprocess::local_socket::traits::{Listener as _, Stream as _};
     use running_process::broker::server::local_socket_name;
+    if crate::platform::host::WINDOWS {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
-    let older = lane_with_sidecar(tmp.path(), 1_000);
-    // Superseding daemon: newer sidecar, fresh socket bound at the path.
-    let newer = lane_with_sidecar(tmp.path(), 2_000);
+    let (older, _older_listener) = real_lane(tmp.path(), 1_000);
+    let (_newer, listener) = real_lane(tmp.path(), 2_000);
     let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
-    let _ = std::fs::remove_file(&endpoint.path);
-    let listener = interprocess::local_socket::ListenerOptions::new()
-        .name(local_socket_name(&endpoint.path).unwrap())
-        .create_sync()
-        .expect("bind newer socket");
     older.cleanup();
     assert!(Path::new(&endpoint.path).exists(), "newer socket removed");
+    let kept = read_daemon_identity_file(&daemon_identity_path(tmp.path()))
+        .expect("newer sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
     let connect = thread::spawn({
         let path = endpoint.path.clone();
         move || interprocess::local_socket::Stream::connect(local_socket_name(&path).unwrap())
     });
     listener.accept().expect("accept");
     connect.join().unwrap().expect("connect to newer socket");
-    drop(newer);
 }
