@@ -630,3 +630,43 @@ fn superseded_lane_cleanup_keeps_the_newer_bound_socket() {
     listener.accept().expect("accept");
     connect.join().unwrap().expect("connect to newer socket");
 }
+
+/// Inode reuse: A's recorded socket identity equals B's real socket, but the
+/// sidecar belongs to B, so A's cleanup must remove nothing (#2340).
+#[test]
+fn cleanup_keeps_a_socket_whose_inode_was_reused_by_the_successor() {
+    use interprocess::local_socket::traits::{Listener as _, Stream as _};
+    use running_process::broker::server::local_socket_name;
+    if crate::platform::host::WINDOWS {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_b, listener) = real_lane(tmp.path(), 2_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    let identity_path = daemon_identity_path(tmp.path());
+    let mut daemon_a = DaemonProcess::current_process(endpoint.clone(), None).expect("identity");
+    daemon_a.started_at_unix_ms = 1_000;
+    let a = super::frame_lane::FrameLane::new(
+        identity_path.clone(),
+        endpoint.path.clone(),
+        &daemon_a,
+        crate::platform::file_identity::file_identity(&identity_path),
+        crate::platform::file_identity::file_identity(Path::new(&endpoint.path)),
+    );
+    a.cleanup();
+    assert!(
+        Path::new(&endpoint.path).exists(),
+        "successor socket removed"
+    );
+    let kept = read_daemon_identity_file(&identity_path).expect("successor sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
+    let connect = thread::spawn({
+        let path = endpoint.path.clone();
+        move || interprocess::local_socket::Stream::connect(local_socket_name(&path).unwrap())
+    });
+    listener.accept().expect("accept");
+    connect
+        .join()
+        .unwrap()
+        .expect("connect to successor socket");
+}

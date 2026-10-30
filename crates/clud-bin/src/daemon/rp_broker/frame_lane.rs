@@ -64,11 +64,14 @@ impl FrameLane {
         }
     }
 
-    /// Remove the sidecar and socket path, but only the files this lane
-    /// created: each is compared by `(dev, inode)` against what was recorded
-    /// at creation, so a superseding daemon's replacements are left alone
-    /// (#2340). There is no connect probe: our own listener is still live
-    /// here, so a probe would always see "a listener" and skip the unlink.
+    /// Remove the sidecar and socket path, but only while the sidecar is
+    /// still ours (pid + start time, and its inode when recorded). A
+    /// successor always writes its sidecar before it binds, so a sidecar that
+    /// is not ours means the socket at the endpoint is not ours either, even
+    /// when the filesystem reused our socket's `(dev, inode)` for it (#2340).
+    /// An unreadable sidecar removes neither file. The socket inode compare
+    /// stays as an extra guard. There is no connect probe: our own listener
+    /// is still live here, so a probe would always see "a listener".
     ///
     /// The stat-then-unlink window remains: a successor that replaces a file
     /// between our check and our `remove_file` loses it. The consequence is
@@ -77,30 +80,42 @@ impl FrameLane {
         if crate::platform::host::WINDOWS {
             // Named pipes vanish with their last handle; only the sidecar
             // is on disk, and without inodes the identity read is the guard.
-            remove_sidecar_if_ours(&self.identity_path, self.owner, None);
+            if sidecar_is_ours(&self.identity_path, self.owner, None) {
+                remove_daemon_identity_file(&self.identity_path);
+            }
             return;
         }
-        remove_sidecar_if_ours(&self.identity_path, self.owner, self.sidecar_id);
+        if !sidecar_is_ours(&self.identity_path, self.owner, self.sidecar_id) {
+            return;
+        }
         let path = Path::new(&self.endpoint_path);
         if self.socket_id.is_some()
             && crate::platform::file_identity::file_identity(path) == self.socket_id
         {
             let _ = std::fs::remove_file(path);
         }
+        remove_daemon_identity_file(&self.identity_path);
     }
 }
 
-/// Remove the sidecar only while it is ours: its inode (when recorded)
-/// matches `sidecar_id` and it still carries `owner`'s identity.
-fn remove_sidecar_if_ours(identity_path: &Path, owner: (u32, u64), sidecar_id: Option<(u64, u64)>) {
+/// Whether the sidecar is still ours: its inode (when recorded) matches
+/// `sidecar_id` and it carries `owner`'s identity. Reads the file once.
+fn sidecar_is_ours(
+    identity_path: &Path,
+    owner: (u32, u64),
+    sidecar_id: Option<(u64, u64)>,
+) -> bool {
     if sidecar_id.is_some()
         && crate::platform::file_identity::file_identity(identity_path) != sidecar_id
     {
-        return;
+        return false;
     }
-    let ours = read_daemon_identity_file(identity_path)
-        .is_some_and(|d| (d.pid, d.started_at_unix_ms) == owner);
-    if ours {
+    read_daemon_identity_file(identity_path).is_some_and(|d| (d.pid, d.started_at_unix_ms) == owner)
+}
+
+/// Remove the sidecar only while it is ours.
+fn remove_sidecar_if_ours(identity_path: &Path, owner: (u32, u64), sidecar_id: Option<(u64, u64)>) {
+    if sidecar_is_ours(identity_path, owner, sidecar_id) {
         remove_daemon_identity_file(identity_path);
     }
 }
