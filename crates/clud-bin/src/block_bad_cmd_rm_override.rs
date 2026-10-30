@@ -397,14 +397,19 @@ fn operand_spans(text: &str, invocation: &Invocation) -> Vec<(usize, usize)> {
 
 /// Whether `reader`'s operands may be dropped: every command that could use
 /// them as a write target (through `$_`, a later `"$@"` or the like) must be
-/// body-inert, except stages of the reader's own pipeline, which run in
-/// subshells and never see its last argument.
+/// body-inert, except other stages of the reader's own pipeline, which run in
+/// subshells and never see its last argument. Commands in the reader's own
+/// stage (`( cat F; sed -i x "$_" ) | cat`, `{ ...; } | cat`) run
+/// sequentially in one shell, so `$_` carries the path and they get no
+/// exemption.
 fn operands_scrubbable(reader: &Invocation, script: &crate::shell_ast::Script) -> bool {
     script.invocations.iter().all(|other| {
         body_inert(other)
-            || reader
-                .pipeline
-                .is_some_and(|slot| other.pipeline.is_some_and(|o| o.id == slot.id))
+            || reader.pipeline.is_some_and(|slot| {
+                other
+                    .pipeline
+                    .is_some_and(|o| o.id == slot.id && o.stage != slot.stage)
+            })
     })
 }
 
@@ -1575,6 +1580,9 @@ mod tests {
             format!("cat a >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\" ~/.clud/{n}"),
             format!("cat ~/.clud/{n} >/dev/null; python -c 'import sys;open(sys.argv[1],\"w\")' \"$_\""),
             format!("cat ~/.clud/{n} >/dev/null; sed -i s/a/b/ \"$_\""),
+            format!("(cat ~/.clud/{n}; sed -i x \"$_\") | cat"),
+            format!("(cat ~/.clud/{n} && sed -i x \"$_\") | cat"),
+            format!("{{ cat ~/.clud/{n}; sed -i x \"$_\"; }} | cat"),
             format!("cat ~/.clud/{n} > /dev/null; perl -pi -e s/a/b/ \"$_\""),
             format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\"; cat clud/{n}"),
             format!("python -c \"open(__import__('os').path.expanduser('~/.clud/{n}'),'w')\""),
