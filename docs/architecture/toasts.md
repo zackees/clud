@@ -120,6 +120,14 @@ fresh window. To never show the overlay, pass `--no-cpu-banner` or set
 `[foreground.cpu_banner] enabled = false` in clud settings. The HUD has no
 close button or hotkey by design: it never consumes the child's input.
 
+When Claude's status line is injected (`Fallback::StatusFile`, every Claude
+PTY launch with a status writer), the compositor does not draw the CPU HUD at
+all, in any tier: `Compositor::mirror_cpu_to_status` publishes the keyed `cpu`
+toast to the status line instead. The reading therefore never covers header
+text and needs no dismissal, including on Linux/kitty. Non-Claude harnesses
+(title fallback) still get the grid HUD, which remains non-dismissable except
+by the opt-outs above.
+
 ### CPU HUD hover
 
 Hover is observed only when the child has already selected DECSET 1003
