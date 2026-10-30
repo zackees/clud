@@ -63,6 +63,25 @@ pub(super) fn signal_process_tree_as(identity: &ProcessIdentity, signal: Signal)
     signal_tree_in(&system, Pid::from_u32(identity.pid), signal);
 }
 
+/// Identity-guarded signal to exactly one process, never its descendants.
+///
+/// Returns `true` only when the platform accepted the signal. `false` covers a
+/// gone or recycled pid and a signal the host cannot deliver (sysinfo reports
+/// `Signal::Term` as unsupported on Windows).
+pub(super) fn signal_process_as(identity: &ProcessIdentity, signal: Signal) -> bool {
+    let system = fresh_minimal_system();
+    let Some(observed) = ProcessIdentity::observe_in(&system, identity.pid) else {
+        return false;
+    };
+    if !identity.matches(&observed) {
+        return false;
+    }
+    let Some(process) = system.process(Pid::from_u32(identity.pid)) else {
+        return false;
+    };
+    process.kill_with(signal).unwrap_or(false)
+}
+
 pub(super) fn signal_process_tree(root_pid: u32, signal: Signal) {
     let system = fresh_minimal_system();
     let root = Pid::from_u32(root_pid);

@@ -22,6 +22,7 @@ mod login_env;
 mod paths;
 mod proc_sampler;
 mod process_utils;
+mod registry_holder;
 mod rp_broker;
 mod runtime_config;
 mod server;
