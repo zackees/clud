@@ -7392,10 +7392,15 @@ The age sweep alone left a day of heavy sessions on disk until it aged out.
 
 **Decision:** `tmp.max_bytes` (default 10 GiB, `0` disables) evicts the oldest
 eviction units (session dirs, or loose files) until the tree fits, but only a
-unit whose newest mtime anywhere beneath it is at least `MIN_IDLE` (6 h) old,
-re-measured immediately before removal. Any unreadable, oversized or
-future-dated walk counts as live. This is the same signal the age sweep uses
-for liveness (activity, not a session registry), with a shorter window.
+unit that is idle by mtime (newest mtime beneath it at least `MIN_IDLE`, 6 h,
+re-measured immediately before removal; unreadable, oversized or future-dated
+walks count as live) **and** not pointed at by a strong liveness signal: no
+running process has its cwd or `TMPDIR`/`CLAUDE_CODE_TMPDIR` inside the unit,
+and no session id the daemon tracks is a component of its path. An unconsulted
+signal source counts every unit as live. mtime alone is not enough (a session
+parked on a long CI wait or overnight is quiet but live), so this is stricter
+than, and not at parity with, the age sweep's activity-only rule. `tmp.warn_bytes`
+defaults to the cap, so a tree live sessions keep over it is warned about.
 Supersedes DD-141's "never a deletion trigger"; the warning stays.
 
 **Why not delete past the cap regardless:** that is exactly DD-141's failure.

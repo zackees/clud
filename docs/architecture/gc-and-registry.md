@@ -635,10 +635,14 @@ trigger, superseding DD-141's warn-only stance for the over-cap case
 `gc::session_tmp_cap::enforce_cap_at` splits the tree into eviction units with the age sweep's depth
 rule (a depth-3 directory, i.e. `claude-<uid>/<project>/<session>/`, or a loose file; shallower
 directories are recursed into, never removed whole) and evicts oldest-first until the tree fits.
-**Liveness** is the age sweep's own signal, activity: a unit whose newest mtime anywhere beneath it
-is under `MIN_IDLE` (6 h) is kept, an unreadable, oversized-walk or future-dated unit counts as live,
-and idleness is re-measured right before removal, so a live session survives however far over the cap
-the tree is. The daemon runs it right after each age pass (`daemon/session_tmp_sweep.rs`, event
+**Liveness** is process/session signals plus idle mtime (it is not the age sweep's activity-only
+rule): a unit is evicted only if its newest mtime is at least `MIN_IDLE` (6 h) old (unreadable,
+oversized-walk or future-dated counts as live; re-measured right before removal) **and** no running
+process has a cwd or `TMPDIR`/`TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR` inside it **and** no session id the
+daemon tracks (`state/sessions` not exited, `state/api-sessions` not terminated) is a component of
+its path (`gc::session_tmp_live`). An unconsultable source makes every unit live. A parked session
+therefore survives however far over the cap the tree is, and `tmp.warn_bytes` (default = the cap)
+warns when live sessions keep it above. The daemon runs it right after each age pass (`daemon/session_tmp_sweep.rs`, event
 `session_tmp_cap`); `clud gc prune tmp` (and `prune all`) runs it on demand, honouring `--dry-run`.
 Removal goes through `rm_tool::remove_dir_tree_writable`, the shared tree deleter.
 
@@ -654,10 +658,12 @@ entry whose tree failed returns that line as its error instead of one error per 
 **Dead worktree registrations (#2397).** A repo's `<common-dir>/worktrees/<name>/` entry
 outlives its worktree directory when a container, a crash or a hand `rm` removes it; `git worktree
 list` keeps printing it. `clud gc prune worktree-registrations` (also part of `prune all`) walks
-every repo in the registry's `repo_visits` and runs `git worktree prune --expire=now` through
-`worktrees::run_git` (running-process). `gc::worktree_registrations::dead_entries` counts
-candidates with plain reads (the `gitdir` target is gone and the entry is not `locked`, git's own
-test) so the count is exact, `--dry-run` reports it without pruning, and two roots sharing a common
+every repo in the registry's `repo_visits` and runs plain `git worktree prune` (no `--expire=now`) through
+`worktrees::run_git` (running-process). `gc::worktree_registrations::classify_entries` counts
+candidates with plain reads: dead = the `gitdir` target is gone, the entry is not `locked`, **and
+the worktree's parent directory exists**. A missing parent (unmounted volume) is "unreachable":
+not counted dead, and its repo is not pruned (git cannot skip single entries). Entries still dead
+after the prune are reported "dead, pending git expiry". The count is exact, `--dry-run` reports it without pruning, and two roots sharing a common
 dir count once. Metadata only: no worktree directory is ever touched. `clud gc list` prints the
 dead count on stderr (so `--json` stays parseable). `purge` runs the same pass.
 
