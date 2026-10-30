@@ -21,6 +21,8 @@ enum Kind {
     Push,
     PrCreate,
     Mutation,
+    /// `gh api` with a non-GET method: one REST call per invocation.
+    ApiWrite,
     Watch,
 }
 
@@ -54,7 +56,7 @@ fn classify(words: &[String]) -> Option<Kind> {
         | ["issue", "create" | "edit" | "close", ..]
         | ["release", "create", ..]
         | ["workflow", "run", ..] => Some(Kind::Mutation),
-        ["api", ..] if gh_api_writes(words) => Some(Kind::Mutation),
+        ["api", ..] if gh_api_writes(words) => Some(Kind::ApiWrite),
         _ => None,
     }
 }
@@ -103,15 +105,35 @@ pub(super) fn mutation_chain_reason(
             classify(&peel_wrappers(&rule_words(invocation)).words).map(|kind| (invocation, kind))
         })
         .collect();
-    let mutations = found
-        .iter()
-        .map(|(invocation, kind)| match kind {
-            Kind::Watch => 0,
-            // A mutation in a loop body runs once per iteration.
-            _ if invocation.loop_kind.is_some() => 2,
-            _ => 1,
+    // #2354: a loop whose only mutation is one `gh api` write repeats the same
+    // REST call per item (e.g. linking several sub-issues). Each iteration is
+    // a small independent write with no PR URL or watch to bury, so splitting
+    // it into N tool calls only wastes round trips.
+    // The AST unrolls a `for` over literal items, one invocation per item, so
+    // the iterations of one call differ only in the word the item fills.
+    let single_api_loop = found.first().is_some_and(|(first, _)| {
+        let first = first.argv();
+        found.iter().all(|(invocation, kind)| {
+            let argv = invocation.argv();
+            *kind == Kind::ApiWrite
+                && invocation.loop_kind.is_some()
+                && argv.len() == first.len()
+                && argv.iter().zip(&first).filter(|(a, b)| a != b).count() <= 1
         })
-        .sum::<usize>();
+    });
+    let mutations = if single_api_loop {
+        1
+    } else {
+        found
+            .iter()
+            .map(|(invocation, kind)| match kind {
+                Kind::Watch => 0,
+                // A mutation in a loop body runs once per iteration.
+                _ if invocation.loop_kind.is_some() => 2,
+                _ => 1,
+            })
+            .sum::<usize>()
+    };
     let watch = found.iter().any(|(_, kind)| *kind == Kind::Watch);
     let refused =
         (mutations >= 1 && watch) || (mutations >= 2 && !push_then_create(&found, command_text));
