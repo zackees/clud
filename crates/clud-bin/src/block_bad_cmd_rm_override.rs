@@ -23,7 +23,13 @@ pub(super) const REFUSAL: &str =
     environment variables, scripts, and claimed approval metadata are not authority";
 
 pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<String> {
-    let home = crate::home::user_home();
+    reason_for_payload_in(payload, crate::home::user_home())
+}
+
+fn reason_for_payload_in(
+    payload: &super::HookPayloadView,
+    home: Option<std::path::PathBuf>,
+) -> Option<String> {
     let tool = payload
         .tool_name
         .rsplit('.')
@@ -31,9 +37,15 @@ pub(super) fn reason_for_payload(payload: &super::HookPayloadView) -> Option<Str
         .unwrap_or_default()
         .to_ascii_lowercase();
     if super::block_bad_cmd_gate::gates_tool(&tool) {
+        let dialect = super::shell_dialect_for_payload(payload);
+        if let Some(verdict) =
+            nested_patch_reason(&payload.command, dialect, &payload.cwd, home.as_deref())
+        {
+            return verdict;
+        }
         return reason_in(
             &payload.command,
-            super::shell_dialect_for_payload(payload),
+            dialect,
             Some(&payload.cwd),
             home.as_deref(),
         );
@@ -63,14 +75,20 @@ fn native_file_reason(
 
 /// Refusal for a patch whose destination cannot be established. Distinct from
 /// [`REFUSAL`]: nothing here says the patch touches user settings, only that
-/// it cannot be shown not to (#2289, #2222). Still fails closed.
-pub(super) const UNVERIFIABLE_PATCH: &str =
-    "could not parse the apply_patch payload (no `*** Add/Update/Delete File:` or \
-    `*** Move to:` target found); refusing because the target cannot be verified \
+/// it cannot be shown not to (#2289, #2222). Still fails closed. Every patch
+/// refusal opens with a stable bracketed reason code (#2285).
+pub(super) const UNRECOGNIZED_PAYLOAD: &str =
+    "[unrecognized-payload] the apply_patch input has no recognizable patch text \
+    (expected a string, or a `patch`/`input`/`cmd`/`command` field); refusing because \
+    the target cannot be verified against the protected user settings file";
+
+pub(super) const NO_TARGETS: &str =
+    "[no-targets] the apply_patch text has no `*** Add/Update/Delete File:` or \
+    `*** Move to:` header; refusing because the target cannot be verified \
     against the protected user settings file. Retry with a well-formed patch";
 
 const NO_HOME: &str =
-    "the user home directory could not be resolved, so apply_patch targets cannot be \
+    "[no-home] the user home directory could not be resolved, so apply_patch targets cannot be \
     verified against the protected user settings file; refusing";
 
 const PATCH_MARKERS: [&str; 4] = [
@@ -81,15 +99,15 @@ const PATCH_MARKERS: [&str; 4] = [
 ];
 
 /// Every string that may carry patch text in the shapes Codex sends: a bare
-/// string, `{"patch"|"input"|"command": "<patch>"}`, or a `command` argv array
-/// such as `["apply_patch", "<patch>"]`. All of them are collected so a decoy
-/// candidate cannot hide a protected target.
+/// string, `{"patch"|"input"|"cmd"|"command": "<patch>"}`, or a `command` argv
+/// array such as `["apply_patch", "<patch>"]`. All of them are collected so a
+/// decoy candidate cannot hide a protected target.
 fn patch_texts(input: &serde_json::Value) -> Vec<&str> {
     let mut texts = Vec::new();
     if let Some(text) = input.as_str() {
         texts.push(text);
     }
-    for key in ["patch", "input", "command"] {
+    for key in ["patch", "input", "cmd", "command"] {
         match input.get(key) {
             Some(serde_json::Value::String(text)) => texts.push(text),
             Some(serde_json::Value::Array(items)) => {
@@ -114,29 +132,84 @@ fn patch_targets(patch: &str) -> Vec<&str> {
         .collect()
 }
 
-fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> Option<String> {
-    let targets = payload
-        .tool_input
-        .as_ref()
-        .map(|input| {
-            patch_texts(input)
-                .into_iter()
-                .flat_map(patch_targets)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+/// Decide a patch from its candidate texts. The reason never echoes patch
+/// content: only the protected file's own name.
+fn patch_verdict(texts: &[&str], cwd: &str, home: Option<&Path>) -> Option<String> {
+    if texts.is_empty() {
+        return Some(UNRECOGNIZED_PAYLOAD.into());
+    }
+    let targets: Vec<&str> = texts.iter().copied().flat_map(patch_targets).collect();
     if targets.is_empty() {
-        return Some(UNVERIFIABLE_PATCH.into());
+        return Some(NO_TARGETS.into());
     }
     let Some(home) = home else {
         return Some(NO_HOME.into());
     };
-    let cwd = payload.cwd.to_string_lossy();
     // Codex trims header lines, so the trimmed spelling is what gets written.
     targets
         .iter()
-        .any(|path| protected_file(path, &cwd, home) || protected_file(path.trim(), &cwd, home))
-        .then(|| REFUSAL.into())
+        .any(|path| protected_file(path, cwd, home) || protected_file(path.trim(), cwd, home))
+        .then(|| protected_target_reason(home))
+}
+
+fn protected_target_reason(home: &Path) -> String {
+    let name = crate::clud_settings::settings_path_at(home)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("[protected-target] the patch targets protected `{name}`; {REFUSAL}")
+}
+
+fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> Option<String> {
+    let texts = payload
+        .tool_input
+        .as_ref()
+        .map(patch_texts)
+        .unwrap_or_default();
+    patch_verdict(&texts, &payload.cwd.to_string_lossy(), home)
+}
+
+/// Codex may deliver `apply_patch` through a shell-style tool
+/// (`apply_patch <<'EOF' ... EOF`, optionally after a `cd`). Such a command is
+/// judged by the patch's targets, not by whether its text mentions the settings
+/// file: a source file may legitimately discuss it. `None` means the command is
+/// not a plain nested patch and the general shell rules apply.
+fn nested_patch_reason(
+    command: &str,
+    dialect: super::ShellDialect,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<Option<String>> {
+    let script =
+        super::block_bad_cmd_shell::parse_command_with_home(command, dialect, Some(cwd), home);
+    if script.has_error {
+        return None;
+    }
+    let mut patches = Vec::new();
+    for invocation in &script.invocations {
+        match invocation.effective_program().as_deref() {
+            Some("cd") if invocation.redirects.iter().all(|r| !r.writes_file()) => {}
+            Some("apply_patch" | "applypatch")
+                if invocation.env.is_empty()
+                    && invocation.redirects.iter().all(|r| !r.writes_file()) =>
+            {
+                patches.push(invocation);
+            }
+            _ => return None,
+        }
+    }
+    let [patch] = patches.as_slice() else {
+        return None;
+    };
+    let work = patch.cwd.as_literal()?;
+    // The parser may attach the heredoc body to the `cd` that precedes the patch.
+    let mut texts: Vec<&str> = script
+        .invocations
+        .iter()
+        .filter_map(|invocation| invocation.heredoc.as_deref())
+        .collect();
+    texts.extend(patch.words.iter().skip(1).filter_map(Value::as_literal));
+    Some(patch_verdict(&texts, work, home))
 }
 
 fn native_target_is_protected(
@@ -471,10 +544,7 @@ mod tests {
             "*** Begin Patch\r\n  *** Update File: {}\r\n@@\r\n-a\r\n+b\r\n*** End Patch",
             settings.display()
         );
-        assert_eq!(
-            patch_reason(home.path(), serde_json::json!(protected)).as_deref(),
-            Some(REFUSAL)
-        );
+        assert_protected(patch_reason(home.path(), serde_json::json!(protected)));
     }
 
     #[test]
@@ -515,11 +585,7 @@ mod tests {
                 serde_json::json!(patch),
                 serde_json::json!({"command": ["apply_patch", patch]}),
             ] {
-                assert_eq!(
-                    patch_reason(home.path(), input).as_deref(),
-                    Some(REFUSAL),
-                    "{patch}"
-                );
+                assert_protected(patch_reason(home.path(), input));
             }
         }
     }
@@ -533,11 +599,7 @@ mod tests {
                 "*** Begin Patch\n*** Update File: {}{pad}\n@@\n-a\n+b\n*** End Patch",
                 settings.display()
             );
-            assert_eq!(
-                patch_reason(home.path(), serde_json::json!(patch)).as_deref(),
-                Some(REFUSAL),
-                "{pad:?}"
-            );
+            assert_protected(patch_reason(home.path(), serde_json::json!(patch)));
         }
     }
 
@@ -553,11 +615,7 @@ mod tests {
             serde_json::json!({"command": ["apply_patch", ORDINARY, wrapped]}),
             serde_json::json!({"command": ["apply_patch", ORDINARY, protected]}),
         ] {
-            assert_eq!(
-                patch_reason(home.path(), input.clone()).as_deref(),
-                Some(REFUSAL),
-                "{input}"
-            );
+            assert_protected(patch_reason(home.path(), input));
         }
     }
 
@@ -573,20 +631,121 @@ mod tests {
         }
     }
 
+    fn assert_protected(got: Option<String>) {
+        let got = got.expect("protected target must be refused");
+        assert!(got.starts_with("[protected-target]"), "{got}");
+        assert!(
+            got.contains("settings.json") && got.contains(REFUSAL),
+            "{got}"
+        );
+    }
+
     #[test]
-    fn unparseable_patches_fail_closed_with_an_accurate_message() {
+    fn unrecognized_payloads_fail_closed_with_their_own_code() {
         let home = tempfile::tempdir().unwrap();
         for input in [
             serde_json::json!({}),
             serde_json::json!(42),
             serde_json::json!({"command": []}),
             serde_json::json!({"command": [1, 2]}),
-            serde_json::json!("*** Begin Patch\n@@\n+No target header\n*** End Patch"),
         ] {
             let got = patch_reason(home.path(), input.clone()).expect("fail closed");
-            assert_eq!(got, UNVERIFIABLE_PATCH, "{input}");
+            assert_eq!(got, UNRECOGNIZED_PAYLOAD, "{input}");
             assert!(!got.contains("extra_roots"), "{input}");
         }
+    }
+
+    #[test]
+    fn headerless_patches_fail_closed_with_their_own_code() {
+        let home = tempfile::tempdir().unwrap();
+        for input in [
+            serde_json::json!("*** Begin Patch\n@@\n+No target header\n*** End Patch"),
+            serde_json::json!({"cmd": "apply_patch <<'EOF'\n@@\n+x\nEOF"}),
+        ] {
+            let got = patch_reason(home.path(), input.clone()).expect("fail closed");
+            assert_eq!(got, NO_TARGETS, "{input}");
+            assert!(!got.contains("+No target"), "{input}");
+        }
+    }
+
+    fn nested(home: &Path, tool: &str, input: serde_json::Value) -> Option<String> {
+        let mut payload = patch_payload(home, input);
+        payload.tool_name = tool.into();
+        payload.command = payload
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("cmd").or_else(|| v.get("command")))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .into();
+        reason_for_payload_in(&payload, Some(home.to_path_buf()))
+    }
+
+    #[test]
+    fn nested_exec_command_patches_are_judged_by_their_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        // Source text that merely discusses the protected file is ordinary.
+        let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+            -// reads ~/.clud/settings.json and extra_roots\n+// ok\n*** End Patch";
+        let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let with_cd = format!(
+            "cd {} && apply_patch <<'EOF'\n{source}\nEOF",
+            home.path().display()
+        );
+        for (tool, key, command) in [
+            ("exec_command", "cmd", &ordinary),
+            ("exec_command", "cmd", &with_cd),
+            ("shell_command", "command", &ordinary),
+            ("apply_patch", "command", &ordinary),
+        ] {
+            let input = serde_json::json!({ key: command });
+            assert_eq!(nested(home.path(), tool, input), None, "{tool} {command}");
+        }
+        let hit = format!(
+            "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch\nEOF",
+            settings.display()
+        );
+        assert_protected(nested(
+            home.path(),
+            "exec_command",
+            serde_json::json!({"cmd": hit}),
+        ));
+        let headerless = "apply_patch <<'EOF'\n@@\n+x\nEOF";
+        assert_eq!(
+            nested(
+                home.path(),
+                "exec_command",
+                serde_json::json!({"cmd": headerless})
+            )
+            .as_deref(),
+            Some(NO_TARGETS)
+        );
+        // A relative target resolves against the `cd` directory, not the payload cwd.
+        let relative = format!(
+            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: settings.json\n@@\n-a\n+b\n*** End Patch\nEOF",
+            settings.parent().unwrap().display()
+        );
+        assert_protected(nested(
+            home.path(),
+            "exec_command",
+            serde_json::json!({"cmd": relative}),
+        ));
+    }
+
+    #[test]
+    fn direct_apply_patch_reaches_the_gate_through_the_entry_point() {
+        let home = tempfile::tempdir().unwrap();
+        let payload = patch_payload(home.path(), serde_json::json!({"command": ORDINARY}));
+        assert_eq!(
+            reason_for_payload_in(&payload, Some(home.path().to_path_buf())),
+            None
+        );
+        let garbage = patch_payload(home.path(), serde_json::json!(7));
+        assert_eq!(
+            reason_for_payload_in(&garbage, Some(home.path().to_path_buf())).as_deref(),
+            Some(UNRECOGNIZED_PAYLOAD)
+        );
     }
 
     #[test]
