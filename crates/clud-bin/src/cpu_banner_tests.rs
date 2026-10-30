@@ -698,7 +698,7 @@ fn line(kind: BannerKind, cpu: f32, trigger: f32) -> BannerLine {
 fn a_running_episode_shows_a_live_toast_without_the_clud_prefix() {
     let now = Instant::now();
     let live = line(BannerKind::Sustained, 287.0, 240.0);
-    let events = toast_events(true, None, Some(&live), now);
+    let events = toast_events(true, None, Some(&live), None, now);
     let [crate::toast::ToastEvent::Show(toast)] = events.as_slice() else {
         panic!("expected one Show, got {events:?}");
     };
@@ -724,7 +724,7 @@ fn severity_escalates_to_alert_at_four_times_the_trigger() {
 fn the_clear_banner_becomes_an_expiring_back_to_normal_toast() {
     let now = Instant::now();
     let clear = line(BannerKind::Clear, 12.0, 240.0);
-    let events = toast_events(true, Some(&clear), None, now);
+    let events = toast_events(true, Some(&clear), None, None, now);
     let [crate::toast::ToastEvent::Show(toast)] = events.as_slice() else {
         panic!("expected one Show, got {events:?}");
     };
@@ -740,12 +740,12 @@ fn the_clear_banner_becomes_an_expiring_back_to_normal_toast() {
 fn a_silent_episode_end_closes_the_toast_and_idle_ticks_publish_nothing() {
     let now = Instant::now();
     assert_eq!(
-        toast_events(true, None, None, now),
+        toast_events(true, None, None, None, now),
         vec![crate::toast::ToastEvent::Close {
             key: CPU_TOAST_KEY.to_string()
         }]
     );
-    assert!(toast_events(false, None, None, now).is_empty());
+    assert!(toast_events(false, None, None, None, now).is_empty());
 }
 
 /// Drives the real state machine through crossover, sustain, and a short
@@ -763,7 +763,7 @@ fn the_state_machine_drives_show_then_close_for_a_short_episode() {
         let was = state.in_episode();
         let banner = state.poll(s, &cfg);
         let live = state.live_line(s, &cfg);
-        events.extend(toast_events(was, banner.as_ref(), live.as_ref(), at));
+        events.extend(toast_events(was, banner.as_ref(), live.as_ref(), None, at));
     }
     assert!(matches!(
         events.first(),
@@ -802,4 +802,38 @@ fn sampler_keeps_a_bounded_number_of_procfs_handles() {
         procfs_fds <= SYSINFO_OPEN_FILES_LIMIT + 36,
         "{procfs_fds} procfs handles open after a full walk"
     );
+}
+
+#[test]
+fn a_live_toast_carries_the_remaining_visible_window() {
+    let now = Instant::now();
+    let live = line(BannerKind::Sustained, 287.0, 240.0);
+    let ttl = Some(Duration::from_secs(7));
+    let events = toast_events(true, None, Some(&live), ttl, now);
+    let [crate::toast::ToastEvent::Show(toast)] = events.as_slice() else {
+        panic!("expected one Show, got {events:?}");
+    };
+    assert_eq!(toast.expires_at, Some(now + Duration::from_secs(7)));
+}
+
+#[test]
+fn the_live_window_expires_after_the_visible_period_and_rearms_per_episode() {
+    let t0 = Instant::now();
+    let mut window = LiveWindow::default();
+    assert_eq!(window.remaining(true, t0), Some(CPU_LIVE_VISIBLE));
+    let mid = t0 + Duration::from_secs(8);
+    assert_eq!(
+        window.remaining(true, mid),
+        Some(CPU_LIVE_VISIBLE - Duration::from_secs(8))
+    );
+    // Heartbeats past the window no longer re-show the toast.
+    assert_eq!(window.remaining(true, t0 + CPU_LIVE_VISIBLE), None);
+    assert_eq!(
+        window.remaining(true, t0 + CPU_LIVE_VISIBLE + Duration::from_secs(60)),
+        None
+    );
+    // Episode ends, a new one gets a fresh window.
+    assert_eq!(window.remaining(false, t0 + Duration::from_secs(100)), None);
+    let t1 = t0 + Duration::from_secs(120);
+    assert_eq!(window.remaining(true, t1), Some(CPU_LIVE_VISIBLE));
 }
