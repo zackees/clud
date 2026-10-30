@@ -16,7 +16,7 @@ use crate::process_identity::ProcessIdentity;
 use super::client::request_daemon_shutdown;
 use super::io_helpers::read_json_file;
 use super::paths::daemon_info_path;
-use super::process_utils::{identity_is_alive, signal_process_tree_as};
+use super::process_utils::{identity_is_alive, signal_process_as};
 use super::rp_broker::daemon_identity_path;
 use super::types::DaemonInfo;
 
@@ -65,23 +65,60 @@ where
     Err(last)
 }
 
+/// Side effects of [`evict_stale_holders`], injectable so tests can assert
+/// which pids are signalled without touching real processes.
+struct EvictOps<'a> {
+    request_shutdown: &'a dyn Fn(&Path),
+    observe: &'a dyn Fn(u32) -> Option<ProcessIdentity>,
+    /// Single-process signal (never the tree); `true` when delivered.
+    signal: &'a dyn Fn(&ProcessIdentity, Signal) -> bool,
+    is_alive: &'a dyn Fn(&ProcessIdentity) -> bool,
+    own_pid: u32,
+    /// Whether the host can deliver a graceful terminate (false on Windows).
+    graceful_terminate: bool,
+    grace: Duration,
+}
+
 /// Ask every other recorded clud daemon (`daemon.json`, then the frame-lane
 /// identity sidecar) to stop. Best effort: nothing here is fatal.
+///
+/// Only the holder pid is ever signalled, never its process tree: the holder's
+/// own shutdown handles its children, and a tree kill would take down the
+/// stale daemon's live session workers. On Windows `Signal::Term` is
+/// unsupported, so there is no graceful signal and the forced kill is skipped
+/// entirely; eviction relies on the graceful `request_daemon_shutdown` alone.
 pub(super) fn evict_stale_holders(state_dir: &Path) {
-    let own = std::process::id();
+    evict_with(
+        state_dir,
+        &EvictOps {
+            request_shutdown: &|dir| {
+                let _ = request_daemon_shutdown(dir);
+            },
+            observe: &ProcessIdentity::observe,
+            signal: &signal_process_as,
+            is_alive: &identity_is_alive,
+            own_pid: std::process::id(),
+            graceful_terminate: !crate::platform::host::WINDOWS,
+            grace: Duration::from_secs(3),
+        },
+    );
+}
+
+fn evict_with(state_dir: &Path, ops: &EvictOps<'_>) {
+    let own = ops.own_pid;
     let recorded = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).ok();
     let recorded_pid = recorded.as_ref().map(|info| info.pid);
     if recorded.is_some_and(|info| info.pid != own) {
         eprintln!("[clud] data.redb is locked; asking the previous daemon to stop");
-        let _ = request_daemon_shutdown(state_dir);
+        (ops.request_shutdown)(state_dir);
     }
     let Some(sidecar) = read_daemon_identity_file(&daemon_identity_path(state_dir)) else {
         return;
     };
-    if sidecar.pid == own || Some(sidecar.pid) == recorded_pid {
+    if sidecar.pid == own || Some(sidecar.pid) == recorded_pid || !ops.graceful_terminate {
         return;
     }
-    let Some(observed) = ProcessIdentity::observe(sidecar.pid) else {
+    let Some(observed) = (ops.observe)(sidecar.pid) else {
         return;
     };
     // A recycled pid must not be signalled: its start has to match the
@@ -90,13 +127,15 @@ pub(super) fn evict_stale_holders(state_dir: &Path) {
     if observed.start_time.abs_diff(recorded_start) > START_SLACK_SECS {
         return;
     }
-    signal_process_tree_as(&observed, Signal::Term);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while identity_is_alive(&observed) && Instant::now() < deadline {
+    if !(ops.signal)(&observed, Signal::Term) {
+        return;
+    }
+    let deadline = Instant::now() + ops.grace;
+    while (ops.is_alive)(&observed) && Instant::now() < deadline {
         thread::sleep(POLL);
     }
-    if identity_is_alive(&observed) {
-        signal_process_tree_as(&observed, Signal::Kill);
+    if (ops.is_alive)(&observed) {
+        (ops.signal)(&observed, Signal::Kill);
     }
 }
 
@@ -157,5 +196,77 @@ mod tests {
         let result = open_after_eviction(|| Err(lock_error()), || {}, Duration::from_millis(300));
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    fn sidecar_for(pid: u32, started_at_unix_ms: u64, state_dir: &Path) {
+        use running_process::broker::backend_handle::DaemonProcess;
+        use running_process::broker::backend_sdk::write_daemon_identity_file;
+        let endpoint =
+            super::super::rp_broker::endpoint_for_state_dir(state_dir).expect("endpoint");
+        let mut daemon = DaemonProcess::current_process(endpoint, None).expect("identity");
+        daemon.pid = pid;
+        daemon.started_at_unix_ms = started_at_unix_ms;
+        write_daemon_identity_file(&daemon_identity_path(state_dir), &daemon).expect("sidecar");
+    }
+
+    /// Run `evict_with` over a sidecar for `holder_pid`; return (shutdown
+    /// calls, signals sent).
+    fn run_evict(
+        holder_pid: u32,
+        sidecar_start_secs: u64,
+        observed_start: u64,
+        own_pid: u32,
+        graceful: bool,
+    ) -> (u32, Vec<(u32, bool)>) {
+        let tmp = tempfile::tempdir().unwrap();
+        sidecar_for(holder_pid, sidecar_start_secs * 1000, tmp.path());
+        let shutdowns = Cell::new(0u32);
+        let signals = std::cell::RefCell::new(Vec::new());
+        let request_shutdown = |_: &Path| shutdowns.set(shutdowns.get() + 1);
+        let observe = |pid: u32| Some(ProcessIdentity::new(pid, observed_start));
+        let signal = |id: &ProcessIdentity, sig: Signal| {
+            signals
+                .borrow_mut()
+                .push((id.pid, matches!(sig, Signal::Kill)));
+            true
+        };
+        let is_alive = |_: &ProcessIdentity| true;
+        evict_with(
+            tmp.path(),
+            &EvictOps {
+                request_shutdown: &request_shutdown,
+                observe: &observe,
+                signal: &signal,
+                is_alive: &is_alive,
+                own_pid,
+                graceful_terminate: graceful,
+                grace: Duration::from_millis(150),
+            },
+        );
+        (shutdowns.get(), signals.into_inner())
+    }
+
+    #[test]
+    fn eviction_signals_only_the_holder_pid_term_then_kill() {
+        let (_, signals) = run_evict(4242, 1_000_000, 1_000_000, 1, true);
+        assert_eq!(signals, vec![(4242, false), (4242, true)]);
+    }
+
+    #[test]
+    fn eviction_never_signals_its_own_pid() {
+        let (_, signals) = run_evict(77, 1_000_000, 1_000_000, 77, true);
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn eviction_spares_a_holder_whose_start_time_mismatches() {
+        let (_, signals) = run_evict(4242, 1_000_000, 2_000_000, 1, true);
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn eviction_without_graceful_terminate_issues_no_signal_at_all() {
+        let (_, signals) = run_evict(4242, 1_000_000, 1_000_000, 1, false);
+        assert!(signals.is_empty());
     }
 }

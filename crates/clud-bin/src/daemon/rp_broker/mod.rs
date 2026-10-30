@@ -33,6 +33,8 @@ use super::types::{DaemonRequest, DaemonResponse};
 use super::wire_prost::{WireFrame, CLUD_PROST_PAYLOAD_PROTOCOL};
 
 mod endpoint;
+#[cfg(test)]
+pub(in crate::daemon) use endpoint::endpoint_for_state_dir;
 mod errors;
 mod frame_lane;
 mod payload;
