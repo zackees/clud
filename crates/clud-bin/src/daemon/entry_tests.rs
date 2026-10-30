@@ -293,6 +293,7 @@ fn transcript_forces_centralized_daemon() {
         codex_config_overrides: Vec::new(),
         resolved_model_selection: None,
         raw_argv: Vec::new(),
+        continue_index: None,
         inline_api_key: None,
     };
     assert!(experimental_enabled(&args));

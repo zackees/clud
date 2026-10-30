@@ -403,6 +403,11 @@ pub struct Args {
     /// parsed representation.
     #[arg(skip)]
     pub raw_argv: Vec<String>,
+
+    /// `-c N` / `--continue N`: continue the Nth newest session in this
+    /// directory without the picker; `0` is the last save spot (#2405).
+    #[arg(skip)]
+    pub continue_index: Option<usize>,
 }
 
 impl std::fmt::Debug for Args {
@@ -1646,7 +1651,8 @@ impl Args {
     }
 
     pub fn parse_from_raw(raw: Vec<String>) -> Self {
-        let normalized = normalize_bare_resume_before_subcommand(&raw);
+        let (normalized, continue_index) = extract_continue_index(&raw);
+        let normalized = normalize_bare_resume_before_subcommand(&normalized);
         let normalized = normalize_known_option_dashes(&normalized);
         let normalized = match split_inline_key_assignments(&normalized) {
             Ok(normalized) => normalized,
@@ -1683,6 +1689,10 @@ impl Args {
             args.resume = Some(None);
         }
         args.passthrough.extend(unknown);
+        if continue_index.is_some() {
+            args.continue_session = true;
+            args.continue_index = continue_index;
+        }
         args.extract_inline_api_key();
         args.raw_argv = raw;
         args
@@ -1744,6 +1754,50 @@ fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
 /// `--resume=<session>`. A following flag (`--resume --model opus`) is never a
 /// session id either, so it gets the same treatment; otherwise the splitter
 /// would take the flag as resume's value (#1899).
+/// Lift a numeric value after `-c`/`--continue` (or `--continue=N`) out of
+/// the argv (#2405). `-c` is a switch, so `clud -c 0` used to forward `0` to
+/// the harness as the prompt. Only the top-level option region is scanned.
+fn extract_continue_index(raw: &[String]) -> (Vec<String>, Option<usize>) {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut index = None;
+    let mut skip_value = false;
+    let mut done = false;
+    let mut i = 0;
+    while i < raw.len() {
+        let arg = raw[i].as_str();
+        out.push(raw[i].clone());
+        i += 1;
+        if done || i == 1 {
+            continue;
+        }
+        if std::mem::replace(&mut skip_value, takes_next_value(arg)) {
+            continue;
+        }
+        if arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg) {
+            done = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--continue=") {
+            if let Ok(n) = value.parse::<usize>() {
+                *out.last_mut().unwrap() = "--continue".to_string();
+                index = Some(n);
+            }
+            continue;
+        }
+        if matches!(arg, "-c" | "--continue") {
+            if let Some(n) = raw
+                .get(i)
+                .filter(|next| !next.is_empty() && next.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|next| next.parse::<usize>().ok())
+            {
+                index = Some(n);
+                i += 1;
+            }
+        }
+    }
+    (out, index)
+}
+
 fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     let mut normalized = raw.to_vec();
     let mut skip_value = false;
