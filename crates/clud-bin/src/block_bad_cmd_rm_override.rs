@@ -311,7 +311,7 @@ fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
         Some("cp" | "mv" | "tee" | "install" | "dd" | "set-content" | "add-content" | "out-file")
     );
     let Some(cwd) = invocation.cwd.as_literal() else {
-        return mutator;
+        return mutator || names_protected_file(invocation, home);
     };
     invocation.effective_argv().iter().skip(1).any(|word| {
         word.as_literal().map_or(mutator, |word| {
@@ -319,6 +319,25 @@ fn protected_operand(invocation: &Invocation, home: Option<&Path>) -> bool {
             // passing a target to a script does not establish its authority.
             protected_file(word.strip_prefix("of=").unwrap_or(word), cwd, home)
         })
+    })
+}
+
+/// With the cwd unknown a relative spelling cannot be resolved, so any word
+/// whose final component is the protected file name fails closed (#2348).
+fn names_protected_file(invocation: &Invocation, home: &Path) -> bool {
+    let settings = crate::clud_settings::settings_path_at(home);
+    let Some(name) = settings
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
+        return true;
+    };
+    invocation.effective_argv().iter().skip(1).any(|word| {
+        let raw = match word {
+            Value::Literal(text) => text.as_str(),
+            Value::Unknown(unknown) => unknown.raw.as_str(),
+        };
+        raw.to_lowercase().trim_end().ends_with(&name)
     })
 }
 
@@ -354,7 +373,11 @@ fn protected_file(target: &str, cwd: &str, home: &Path) -> bool {
         let path = crate::path_norm::win32_file_name(path);
         crate::path_norm::display_slash(&canonical_creation_target(&path)).to_ascii_lowercase()
     };
-    canonical(&destination) == canonical(&settings)
+    // A `..` after a missing directory cannot be canonicalized on disk, so the
+    // lexically collapsed spelling is compared too (#2348).
+    let lexical: std::path::PathBuf = crate::shell_ast::join_path(cwd, &expanded).into();
+    let settings = canonical(&settings);
+    canonical(&destination) == settings || canonical(&lexical) == settings
 }
 
 fn canonical_creation_target(path: &Path) -> std::path::PathBuf {
@@ -518,6 +541,58 @@ mod tests {
                 .is_some(),
                 "{command}"
             );
+        }
+    }
+
+    fn relative_reason(home: &Path, command: &str) -> Option<String> {
+        let cwd = home.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        reason_in(
+            command,
+            crate::block_bad_cmd::ShellDialect::Posix,
+            Some(&cwd),
+            Some(home),
+        )
+    }
+
+    #[test]
+    fn relative_spellings_into_home_settings_are_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let name = crate::clud_settings::settings_path_at(home.path())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for command in [
+            format!("echo x > ../.clud/{name}"),
+            format!("cd proj && echo x > ../../x/../.clud/{name}"),
+            format!("cp a ../.clud/{name}"),
+            format!("tee ../.clud/{name}"),
+            format!("mv a ./../.clud/{name}"),
+            format!("cd .. && echo x > .clud/{name}"),
+        ] {
+            assert!(
+                relative_reason(home.path(), &command).is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_reads_and_unrelated_paths_are_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let name = crate::clud_settings::settings_path_at(home.path())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for command in [
+            format!("cat ../.clud/{name}"),
+            format!("cp a ../other/{name}"),
+            format!("grep x ../.clud/{name}"),
+            format!("echo x > ../other/{name}"),
+        ] {
+            assert_eq!(relative_reason(home.path(), &command), None, "{command}");
         }
     }
 
