@@ -418,7 +418,10 @@ fn default_raw_sets_parsed_json_only_where_nothing_is() {
 
     let mut other = serde_json::json!({"generationConfig": {}});
     let untouched = apply(&rules, "claude-sonnet-4", "claude", &mut other);
-    assert!(!untouched.changed(), "the model selector still gates raw rules");
+    assert!(
+        !untouched.changed(),
+        "the model selector still gates raw rules"
+    );
 }
 
 #[test]

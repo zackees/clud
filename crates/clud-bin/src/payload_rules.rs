@@ -372,7 +372,14 @@ pub fn apply(rules: &PayloadRules, model: &str, protocol: &str, payload: &mut Va
 /// in [`Outcome::problems`] and skipped; nothing here can fail the request.
 pub fn apply_request(rules: &PayloadRules, request: &Request<'_>, payload: &mut Value) -> Outcome {
     let mut outcome = Outcome::default();
-    outcome.defaulted += apply_set_rules(&rules.default, "default", true, request, payload, &mut outcome);
+    outcome.defaulted += apply_set_rules(
+        &rules.default,
+        "default",
+        true,
+        request,
+        payload,
+        &mut outcome,
+    );
     outcome.defaulted += apply_raw_rules(
         &rules.default_raw,
         "default-raw",
