@@ -25,14 +25,18 @@ mod registry;
 mod scanner;
 pub mod session_state;
 pub mod session_tmp;
+pub mod session_tmp_cap;
 mod session_tmp_continuation;
+pub mod session_tmp_live;
 pub mod target_prune;
 pub mod target_size_cache;
 pub mod target_sweep;
+pub mod undeletable;
 pub mod uv_cache;
 #[cfg(test)]
 pub(crate) mod uv_cache_fixture;
 pub mod uv_cache_repair;
+pub mod worktree_registrations;
 pub mod worktree_root;
 pub mod worktree_schedule;
 pub mod worktree_size_cache;

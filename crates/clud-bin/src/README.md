@@ -424,6 +424,10 @@ which test tier a change belongs in — lives in
   removal is bounded by `SHUTDOWN_BUDGET` (#1660) so a held lock cannot stall exit.
 - `gc/target_size_cache.rs` — daemon-measured per-worktree Rust target sizes;
   `gc list --targets` reads the cached report ([contract](../../../docs/architecture/gc-and-registry.md#cached-rust-target-sizes-1687)).
+- `gc/worktree_registrations.rs` — dead `git worktree` registration count + prune (#2397);
+  `clud gc prune worktree-registrations` ([contract](../../../docs/architecture/gc-and-registry.md)).
+- `gc/session_tmp_cap.rs` — `tmp.max_bytes` size cap for `~/.clud/tmp` (#2397, DD-194); `clud gc prune tmp`.
+- `gc/undeletable.rs` — aggregates deletion failures into the single "N paths could not be removed" line (#2397).
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and
   daemon-watch root derivation. The GC registry and its shared watcher live inside
   the daemon. `delete_audit.rs` is the pre-deletion JSONL audit trail

@@ -629,6 +629,44 @@ early-exit walk, and the daemon's maintenance sweep thread (after the age sweep,
 for size; the 72 h age sweep stays the only deleter of session temp
 ([DD-141](../DESIGN_DECISIONS.md#dd-141-session-temp-size-is-reported-never-a-deletion-trigger)).
 
+**Session temp size cap (#2397).** `tmp.max_bytes` (seeded 10 GiB, `0` disables) adds a size
+trigger, superseding DD-141's warn-only stance for the over-cap case
+([DD-194](../DESIGN_DECISIONS.md#dd-194-session-temp-is-capped-by-size-evicting-only-idle-units-oldest-first)).
+`gc::session_tmp_cap::enforce_cap_at` splits the tree into eviction units with the age sweep's depth
+rule (a depth-3 directory, i.e. `claude-<uid>/<project>/<session>/`, or a loose file; shallower
+directories are recursed into, never removed whole) and evicts oldest-first until the tree fits.
+**Liveness** is process/session signals plus idle mtime (it is not the age sweep's activity-only
+rule): a unit is evicted only if its newest mtime is at least `MIN_IDLE` (6 h) old (unreadable,
+oversized-walk or future-dated counts as live; re-measured right before removal) **and** no running
+process has a cwd or `TMPDIR`/`TMP`/`TEMP`/`CLAUDE_CODE_TMPDIR` inside it, and no running process has a cwd (or ancestor of it) whose Claude-encoded form (`session_history::import::project_slug`) names a path component of the unit, so the whole `claude-<uid>/<project>/` subtree is live while anything works in that project (`TMPDIR` is the tmp root and claude's cwd the project dir, so only the encoded name links them) **and** no session id the
+daemon tracks (`state/sessions` not exited, `state/api-sessions` not terminated) is a component of
+its path (`gc::session_tmp_live`). An unconsultable source makes every unit live, including a process scan where this process cannot read its own cwd/environ or any non-zombie process of the same user returned neither (a denied read looks like absence). A parked session
+therefore survives however far over the cap the tree is, and `tmp.warn_bytes` (default = the cap)
+warns when live sessions keep it above. The daemon runs it right after each age pass (`daemon/session_tmp_sweep.rs`, event
+`session_tmp_cap`); `clud gc prune tmp` (and `prune all`) runs it on demand, honouring `--dry-run`.
+Removal goes through `rm_tool::remove_dir_tree_writable`, the shared tree deleter.
+
+**Undeletable paths are one line (#2397).** Container builds leave `root:root` trees (47 GB of CEF
+under one `*-extern`) that the owning user cannot unlink. The gc deleters (`~/.clud/tmp` eviction,
+trash reaping, tracked-entry removal) go through `rm_tool::remove_dir_tree_collecting`, which keeps
+going past undeletable entries and reports each failed leaf to `gc::undeletable::Undeletable`. The
+pass prints `Undeletable::summary_line()` once: `N paths could not be removed (permission denied),
+e.g. <path>; owned by root — remove with sudo` (the owner clause comes from
+`platform::rm_tool::file_owner`; mixed causes read `(D permission denied, O other)`). A tracked
+entry whose tree failed returns that line as its error instead of one error per file.
+
+**Dead worktree registrations (#2397).** A repo's `<common-dir>/worktrees/<name>/` entry
+outlives its worktree directory when a container, a crash or a hand `rm` removes it; `git worktree
+list` keeps printing it. `clud gc prune worktree-registrations` (also part of `prune all`) walks
+every repo in the registry's `repo_visits` and runs plain `git worktree prune` (no `--expire=now`) through
+`worktrees::run_git` (running-process). `gc::worktree_registrations::classify_entries` counts
+candidates with plain reads: dead = the `gitdir` target is gone, the entry is not `locked`, **and
+the worktree's parent directory exists**. A missing parent (unmounted volume) is "unreachable":
+not counted dead, and its repo is not pruned (git cannot skip single entries). Entries still dead
+after the prune are reported "dead, pending git expiry". The count is exact, `--dry-run` reports it without pruning, and two roots sharing a common
+dir count once. Metadata only: no worktree directory is ever touched. `clud gc list` prints the
+dead count on stderr (so `--json` stays parseable). `purge` runs the same pass.
+
 **Cache size warning (#1691).** `cache.warn_bytes` (seeded 20 GiB, `0` disables) applies the
 same mechanism to `~/.clud/cache`, which is almost entirely uv's own cache under `cache/uv`:
 `clud gc list` walks it (bounded), the maintenance sweep thread writes `~/.clud/cache-size.json`,

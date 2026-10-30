@@ -29,10 +29,12 @@ pub const CACHE_FILE_NAME: &str = "worktrees-size.json";
 /// File name of the `~/.clud/tmp` size cache, a sibling of `tmp` (#1327).
 pub const TMP_CACHE_FILE_NAME: &str = "tmp-size.json";
 
-/// Default for `tmp.warn_bytes`: 20 GiB. `0` disables the warning. Four
-/// times the per-session report threshold (`SIZE_REPORT_THRESHOLD`), small
-/// enough to speak up long before the 100+ GiB trees of #1327 and #1672.
-pub const DEFAULT_TMP_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+/// Default for `tmp.warn_bytes`: equal to the `tmp.max_bytes` cap (10 GiB).
+/// `0` disables the warning. The size cap evicts idle units, so a tree still
+/// over the cap means live sessions (or units not yet idle) are holding it
+/// there: the warning fires exactly when the cap could not be met. Keep it
+/// `<=` the cap, or the warning would stay silent while the cap is unmet.
+pub const DEFAULT_TMP_WARN_BYTES: u64 = crate::gc::session_tmp_cap::DEFAULT_TMP_MAX_BYTES;
 
 /// A cache older than this is ignored. The GC tick is hourly by default, so
 /// this tolerates several missed ticks before going quiet.
@@ -135,8 +137,8 @@ pub fn tmp_list_warning(root: &Path, warn_bytes: u64, check: SizeCheck) -> Optio
         SizeCheck::Under(_) => None,
         SizeCheck::Over(bytes) => Some(format!(
             "warning: {} holds at least {bytes} bytes, over tmp.warn_bytes ({warn_bytes}); \
-             session temp is never deleted for size (only the 72 h age sweep reclaims it) \
-             — remove what you no longer need",
+             the tmp.max_bytes size cap only evicts idle units, so live sessions are keeping \
+             it above the cap — remove what you no longer need",
             root.display()
         )),
         SizeCheck::Unknown => Some(format!(

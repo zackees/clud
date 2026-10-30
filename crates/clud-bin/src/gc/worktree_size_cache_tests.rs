@@ -192,7 +192,7 @@ fn tmp_list_warning_is_quiet_under_and_disabled() {
     assert_eq!(tmp_list_warning(root, 0, SizeCheck::Over(50)), None);
     let over = tmp_list_warning(root, 10, SizeCheck::Over(50)).unwrap();
     assert!(over.contains("tmp.warn_bytes"), "{over}");
-    assert!(over.contains("never deleted for size"), "{over}");
+    assert!(over.contains("keeping it above the cap"), "{over}");
     let unknown = tmp_list_warning(root, 10, SizeCheck::Unknown).unwrap();
     assert!(unknown.contains("tmp.warn_bytes"), "{unknown}");
 }

@@ -17,7 +17,7 @@ use fs4::fs_std::FileExt;
 use serde_json::json;
 
 use super::daemon_events;
-use crate::gc::session_tmp;
+use crate::gc::{session_tmp, session_tmp_cap};
 
 /// Temp accumulates faster than the uv cache, so sweep more often than the
 /// daily uv sweep — but still cheap (one stat + age compare) between runs.
@@ -33,8 +33,38 @@ pub fn maybe_sweep_session_tmp() {
     let Some(sentinel) = sentinel_path() else {
         return;
     };
-    if let Err(e) = maybe_sweep_continuously_at(&sentinel, SystemTime::now()) {
-        eprintln!("[clud] session-tmp sweep error: {e}");
+    match maybe_sweep_continuously_at(&sentinel, SystemTime::now()) {
+        // The age pass ran (so the cadence is due): follow it with the size cap.
+        Ok(Some(_)) => enforce_size_cap(sentinel.parent()),
+        Ok(None) => {}
+        Err(e) => eprintln!("[clud] session-tmp sweep error: {e}"),
+    }
+}
+
+/// #2397 (DD-194): evict the oldest idle units while `~/.clud/tmp` is over
+/// `tmp.max_bytes`. Runs after the age pass so it sizes what survived.
+fn enforce_size_cap(state_dir: Option<&Path>) {
+    let report = session_tmp_cap::enforce_cap(false);
+    if report.evicted == 0 && report.failed == 0 {
+        return;
+    }
+    eprintln!("[clud] gc: {}", report.summary_line());
+    if let Some(line) = report.undeletable.summary_line() {
+        eprintln!("[clud] gc: tmp: {line}");
+    }
+    if let Some(state_dir) = state_dir {
+        daemon_events::log_event(
+            state_dir,
+            "session_tmp_cap",
+            [
+                ("total_bytes", json!(report.total_bytes)),
+                ("cap", json!(report.cap)),
+                ("evicted", json!(report.evicted)),
+                ("reclaimed_bytes", json!(report.reclaimed_bytes)),
+                ("kept_live", json!(report.kept_live)),
+                ("failed", json!(report.failed)),
+            ],
+        );
     }
 }
 
@@ -174,7 +204,7 @@ pub fn sweep_now() {
     match run_sweep_at(&sentinel, &root, now, TICK_ALLOWANCE)
         .and_then(|report| continue_sweep(&sentinel, &root, TICK_ALLOWANCE, report))
     {
-        Ok(_) => {}
+        Ok(_) => enforce_size_cap(sentinel.parent()),
         Err(e) => eprintln!("[clud] session-tmp sweep error: {e}"),
     }
 }

@@ -90,12 +90,12 @@ fn worktrees_warn_bytes_defaults_and_parses() {
     assert_eq!(seeded["worktrees"]["warn_bytes"], json!(DEFAULT_WARN_BYTES));
 }
 
-/// #1327: the warn-only `~/.clud/tmp` size threshold defaults to 20 GiB,
+/// #1327: the warn-only `~/.clud/tmp` size threshold defaults to the 10 GiB tmp.max_bytes cap,
 /// `0` disables it, and a malformed value falls back to the default.
 #[test]
 fn tmp_warn_bytes_defaults_and_parses() {
     use crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES;
-    assert_eq!(DEFAULT_TMP_WARN_BYTES, 20 * 1024 * 1024 * 1024);
+    assert_eq!(DEFAULT_TMP_WARN_BYTES, 10 * 1024 * 1024 * 1024);
     let home = tempdir().unwrap();
     assert_eq!(
         load_tmp_warn_bytes_at(home.path()).unwrap(),
@@ -120,7 +120,30 @@ fn tmp_warn_bytes_defaults_and_parses() {
     assert_eq!(seeded["tmp"]["warn_bytes"], json!(DEFAULT_TMP_WARN_BYTES));
 }
 
-/// #1672: the trash size cap defaults to 20 GiB, `0` disables it, and a
+/// #2397: `tmp.max_bytes` defaults to 10 GiB, `0` disables, malformed falls back.
+#[test]
+fn tmp_max_bytes_defaults_and_parses() {
+    use crate::gc::session_tmp_cap::DEFAULT_TMP_MAX_BYTES;
+    assert_eq!(DEFAULT_TMP_MAX_BYTES, 10 * 1024 * 1024 * 1024);
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        load_tmp_max_bytes_at(home.path()).unwrap(),
+        DEFAULT_TMP_MAX_BYTES
+    );
+    for (doc, want) in [
+        (json!({}), DEFAULT_TMP_MAX_BYTES),
+        (json!({"tmp": {"max_bytes": 0}}), 0),
+        (json!({"tmp": {"max_bytes": 99}}), 99),
+        (json!({"tmp": {"max_bytes": -1}}), DEFAULT_TMP_MAX_BYTES),
+        (json!({"tmp": {"warn_bytes": 5}}), DEFAULT_TMP_MAX_BYTES),
+    ] {
+        assert_eq!(tmp_max_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["tmp"]["max_bytes"], json!(DEFAULT_TMP_MAX_BYTES));
+}
+
+/// #1672: the trash size cap defaults to the 10 GiB tmp.max_bytes cap, `0` disables it, and a
 /// malformed value falls back to the default.
 #[test]
 fn trash_max_bytes_defaults_and_parses() {
@@ -147,7 +170,7 @@ fn trash_max_bytes_defaults_and_parses() {
     assert_eq!(seeded["trash"]["max_bytes"], json!(TRASH_MAX_BYTES_DEFAULT));
 }
 
-/// #1691: the warn-only `~/.clud/cache` size threshold defaults to 20 GiB,
+/// #1691: the warn-only `~/.clud/cache` size threshold defaults to the 10 GiB tmp.max_bytes cap,
 /// `0` disables it, and a malformed value falls back to the default.
 #[test]
 fn cache_warn_bytes_defaults_and_parses() {
