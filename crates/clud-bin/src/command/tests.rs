@@ -998,3 +998,21 @@ fn landing_instructions_cover_both_backends_and_no_land() {
         assert!(off.command.iter().all(|arg| !arg.contains("Land the work")));
     }
 }
+
+#[test]
+fn tool_call_rules_reach_both_backends_even_without_landing() {
+    for backend in ["--claude", "--codex"] {
+        for extra in [None, Some("--no-land")] {
+            let mut argv = vec!["clud", backend];
+            argv.extend(extra);
+            argv.extend(["-p", "hello"]);
+            let p = plan(&argv);
+            assert!(
+                p.command
+                    .iter()
+                    .any(|arg| arg.contains(super::builder::TOOL_CALL_RULES)),
+                "{backend} {extra:?} is missing the tool-call rules"
+            );
+        }
+    }
+}

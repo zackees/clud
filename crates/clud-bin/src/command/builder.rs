@@ -388,6 +388,10 @@ fn land_instructions(args: &Args) -> &'static str {
     }
 }
 
+/// The patterns clud's command hooks refuse most often, stated before the
+/// agent tries them: a refused call still costs a full round trip (#2354).
+pub(super) const TOOL_CALL_RULES: &str = "Tool-call rules clud enforces (a refused call is a wasted round trip): never wait with a while/until/sleep loop, `watch` or `tail -f`, in Bash or Monitor; use run_in_background and its completion notification, or a tool with its own deadline (pr_merge_watch, clud ci). Prefer `(cd DIR && CMD)` or absolute paths over a bare `cd`. Run one GitHub mutation (push, PR create, merge, issue or API write) per call.";
+
 fn append_instructions(target: &mut String, text: &str) {
     if !text.is_empty() {
         if !target.is_empty() {
@@ -485,6 +489,7 @@ fn build_launch_plan_for_target_at(
     let land = land_instructions(args);
     if backend == Backend::Claude {
         append_instructions(&mut deletion_instructions, land);
+        append_instructions(&mut deletion_instructions, TOOL_CALL_RULES);
     }
     let codex_passthrough_instructions = (backend == Backend::Codex)
         .then(|| take_codex_developer_instructions(&mut passthrough))
@@ -609,6 +614,7 @@ fn build_launch_plan_for_target_at(
             instructions.push_str(&crate::deletion_rules::generated().instructions);
         }
         append_instructions(&mut instructions, land);
+        append_instructions(&mut instructions, TOOL_CALL_RULES);
         if !instructions.is_empty() || has_user_instructions {
             cmd.extend([
                 "-c".into(),
