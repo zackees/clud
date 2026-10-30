@@ -152,6 +152,7 @@ tmp_path_retention_policy = "failed"
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
     "real_claude: opt-in secret-free protocol fixtures using an installed Claude Code binary",
+    "daemon: Tier 1 (#2356): runs a built clud/mock-agent binary or a daemon; excluded from `bash test --host`",
 ]
 
 [tool.ruff]

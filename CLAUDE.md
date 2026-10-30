@@ -18,6 +18,7 @@ before selecting native coverage.
 
 - **Build**: `bash build` — dev wheel (Rust binary + Python package)
 - **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit). `bash lint --windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr — run it before pushing Windows-only code ([ci.md](docs/architecture/ci.md#local-validation-before-remote-ci))
+- **Test (Tier 0, host)**: `bash test --host` — Rust library tests + Python tests with no built binary or daemon; run constantly ([tiers](docs/architecture/ci.md#two-local-test-tiers-2356))
 - **Test**: `bash test` — Rust unit tests + Python unit tests
 - **Test (full)**: `bash test --integration` — adds integration tests with mock agents
 

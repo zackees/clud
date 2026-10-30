@@ -12,6 +12,9 @@ import pytest
 from tests import process
 from tests.test_settings_authorization import _world
 
+# Tier 1 (#2356): drives the built clud through test_settings_authorization.
+pytestmark = pytest.mark.daemon
+
 
 @pytest.mark.skipif(sys.platform != "linux", reason="X11 native approval acceptance")
 @pytest.mark.parametrize("action", ["approve", "cancel", "enter", "roots", "changed", "target"])

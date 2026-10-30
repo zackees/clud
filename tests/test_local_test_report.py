@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+# Tier 1 (#2356): the test_report tool under test spawns the built clud.
+pytestmark = pytest.mark.daemon
+
 TOOL = (
     Path(__file__).resolve().parents[1] / "crates/clud-bin/assets/tools/diagnostics/test_report.py"
 )
