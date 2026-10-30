@@ -185,22 +185,7 @@ fn nested_patch_reason(
     if script.has_error {
         return None;
     }
-    let mut patches = Vec::new();
-    for invocation in &script.invocations {
-        match invocation.effective_program().as_deref() {
-            Some("cd") if invocation.redirects.iter().all(|r| !r.writes_file()) => {}
-            Some("apply_patch" | "applypatch")
-                if invocation.env.is_empty()
-                    && invocation.redirects.iter().all(|r| !r.writes_file()) =>
-            {
-                patches.push(invocation);
-            }
-            _ => return None,
-        }
-    }
-    let [patch] = patches.as_slice() else {
-        return None;
-    };
+    let patch = nested_patch_invocation(command, &script.invocations)?;
     let work = patch.cwd.as_literal()?;
     // The parser may attach the heredoc body to the `cd` that precedes the patch.
     let mut texts: Vec<&str> = script
@@ -210,6 +195,37 @@ fn nested_patch_reason(
         .collect();
     texts.extend(patch.words.iter().skip(1).filter_map(Value::as_literal));
     Some(patch_verdict(&texts, work, home))
+}
+
+fn plain_redirects(invocation: &Invocation) -> bool {
+    invocation.redirects.iter().all(|r| !r.writes_file())
+}
+
+/// The `apply_patch` of a command that is exactly a bare patch or a single
+/// `cd DIR && apply_patch`. Only `&&` guarantees the patch runs in the `cd`
+/// directory the parser tracked: after `;`, a newline or `||` a failed `cd`
+/// leaves the patch in the real cwd, so every other shape returns `None`.
+fn nested_patch_invocation<'a>(
+    command: &str,
+    invocations: &'a [Invocation],
+) -> Option<&'a Invocation> {
+    let is_patch = |inv: &Invocation| {
+        matches!(
+            inv.effective_program().as_deref(),
+            Some("apply_patch" | "applypatch")
+        ) && inv.env.is_empty()
+            && plain_redirects(inv)
+    };
+    match invocations {
+        [patch] if is_patch(patch) => Some(patch),
+        [cd, patch] if is_patch(patch) => {
+            let is_cd = cd.effective_program().as_deref() == Some("cd") && plain_redirects(cd);
+            let rest = command.trim_start().strip_prefix(cd.source.trim())?;
+            let rest = rest.trim_start().strip_prefix("&&")?;
+            (is_cd && rest.trim_start().starts_with(patch.source.trim())).then_some(patch)
+        }
+        _ => None,
+    }
 }
 
 fn native_target_is_protected(
@@ -731,6 +747,46 @@ mod tests {
             "exec_command",
             serde_json::json!({"cmd": relative}),
         ));
+    }
+
+    #[test]
+    fn nested_patch_after_unreliable_cd_connectors_is_not_trusted() {
+        let home = tempfile::tempdir().unwrap();
+        let body = "<<'EOF'\n*** Begin Patch\n*** Update File: ../.clud/settings.json\n@@\n-a\n+b\n*** End Patch\nEOF";
+        let cwd = home.path().join("proj");
+        for command in [
+            format!("cd /nonexistent_zz; apply_patch {body}"),
+            format!("cd /nonexistent_zz\napply_patch {body}"),
+            format!("cd /nonexistent_zz || apply_patch {body}"),
+            format!("cd /a && cd /b && apply_patch {body}"),
+            format!("apply_patch {body} && cd /a"),
+        ] {
+            let mut payload = patch_payload(home.path(), serde_json::json!({}));
+            payload.tool_name = "exec_command".into();
+            payload.cwd = cwd.clone();
+            payload.command = command.clone();
+            let dialect = super::super::shell_dialect_for_payload(&payload);
+            assert_eq!(
+                nested_patch_reason(&command, dialect, &cwd, Some(home.path())),
+                None,
+                "{command}"
+            );
+            // The general fail-closed rule then judges it.
+            let reaching = command.replace("../.clud", "~/.clud");
+            payload.command = reaching.clone();
+            assert!(
+                reason_for_payload_in(&payload, Some(home.path().to_path_buf())).is_some(),
+                "{reaching}"
+            );
+        }
+        let ok = format!(
+            "cd {} && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: x.rs\n@@\n-a\n+b\n*** End Patch\nEOF",
+            cwd.display()
+        );
+        assert_eq!(
+            nested(home.path(), "exec_command", serde_json::json!({"cmd": ok})),
+            None
+        );
     }
 
     #[test]
