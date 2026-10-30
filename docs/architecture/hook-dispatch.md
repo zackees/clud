@@ -725,6 +725,21 @@ is no session id or the state cannot be read or written. Condensing changes
 only the message, never what is denied. A subagent has its own session, so it
 sees the full text once (`block_bad_cmd_cd.rs` `condense_at`).
 
+**A blocked `cd DIR && CMD` runs in a subshell instead** (#2354, part of the
+refusal-round-trip work). When `block_cd` would deny a POSIX command whose very
+first command is a top-level `cd`, the hook returns `updatedInput` with the whole
+command wrapped as `(cd DIR && CMD)` plus an `additionalContext` notice
+(`[clud] ran (...) instead of ...`), so the call is not lost. The decision is
+`ask`, not `allow`: the rewrite vets only the `cd`, so the rest of the command
+keeps the harness's normal permission decision (as in #1087). Claude Code and
+Codex share the one `updatedInput` shape the other rewrites use. It declines
+and keeps the deny (with the #2314 condensing) when the wrap could change
+meaning: a parse error, a top-level `exit`/`exec`/`export`/`set`/`source`/`.`/
+`alias`/`unset`/`pushd`/`popd` (and similar session builtins), a top-level `&`,
+a function definition, a script variable assignment, a here-doc, `#` comment,
+backtick, newline or trailing backslash, or when another rewrite already applies
+to the call (`block_bad_cmd_cd.rs` `subshell_substitute`).
+
 **The `CwdChanged` backstop** (D12, DD-064) closes the gap the scanner
 cannot see: a session cwd moved by an alias or a script is invisible to
 PreToolUse, yet breaks exactly what pinning protects. clud registers its own

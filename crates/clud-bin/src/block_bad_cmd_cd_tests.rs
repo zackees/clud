@@ -852,3 +852,86 @@ fn the_pwd_walk_remedy_names_the_root_and_the_reason() {
     assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains("CLAUDE_PROJECT_DIR"));
     assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains(".extern-repos"));
 }
+
+// ---------------------------------------------------------------------
+// #2354: a blocked `cd DIR && CMD` runs in a subshell instead.
+// ---------------------------------------------------------------------
+
+fn sub(command: &str) -> Option<String> {
+    subshell_substitute(command, ShellDialect::Posix)
+}
+
+#[test]
+fn a_leading_cd_chain_is_wrapped_in_a_subshell() {
+    assert_eq!(sub("cd x && ls").as_deref(), Some("(cd x && ls)"));
+    assert_eq!(sub("  cd x; ls -la  ").as_deref(), Some("(cd x; ls -la)"));
+    assert_eq!(
+        sub("cd x && ls | wc -l").as_deref(),
+        Some("(cd x && ls | wc -l)")
+    );
+}
+
+#[test]
+fn unsafe_forms_keep_the_denial() {
+    for command in [
+        "cd x && exit 3",
+        "cd x && exec ls",
+        "cd x && export A=1",
+        "cd x && set -e",
+        "cd x && source env.sh",
+        "cd x && . env.sh",
+        "cd x && alias l=ls",
+        "cd x && unset A",
+        "cd x && pushd y",
+        "cd x && popd",
+        "cd x && sleep 5 &",
+        "cd x && ls # note",
+        "cd x && cat <<EOF\nhi\nEOF",
+        "cd x && echo hi \\",
+        "cd x &&\nls",
+        "ls && cd x",
+        "A=1; cd x && ls",
+        "f() { :; }; cd x && ls",
+        "cd x && (ls",
+        "",
+    ] {
+        assert_eq!(sub(command), None, "{command:?}");
+    }
+    assert_eq!(
+        subshell_substitute("cd x && ls", ShellDialect::PowerShell),
+        None
+    );
+}
+
+#[test]
+fn the_substitution_response_is_an_ask_with_updated_input_and_a_notice() {
+    let raw = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "cwd": "/repo",
+        "tool_input": {"command": "cd x && ls", "description": "d"},
+    })
+    .to_string();
+    let payload =
+        crate::block_bad_cmd::parse_payload(&raw, Path::new("/repo")).expect("payload parses");
+    let rewritten = sub(&payload.command).unwrap();
+    let notice = substitution_notice(&payload.command, &rewritten);
+    let out =
+        crate::block_bad_cmd::cd_substitution_output(&payload, rewritten, &notice, "PreToolUse")
+            .expect("object-shaped input rewrites");
+    let specific = &out["hookSpecificOutput"];
+    assert_eq!(specific["permissionDecision"], "ask");
+    assert_eq!(specific["updatedInput"]["command"], "(cd x && ls)");
+    assert_eq!(specific["updatedInput"]["description"], "d");
+    let context = specific["additionalContext"].as_str().unwrap();
+    assert!(context.starts_with("[clud] ran `(cd x && ls)` instead of `cd x && ls`"));
+}
+
+#[test]
+fn a_repeat_denial_is_still_shortened() {
+    let dir = TempDir::new().unwrap();
+    let full = || deny("cd /elsewhere && make", CdPolicy::Strict).expect("denied");
+    let first = condense_at(Some(dir.path()), Some("s2"), full());
+    let second = condense_at(Some(dir.path()), Some("s2"), full());
+    assert!(second.len() < first.len());
+}

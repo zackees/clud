@@ -839,8 +839,20 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // #967 Phase 1: session cwd pinning. Runs after the command rules so a
     // command that is independently forbidden still reports the stronger
     // reason.
+    let mut cd_substitution: Option<(String, String)> = None;
     if evaluation.reason.is_none() {
-        evaluation.reason = block_cd_denial(&payload, &config);
+        // #2354: a substitute rewrites the input, so it needs the call to
+        // carry no other rewrite and not be a gate check.
+        let may_substitute = deletion_rewrite.is_none()
+            && evaluation.rewritten_command.is_none()
+            && payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE);
+        match block_cd_denial(&payload, &config, may_substitute) {
+            Some(CdVerdict::Deny(reason)) => evaluation.reason = Some(reason),
+            Some(CdVerdict::Substitute { command, notice }) => {
+                cd_substitution = Some((command, notice));
+            }
+            None => {}
+        }
     }
 
     // #967 Phase 2: the repo's own declared hooks ("Tier B"). clud's policy
@@ -891,6 +903,25 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         let output = with_hook_notice(allow_with_updated_input_json(updated), event, &payload);
         println!("{output}");
         return 0;
+    }
+
+    if let Some((command, notice)) = cd_substitution {
+        if let Some(output) = cd_substitution_output(&payload, command, &notice, event) {
+            println!("{output}");
+            return 0;
+        }
+        // Not rewritable (no object-shaped input): refuse as before.
+        let reason = block_bad_cmd_cd::condense_denial(
+            "Blocked a `cd` that would move the session cwd; run it as `(cd DIR && CMD)`."
+                .to_string(),
+            payload.session_id.as_deref(),
+        );
+        println!("{}", deny_json(&reason));
+        eprintln!(
+            "[block-bad-cmd hook] refusing to run {:?}: {reason}",
+            payload.tool_name
+        );
+        return 2;
     }
 
     if deletion_rewrite.is_some() && evaluation.rewritten_command.is_some() {
@@ -1549,10 +1580,39 @@ fn declared_hook_denial(
 /// mentions `cd` pays one lowercase scan and nothing else. The override is
 /// consulted only once a denial is certain, so unrelated commands do not
 /// litter the log with override attempts.
+/// What `bash.block_cd` decided for a command that would move the cwd.
+enum CdVerdict {
+    Deny(String),
+    /// Run `command` (the original in a subshell) and tell the agent `notice`.
+    Substitute {
+        command: String,
+        notice: String,
+    },
+}
+
+/// The `ask` response carrying the subshell-wrapped command and the notice.
+///
+/// `ask`, not `allow`: the rewrite vets only the `cd`, so the rest of the
+/// command keeps the harness's normal permission decision (#1087). Claude
+/// Code and Codex share the `updatedInput` shape the other rewrites emit.
+pub(crate) fn cd_substitution_output(
+    payload: &HookPayloadView,
+    command: String,
+    notice: &str,
+    event: &str,
+) -> Option<Value> {
+    let mut updated = payload.tool_input.clone()?;
+    *command_text_mut(updated.as_object_mut()?, &payload.tool_name)? = Value::String(command);
+    let output =
+        block_bad_cmd_hook_notice::merge(ask_with_updated_input_json(updated), event, notice);
+    Some(with_hook_notice(output, event, payload))
+}
+
 fn block_cd_denial(
     payload: &HookPayloadView,
     config: &crate::repo_clud_config::RepoCludConfig,
-) -> Option<String> {
+    may_substitute: bool,
+) -> Option<CdVerdict> {
     use crate::repo_clud_config::BlockCd;
 
     let dialect = shell_dialect_for_payload(payload);
@@ -1606,11 +1666,18 @@ fn block_cd_denial(
         ));
         return None;
     }
+    if may_substitute {
+        if let Some(command) = block_bad_cmd_cd::subshell_substitute(&payload.command, dialect) {
+            append_log(&format!("block_cd_substituted policy={policy:?}"));
+            let notice = block_bad_cmd_cd::substitution_notice(&payload.command, &command);
+            return Some(CdVerdict::Substitute { command, notice });
+        }
+    }
     append_log(&format!("block_cd_denied policy={policy:?}"));
-    Some(block_bad_cmd_cd::condense_denial(
+    Some(CdVerdict::Deny(block_bad_cmd_cd::condense_denial(
         reason,
         payload.session_id.as_deref(),
-    ))
+    )))
 }
 
 /// Cheap, conservative pre-filter for whether `command_text` could possibly
