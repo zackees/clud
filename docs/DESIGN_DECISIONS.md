@@ -7362,3 +7362,24 @@ at creation.
 **Evidence:** The 2026-10-29 burn-down loop spent 70-80% of worker wall time
 (about 15-17 of 21-24 minutes) idle on CI while holding the checkout, and a
 `ci-windows` PR (#2323) stalled the pipeline for 45+ minutes.
+
+## DD-193: `ci/lint.py` keeps its own fmt/Clippy steps instead of calling `soldr lint`
+
+**Decision (2026-10-29):** Agents batch their edit-loop validation into one
+`soldr lint` call (CLAUDE.md "Batch validation", #2313), but the mandatory
+gate `bash lint` / `ci/lint.py` keeps running `soldr cargo fmt` and
+`soldr cargo clippy` as separate steps, followed by the pinned Dylint pass in
+`lint`.
+
+**Why:** Delegating would not preserve behavior:
+- fmt passes `--config-path .rustfmt.toml` explicitly because setup-soldr's
+  cargo shim can skip rustfmt config discovery on some runners.
+- CI deliberately splits the steps: `--static-only` runs fmt once in the
+  static job, and Clippy runs once per target triple inside each build job. A
+  fused `soldr lint` would rerun fmt and Dylint in every build lane.
+- Dylint is pinned through `SOLDR_DYLINT_TOOLCHAIN` and prepared explicitly.
+  `soldr lint`'s own Dylint pass would bring a second, unpinned lint setup.
+
+The context cost #2313 measured came from agents fanning out ad-hoc calls,
+not from the gate. The gate runs once per change, so the steering doc fixes
+the cost without touching the CI of record.
