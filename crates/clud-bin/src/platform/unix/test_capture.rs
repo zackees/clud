@@ -158,16 +158,43 @@ mod tests {
         assert_eq!(result.tree_cleanup, "unverified");
     }
 
+    // Timeout comfortably above scheduler jitter so the child has printed
+    // `ready` before the window closes; the writers sleep far longer (#2377).
+    const TIMEOUT_WINDOW: Duration = Duration::from_secs(3);
+
+    /// Kills the escaped sleeper recorded in `pid_file`, even if an assertion
+    /// panics first, so no 30s process outlives the test.
+    #[cfg(target_os = "linux")]
+    struct EscapedWriterGuard(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for EscapedWriterGuard {
+        fn drop(&mut self) {
+            let pid = fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|text| text.trim().parse::<libc::pid_t>().ok());
+            if let Some(pid) = pid.filter(|pid| *pid > 1) {
+                // SAFETY: plain kill(2) on a pid this test's own writer recorded.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn escaped_writer_makes_timeout_cleanup_uncertain() {
         let root = private_root();
+        let pid_dir = tempfile::tempdir().unwrap();
+        let pid_file = pid_dir.path().join("pid");
+        let _guard = EscapedWriterGuard(pid_file.clone());
         let command = vec![
             "sh".into(),
             "-c".into(),
-            "setsid sh -c 'sleep 2' & printf ready".into(),
+            "setsid sh -c 'echo $$ > \"$1\"; exec sleep 30' sh \"$1\" & printf ready".into(),
+            "sh".into(),
+            pid_file.to_string_lossy().into_owned(),
         ];
-        let result = capture(root.path(), Duration::from_millis(250), &command).unwrap();
+        let result = capture(root.path(), TIMEOUT_WINDOW, &command).unwrap();
         assert_eq!(result.state, "timeout");
         assert!(!result.pipe_eof);
         assert_eq!(result.tree_cleanup, "unverified");
@@ -177,8 +204,8 @@ mod tests {
     #[test]
     fn retained_pipe_writer_causes_bounded_incomplete_result() {
         let root = private_root();
-        let command = vec!["sh".into(), "-c".into(), "(sleep 5) & printf ready".into()];
-        let result = capture(root.path(), Duration::from_millis(250), &command).unwrap();
+        let command = vec!["sh".into(), "-c".into(), "(sleep 30) & printf ready".into()];
+        let result = capture(root.path(), TIMEOUT_WINDOW, &command).unwrap();
         assert_eq!(result.state, "timeout");
         assert_eq!(fs::read(result.artifact).unwrap(), b"ready");
     }
