@@ -174,11 +174,31 @@ fn apply_patch_reason(payload: &super::HookPayloadView, home: Option<&Path>) -> 
 /// judged by the patch's targets, not by whether its text mentions the settings
 /// file: a source file may legitimately discuss it. `None` means the command is
 /// not a plain nested patch and the general shell rules apply.
+///
+/// Codex recognizes the heredoc form itself, with POSIX rules, before any
+/// shell runs, so where `exec_command` defaults to the PowerShell dialect
+/// (which has no heredocs) a POSIX parse is tried as well (#2378). That
+/// fallback only accepts a patch that carries a heredoc: `<<` is a PowerShell
+/// and cmd syntax error, so such a command never runs in those shells.
 fn nested_patch_reason(
     command: &str,
     dialect: super::ShellDialect,
     cwd: &Path,
     home: Option<&Path>,
+) -> Option<Option<String>> {
+    nested_patch_reason_as(command, dialect, cwd, home, false).or_else(|| {
+        (dialect != super::ShellDialect::Posix)
+            .then(|| nested_patch_reason_as(command, super::ShellDialect::Posix, cwd, home, true))
+            .flatten()
+    })
+}
+
+fn nested_patch_reason_as(
+    command: &str,
+    dialect: super::ShellDialect,
+    cwd: &Path,
+    home: Option<&Path>,
+    require_heredoc: bool,
 ) -> Option<Option<String>> {
     let script =
         super::block_bad_cmd_shell::parse_command_with_home(command, dialect, Some(cwd), home);
@@ -186,6 +206,14 @@ fn nested_patch_reason(
         return None;
     }
     let patch = nested_patch_invocation(command, &script.invocations)?;
+    if require_heredoc
+        && !script
+            .invocations
+            .iter()
+            .any(|invocation| invocation.heredoc.is_some())
+    {
+        return None;
+    }
     let work = patch.cwd.as_literal()?;
     // The parser may attach the heredoc body to the `cd` that precedes the patch.
     let mut texts: Vec<&str> = script
@@ -1344,6 +1372,32 @@ mod tests {
             .unwrap_or_default()
             .into();
         reason_for_payload_in(&payload, Some(home.to_path_buf()))
+    }
+
+    #[test]
+    fn non_posix_dialect_heredoc_patches_are_judged_by_their_targets() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = crate::clud_settings::settings_path_at(home.path());
+        let name = settings_name(home.path());
+        let source = format!(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+             -// reads ~/.clud/{name}\n+// ok\n*** End Patch"
+        );
+        let ordinary = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let hit = format!(
+            "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch\nEOF",
+            settings.display()
+        );
+        for dialect in [
+            crate::block_bad_cmd::ShellDialect::PowerShell,
+            crate::block_bad_cmd::ShellDialect::Cmd,
+        ] {
+            let judge = |command: &str| {
+                nested_patch_reason(command, dialect, home.path(), Some(home.path()))
+            };
+            assert_eq!(judge(&ordinary), Some(None), "{dialect:?}");
+            assert!(judge(&hit).flatten().is_some(), "{dialect:?}");
+        }
     }
 
     #[test]
