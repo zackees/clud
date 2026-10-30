@@ -188,9 +188,31 @@ fn nested_patch_reason(
 ) -> Option<Option<String>> {
     nested_patch_reason_as(command, dialect, cwd, home, false).or_else(|| {
         (dialect != super::ShellDialect::Posix)
-            .then(|| nested_patch_reason_as(command, super::ShellDialect::Posix, cwd, home, true))
+            .then(|| {
+                let command = literal_backslash_cd(command);
+                nested_patch_reason_as(&command, super::ShellDialect::Posix, cwd, home, true)
+            })
             .flatten()
     })
+}
+
+/// A Windows `cd C:\dir && apply_patch` names its directory with backslashes
+/// that Codex takes literally, while a POSIX parse would drop them as escapes
+/// and lose the directory (#2378). Doubling them in a plain, unquoted `cd`
+/// prefix keeps the path; any other command is returned unchanged.
+fn literal_backslash_cd(command: &str) -> String {
+    let trimmed = command.trim_start();
+    let Some((prefix, rest)) = trimmed.split_once("&&") else {
+        return command.to_string();
+    };
+    let plain = prefix.starts_with("cd ")
+        && prefix.contains('\\')
+        && !prefix.contains(['\n', '\'', '"', '$', '`']);
+    if plain {
+        format!("{}&&{rest}", prefix.replace('\\', "\\\\"))
+    } else {
+        command.to_string()
+    }
 }
 
 fn nested_patch_reason_as(
@@ -1372,6 +1394,21 @@ mod tests {
             .unwrap_or_default()
             .into();
         reason_for_payload_in(&payload, Some(home.to_path_buf()))
+    }
+
+    #[test]
+    fn windows_cd_backslashes_survive_the_posix_fallback() {
+        assert_eq!(
+            literal_backslash_cd("cd C:\\a\\b && apply_patch <<'EOF'\nx\\y\nEOF"),
+            "cd C:\\\\a\\\\b && apply_patch <<'EOF'\nx\\y\nEOF"
+        );
+        for unchanged in [
+            "cd \"C:\\a\" && x",
+            "apply_patch <<'EOF'\nEOF",
+            "cd /a && x",
+        ] {
+            assert_eq!(literal_backslash_cd(unchanged), unchanged);
+        }
     }
 
     #[test]
