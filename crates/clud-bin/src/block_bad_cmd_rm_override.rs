@@ -373,6 +373,7 @@ fn expand_braces(word: &str) -> Option<Vec<String>> {
     let mut done = Vec::new();
     let mut pending = vec![word.to_string()];
     while let Some(text) = pending.pop() {
+        let text = wildcard_sequences(&text);
         let Some((open, close, commas)) = first_brace_group(&text) else {
             done.push(text);
             continue;
@@ -419,39 +420,75 @@ fn first_brace_group(text: &str) -> Option<(usize, usize, Vec<usize>)> {
 }
 
 /// Glob match where `*` and `?` never cross a `/` and `[...]` is a class.
+/// Iterative star-backtracking, O(n*m) worst case.
 fn glob_match(pattern: &[char], text: &[char]) -> bool {
-    match pattern.split_first() {
-        None => text.is_empty(),
-        Some((&'*', rest)) => (0..=text.len())
-            .take_while(|&n| n == 0 || text[n - 1] != '/')
-            .any(|n| glob_match(rest, &text[n..])),
-        Some((&'?', rest)) => text
-            .split_first()
-            .is_some_and(|(&c, tail)| c != '/' && glob_match(rest, tail)),
-        Some((&'[', rest)) => match (class_end(rest), text.split_first()) {
-            (Some(end), Some((&c, tail))) => {
-                c != '/' && class_has(&rest[..end], c) && glob_match(&rest[end + 1..], tail)
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < text.len() {
+        if pattern.get(pi) == Some(&'*') {
+            while pattern.get(pi) == Some(&'*') {
+                pi += 1;
             }
-            // An unterminated class is a literal `[`.
-            (None, Some((&c, tail))) => c == '[' && glob_match(rest, tail),
-            _ => false,
-        },
-        Some((&p, rest)) => text
-            .split_first()
-            .is_some_and(|(&c, tail)| c == p && glob_match(rest, tail)),
+            star = Some((pi, ti));
+        } else if let Some(next) = glob_step(pattern, pi, text[ti]) {
+            pi = next;
+            ti += 1;
+        } else {
+            match star {
+                Some((sp, st)) if text[st] != '/' => {
+                    star = Some((sp, st + 1));
+                    pi = sp;
+                    ti = st + 1;
+                }
+                _ => return false,
+            }
+        }
+    }
+    pattern[pi.min(pattern.len())..].iter().all(|&c| c == '*')
+}
+
+/// Match one non-`*` pattern element at `pi` against `c`; the next pattern
+/// index on success.
+fn glob_step(pattern: &[char], pi: usize, c: char) -> Option<usize> {
+    let &p = pattern.get(pi)?;
+    match p {
+        '?' => (c != '/').then_some(pi + 1),
+        '[' => {
+            let rest = &pattern[pi + 1..];
+            match class_end(rest) {
+                Some(end) => (c != '/' && class_has(&rest[..end], c)).then_some(pi + end + 2),
+                // An unterminated class is a literal `[`.
+                None => (c == '[').then_some(pi + 1),
+            }
+        }
+        _ => (c == p).then_some(pi + 1),
     }
 }
 
+/// Index of the `]` closing a class whose `[` was just consumed. A `[:name:]`
+/// element is skipped whole so its inner `]` does not end the class.
 fn class_end(after_open: &[char]) -> Option<usize> {
     let skip = usize::from(matches!(after_open.first(), Some('!' | '^')));
-    let skip = skip + usize::from(after_open.get(skip) == Some(&']'));
-    after_open[skip..]
-        .iter()
-        .position(|&c| c == ']')
-        .map(|n| n + skip)
+    let mut i = skip + usize::from(after_open.get(skip) == Some(&']'));
+    while i < after_open.len() {
+        match after_open[i] {
+            ']' => return Some(i),
+            '[' if after_open.get(i + 1) == Some(&':') => {
+                let found = after_open[i + 2..].windows(2).position(|w| w == [':', ']']);
+                i += found.map_or(1, |n| n + 4);
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 fn class_has(class: &[char], c: char) -> bool {
+    // POSIX classes (`[:alpha:]`) are not evaluated: match any char, which
+    // can only over-refuse.
+    if class.windows(2).any(|w| w == ['[', ':']) {
+        return true;
+    }
     let (negate, class) = match class.split_first() {
         Some((&('!' | '^'), rest)) => (true, rest),
         _ => (false, class),
@@ -468,6 +505,34 @@ fn class_has(class: &[char], c: char) -> bool {
         }
     }
     hit != negate
+}
+
+/// Replace each comma-free `{x..y}` sequence group with `*` (over-refusal is
+/// fine); other text is untouched.
+fn wildcard_sequences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find(['{', '}']) {
+            Some(close) if after[close..].starts_with('}') && after[..close].contains("..") => {
+                if !after[..close].contains(',') {
+                    out.push('*');
+                    rest = &after[close + 1..];
+                    continue;
+                }
+                out.push('{');
+                rest = after;
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn pattern_may_match(word: &str, cwd: &str, home: &Path) -> bool {
@@ -813,12 +878,27 @@ mod tests {
             format!("cp a ../.clud/{stem}.js?n"),
             format!("cp a ../.clud/{stem}.[j]son"),
             format!("cp a ../.c*/{name}"),
+            format!("cp a ../.clu[[:alpha:]]/{name}"),
+            format!("cp a ../.clu{{c..e}}/{name}"),
+            format!("cp a ../.clud/{{{stem}.j,x}}{{a..c}}son"),
         ] {
             assert!(
                 relative_reason(home.path(), &command).is_some(),
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn glob_match_is_not_exponential_on_star_runs() {
+        let pattern: Vec<char> = "*".repeat(40).chars().chain(['x']).collect();
+        let text: Vec<char> = "a".repeat(60).chars().collect();
+        let started = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &text));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let name: Vec<char> = "ax".chars().collect();
+        assert!(glob_match(&pattern, &name));
+        assert!(!glob_match(&['*', 'x'], &['a', '/', 'x']));
     }
 
     #[test]
@@ -829,6 +909,9 @@ mod tests {
             "cp a ../other/*".to_string(),
             "cp a ../.clud/other-*.txt".to_string(),
             "tee ../other/{a,b}.json".to_string(),
+            "rm -rf target/*".to_string(),
+            "cp src/*.rs dst/".to_string(),
+            "cp a ../other/[[:alpha:]]*".to_string(),
             format!("cp a ../.clud/foo{name}"),
             format!("cd \"$X\"; sed -i s/a/b/ foo{name}"),
             format!("cd \"$X\"; sed -i s/a/b/ ../.clud/{name}x"),
