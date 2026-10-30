@@ -1342,7 +1342,14 @@ mod tests {
         }
     }
 
-    fn nested(home: &Path, tool: &str, input: serde_json::Value) -> Option<String> {
+    /// Pins the shell dialect: on a Windows host `exec_command` and
+    /// `shell_command` default to PowerShell, which has no heredoc, so a
+    /// nested `apply_patch <<EOF` is only recognised when the call declares
+    /// bash (`exec_command` takes a `shell` field; Git-Bash on Windows).
+    fn nested(home: &Path, tool: &str, mut input: serde_json::Value) -> Option<String> {
+        if tool == "exec_command" && input.get("shell").is_none() {
+            input["shell"] = "bash".into();
+        }
         let mut payload = patch_payload(home, input);
         payload.tool_name = tool.into();
         payload.command = payload
@@ -1371,7 +1378,6 @@ mod tests {
         for (tool, key, command) in [
             ("exec_command", "cmd", &ordinary),
             ("exec_command", "cmd", &with_cd),
-            ("shell_command", "command", &ordinary),
             ("apply_patch", "command", &ordinary),
         ] {
             let input = serde_json::json!({ key: command });
@@ -1406,6 +1412,38 @@ mod tests {
             "exec_command",
             serde_json::json!({"cmd": relative}),
         ));
+    }
+
+    /// `shell_command` has no `shell` field, so its dialect is the host's:
+    /// PowerShell on Windows (no heredoc, so the nested patch is unparseable
+    /// and fails closed to the general rule), POSIX elsewhere.
+    #[test]
+    fn nested_shell_command_patch_follows_the_host_dialect() {
+        let home = tempfile::tempdir().unwrap();
+        let source = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+            -// reads ~/.clud/settings.json\n+// ok\n*** End Patch";
+        let command = format!("apply_patch <<'EOF'\n{source}\nEOF");
+        let got = nested(
+            home.path(),
+            "shell_command",
+            serde_json::json!({"command": command}),
+        );
+        // Host-independent simulation of the Windows default: PowerShell does
+        // not recognise the heredoc, so the nested path declines.
+        assert_eq!(
+            nested_patch_reason(
+                &command,
+                crate::block_bad_cmd::ShellDialect::PowerShell,
+                home.path(),
+                Some(home.path())
+            ),
+            None
+        );
+        if crate::platform::host::WINDOWS {
+            assert_eq!(got.as_deref(), Some(REFUSAL));
+        } else {
+            assert_eq!(got, None);
+        }
     }
 
     #[test]
