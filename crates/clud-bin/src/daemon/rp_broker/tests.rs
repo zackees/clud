@@ -2,6 +2,7 @@ use super::super::io_helpers::read_json_file;
 use super::super::paths::daemon_info_path;
 use super::super::server::run_daemon_uninterrupted;
 use super::super::types::DaemonInfo;
+use super::endpoint::endpoint_for_state_dir;
 use super::*;
 use running_process::broker::backend_handle::{BackendHandle, DaemonProcess};
 use running_process::broker::backend_sdk::{
@@ -525,4 +526,47 @@ fn running_process_disabled_requires_exact_value() {
     drop(_env);
     let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
     assert!(!running_process_disabled());
+}
+
+/// Build a lane that owns a freshly written sidecar and a placeholder
+/// socket file at the shared endpoint path (#2340).
+fn lane_with_sidecar(state_dir: &Path, started_at_unix_ms: u64) -> super::frame_lane::FrameLane {
+    let endpoint = endpoint_for_state_dir(state_dir).expect("endpoint");
+    let endpoint_path = endpoint.path.clone();
+    let mut daemon = DaemonProcess::current_process(endpoint, None).expect("identity");
+    daemon.started_at_unix_ms = started_at_unix_ms;
+    let identity_path = daemon_identity_path(state_dir);
+    write_daemon_identity_file(&identity_path, &daemon).expect("write sidecar");
+    std::fs::write(&endpoint_path, b"").expect("socket placeholder");
+    super::frame_lane::FrameLane::new(identity_path, endpoint_path, &daemon)
+}
+
+#[test]
+fn lane_cleanup_removes_its_own_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lane = lane_with_sidecar(tmp.path(), 1_000);
+    let identity_path = daemon_identity_path(tmp.path());
+    assert!(identity_path.exists());
+    lane.cleanup();
+    assert!(!identity_path.exists());
+    if !crate::platform::host::WINDOWS {
+        let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+        assert!(!Path::new(&endpoint.path).exists());
+    }
+}
+
+#[test]
+fn superseded_lane_cleanup_keeps_the_newer_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let older = lane_with_sidecar(tmp.path(), 1_000);
+    // The superseding daemon rewrites the sidecar at the same path.
+    let _newer = lane_with_sidecar(tmp.path(), 2_000);
+    older.cleanup();
+    let identity_path = daemon_identity_path(tmp.path());
+    let kept = read_daemon_identity_file(&identity_path).expect("newer sidecar must survive");
+    assert_eq!(kept.started_at_unix_ms, 2_000);
+    if !crate::platform::host::WINDOWS {
+        let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+        assert!(Path::new(&endpoint.path).exists());
+    }
 }

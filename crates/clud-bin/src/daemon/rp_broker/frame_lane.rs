@@ -9,8 +9,8 @@ use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::ListenerOptions;
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_sdk::{
-    remove_daemon_identity_file, write_daemon_identity_file, BackendEndpointMux,
-    LegacyClassification, MuxPoll,
+    read_daemon_identity_file, remove_daemon_identity_file, write_daemon_identity_file,
+    BackendEndpointMux, LegacyClassification, MuxPoll,
 };
 use running_process::broker::builders::{CacheManifestBuilder, ServiceDefinitionBuilder};
 use running_process::broker::protocol::CacheRootKind;
@@ -37,10 +37,33 @@ use super::{
 pub(in crate::daemon) struct FrameLane {
     identity_path: PathBuf,
     endpoint_path: String,
+    /// Identity this lane wrote to the sidecar: `(pid, started_at_unix_ms)`.
+    owner: (u32, u64),
 }
 
 impl FrameLane {
+    pub(super) fn new(
+        identity_path: PathBuf,
+        endpoint_path: String,
+        daemon: &DaemonProcess,
+    ) -> Self {
+        Self {
+            identity_path,
+            endpoint_path,
+            owner: (daemon.pid, daemon.started_at_unix_ms),
+        }
+    }
+
+    /// Remove the sidecar and socket path, but only while the sidecar still
+    /// carries this lane's identity. A superseding daemon rewrites both, so
+    /// an unreadable or different sidecar means they are no longer ours
+    /// (#2340).
     pub(in crate::daemon) fn cleanup(&self) {
+        let still_ours = read_daemon_identity_file(&self.identity_path)
+            .is_some_and(|d| (d.pid, d.started_at_unix_ms) == self.owner);
+        if !still_ours {
+            return;
+        }
         remove_daemon_identity_file(&self.identity_path);
         if crate::platform::host::WINDOWS {
             // Named pipes vanish with their last handle; nothing on disk.
@@ -191,6 +214,8 @@ pub(super) fn start_frame_lane(
     let identity_path = daemon_identity_path(state_dir);
     write_daemon_identity_file(&identity_path, &daemon)?;
 
+    let lane = FrameLane::new(identity_path, endpoint_path, &daemon);
+
     let mux = Arc::new(BackendEndpointMux::new(
         daemon,
         &[CLUD_PAYLOAD_PROTOCOL],
@@ -244,10 +269,7 @@ pub(super) fn start_frame_lane(
             }
         })?;
 
-    Ok(FrameLane {
-        identity_path,
-        endpoint_path,
-    })
+    Ok(lane)
 }
 
 /// Serve one accepted connection through the mux until the peer
