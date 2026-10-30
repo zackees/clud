@@ -74,3 +74,12 @@ def test_successful_gh_call_clears_a_stale_rate_limit(watcher, monkeypatch):
     assert watcher.PENDING_RATE_LIMIT is not None
     watcher.gh("api", "y")
     assert watcher.PENDING_RATE_LIMIT is None
+
+
+def test_quiet_suppresses_progress_report(watcher, monkeypatch, capsys):
+    monkeypatch.setattr(watcher, "QUIET", True)
+    monkeypatch.setattr(watcher, "fetch_run_jobs", lambda *a: pytest.fail("fetched"))
+    watcher.emit_progress_report(1, "o/r", None, [])
+    assert capsys.readouterr().out == ""
+    assert watcher.parse_args(["1", "--quiet"]).quiet
+    assert not watcher.parse_args(["1"]).quiet
