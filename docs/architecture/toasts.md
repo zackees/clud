@@ -110,6 +110,16 @@ opacity to 90% without changing content or lifetime. The image is re-pinned
 after child bursts, re-uploaded after terminal image-dropping events, and
 deleted when hidden or at session exit.
 
+### CPU HUD lifetime and opt-out (#2367)
+
+A CPU episode's live reading stays up for `cpu_banner::CPU_LIVE_VISIBLE`
+(20 s), then the toast expires and later heartbeats of the same episode do not
+re-show it, so a long burn stops covering the harness header. The "cpu back to
+normal" notice still appears when the episode ends, and a new episode gets a
+fresh window. To never show the overlay, pass `--no-cpu-banner` or set
+`[foreground.cpu_banner] enabled = false` in clud settings. The HUD has no
+close button or hotkey by design: it never consumes the child's input.
+
 ### CPU HUD hover
 
 Hover is observed only when the child has already selected DECSET 1003
