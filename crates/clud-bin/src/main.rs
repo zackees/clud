@@ -329,10 +329,24 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
                 clud::openai_ingress::run_translate_stdin()
             }
         }
-        // Hidden test seam for the Claude -> Gemini egress translator: stdin
-        // in, `generateContent` request body out. No session, backend or daemon.
-        args::Command::InternalClaudeGeminiTranslate { model } => {
-            clud::gemini_ingress::run_translate_stdin(model.as_deref())
+        // Hidden test seam for the Claude <-> Gemini translator: stdin in, the
+        // translated body out. `--response` runs the ingress direction. No
+        // session, backend or daemon.
+        args::Command::InternalClaudeGeminiTranslate {
+            model,
+            response,
+            stream,
+            http,
+        } => {
+            if *response {
+                clud::gemini_ingress::run_translate_response_stdin(
+                    *stream,
+                    model.as_deref(),
+                    *http,
+                )
+            } else {
+                clud::gemini_ingress::run_translate_stdin(model.as_deref())
+            }
         }
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),

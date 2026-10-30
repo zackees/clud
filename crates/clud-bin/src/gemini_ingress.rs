@@ -35,6 +35,29 @@
 //!   (local `$ref` inlining, union flattening, enum/const coercions) is a named
 //!   follow-up slice, not something to half-copy here.
 //!
+//! The *ingress* half lives further down: [`translate_generate_content_response`]
+//! turns a Gemini `generateContent` body back into an Anthropic Messages body and
+//! [`GeminiStreamTranslator`] does the same for the SSE stream, ported from
+//! CLIProxyAPI `internal/translator/gemini/claude/gemini_claude_response.go`
+//! (`ConvertGeminiResponseToClaude` / `ConvertGeminiResponseToClaudeNonStream`).
+//! Its deliberate differences:
+//!
+//! * **Thought signatures are dropped, not replayed as empty carrier blocks.**
+//!   Upstream emits a `thinking` block whose only content is a
+//!   `signature_delta` so the *next* request can send the thought part back.
+//!   clud's request half never replays thinking (see above), so such a block
+//!   would reach the client as an empty `thinking` block with no value.
+//! * **Tool names are not restored.** The request half sanitises
+//!   `Read.File` -> `Read_File` and keeps no reverse map, so a response repeats
+//!   the sanitised name it was given instead of inventing one.
+//! * **`MALFORMED_FUNCTION_CALL` is a typed error** (`GeminiEgressError`), which
+//!   the renderers turn into the same Anthropic error envelope upstream emits -
+//!   never a silent `end_turn`.
+//! * **Tool arguments are emitted whole** as one `input_json_delta` when a
+//!   `functionCall` carries a non-empty object, rather than upstream's deferred
+//!   empty-`{}` dance, because clud has no request-side tool declaration to
+//!   consult for a parameterless tool.
+//!
 //! Nothing here changes the launch-scoped gateway contract: there is no route
 //! and no lifecycle change, only a pure translator plus its hidden process seam.
 
@@ -783,6 +806,575 @@ fn sanitize_tool_name(name: &str) -> String {
     sanitized.chars().take(64).collect()
 }
 
+// ---------------------------------------------------------------------------
+// The ingress half: `generateContent` (JSON or SSE) -> Anthropic Messages
+// ---------------------------------------------------------------------------
+
+/// Why a Gemini response cannot be expressed as a Messages response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeminiEgressError {
+    /// The body was not a JSON object.
+    NotJson,
+    /// Gemini stopped with `MALFORMED_FUNCTION_CALL` without producing a call,
+    /// so there is no assistant content to hand back.
+    MalformedFunctionCall,
+}
+
+impl std::fmt::Display for GeminiEgressError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotJson => write!(formatter, "the response body is not a JSON object"),
+            Self::MalformedFunctionCall => write!(
+                formatter,
+                "Gemini response finished with MALFORMED_FUNCTION_CALL"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GeminiEgressError {}
+
+/// The Anthropic-shaped error upstream returns for a malformed function call.
+fn malformed_function_call_error() -> Value {
+    json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": "Gemini response finished with MALFORMED_FUNCTION_CALL",
+        }
+    })
+}
+
+fn is_malformed_function_call(finish_reason: &str, saw_tool_call: bool) -> bool {
+    finish_reason == "MALFORMED_FUNCTION_CALL" && !saw_tool_call
+}
+
+/// Gemini `finishReason` -> Anthropic `stop_reason`, upstream's table. A tool
+/// call wins over any finish reason because the caller still has to run it.
+pub fn stop_reason(finish_reason: &str, saw_tool_call: bool) -> &'static str {
+    if saw_tool_call {
+        return "tool_use";
+    }
+    match finish_reason {
+        "MAX_TOKENS" => "max_tokens",
+        "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "IMAGE_SAFETY"
+        | "MALFORMED_RESPONSE" => "refusal",
+        _ => "end_turn",
+    }
+}
+
+/// Token accounting from one `usageMetadata` object. Gemini counts the cached
+/// prefix inside `promptTokenCount`, while Anthropic reports it separately, so
+/// the cached count is subtracted from `input_tokens` and surfaced as
+/// `cache_read_input_tokens` (upstream's arithmetic).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GeminiUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+}
+
+impl GeminiUsage {
+    fn parse(chunk: &Value) -> Option<Self> {
+        let usage = chunk.get("usageMetadata")?;
+        let number = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
+        let cached_tokens = number("cachedContentTokenCount");
+        let prompt_tokens = number("promptTokenCount");
+        let mut output_tokens = number("candidatesTokenCount") + number("thoughtsTokenCount");
+        if output_tokens == 0 {
+            let total = number("totalTokenCount");
+            if total > 0 {
+                output_tokens = total.saturating_sub(prompt_tokens);
+            }
+        }
+        Some(Self {
+            input_tokens: prompt_tokens.saturating_sub(cached_tokens),
+            output_tokens,
+            cached_tokens,
+        })
+    }
+
+    fn to_json(self) -> Value {
+        let mut usage = json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        });
+        if self.cached_tokens > 0 {
+            usage["cache_read_input_tokens"] = json!(self.cached_tokens);
+        }
+        usage
+    }
+}
+
+/// `candidates[0].content.parts`, the only place Gemini puts content.
+fn response_parts(chunk: &Value) -> &[Value] {
+    chunk
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// `candidates[0].finishReason`, if this chunk closes the response.
+fn finish_reason(chunk: &Value) -> Option<&str> {
+    chunk
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("finishReason"))
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+}
+
+fn string_field<'a>(chunk: &'a Value, name: &str) -> Option<&'a str> {
+    chunk
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+/// A `tool_use` id in the shape clud's own `tool_name_from_id` can read back.
+fn tool_use_id(name: &str, counter: u64) -> String {
+    sanitize_tool_name(&format!("{name}-{counter}"))
+}
+
+fn flush_text(blocks: &mut Vec<Value>, text: &mut String) {
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": std::mem::take(text) }));
+    }
+}
+
+fn flush_thinking(blocks: &mut Vec<Value>, thinking: &mut String) {
+    if !thinking.is_empty() {
+        blocks.push(json!({ "type": "thinking", "thinking": std::mem::take(thinking) }));
+    }
+}
+
+fn tool_use_block(call: &Value, counter: u64) -> Value {
+    let name = sanitize_tool_name(call.get("name").and_then(Value::as_str).unwrap_or_default());
+    let input = call
+        .get("args")
+        .filter(|args| args.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "type": "tool_use",
+        "id": tool_use_id(&name, counter),
+        "name": name,
+        "input": input,
+    })
+}
+
+/// Translate one buffered Gemini `generateContent` response into an Anthropic
+/// Messages response.
+///
+/// `requested_model` stands in when the body carries no `modelVersion`, so the
+/// reply echoes what the client asked for.
+pub fn translate_generate_content_response(
+    body: &[u8],
+    requested_model: Option<&str>,
+) -> Result<Value, GeminiEgressError> {
+    let chunk: Value = serde_json::from_slice(body).map_err(|_| GeminiEgressError::NotJson)?;
+    if !chunk.is_object() {
+        return Err(GeminiEgressError::NotJson);
+    }
+
+    let id = string_field(&chunk, "responseId").unwrap_or("msg_gemini");
+    let model = string_field(&chunk, "modelVersion")
+        .or(requested_model.filter(|model| !model.is_empty()))
+        .unwrap_or_default();
+
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut text = String::new();
+    let mut thinking = String::new();
+    let mut tool_counter = 0_u64;
+    let mut saw_tool_call = false;
+
+    for part in response_parts(&chunk) {
+        if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+            flush_text(&mut blocks, &mut text);
+            thinking.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default());
+            continue;
+        }
+        if let Some(call) = part.get("functionCall").filter(|call| call.is_object()) {
+            flush_thinking(&mut blocks, &mut thinking);
+            flush_text(&mut blocks, &mut text);
+            saw_tool_call = true;
+            tool_counter += 1;
+            blocks.push(tool_use_block(call, tool_counter));
+            continue;
+        }
+        let piece = part.get("text").and_then(Value::as_str).unwrap_or_default();
+        if piece.is_empty() {
+            // A signature-only part: dropped by design, see the module docs.
+            continue;
+        }
+        flush_thinking(&mut blocks, &mut thinking);
+        text.push_str(piece);
+    }
+    flush_thinking(&mut blocks, &mut thinking);
+    flush_text(&mut blocks, &mut text);
+
+    let finish = finish_reason(&chunk).unwrap_or_default();
+    if is_malformed_function_call(finish, saw_tool_call) {
+        return Err(GeminiEgressError::MalformedFunctionCall);
+    }
+
+    let mut response = json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": blocks,
+        "stop_reason": stop_reason(finish, saw_tool_call),
+        "stop_sequence": null,
+    });
+    if let Some(usage) = GeminiUsage::parse(&chunk) {
+        response["usage"] = usage.to_json();
+    }
+    Ok(response)
+}
+
+/// Which block the stream currently has open. Gemini chunks do not tell us when
+/// a block ends, so the translator tracks it the way upstream's state machine
+/// does: a part of a different kind closes the previous block first.
+const BLOCK_NONE: u8 = 0;
+const BLOCK_TEXT: u8 = 1;
+const BLOCK_THINKING: u8 = 2;
+const BLOCK_TOOL: u8 = 3;
+
+/// Stateful translator for the streaming half: feed it the upstream SSE lines,
+/// get Anthropic `message_start` / `content_block_*` / `message_delta` /
+/// `message_stop` events back.
+///
+/// Every chunk carries a whole `parts` array, so the translator emits one delta
+/// per part and closes a block only when the next part (or the end of the
+/// stream) needs a different one - the same event order upstream produces.
+pub struct GeminiStreamTranslator {
+    model: String,
+    message_id: String,
+    index: u64,
+    block: u8,
+    started: bool,
+    finished: bool,
+    saw_tool_call: bool,
+    finish_reason: String,
+    usage: GeminiUsage,
+    tool_counter: u64,
+}
+
+impl GeminiStreamTranslator {
+    /// `model` is echoed in `message_start` until a chunk names a `modelVersion`.
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            message_id: "msg_gemini".to_string(),
+            index: 0,
+            block: BLOCK_NONE,
+            started: false,
+            finished: false,
+            saw_tool_call: false,
+            finish_reason: String::new(),
+            usage: GeminiUsage::default(),
+            tool_counter: 0,
+        }
+    }
+
+    /// Feed one SSE line. Returns the events it produced (frequently none).
+    ///
+    /// `event:`/`id:`/`retry:` framing, comments, blank lines and the `[DONE]`
+    /// sentinel produce nothing except that `[DONE]` seals the message; a
+    /// `data:` line that is not JSON is ignored rather than aborting the stream
+    /// the client is already reading.
+    pub fn push_line(&mut self, line: &str) -> Vec<Value> {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with(':')
+            || line.starts_with("event:")
+            || line.starts_with("id:")
+            || line.starts_with("retry:")
+        {
+            return Vec::new();
+        }
+        let Some(payload) = line.strip_prefix("data:") else {
+            return Vec::new();
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            return self.finish();
+        }
+        if payload.is_empty() {
+            return Vec::new();
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
+            return Vec::new();
+        };
+        self.push_chunk(&chunk)
+    }
+
+    /// Feed a whole SSE body and collect every event it produces, sealing the
+    /// message at the end even when the upstream never sent `[DONE]`.
+    pub fn push_body(&mut self, body: &[u8]) -> Vec<Value> {
+        let body = String::from_utf8_lossy(body);
+        let mut events: Vec<Value> = body.lines().flat_map(|line| self.push_line(line)).collect();
+        events.extend(self.finish());
+        events
+    }
+
+    /// Emit the closing events once. Idempotent, so `[DONE]`, an explicit
+    /// `finishReason` and the end of the body cannot double-close the message.
+    pub fn finish(&mut self) -> Vec<Value> {
+        if self.finished || !self.started {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        if is_malformed_function_call(&self.finish_reason, self.saw_tool_call) {
+            output.push(malformed_function_call_error());
+            self.finished = true;
+            return output;
+        }
+        self.close_block(&mut output);
+        output.push(json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": stop_reason(&self.finish_reason, self.saw_tool_call),
+                "stop_sequence": null,
+            },
+            "usage": self.usage.to_json(),
+        }));
+        output.push(json!({ "type": "message_stop" }));
+        self.finished = true;
+        output
+    }
+
+    fn push_chunk(&mut self, chunk: &Value) -> Vec<Value> {
+        if self.finished {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        if !self.started {
+            self.start_message(chunk, &mut output);
+        }
+        if let Some(usage) = GeminiUsage::parse(chunk) {
+            self.usage = usage;
+        }
+        for part in response_parts(chunk) {
+            if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                self.push_thinking(part.get("text").and_then(Value::as_str).unwrap_or_default(), &mut output);
+                continue;
+            }
+            if let Some(call) = part.get("functionCall").filter(|call| call.is_object()) {
+                self.push_tool_call(call, &mut output);
+                continue;
+            }
+            let piece = part.get("text").and_then(Value::as_str).unwrap_or_default();
+            if !piece.is_empty() {
+                self.push_text(piece, &mut output);
+            }
+        }
+        if let Some(reason) = finish_reason(chunk) {
+            self.finish_reason = reason.to_string();
+            output.extend(self.finish());
+        }
+        output
+    }
+
+    fn start_message(&mut self, chunk: &Value, output: &mut Vec<Value>) {
+        if let Some(id) = string_field(chunk, "responseId") {
+            self.message_id = id.to_string();
+        }
+        if let Some(model) = string_field(chunk, "modelVersion") {
+            self.model = model.to_string();
+        }
+        output.push(json!({
+            "type": "message_start",
+            "message": {
+                "id": self.message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": self.model,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 0, "output_tokens": 0 },
+            }
+        }));
+        self.started = true;
+    }
+
+    fn start_block(&mut self, kind: u8, block: Value, output: &mut Vec<Value>) {
+        self.close_block(output);
+        output.push(json!({
+            "type": "content_block_start",
+            "index": self.index,
+            "content_block": block,
+        }));
+        self.block = kind;
+    }
+
+    fn close_block(&mut self, output: &mut Vec<Value>) {
+        if self.block != BLOCK_NONE {
+            output.push(json!({ "type": "content_block_stop", "index": self.index }));
+            self.index += 1;
+            self.block = BLOCK_NONE;
+        }
+    }
+
+    fn push_text(&mut self, piece: &str, output: &mut Vec<Value>) {
+        if self.block != BLOCK_TEXT {
+            self.start_block(BLOCK_TEXT, json!({ "type": "text", "text": "" }), output);
+        }
+        output.push(json!({
+            "type": "content_block_delta",
+            "index": self.index,
+            "delta": { "type": "text_delta", "text": piece },
+        }));
+    }
+
+    fn push_thinking(&mut self, piece: &str, output: &mut Vec<Value>) {
+        if self.block != BLOCK_THINKING {
+            self.start_block(
+                BLOCK_THINKING,
+                json!({ "type": "thinking", "thinking": "" }),
+                output,
+            );
+        }
+        if !piece.is_empty() {
+            output.push(json!({
+                "type": "content_block_delta",
+                "index": self.index,
+                "delta": { "type": "thinking_delta", "thinking": piece },
+            }));
+        }
+    }
+
+    fn push_tool_call(&mut self, call: &Value, output: &mut Vec<Value>) {
+        self.saw_tool_call = true;
+        self.tool_counter += 1;
+        let block = tool_use_block(call, self.tool_counter);
+        let arguments = block
+            .get("input")
+            .filter(|input| input.as_object().is_some_and(|object| !object.is_empty()))
+            .cloned();
+        self.start_block(BLOCK_TOOL, block, output);
+        if let Some(arguments) = arguments {
+            output.push(json!({
+                "type": "content_block_delta",
+                "index": self.index,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": serde_json::to_string(&arguments).unwrap_or_default(),
+                },
+            }));
+        }
+    }
+}
+
+/// The bytes a served `POST /v1/messages` writes for a buffered Gemini response,
+/// or the Anthropic error envelope for a malformed function call.
+pub fn render_messages_body(model: &str, body: &[u8]) -> Vec<u8> {
+    match translate_generate_content_response(body, Some(model)) {
+        Ok(translated) => serde_json::to_vec(&translated).unwrap_or_default(),
+        Err(error) => serde_json::to_vec(&malformed_error_for(&error)).unwrap_or_default(),
+    }
+}
+
+fn malformed_error_for(error: &GeminiEgressError) -> Value {
+    match error {
+        GeminiEgressError::MalformedFunctionCall => malformed_function_call_error(),
+        GeminiEgressError::NotJson => json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": error.to_string() },
+        }),
+    }
+}
+
+/// The SSE bytes for a streamed Gemini response: one Anthropic event per frame.
+pub fn render_messages_stream(model: &str, body: &[u8]) -> Vec<u8> {
+    let mut translator = GeminiStreamTranslator::new(model);
+    let mut rendered = Vec::new();
+    for event in translator.push_body(body) {
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        rendered.extend_from_slice(format!("event: {kind}\ndata: ").as_bytes());
+        rendered.extend_from_slice(&serde_json::to_vec(&event).unwrap_or_default());
+        rendered.extend_from_slice(b"\n\n");
+    }
+    rendered
+}
+
+/// `clud __claude-gemini-translate --response [--stream] [--http]` — the process
+/// seam for the response half. Reads the upstream body on stdin; writes one
+/// Messages JSON object per line (a single message, or one event per line for a
+/// stream), or with `--http` the exact HTTP body the route writes. No session,
+/// backend, credential or daemon action.
+pub fn run_translate_response_stdin(
+    stream: bool,
+    requested_model: Option<&str>,
+    http: bool,
+) -> i32 {
+    use std::io::{Read, Write};
+
+    let mut body = Vec::new();
+    if std::io::stdin().read_to_end(&mut body).is_err() {
+        eprintln!("could not read the response body from stdin");
+        return 2;
+    }
+    let model = requested_model.unwrap_or_default();
+    let mut rendered = Vec::new();
+    if http {
+        if stream {
+            rendered = render_messages_stream(model, &body);
+        } else {
+            rendered = render_messages_body(model, &body);
+        }
+    } else if stream {
+        let mut translator = GeminiStreamTranslator::new(model);
+        for event in translator.push_body(&body) {
+            match serde_json::to_vec(&event) {
+                Ok(mut encoded) => {
+                    encoded.push(b'\n');
+                    rendered.extend_from_slice(&encoded);
+                }
+                Err(error) => {
+                    eprintln!("could not encode a translated event: {error}");
+                    return 2;
+                }
+            }
+        }
+    } else {
+        match translate_generate_content_response(&body, requested_model) {
+            Ok(translated) => match serde_json::to_vec(&translated) {
+                Ok(mut encoded) => {
+                    encoded.push(b'\n');
+                    rendered.extend_from_slice(&encoded);
+                }
+                Err(error) => {
+                    eprintln!("could not encode the translated response: {error}");
+                    return 2;
+                }
+            },
+            Err(error) => {
+                eprintln!("{error}");
+                return 2;
+            }
+        }
+    }
+    match std::io::stdout().write_all(&rendered) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("could not write the translated response: {error}");
+            2
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,5 +1618,187 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out["model"], "claude-sonnet-4");
+    }
+
+    fn gemini_response(body: &str) -> Value {
+        translate_generate_content_response(body.as_bytes(), None).unwrap()
+    }
+
+    #[test]
+    fn a_gemini_response_becomes_a_messages_response() {
+        let out = gemini_response(
+            r#"{"responseId":"resp_1","modelVersion":"gemini-3-pro","candidates":[{"content":{"parts":[{"text":"he"},{"text":"llo"},{"functionCall":{"name":"Read.File","args":{"path":"a.rs"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":40,"candidatesTokenCount":10,"thoughtsTokenCount":5}}"#,
+        );
+        assert_eq!(out["id"], "resp_1");
+        assert_eq!(out["type"], "message");
+        assert_eq!(out["role"], "assistant");
+        assert_eq!(out["model"], "gemini-3-pro");
+        assert_eq!(out["content"][0]["type"], "text");
+        assert_eq!(out["content"][0]["text"], "hello");
+        assert_eq!(out["content"][1]["type"], "tool_use");
+        assert_eq!(out["content"][1]["name"], "Read_File");
+        assert_eq!(out["content"][1]["input"]["path"], "a.rs");
+        assert_eq!(out["content"][1]["id"], "Read_File-1");
+        assert_eq!(out["stop_reason"], "tool_use");
+        // Gemini folds the cached prefix into promptTokenCount; Anthropic does not.
+        assert_eq!(out["usage"]["input_tokens"], 60);
+        assert_eq!(out["usage"]["output_tokens"], 15);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 40);
+    }
+
+    #[test]
+    fn thought_parts_become_thinking_blocks() {
+        let out = gemini_response(
+            r#"{"candidates":[{"content":{"parts":[{"text":"weigh it","thought":true},{"text":"answer"}]},"finishReason":"STOP"}]}"#,
+        );
+        assert_eq!(out["content"][0]["type"], "thinking");
+        assert_eq!(out["content"][0]["thinking"], "weigh it");
+        assert_eq!(out["content"][1]["type"], "text");
+        assert_eq!(out["content"][1]["text"], "answer");
+    }
+
+    #[test]
+    fn a_signature_only_part_is_dropped() {
+        let out = gemini_response(
+            r#"{"candidates":[{"content":{"parts":[{"text":"a"},{"thoughtSignature":"c2ln"},{"text":"b"}]},"finishReason":"STOP"}]}"#,
+        );
+        assert_eq!(out["content"][0]["text"], "ab");
+        assert_eq!(out["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn finish_reasons_map_to_the_anthropic_table() {
+        assert_eq!(stop_reason("STOP", false), "end_turn");
+        assert_eq!(stop_reason("", false), "end_turn");
+        assert_eq!(stop_reason("MAX_TOKENS", false), "max_tokens");
+        assert_eq!(stop_reason("SAFETY", false), "refusal");
+        assert_eq!(stop_reason("MALFORMED_RESPONSE", false), "refusal");
+        assert_eq!(stop_reason("STOP", true), "tool_use");
+        assert_eq!(stop_reason("MAX_TOKENS", true), "tool_use");
+    }
+
+    #[test]
+    fn a_response_without_a_model_echoes_the_requested_one() {
+        let out = translate_generate_content_response(
+            br#"{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}]}"#,
+            Some("clud-claude-gemini-3-pro"),
+        )
+        .unwrap();
+        assert_eq!(out["model"], "clud-claude-gemini-3-pro");
+        assert_eq!(out["id"], "msg_gemini");
+        assert_eq!(out["usage"], Value::Null);
+    }
+
+    #[test]
+    fn a_malformed_function_call_is_a_typed_error() {
+        let error = translate_generate_content_response(
+            br#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#,
+            Some("m"),
+        )
+        .unwrap_err();
+        assert_eq!(error, GeminiEgressError::MalformedFunctionCall);
+        let rendered = render_messages_body("m", br#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&rendered).unwrap()["error"]["type"],
+            "api_error"
+        );
+        let not_json =
+            translate_generate_content_response(b"nope", None).unwrap_err();
+        assert_eq!(not_json, GeminiEgressError::NotJson);
+    }
+
+    fn stream_kinds(events: &[Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| {
+                event["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    const STREAM_BODY: &str = concat!(
+        "data: {\"responseId\":\"resp_2\",\"modelVersion\":\"gemini-3-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}]}}]}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"Bash\",\"args\":{\"command\":\"ls\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":4}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[test]
+    fn a_streamed_response_emits_anthropic_events_in_order() {
+        let mut translator = GeminiStreamTranslator::new("gemini-3-pro");
+        let events = translator.push_body(STREAM_BODY.as_bytes());
+        let kinds = stream_kinds(&events);
+        assert_eq!(kinds[0], "message_start");
+        assert_eq!(events[0]["message"]["id"], "resp_2");
+        assert_eq!(events[0]["message"]["model"], "gemini-3-pro");
+        assert_eq!(kinds.last().map(String::as_str), Some("message_stop"));
+        // The trailing [DONE] must not seal the message a second time.
+        assert_eq!(kinds.iter().filter(|kind| *kind == "message_delta").count(), 1);
+        let text: String = events
+            .iter()
+            .filter(|event| event["delta"]["type"] == "text_delta")
+            .map(|event| event["delta"]["text"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(text, "hi there");
+        let tool_start = events
+            .iter()
+            .find(|event| event["content_block"]["type"] == "tool_use")
+            .expect("a tool_use block");
+        assert_eq!(tool_start["content_block"]["name"], "Bash");
+        let partial: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["delta"]["type"] == "input_json_delta")
+            .collect();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0]["delta"]["partial_json"], "{\"command\":\"ls\"}");
+        let delta = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .expect("a message_delta");
+        assert_eq!(delta["delta"]["stop_reason"], "tool_use");
+        assert_eq!(delta["usage"]["input_tokens"], 10);
+        assert_eq!(delta["usage"]["output_tokens"], 4);
+        // Every opened block is closed exactly once.
+        let starts = kinds.iter().filter(|kind| *kind == "content_block_start").count();
+        let stops = kinds.iter().filter(|kind| *kind == "content_block_stop").count();
+        assert_eq!(starts, stops);
+        assert_eq!(kinds.iter().filter(|kind| *kind == "content_block_start").count(), 2);
+    }
+
+    #[test]
+    fn a_stream_without_done_is_sealed_at_the_end_of_the_body() {
+        let mut translator = GeminiStreamTranslator::new("m");
+        let events = translator.push_body(
+            br#"data: {"candidates":[{"content":{"parts":[{"text":"x"}]}}]}"#,
+        );
+        let kinds = stream_kinds(&events);
+        assert_eq!(kinds.last().map(String::as_str), Some("message_stop"));
+        assert_eq!(events.len(), 5);
+        // A second finish (a late [DONE]) is a no-op.
+        assert!(translator.finish().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_stream_ends_with_an_error_event() {
+        let mut translator = GeminiStreamTranslator::new("m");
+        let events = translator.push_body(
+            br#"data: {"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#,
+        );
+        let kinds = stream_kinds(&events);
+        assert_eq!(kinds.last().map(String::as_str), Some("error"));
+        assert!(!kinds.iter().any(|kind| kind == "message_delta"));
+        assert_eq!(events.last().unwrap()["error"]["type"], "api_error");
+    }
+
+    #[test]
+    fn rendered_sse_frames_name_their_event() {
+        let rendered = String::from_utf8(render_messages_stream("gemini-3-pro", STREAM_BODY.as_bytes()))
+            .expect("utf-8");
+        assert!(rendered.starts_with("event: message_start\ndata: {"));
+        assert!(rendered.contains("event: content_block_delta\ndata: {\"delta\""));
+        assert!(rendered.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
     }
 }
