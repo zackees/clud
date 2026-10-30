@@ -516,3 +516,19 @@ fn the_share_limit_comes_from_env_then_settings_then_default() {
     assert_eq!(share_from(None, Some(&settings)), 50);
     assert_eq!(share_from(None, None), DEFAULT_SHARE);
 }
+
+#[test]
+fn pruning_ledgers_never_removes_a_sessions_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = session_file(dir.path(), "s1");
+    let lock = lock_path(&ledger);
+    drop(SessionLock::acquire(&ledger));
+    assert!(lock.exists());
+    assert_ne!(lock.parent(), ledger.parent());
+    std::fs::create_dir_all(ledger.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&ledger, b"{}").expect("ledger");
+    let far_future = SystemTime::now() + std::time::Duration::from_secs(30 * 24 * 3600);
+    prune(ledger.parent().expect("dir"), far_future);
+    assert!(!ledger.exists(), "old ledger is pruned");
+    assert!(lock.exists(), "lock survives the prune");
+}

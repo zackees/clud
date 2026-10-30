@@ -60,6 +60,8 @@ const MAX_SEEN: usize = 32;
 /// A pending call older than this never reports a duration.
 const PENDING_TTL_MS: u64 = 60 * 60 * 1000;
 const DIR_NAME: &str = "verify-ratio";
+/// Sibling of [`DIR_NAME`] so ledger pruning never touches lock files.
+const LOCK_DIR_NAME: &str = "verify-ratio-locks";
 const HASH_DOMAIN: &str = "clud-verify-ratio-v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,6 +523,17 @@ fn store(path: &Path, ledger: &Ledger, fresh: bool) -> Option<()> {
     Some(())
 }
 
+/// Lock file for a ledger. It lives in a sibling directory that [`prune`] never
+/// scans: a lock is never rewritten, so its mtime stays old and the prune would
+/// unlink a live session's lock while its ledger survives, letting two
+/// processes lock different inodes.
+fn lock_path(ledger: &Path) -> PathBuf {
+    let root = ledger.parent().and_then(Path::parent).unwrap_or(ledger);
+    root.join(LOCK_DIR_NAME)
+        .join(ledger.file_name().unwrap_or_default())
+        .with_extension("lock")
+}
+
 /// Cross-process advisory lock around one ledger read-modify-write, so two
 /// concurrent hook invocations cannot both read the same cooldown and both
 /// advise, or overwrite each other's update. Fail open: when the lock file
@@ -530,14 +543,15 @@ struct SessionLock(Option<std::fs::File>);
 impl SessionLock {
     fn acquire(path: &Path) -> Self {
         use fs4::fs_std::FileExt;
-        if let Some(dir) = path.parent() {
+        let lock = lock_path(path);
+        if let Some(dir) = lock.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(path.with_extension("lock"))
+            .open(&lock)
             .ok()
             .filter(|file| FileExt::lock_exclusive(file).is_ok());
         Self(file)
