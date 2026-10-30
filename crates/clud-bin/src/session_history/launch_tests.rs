@@ -143,7 +143,11 @@ fn continue_index_resumes_the_nth_newest_session_without_a_picker() {
         (vec!["clud", "--continue=0"], "new"),
     ] {
         let mut args = parse(&argv);
-        assert!(args.passthrough.is_empty(), "{argv:?}: {:?}", args.passthrough);
+        assert!(
+            args.passthrough.is_empty(),
+            "{argv:?}: {:?}",
+            args.passthrough
+        );
         assert!(applies(&args, None), "{argv:?}");
         prepare(&mut args, &fx.env, never_pick).unwrap().unwrap();
         assert_eq!(args.resume, Some(Some(want.into())), "{argv:?}");
