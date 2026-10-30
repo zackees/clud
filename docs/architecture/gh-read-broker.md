@@ -396,6 +396,19 @@ stays off. So after an upgrade such a session's next statusline tick or
 `clud` call turns the broker on, with no restart
 ([DD-152](../DESIGN_DECISIONS.md#dd-152-a-running-sessions-aliases-are-relinked-by-the-installed-clud-not-self-delegated)).
 
+### `gh.backend = "ghd"` (#2352)
+
+A repo (or the user) can make [ghd](https://github.com/forge-ci/ghd) the
+mandatory substitute for gh: `{"gh": {"backend": "ghd"}}` in clud's
+layered settings (`repo_clud_config`, repo over user). The gh shim then
+runs `ghd gh ARGS` for every call after the `pr checks --watch` upgrade.
+`GHD_REAL_GH` names the real gh, so ghd's relay never resolves back to the
+shim. ghd serves what it parses natively and relays the rest to that gh.
+This broker is not consulted, because ghd keeps its own cache. The backend
+is read from the call's cwd on every call, so a running session follows
+the setting without a restart. With no ghd on PATH, dispatch prints one
+line and exits 127; there is no silent fallback to gh.
+
 ## Code
 
 | File | Role |

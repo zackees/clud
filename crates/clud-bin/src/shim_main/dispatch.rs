@@ -34,6 +34,41 @@ pub struct GhSession {
     /// enabled it (`git.gh_read_broker`). `None` runs every call on the
     /// real `gh`.
     pub read_broker: Option<crate::gh_broker::client::BrokerClient>,
+    /// #2352: where calls go after the watch upgrade.
+    pub route: GhRoute,
+}
+
+/// #2352: `gh.backend` resolved for this call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GhRoute {
+    /// The real gh, with the read broker when enabled.
+    Gh,
+    /// `ghd gh ARGS`, told where the real gh is.
+    Ghd(PathBuf),
+    /// `gh.backend` is `"ghd"` but no ghd is on PATH: fail, never fall back.
+    GhdMissing,
+}
+
+/// The route for a backend and the ghd found on PATH, if any.
+pub fn route_for(backend: crate::repo_clud_config::GhBackend, ghd: Option<PathBuf>) -> GhRoute {
+    match (backend, ghd) {
+        (crate::repo_clud_config::GhBackend::Gh, _) => GhRoute::Gh,
+        (crate::repo_clud_config::GhBackend::Ghd, Some(path)) => GhRoute::Ghd(path),
+        (crate::repo_clud_config::GhBackend::Ghd, None) => GhRoute::GhdMissing,
+    }
+}
+
+/// `gh.backend` for the repo the call runs in (user settings, then the repo's).
+fn gh_route(facts: &Facts) -> GhRoute {
+    let backend = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::repo_clud_config::discover_effective_clud_config(&cwd))
+        .map(|config| config.gh.backend)
+        .unwrap_or_default();
+    let ghd = (backend == crate::repo_clud_config::GhBackend::Ghd)
+        .then(|| resolve_passthrough("ghd", facts))
+        .flatten();
+    route_for(backend, ghd)
 }
 
 pub enum Session {
@@ -137,6 +172,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
         ShimKind::Gh => target(registry::GH_TARGET_KEY).map(|target| {
             Session::Gh(GhSession {
                 read_broker: read_broker(&target, facts),
+                route: gh_route(facts),
                 target,
                 watcher: var(registry::CLUD_EXE_KEY)
                     .map(PathBuf::from)
@@ -223,6 +259,15 @@ pub fn resolve_passthrough(name: &str, facts: &Facts) -> Option<PathBuf> {
 fn handle(session: Session, args: &[OsString]) -> i32 {
     match session {
         Session::Python { target } => super::python_shim::run(&target, args),
+        // #2352: `gh.backend = "ghd"` is mandatory, so a missing ghd is a
+        // missing command, never a silent fall back to the real gh.
+        Session::Gh(gh) if gh.route == GhRoute::GhdMissing => {
+            eprintln!(
+                "gh: this repo sets gh.backend = \"ghd\", but ghd is not on PATH; \
+                 install ghd (https://github.com/forge-ci/ghd) or unset gh.backend"
+            );
+            127
+        }
         Session::Gh(gh) => super::gh_shim::run(&gh, args),
         Session::Git { target } => super::git_shim::run(&target, args),
         Session::Rm => super::rm_shim::run(args),
@@ -266,6 +311,19 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn gh_backend_ghd_routes_to_ghd_and_fails_closed_without_it() {
+        use crate::repo_clud_config::GhBackend;
+        let ghd = PathBuf::from("/opt/ghd");
+        assert_eq!(route_for(GhBackend::Gh, Some(ghd.clone())), GhRoute::Gh);
+        assert_eq!(
+            route_for(GhBackend::Ghd, Some(ghd.clone())),
+            GhRoute::Ghd(ghd)
+        );
+        // Mandatory: no silent fallback to the real gh.
+        assert_eq!(route_for(GhBackend::Ghd, None), GhRoute::GhdMissing);
+    }
 
     fn write_exe(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
