@@ -449,6 +449,27 @@ fn the_status_file_fallback_mirrors_and_clears_the_toast() {
     assert!(read_live_toast(&path, crate::toast::statusline::now_ms()).is_none());
 }
 
+#[test]
+fn claude_status_line_carries_the_cpu_toast_instead_of_a_grid_overlay() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state_path(dir.path(), 4243);
+    let writer = Arc::new(StatusStateWriter::new(path.clone()));
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::StatusFile(Arc::clone(&writer)));
+    show(&hub, "cpu 150 %", now);
+    let out = c.on_tick(now);
+    assert!(
+        out.is_empty(),
+        "no kitty image or cell bytes may cover the header: {out:?}"
+    );
+    assert!(c.input().cpu_rect().is_none());
+    let live = read_live_toast(&path, crate::toast::statusline::now_ms()).unwrap();
+    assert_eq!(live.text, "cpu 150 %");
+    hub.publish(ToastEvent::Close { key: "cpu".into() });
+    assert!(c.on_tick(now).is_empty());
+    assert!(read_live_toast(&path, crate::toast::statusline::now_ms()).is_none());
+}
+
 // ── dismiss, resize, off ──────────────────────────────────────────────────
 
 #[test]

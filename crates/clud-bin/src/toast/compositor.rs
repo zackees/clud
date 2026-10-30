@@ -174,6 +174,8 @@ pub struct Compositor {
     cpu_appeared_at: Option<Instant>,
     cpu_drawn: bool,
     cpu_transmitted: Option<(String, super::Severity, u16, u16, u8)>,
+    /// The CPU toast last mirrored into Claude's status line (#2367).
+    status_cpu: Option<(String, super::Severity, Instant)>,
 }
 
 impl Compositor {
@@ -202,6 +204,7 @@ impl Compositor {
             cpu_appeared_at: None,
             cpu_drawn: false,
             cpu_transmitted: None,
+            status_cpu: None,
         }
     }
 
@@ -321,10 +324,18 @@ impl Compositor {
 
     fn sync_hub(&mut self, now: Instant) {
         let snapshot = self.hub.snapshot_with_key(now, CPU_TOAST_KEY);
-        let cpu = snapshot
-            .keyed
-            .filter(|toast| self.cpu_cells(&toast.text).is_some());
-        let visible = if cpu.is_some() {
+        // With Claude's status line injected the CPU reading lives there: no
+        // grid overlay, so nothing covers the header and nothing needs a
+        // dismiss control (#2367).
+        let cpu = if matches!(self.fallback, Fallback::StatusFile(_)) {
+            self.mirror_cpu_to_status(snapshot.keyed.as_ref());
+            None
+        } else {
+            snapshot
+                .keyed
+                .filter(|toast| self.cpu_cells(&toast.text).is_some())
+        };
+        let visible = if cpu.is_some() || matches!(self.fallback, Fallback::StatusFile(_)) {
             snapshot.other_visible
         } else {
             snapshot.visible
@@ -349,6 +360,23 @@ impl Compositor {
         if changed || cpu_changed {
             self.pending = true;
         }
+    }
+
+    fn mirror_cpu_to_status(&mut self, toast: Option<&Toast>) {
+        let Fallback::StatusFile(writer) = &self.fallback else {
+            return;
+        };
+        let next = toast.map(|t| (t.text.clone(), t.severity, t.shown_at));
+        if next == self.status_cpu {
+            return;
+        }
+        match toast {
+            Some(t) => writer.publish(ToastEvent::Show(t.clone())),
+            None => writer.publish(ToastEvent::Close {
+                key: CPU_TOAST_KEY.into(),
+            }),
+        }
+        self.status_cpu = next;
     }
 
     fn sync_usage(&mut self) {
