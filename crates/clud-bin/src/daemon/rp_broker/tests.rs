@@ -570,3 +570,29 @@ fn superseded_lane_cleanup_keeps_the_newer_sidecar() {
         assert!(Path::new(&endpoint.path).exists());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn superseded_lane_cleanup_keeps_the_newer_bound_socket() {
+    use interprocess::local_socket::traits::{Listener as _, Stream as _};
+    use running_process::broker::server::local_socket_name;
+    let tmp = tempfile::tempdir().unwrap();
+    let older = lane_with_sidecar(tmp.path(), 1_000);
+    // Superseding daemon: newer sidecar, fresh socket bound at the path.
+    let newer = lane_with_sidecar(tmp.path(), 2_000);
+    let endpoint = endpoint_for_state_dir(tmp.path()).unwrap();
+    let _ = std::fs::remove_file(&endpoint.path);
+    let listener = interprocess::local_socket::ListenerOptions::new()
+        .name(local_socket_name(&endpoint.path).unwrap())
+        .create_sync()
+        .expect("bind newer socket");
+    older.cleanup();
+    assert!(Path::new(&endpoint.path).exists(), "newer socket removed");
+    let connect = thread::spawn({
+        let path = endpoint.path.clone();
+        move || interprocess::local_socket::Stream::connect(local_socket_name(&path).unwrap())
+    });
+    listener.accept().expect("accept");
+    connect.join().unwrap().expect("connect to newer socket");
+    drop(newer);
+}

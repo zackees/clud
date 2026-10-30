@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use interprocess::local_socket::traits::Listener as _;
-use interprocess::local_socket::ListenerOptions;
+use interprocess::local_socket::traits::{Listener as _, Stream as _};
+use interprocess::local_socket::{ListenerOptions, Stream};
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_sdk::{
     read_daemon_identity_file, remove_daemon_identity_file, write_daemon_identity_file,
@@ -68,9 +68,27 @@ impl FrameLane {
         if crate::platform::host::WINDOWS {
             // Named pipes vanish with their last handle; nothing on disk.
             let _ = &self.endpoint_path;
-        } else {
+        } else if !socket_has_listener(&self.endpoint_path) {
+            // A listener here is a superseding daemon that bound after we
+            // read the sidecar; its socket is not ours to unlink.
             let _ = std::fs::remove_file(&self.endpoint_path);
         }
+    }
+}
+
+/// True when something accepts connections at `endpoint_path`.
+fn socket_has_listener(endpoint_path: &str) -> bool {
+    local_socket_name(endpoint_path)
+        .and_then(Stream::connect)
+        .is_ok()
+}
+
+/// Remove the sidecar only while it still carries `owner`'s identity.
+fn remove_sidecar_if_ours(identity_path: &Path, owner: (u32, u64)) {
+    let ours = read_daemon_identity_file(identity_path)
+        .is_some_and(|d| (d.pid, d.started_at_unix_ms) == owner);
+    if ours {
+        remove_daemon_identity_file(identity_path);
     }
 }
 
@@ -186,6 +204,16 @@ pub(in crate::daemon) fn publish_cache_manifest(state_dir: &Path) -> io::Result<
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+fn bind_listener(endpoint_path: &str) -> io::Result<interprocess::local_socket::Listener> {
+    if !crate::platform::host::WINDOWS {
+        // A previous daemon that died uncleanly leaves the socket file
+        // behind; binding fails with AddrInUse unless it is removed.
+        let _ = std::fs::remove_file(endpoint_path);
+    }
+    let name = local_socket_name(endpoint_path)?;
+    ListenerOptions::new().name(name).create_sync()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_frame_lane(
     state_dir: &Path,
@@ -200,19 +228,22 @@ pub(super) fn start_frame_lane(
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
 
-    if !crate::platform::host::WINDOWS {
-        // A previous daemon that died uncleanly leaves the socket file
-        // behind; binding fails with AddrInUse unless it is removed.
-        let _ = std::fs::remove_file(&endpoint_path);
-    }
-
-    let name = local_socket_name(&endpoint_path)?;
-    let listener = ListenerOptions::new().name(name).create_sync()?;
-
+    // The sidecar is the ownership claim: write it before touching the
+    // socket so a superseded daemon's cleanup never sees its own identity
+    // while our socket is bound.
     let daemon = DaemonProcess::current_process(endpoint, None)
         .map_err(|err| io::Error::other(err.to_string()))?;
     let identity_path = daemon_identity_path(state_dir);
     write_daemon_identity_file(&identity_path, &daemon)?;
+    let owner = (daemon.pid, daemon.started_at_unix_ms);
+
+    let listener = match bind_listener(&endpoint_path) {
+        Ok(listener) => listener,
+        Err(err) => {
+            remove_sidecar_if_ours(&identity_path, owner);
+            return Err(err);
+        }
+    };
 
     let lane = FrameLane::new(identity_path, endpoint_path, &daemon);
 
