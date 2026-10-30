@@ -845,7 +845,10 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         // carry no other rewrite and not be a gate check.
         let may_substitute = deletion_rewrite.is_none()
             && evaluation.rewritten_command.is_none()
-            && payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE);
+            && payload.agent_type.as_deref() != Some(block_bad_cmd_grind_caps::GATE)
+            // Codex may ignore `updatedInput` and run the original `cd`
+            // (fail open), so it keeps the deny until that is verified.
+            && !is_codex_session();
         match block_cd_denial(&payload, &config, may_substitute) {
             Some(CdVerdict::Deny(reason)) => evaluation.reason = Some(reason),
             Some(CdVerdict::Substitute { command, notice }) => {
@@ -906,7 +909,13 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     }
 
     if let Some((command, notice)) = cd_substitution {
-        if let Some(output) = cd_substitution_output(&payload, command, &notice, event) {
+        if let Some(output) = cd_substitution_output(
+            &payload,
+            command,
+            &notice,
+            event,
+            crate::loop_plan_mode::permission_mode(raw_payload),
+        ) {
             println!("{output}");
             return 0;
         }
@@ -1346,6 +1355,17 @@ fn tier_b_fire_targets(
     targets
 }
 
+/// Whether this hook runs for a Codex session: Codex has no hook-argument
+/// surface, so it is detected by the absence of Claude Code's project-dir env
+/// var.
+fn is_codex_session() -> bool {
+    codex_without_project_dir(std::env::var_os("CLAUDE_PROJECT_DIR").as_deref())
+}
+
+pub(crate) fn codex_without_project_dir(project_dir: Option<&std::ffi::OsStr>) -> bool {
+    project_dir.is_none()
+}
+
 /// Whether a sub-repo's own hooks must be skipped in this session: the codex
 /// parity gate (zackees/clud#967 Phase 4).
 ///
@@ -1356,7 +1376,7 @@ fn tier_b_fire_targets(
 /// extern or child repo's own hooks in a codex session. `None` for home — no
 /// home, no codex config to be gated by.
 fn tier_b_gated_in_codex(repo_root: &Path, home: Option<&Path>) -> bool {
-    if std::env::var_os("CLAUDE_PROJECT_DIR").is_some() {
+    if !is_codex_session() {
         // A Claude session: the harness has already run whatever it trusts.
         return false;
     }
@@ -1590,21 +1610,27 @@ enum CdVerdict {
     },
 }
 
-/// The `ask` response carrying the subshell-wrapped command and the notice.
+/// The response carrying the subshell-wrapped command and the notice.
 ///
-/// `ask`, not `allow`: the rewrite vets only the `cd`, so the rest of the
-/// command keeps the harness's normal permission decision (#1087). Claude
-/// Code and Codex share the `updatedInput` shape the other rewrites emit.
+/// Under `bypassPermissions` it is `allow`: a hook `ask` raises the permission
+/// dialog even there and would stall headless agents. Every other known mode
+/// gets `ask`, since the rewrite vets only the `cd` and the rest of the command
+/// keeps the harness's normal decision (#1087). A missing `permission_mode`
+/// returns `None` so the caller keeps the deny rather than guess.
 pub(crate) fn cd_substitution_output(
     payload: &HookPayloadView,
     command: String,
     notice: &str,
     event: &str,
+    permission_mode: Option<&str>,
 ) -> Option<Value> {
     let mut updated = payload.tool_input.clone()?;
     *command_text_mut(updated.as_object_mut()?, &payload.tool_name)? = Value::String(command);
-    let output =
-        block_bad_cmd_hook_notice::merge(ask_with_updated_input_json(updated), event, notice);
+    let rewrite = match permission_mode? {
+        "bypassPermissions" => allow_with_updated_input_json(updated),
+        _ => ask_with_updated_input_json(updated),
+    };
+    let output = block_bad_cmd_hook_notice::merge(rewrite, event, notice);
     Some(with_hook_notice(output, event, payload))
 }
 

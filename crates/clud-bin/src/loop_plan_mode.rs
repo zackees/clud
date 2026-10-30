@@ -154,11 +154,18 @@ fn observed_event(event: &str, payload: &Value) -> Option<Event> {
     }
 }
 
+/// The harness's permission mode (`default`, `plan`, `bypassPermissions`, ...)
+/// as the hook payload names it; `None` when absent.
+#[must_use]
+pub(crate) fn permission_mode(payload: &Value) -> Option<&str> {
+    payload.get("permission_mode").and_then(Value::as_str)
+}
+
 fn recovery_context(event: &str, payload: &Value, state_dir: &Path, session: &str) {
     // A hook cannot change Claude's permission mode. Give a loop already
     // started in manual plan mode an actionable recovery, without blocking it.
     if event == "UserPromptSubmit"
-        && payload["permission_mode"] == "plan"
+        && permission_mode(payload) == Some("plan")
         && refusal_in(state_dir, Some(session), false).is_some()
     {
         println!(

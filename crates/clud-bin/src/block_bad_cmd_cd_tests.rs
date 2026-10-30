@@ -903,28 +903,69 @@ fn unsafe_forms_keep_the_denial() {
     );
 }
 
-#[test]
-fn the_substitution_response_is_an_ask_with_updated_input_and_a_notice() {
+fn substitution_response(
+    input: serde_json::Value,
+    mode: Option<&str>,
+) -> Option<serde_json::Value> {
     let raw = serde_json::json!({
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "cwd": "/repo",
-        "tool_input": {"command": "cd x && ls", "description": "d"},
+        "tool_input": input,
     })
     .to_string();
     let payload =
         crate::block_bad_cmd::parse_payload(&raw, Path::new("/repo")).expect("payload parses");
-    let rewritten = sub(&payload.command).unwrap();
+    let rewritten = sub(&payload.command)?;
     let notice = substitution_notice(&payload.command, &rewritten);
-    let out =
-        crate::block_bad_cmd::cd_substitution_output(&payload, rewritten, &notice, "PreToolUse")
-            .expect("object-shaped input rewrites");
+    crate::block_bad_cmd::cd_substitution_output(&payload, rewritten, &notice, "PreToolUse", mode)
+}
+
+fn bash_input() -> serde_json::Value {
+    serde_json::json!({"command": "cd x && ls", "description": "d"})
+}
+
+#[test]
+fn bypass_permissions_substitutes_with_allow() {
+    let out = substitution_response(bash_input(), Some("bypassPermissions")).unwrap();
     let specific = &out["hookSpecificOutput"];
-    assert_eq!(specific["permissionDecision"], "ask");
+    assert_eq!(specific["permissionDecision"], "allow");
     assert_eq!(specific["updatedInput"]["command"], "(cd x && ls)");
     assert_eq!(specific["updatedInput"]["description"], "d");
     let context = specific["additionalContext"].as_str().unwrap();
     assert!(context.starts_with("[clud] ran `(cd x && ls)` instead of `cd x && ls`"));
+}
+
+#[test]
+fn other_permission_modes_substitute_with_ask() {
+    for mode in ["default", "acceptEdits", "plan"] {
+        let out = substitution_response(bash_input(), Some(mode)).unwrap();
+        let specific = &out["hookSpecificOutput"];
+        assert_eq!(specific["permissionDecision"], "ask", "{mode}");
+        assert_eq!(
+            specific["updatedInput"]["command"], "(cd x && ls)",
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_permission_mode_keeps_the_deny() {
+    assert_eq!(substitution_response(bash_input(), None), None);
+}
+
+#[test]
+fn a_non_object_tool_input_keeps_the_deny() {
+    let out = substitution_response(serde_json::json!("cd x && ls"), Some("bypassPermissions"));
+    assert_eq!(out, None);
+}
+
+#[test]
+fn a_codex_session_is_one_without_a_claude_project_dir() {
+    assert!(crate::block_bad_cmd::codex_without_project_dir(None));
+    assert!(!crate::block_bad_cmd::codex_without_project_dir(Some(
+        "/repo".as_ref()
+    )));
 }
 
 #[test]

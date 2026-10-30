@@ -729,10 +729,15 @@ sees the full text once (`block_bad_cmd_cd.rs` `condense_at`).
 refusal-round-trip work). When `block_cd` would deny a POSIX command whose very
 first command is a top-level `cd`, the hook returns `updatedInput` with the whole
 command wrapped as `(cd DIR && CMD)` plus an `additionalContext` notice
-(`[clud] ran (...) instead of ...`), so the call is not lost. The decision is
-`ask`, not `allow`: the rewrite vets only the `cd`, so the rest of the command
-keeps the harness's normal permission decision (as in #1087). Claude Code and
-Codex share the one `updatedInput` shape the other rewrites use. It declines
+(`[clud] ran (...) instead of ...`), so the call is not lost. The decision
+follows the payload's `permission_mode`: `allow` under `bypassPermissions`
+(a hook `ask` would raise the permission dialog even there and stall headless
+agents), `ask` in every other mode (the rewrite vets only the `cd`, so the rest
+of the command keeps the harness's normal decision, as in #1087), and the old
+deny when the mode is missing. Codex keeps the deny until its handling of
+`updatedInput` for this rewrite is verified (it may ignore the rewrite and run
+the original `cd`); a Codex session is detected by the absence of
+`CLAUDE_PROJECT_DIR`. It declines
 and keeps the deny (with the #2314 condensing) when the wrap could change
 meaning: a parse error, a top-level `exit`/`exec`/`export`/`set`/`source`/`.`/
 `alias`/`unset`/`pushd`/`popd` (and similar session builtins), a top-level `&`,
