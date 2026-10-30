@@ -151,3 +151,123 @@ def test_a_request_without_a_model_is_refused() -> None:
     completed = _translate({"messages": [{"role": "user", "content": "hi"}]})
     assert completed.returncode == 2
     assert "names no model" in completed.stderr
+
+
+# --- the response direction: generateContent -> Anthropic Messages ---------
+
+_GEMINI_RESPONSE = {
+    "responseId": "resp_7",
+    "modelVersion": "gemini-3-pro",
+    "candidates": [
+        {
+            "content": {
+                "parts": [
+                    {"text": "thinking it over", "thought": True},
+                    {"text": "here you go"},
+                    {"functionCall": {"name": "Read.File", "args": {"path": "a.rs"}}},
+                ]
+            },
+            "finishReason": "STOP",
+        }
+    ],
+    "usageMetadata": {
+        "promptTokenCount": 100,
+        "cachedContentTokenCount": 40,
+        "candidatesTokenCount": 12,
+    },
+}
+
+
+def _translate_response(payload: str, *extra: str) -> process.CompletedProcess[object]:
+    return process.run(
+        [str(_clud_binary()), "__claude-gemini-translate", "--response", *extra],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_a_generate_content_response_becomes_a_messages_response() -> None:
+    completed = _translate_response(json.dumps(_GEMINI_RESPONSE))
+    assert completed.returncode == 0, completed.stderr
+    body = json.loads(completed.stdout)
+    assert body["id"] == "resp_7"
+    assert body["type"] == "message"
+    assert body["model"] == "gemini-3-pro"
+    assert body["content"][0] == {"type": "thinking", "thinking": "thinking it over"}
+    assert body["content"][1] == {"type": "text", "text": "here you go"}
+    tool = body["content"][2]
+    assert tool["type"] == "tool_use"
+    assert tool["name"] == "Read_File"
+    assert tool["input"] == {"path": "a.rs"}
+    assert body["stop_reason"] == "tool_use"
+    assert body["usage"] == {
+        "input_tokens": 60,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 40,
+    }
+
+
+def test_a_malformed_function_call_is_refused_by_name() -> None:
+    completed = _translate_response(
+        json.dumps({"candidates": [{"finishReason": "MALFORMED_FUNCTION_CALL"}]})
+    )
+    assert completed.returncode == 2
+    assert "MALFORMED_FUNCTION_CALL" in completed.stderr
+
+
+def test_a_streamed_response_becomes_anthropic_sse_events() -> None:
+    stream = "\n\n".join(
+        f"data: {json.dumps(chunk)}"
+        for chunk in (
+            {
+                "responseId": "resp_8",
+                "modelVersion": "gemini-3-pro",
+                "candidates": [{"content": {"parts": [{"text": "hi"}]}}],
+            },
+            {"candidates": [{"content": {"parts": [{"text": " there"}]}}]},
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"functionCall": {"name": "Bash", "args": {"command": "ls"}}}]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4},
+            },
+        )
+    )
+    completed = _translate_response(f"{stream}\n\ndata: [DONE]\n\n", "--stream")
+    assert completed.returncode == 0, completed.stderr
+    events = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+    kinds = [event["type"] for event in events]
+    assert kinds[0] == "message_start"
+    assert events[0]["message"]["id"] == "resp_8"
+    assert kinds[-1] == "message_stop"
+    assert kinds.count("message_delta") == 1
+    text = "".join(
+        event["delta"]["text"]
+        for event in events
+        if event.get("delta", {}).get("type") == "text_delta"
+    )
+    assert text == "hi there"
+    delta = next(event for event in events if event["type"] == "message_delta")
+    assert delta["delta"]["stop_reason"] == "tool_use"
+    assert delta["usage"]["input_tokens"] == 10
+
+
+def test_the_http_stream_frames_name_their_event() -> None:
+    stream = (
+        'data: {"responseId":"resp_9","candidates":[{"content":{"parts":[{"text":"ok"}]},'
+        '"finishReason":"STOP"}]}\n\ndata: [DONE]\n\n'
+    )
+    completed = _translate_response(stream, "--stream", "--http")
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith("event: message_start\ndata: {")
+    assert "event: content_block_delta\ndata: " in completed.stdout
+    assert completed.stdout.rstrip().endswith(
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}"
+    )

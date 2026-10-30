@@ -995,7 +995,11 @@ pub fn translate_generate_content_response(
     let mut saw_tool_call = false;
 
     for part in response_parts(&chunk) {
-        if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+        if part
+            .get("thought")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             flush_text(&mut blocks, &mut text);
             thinking.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default());
             continue;
@@ -1163,8 +1167,15 @@ impl GeminiStreamTranslator {
             self.usage = usage;
         }
         for part in response_parts(chunk) {
-            if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
-                self.push_thinking(part.get("text").and_then(Value::as_str).unwrap_or_default(), &mut output);
+            if part
+                .get("thought")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                self.push_thinking(
+                    part.get("text").and_then(Value::as_str).unwrap_or_default(),
+                    &mut output,
+                );
                 continue;
             }
             if let Some(call) = part.get("functionCall").filter(|call| call.is_object()) {
@@ -1697,25 +1708,22 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, GeminiEgressError::MalformedFunctionCall);
-        let rendered = render_messages_body("m", br#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#);
+        let rendered = render_messages_body(
+            "m",
+            br#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#,
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(&rendered).unwrap()["error"]["type"],
             "api_error"
         );
-        let not_json =
-            translate_generate_content_response(b"nope", None).unwrap_err();
+        let not_json = translate_generate_content_response(b"nope", None).unwrap_err();
         assert_eq!(not_json, GeminiEgressError::NotJson);
     }
 
     fn stream_kinds(events: &[Value]) -> Vec<String> {
         events
             .iter()
-            .map(|event| {
-                event["type"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string()
-            })
+            .map(|event| event["type"].as_str().unwrap_or_default().to_string())
             .collect()
     }
 
@@ -1736,7 +1744,10 @@ mod tests {
         assert_eq!(events[0]["message"]["model"], "gemini-3-pro");
         assert_eq!(kinds.last().map(String::as_str), Some("message_stop"));
         // The trailing [DONE] must not seal the message a second time.
-        assert_eq!(kinds.iter().filter(|kind| *kind == "message_delta").count(), 1);
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "message_delta").count(),
+            1
+        );
         let text: String = events
             .iter()
             .filter(|event| event["delta"]["type"] == "text_delta")
@@ -1762,21 +1773,32 @@ mod tests {
         assert_eq!(delta["usage"]["input_tokens"], 10);
         assert_eq!(delta["usage"]["output_tokens"], 4);
         // Every opened block is closed exactly once.
-        let starts = kinds.iter().filter(|kind| *kind == "content_block_start").count();
-        let stops = kinds.iter().filter(|kind| *kind == "content_block_stop").count();
+        let starts = kinds
+            .iter()
+            .filter(|kind| *kind == "content_block_start")
+            .count();
+        let stops = kinds
+            .iter()
+            .filter(|kind| *kind == "content_block_stop")
+            .count();
         assert_eq!(starts, stops);
-        assert_eq!(kinds.iter().filter(|kind| *kind == "content_block_start").count(), 2);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "content_block_start")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn a_stream_without_done_is_sealed_at_the_end_of_the_body() {
         let mut translator = GeminiStreamTranslator::new("m");
-        let events = translator.push_body(
-            br#"data: {"candidates":[{"content":{"parts":[{"text":"x"}]}}]}"#,
-        );
+        let events =
+            translator.push_body(br#"data: {"candidates":[{"content":{"parts":[{"text":"x"}]}}]}"#);
         let kinds = stream_kinds(&events);
         assert_eq!(kinds.last().map(String::as_str), Some("message_stop"));
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 6);
         // A second finish (a late [DONE]) is a no-op.
         assert!(translator.finish().is_empty());
     }
@@ -1795,8 +1817,11 @@ mod tests {
 
     #[test]
     fn rendered_sse_frames_name_their_event() {
-        let rendered = String::from_utf8(render_messages_stream("gemini-3-pro", STREAM_BODY.as_bytes()))
-            .expect("utf-8");
+        let rendered = String::from_utf8(render_messages_stream(
+            "gemini-3-pro",
+            STREAM_BODY.as_bytes(),
+        ))
+        .expect("utf-8");
         assert!(rendered.starts_with("event: message_start\ndata: {"));
         assert!(rendered.contains("event: content_block_delta\ndata: {\"delta\""));
         assert!(rendered.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
