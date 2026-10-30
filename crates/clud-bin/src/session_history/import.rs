@@ -19,11 +19,23 @@ pub fn claude_config_dir(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".claude"))
 }
 
-/// Claude Code's project-directory name for a cwd: every character that is
-/// not ASCII alphanumeric becomes `-` (`/work/my.proj` -> `-work-my-proj`).
+/// Claude Code's project-directory name for a cwd: every UTF-16 code unit
+/// that is not ASCII alphanumeric becomes `-` (`/work/my.proj` ->
+/// `-work-my-proj`). Claude is JavaScript (`replace(/[^a-zA-Z0-9]/g, '-')`),
+/// so a character outside the BMP is a surrogate pair and yields two dashes
+/// (#2400). Long paths may also be truncated with a hash suffix by newer
+/// Claude versions; that is handled by the gc liveness matcher, not here.
 pub fn project_slug(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .flat_map(|c| {
+            let dashes = if c.is_ascii_alphanumeric() {
+                0
+            } else {
+                c.len_utf16()
+            };
+            let kept = (dashes == 0).then_some(c);
+            kept.into_iter().chain(std::iter::repeat_n('-', dashes))
+        })
         .collect()
 }
 
@@ -135,6 +147,9 @@ mod tests {
     fn slug_matches_claude_codes_rule() {
         assert_eq!(project_slug("/work/my.proj"), "-work-my-proj");
         assert_eq!(project_slug(r"C:\Users\me\repo"), "C--Users-me-repo");
+        // JS counts UTF-16 units: a non-BMP char is two dashes (#2400).
+        assert_eq!(project_slug("/a/\u{1F600}b"), "-a---b");
+        assert_eq!(project_slug("/a/\u{e9}b"), "-a--b");
     }
 
     #[test]

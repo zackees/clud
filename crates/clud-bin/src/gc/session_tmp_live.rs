@@ -85,9 +85,43 @@ impl LiveSignals {
         // `claude-<uid>/<project>` after the encoded cwd).
         rel.components().any(|c| {
             let name = c.as_os_str().to_string_lossy();
-            ids.contains(name.as_ref()) || self.project_slugs.contains(name.as_ref())
+            ids.contains(name.as_ref())
+                || self
+                    .project_slugs
+                    .iter()
+                    .any(|live| slug_matches(name.as_ref(), live))
         })
     }
+}
+
+/// Prefix length compared once both names are long enough to be suspected
+/// truncations (#2400).
+const LONG_SLUG: usize = 100;
+
+/// Does the unit component `name` plausibly name the project whose encoded
+/// cwd is `live`? Exact equality, plus two deliberately generous long-path
+/// rules: newer Claude Code is believed (unverified) to truncate long encoded
+/// names and append `-<hash>`. When both names are at least [`LONG_SLUG`]
+/// long and share their first [`LONG_SLUG`] characters, or `name` minus a
+/// trailing `-<hex>` is a prefix of `live`, we treat them as the same
+/// project. A false positive only spares scratch for a sibling of a live deep
+/// path; a false negative evicts a live session's files, so this errs toward
+/// sparing.
+fn slug_matches(name: &str, live: &str) -> bool {
+    if name == live {
+        return true;
+    }
+    if name.len() >= LONG_SLUG
+        && live.len() >= LONG_SLUG
+        && name.as_bytes()[..LONG_SLUG] == live.as_bytes()[..LONG_SLUG]
+    {
+        return true;
+    }
+    let base = match name.rsplit_once('-') {
+        Some((base, hex)) if !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()) => base,
+        _ => name,
+    };
+    base.len() >= LONG_SLUG && live.starts_with(base)
 }
 
 fn env_value<'a>(environ: &'a [std::ffi::OsString], key: &str) -> Option<&'a str> {

@@ -110,3 +110,51 @@ fn denied_reads_make_the_scan_unconsulted() {
     assert!(paths_from_facts(&facts(Some("/a"), &[]), &[]).is_none());
     assert!(paths_from_facts(&facts(None, &["X=1"]), &[]).is_none());
 }
+
+fn live_in(cwd: &str) -> LiveSignals {
+    LiveSignals::new(Some(vec![PathBuf::from(cwd)]), Some(HashSet::new()))
+}
+
+#[test]
+fn non_bmp_cwd_matches_js_two_dash_encoding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // U+1F600 is a surrogate pair in JS: two dashes, not one.
+    let unit = root.join("claude-1000").join("-home-u---proj").join("s");
+    fs::create_dir_all(&unit).unwrap();
+    assert!(live_in("/home/u/\u{1F600}proj").is_live(root, &unit));
+    let one_dash = root.join("claude-1000").join("-home-u--proj").join("s");
+    fs::create_dir_all(&one_dash).unwrap();
+    assert!(!live_in("/home/u/\u{1F600}proj").is_live(root, &one_dash));
+}
+
+#[test]
+fn truncated_long_project_dir_is_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let cwd = format!("/home/u/{}", "deep/".repeat(60));
+    let full = crate::session_history::import::project_slug(&cwd);
+    assert!(full.len() > 200);
+    // Truncated to 200 chars plus a hash suffix.
+    let name = format!("{}-1a2b3c", &full[..200]);
+    let unit = root.join("claude-1000").join(&name).join("s");
+    fs::create_dir_all(&unit).unwrap();
+    assert!(live_in(&cwd).is_live(root, &unit));
+    // Same prefix beyond 100 chars but a different hash suffix still spares.
+    let sibling = root
+        .join("claude-1000")
+        .join(format!("{}-zz", &full[..150]));
+    fs::create_dir_all(&sibling).unwrap();
+    assert!(live_in(&cwd).is_live(root, &sibling));
+    // A short, unrelated name does not.
+    let short = root.join("claude-1000").join("-home-u").join("s");
+    fs::create_dir_all(&short).unwrap();
+    assert!(!live_in("/elsewhere").is_live(root, &short));
+}
+
+#[test]
+fn slug_matches_short_names_only_when_equal() {
+    assert!(slug_matches("-a-b", "-a-b"));
+    assert!(!slug_matches("-a", "-a-b"));
+    assert!(!slug_matches("-a-b-cafe", "-a-b"));
+}
