@@ -909,7 +909,7 @@ def test_do_dotted_free_form_goal_is_not_misclassified_as_a_url() -> None:
     assert result.returncode == 0, result.stderr
     prompt = json.loads(result.stdout)["command"][-1]
     assert prompt.startswith("/goal ")
-    assert "The goal: README.md" in prompt
+    assert "README.md" in prompt
     assert "Read the issue and implement it" not in prompt
 
 
@@ -1917,12 +1917,15 @@ def test_dry_run_rebase() -> None:
 def test_dry_run_do_seeds_the_rendered_goal_for_a_single_issue() -> None:
     result = _run("--dry-run", "--codex", "do", "https://github.com/o/r/issues/1")
     assert result.returncode == 0, result.stderr
-    seed = json.loads(result.stdout)["command"][-1]
+    command = json.loads(result.stdout)["command"]
+    seed = command[-1]
     assert seed.startswith("/goal ")
-    assert "rendered for this checkout" in seed
     assert "https://github.com/o/r/issues/1" in seed
-    assert "Read the issue and implement it" in seed
     assert not seed.startswith("/goal /do ")
+    # The full contract rides in developer_instructions, not the goal (#2372).
+    dev = next(a for a in command if a.startswith("developer_instructions="))
+    assert "rendered for this checkout" in dev
+    assert "Read the issue and implement it" in dev
 
 
 def _run_do_with_kind(
