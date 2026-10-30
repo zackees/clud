@@ -12,6 +12,9 @@ The [connector log inventory](connector_logs/README.md) is a read-only,
 content-safe diagnostic that identifies which Claude transcripts and clud
 bridge logs can be attributed to Codex, DeepSeek, or Kimi.
 
+The [context spam scan](context_spam/README.md) measures Bash output volume
+and CI-polling redundancy in local transcripts (#2312, #2315).
+
 The [Kimi real-key smoke](kimi_smoke.md) is the opt-in, manual check that a
 real Moonshot key works direct and through `--unified` without leaking.
 
