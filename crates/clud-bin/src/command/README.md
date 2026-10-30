@@ -52,7 +52,8 @@ deny. See [loop-scoped plan mode](../../../../docs/architecture/hook-dispatch.md
 - `push_prompt(cmd, backend, prompt)` — `prompts.rs`
 - `build_up_prompt(message, publish) -> String` — `prompts.rs`
 - `build_fix_prompt(url) -> String` — `prompts.rs`
-- `build_do_prompt(rendered) -> String` — `prompts.rs`
+- `build_do_prompt(rendered) -> String` — `prompts.rs` (Codex seed: the whole contract as `/goal`)
+- `build_claude_do_goal(target, prepared) -> String` — `prompts.rs` (Claude seed: a short `/goal` under the 4000-char cap; the contract rides in `--append-system-prompt`, #2372)
 - `struct LaunchPlan` — executable argv plus provider/harness metadata, launch mode, repeat state, task summary, markers, and stream-json state
 - `struct LoopMarkers { done_path, blocked_path }`
 - `struct RepeatSchedule { interval_secs }`

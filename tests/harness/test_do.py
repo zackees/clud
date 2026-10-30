@@ -221,7 +221,7 @@ def test_h13_goal_seed_does_not_bypass_explicit_only_do_policy(harness: Harness)
     assert "rendered for this checkout by `clud do-prompt`" not in after_skill
 
 
-def _cli_seed(harness: Harness, target: str) -> str:
+def _cli_launch(harness: Harness, target: str) -> list[str]:
     launch = process.run(
         [str(harness.clud), "--dry-run", "--claude", "do", target],
         cwd=str(harness.repo),
@@ -231,7 +231,13 @@ def _cli_seed(harness: Harness, target: str) -> str:
         timeout=60,
     )
     assert launch.returncode == 0, launch.stderr
-    return json.loads(launch.stdout)["command"][-1]
+    return json.loads(launch.stdout)["command"]
+
+
+def _cli_system(command: list[str]) -> list[str]:
+    """The plan's appended system prompt, which carries the /do procedure (#2372)."""
+    at = command.index("--append-system-prompt")
+    return command[at : at + 2]
 
 
 @pytest.mark.parametrize(
@@ -245,8 +251,11 @@ def _cli_seed(harness: Harness, target: str) -> str:
 def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, target: str) -> None:
     _branch(harness, "feat/x", commit=True)
     _gh(harness, prs=[{"number": 812, "head": "feat/x", "state": "MERGED"}])
-    seed = _cli_seed(harness, target)
+    command = _cli_launch(harness, target)
+    seed = command[-1]
     assert seed.startswith("/goal ")
+    # Claude Code rejects a /goal condition over 4000 chars (#2372).
+    assert len(seed) - len("/goal ") < 4000
     direct = process.run(
         [str(harness.clud), "do-prompt", target],
         cwd=str(harness.repo),
@@ -258,9 +267,10 @@ def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, targe
     assert direct.returncode == 0, direct.stderr
     # Feed the actual CLI seed through the real harness, with no recovery
     # Skill call. The first model request must already have the live verdict.
-    result = harness.run(seed, ACK)
+    result = harness.run(seed, ACK, extra_args=_cli_system(command))
     assert result.returncode == 0, result.stdout[-2000:]
-    text = result.prompt_text("main")
+    request = result.first_request("main")
+    text = json.dumps([request.get("system"), request.get("messages")])
     _rendered(text)
     assert "Verdict: `stale_merged`" in text
     assert "A session-scoped Stop hook is now active" in text
@@ -277,7 +287,8 @@ def test_h14_explicit_cli_goal_delivers_live_do_contract(harness: Harness, targe
 def test_h15_explicit_cli_meta_handoff_reads_the_router(harness: Harness) -> None:
     _gh(harness)
     router = harness.config / "skills" / "grind" / "SKILL.md"
-    seed = _cli_seed(harness, META)
+    command = _cli_launch(harness, META)
+    seed = command[-1]
     assert seed.startswith("/goal ")
     script = {
         "default_text": "ACK",
@@ -291,9 +302,10 @@ def test_h15_explicit_cli_meta_handoff_reads_the_router(harness: Harness) -> Non
             }
         ],
     }
-    result = harness.run(seed, script)
+    result = harness.run(seed, script, extra_args=_cli_system(command))
     assert result.returncode == 0, result.stdout[-2000:]
-    text = result.prompt_text("main")
+    request = result.first_request("main")
+    text = json.dumps([request.get("system"), request.get("messages")])
     _rendered(text)
     assert "Verdict: `default`" in text
     assert META in text
