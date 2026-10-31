@@ -58,9 +58,7 @@ fn classify(words: &[String]) -> Option<Kind> {
         ["pr", "edit" | "merge" | "close" | "ready" | "review", ..]
         | ["release", "create", ..]
         | ["workflow", "run", ..] => Some(Kind::Mutation),
-        ["issue", "create" | "edit" | "close" | "reopen" | "comment", ..] => {
-            Some(Kind::IssueWrite)
-        }
+        ["issue", "create" | "edit" | "close" | "reopen" | "comment", ..] => Some(Kind::IssueWrite),
         ["api", ..] if gh_api_writes(words) => Some(Kind::ApiWrite),
         _ => None,
     }
