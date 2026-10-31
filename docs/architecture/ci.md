@@ -354,15 +354,19 @@ agent's context, and hand-polling repeats near-identical output.
 - To **wait** on CI, use `clud tool run github/pr_merge_watch.py -- <PR>`
   (background or bounded, never a hand-written loop; DD-168). Its output is
   already compact.
-- For a **one-off** read, ask only for what is unresolved:
+- For a **one-off** read, print one summary line of counts, then only what is
+  unresolved:
 
   ```bash
-  gh pr checks N --json name,state --jq '[.[]|select(.state!="SUCCESS" and .state!="SKIPPED")]'
-  gh run view ID --json status,conclusion,jobs --jq '[.jobs[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]'
+  gh pr checks N --json name,state --jq '(group_by(.state)|map("\(.[0].state // "pending")=\(length)")|join(" ")), [.[]|select(.state!="SUCCESS" and .state!="SKIPPED")|.name]'
+  gh run view ID --json jobs --jq '(.jobs|group_by(.conclusion)|map("\(.[0].conclusion|if .=="" or .==null then "pending" else . end)=\(length)")|join(" ")), [.jobs[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]'
   ```
 
-  An empty list means nothing is unresolved. Drop the filter only when you
-  need the full job list.
+  The first line is the per-state count (for example
+  `SUCCESS=14 SKIPPED=6 FAILURE=1`), so you can still see which jobs ran
+  without listing the passing ones. The second line lists only the
+  unresolved job names. An empty list means nothing is unresolved. Drop the
+  filter only when you need the full job list.
 - Do not repeat an identical read; a status that has not changed is not new
   information.
 
