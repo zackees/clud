@@ -164,6 +164,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push("CLUD_SESSION_ID");
     keys.push(crate::shim_session::RM_SHIM_DIR_KEY);
     keys.push(crate::shim_session::GH_SHIM_TARGET_KEY);
+    keys.push(crate::shim_registry::GHD_REAL_GH_KEY);
     keys.push(crate::shim_session::GH_SHIM_ACTIVE_KEY);
     keys.push(crate::shim_session::GH_SHIM_FAIL_FAST_KEY);
     keys.push(crate::shim_session::GH_READ_BROKER_KEY);

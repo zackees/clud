@@ -64,6 +64,16 @@ pub fn prepend_to_path(env: &mut Vec<(String, String)>, dir: &Path) -> bool {
 /// Set `key=value` in `env`, replacing any existing entry with the
 /// same key (case-insensitive match — Windows env vars are
 /// case-insensitive and clud aims to behave consistently).
+/// A direct `ghd gh` in the session resolves `gh` on PATH to the alias, which
+/// routes back to ghd: a relay loop. Name the real gh unless the user already
+/// did.
+fn set_ghd_real_gh(env: &mut Vec<(String, String)>, target: &Path) {
+    let key = shim_registry::GHD_REAL_GH_KEY;
+    if !env.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)) {
+        set_env(env, key, &target.to_string_lossy());
+    }
+}
+
 pub fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
     for (k, v) in env.iter_mut() {
         if k.eq_ignore_ascii_case(key) {
@@ -137,6 +147,8 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
                 let target = target.canonicalize().unwrap_or(target);
                 set_env(env, GH_SHIM_TARGET_KEY, &target.to_string_lossy());
                 set_env(env, GH_SHIM_ACTIVE_KEY, "1");
+                set_ghd_real_gh(env, &target);
+                set_env(env, shim_registry::GH_BACKEND_KEY, launch_gh_backend());
             } else {
                 set_env(env, GH_SHIM_ACTIVE_KEY, "0");
             }
@@ -153,6 +165,23 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
         Err(error) => {
             eprintln!("[clud rm shim] installation failed; shell identity guard will deny: {error}")
         }
+    }
+}
+
+/// #2368: `gh.backend` for the launch directory, as `CLUD_GH_BACKEND`.
+fn launch_gh_backend() -> &'static str {
+    let backend = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::repo_clud_config::discover_effective_clud_config(&cwd))
+        .map(|config| config.gh.backend)
+        .unwrap_or_default();
+    gh_backend_value(backend)
+}
+
+fn gh_backend_value(backend: crate::repo_clud_config::GhBackend) -> &'static str {
+    match backend {
+        crate::repo_clud_config::GhBackend::Gh => "gh",
+        crate::repo_clud_config::GhBackend::Ghd => "ghd",
     }
 }
 
@@ -336,6 +365,24 @@ mod tests {
         assert!(added);
         let path = &e.iter().find(|(k, _)| k == "PATH").unwrap().1;
         assert_eq!(path, "/shims");
+    }
+
+    #[test]
+    fn ghd_real_gh_names_the_target_but_keeps_a_user_value() {
+        let mut env = Vec::new();
+        set_ghd_real_gh(&mut env, Path::new("/real/gh"));
+        assert_eq!(env, vec![("GHD_REAL_GH".into(), "/real/gh".into())]);
+        let mut env = vec![("GHD_REAL_GH".to_string(), "/mine/gh".to_string())];
+        set_ghd_real_gh(&mut env, Path::new("/real/gh"));
+        assert_eq!(env, vec![("GHD_REAL_GH".into(), "/mine/gh".into())]);
+    }
+
+    #[test]
+    fn gh_backend_value_names_the_route_for_the_watchers() {
+        use crate::repo_clud_config::GhBackend;
+        assert_eq!(gh_backend_value(GhBackend::Gh), "gh");
+        assert_eq!(gh_backend_value(GhBackend::Ghd), "ghd");
+        assert_eq!(shim_registry::GH_BACKEND_KEY, "CLUD_GH_BACKEND");
     }
 
     #[test]

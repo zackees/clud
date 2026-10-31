@@ -4,6 +4,7 @@ pub mod do_kind;
 pub mod do_prompt;
 pub mod grind_scripts;
 mod loop_task;
+mod mcp_config;
 mod prompts;
 mod types;
 

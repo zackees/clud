@@ -41,7 +41,7 @@ per-crate calls. `soldr lint` does not replace `bash lint`: that stays the manda
 gate (repo guards, Ruff, pinned Dylint setup), as do the hosted Static checks, Clippy
 and Dylint jobs.
 
-Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
+Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `forge-ci/setup-soldr@v0`.
 
 ### Validation before merging
 

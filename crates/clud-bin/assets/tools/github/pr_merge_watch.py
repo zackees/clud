@@ -531,6 +531,20 @@ def broker_reads() -> bool:
     )
 
 
+def ghd_reads() -> bool:
+    """Whether this session routes `gh` through ghd (`gh.backend: "ghd"`,
+    #2352), which shares REST reads across concurrent watchers (#2368). A
+    per-process `If-None-Match`/`-i` read would defeat that sharing."""
+    return os.environ.get("CLUD_GH_BACKEND") == "ghd" and bool(
+        os.environ.get("CLUD_GH_SHIM_TARGET")
+    )
+
+
+def shared_reads() -> bool:
+    """A plain `gh api <path>` is shared upstream: by the read broker or ghd."""
+    return broker_reads() or ghd_reads()
+
+
 # REST GETs this process sent outside a broker: path -> (ETag, parsed body).
 _CONDITIONAL_CACHE: dict[str, tuple[str, object]] = {}
 
@@ -554,12 +568,13 @@ def _split_include(text: str) -> tuple[int, dict[str, str], str]:
 
 def api_get(path: str) -> object | None:
     """One REST GET, parsed; None on any failure. It is always conditional:
-    in a clud session the read broker revalidates it with the ETag it holds
-    (and shares the answer with every other reader); otherwise this process
+    in a clud session the read broker, or ghd when gh routes through it,
+    revalidates it with the ETag it holds (and shares the answer with every
+    other reader); otherwise this process
     sends its own `If-None-Match`, and an unchanged resource is a `304`,
     which GitHub does not count against the rate limit."""
-    if broker_reads():
-        r = gh("api", path)  # ci-lint: allow GHAPI-001 brokered: the session read broker revalidates it by ETag
+    if shared_reads():
+        r = gh("api", path)  # ci-lint: allow GHAPI-001 brokered: the session read broker or ghd revalidates it by ETag
         return _parse_json(r)
     cached = _CONDITIONAL_CACHE.get(path)
     noted = LAST_GH_ERROR

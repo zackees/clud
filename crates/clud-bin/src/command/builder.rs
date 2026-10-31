@@ -172,6 +172,16 @@ fn is_codex_claude_bridge(target: ResolvedLaunchTarget) -> bool {
         && matches!(target.effective_harness, Backend::Claude)
 }
 
+/// Claude launches get clud's MCP bridge so the agent can spawn Codex
+/// sub-agents. The Codex->Claude bridge is excluded: it already runs on Codex
+/// and allows exactly one Claude process.
+fn claude_mcp_bridge_arg(backend: Backend, target: ResolvedLaunchTarget) -> Option<String> {
+    if backend != Backend::Claude || is_codex_claude_bridge(target) {
+        return None;
+    }
+    super::mcp_config::claude_mcp_config_arg(&super::mcp_config::current_exe_dir()?)
+}
+
 pub fn bridge_suppresses_plan_mode(args: &Args, target: ResolvedLaunchTarget) -> bool {
     !args.allow_plan_mode && is_non_claude_claude_harness_bridge(target)
 }
@@ -682,6 +692,7 @@ fn build_launch_plan_for_target_at(
     if !disallowed.is_empty() {
         cmd.push(format!("--disallowedTools={}", disallowed.join(",")));
     }
+    cmd.extend(claude_mcp_bridge_arg(backend, target));
 
     // A Claude-harness gateway must receive its catalog discovery id, not the
     // provider wire id. Claude Code sees and classifies this value before the

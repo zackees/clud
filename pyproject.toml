@@ -104,7 +104,7 @@ dev = [
 ]
 # soldr is intentionally NOT a Python dev dep — install it via ./install
 # (or `./install --global`) which fetches the binary from
-# https://github.com/zackees/soldr/releases. CI uses zackees/setup-soldr@v0.
+# https://github.com/zackees/soldr/releases. CI uses forge-ci/setup-soldr@v0.
 
 [tool.maturin]
 manifest-path = "crates/clud-bin/Cargo.toml"

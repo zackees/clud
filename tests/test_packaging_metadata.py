@@ -77,7 +77,7 @@ def _setup_soldr_sources() -> list[Path]:
     return sorted(
         path
         for path in set(paths)
-        if "zackees/setup-soldr" in path.read_text(encoding="utf-8")
+        if "forge-ci/setup-soldr" in path.read_text(encoding="utf-8")
     )
 
 
@@ -120,7 +120,7 @@ def _setup_soldr_steps_in_text(  # noqa: C901
     lines = text.splitlines()
     uses_pattern = re.compile(
         r"^(?P<indent> *)(?P<dash>-\s+)?uses:\s*"
-        r"zackees/setup-soldr@(?P<ref>\S+)\s*$"
+        r"forge-ci/setup-soldr@(?P<ref>\S+)\s*$"
     )
 
     for index, line in enumerate(lines):
@@ -188,7 +188,7 @@ def _setup_soldr_steps_in_text(  # noqa: C901
 
 
 def _setup_soldr_steps() -> list[tuple[str, str, str]]:
-    """Every `zackees/setup-soldr` step as (workflow name, action ref, version).
+    """Every `forge-ci/setup-soldr` step as (workflow name, action ref, version).
 
     Parsed without a YAML dependency, but indentation still matters. A version
     must either be literal or forwarded from a composite-action input with a
@@ -207,7 +207,7 @@ def test_setup_soldr_parser_rejects_version_outside_with() -> None:
 jobs:
   test:
     steps:
-      - uses: zackees/setup-soldr@v0.9.66
+      - uses: forge-ci/setup-soldr@v0.9.66
         env:
           version: 0.8.28
         with:
@@ -243,7 +243,7 @@ def test_soldr_release_policy_moves_in_lockstep() -> None:
     fossilize on an older protocol while the others advance.
     """
     steps = _setup_soldr_steps()
-    assert steps, "no zackees/setup-soldr steps found in .github"
+    assert steps, "no forge-ci/setup-soldr steps found in .github"
 
     expected = _backend_soldr_policy()
     drift = [(name, version) for name, _, version in steps if version != expected]
@@ -350,3 +350,14 @@ def test_mcp_sdk_is_a_base_dependency() -> None:
     assert mcp == ["mcp>=2.1; sys_platform != 'win32' or platform_machine != 'ARM64'"]
     # The extra stays as an empty alias so `clud[mcp]` still resolves.
     assert project["optional-dependencies"]["mcp"] == []
+
+
+def test_setup_soldr_uses_its_current_repository() -> None:
+    """setup-soldr moved to forge-ci; the old name works only by redirect (#2419)."""
+    stale = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in (ROOT / ".github").rglob("*.y*ml")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "uses:" in line and "zackees/setup-soldr@" in line
+    ]
+    assert not stale, f"repin to forge-ci/setup-soldr: {stale}"

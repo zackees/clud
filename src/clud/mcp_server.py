@@ -68,6 +68,12 @@ server = MCPServer(
     name="clud",
     title="clud — agent harness runner and local model gateway",
     lifespan=_gateway_lifespan,
+    instructions=(
+        "To delegate work to a Codex (OpenAI) sub-agent, call session_start with "
+        'backend="codex" and a self-contained prompt and cwd, then session_wait or '
+        "session_result for its result. Use run for short blocking jobs. Pass model "
+        "to pick a specific Codex model."
+    ),
     description=(
         "Run the clud agent harness (Claude Code / Codex in YOLO mode) on a "
         "prompt — either as a blocking child process, or as a durable session "
@@ -282,7 +288,10 @@ def _clud_bin() -> str:
 async def _discover_api() -> tuple[str, str]:
     """Return the daemon's (base_url, bearer_token) from `clud daemon api-info`."""
     proc = await asyncio.create_subprocess_exec(
-        _clud_bin(), "daemon", "api-info", "--json",
+        _clud_bin(),
+        "daemon",
+        "api-info",
+        "--json",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -431,9 +440,7 @@ async def _session_record(base: str, token: str, session_id: str) -> dict:
     """GET one session record, or raise :class:`SessionError`."""
     status, record = await _api(base, token, "GET", f"/v1/sessions/{session_id}")
     if status != 200 or not isinstance(record, dict):
-        raise SessionError(
-            f"session lookup failed ({status}): {record}", session_id=session_id
-        )
+        raise SessionError(f"session lookup failed ({status}): {record}", session_id=session_id)
     return record
 
 
@@ -457,9 +464,7 @@ async def _collect_events(
             f"/v1/sessions/{session_id}/events?after={cursor}&limit={_EVENT_PAGE_LIMIT}",
         )
         if status != 200 or not isinstance(page, dict):
-            raise SessionError(
-                f"event fetch failed ({status}): {page}", session_id=session_id
-            )
+            raise SessionError(f"event fetch failed ({status}): {page}", session_id=session_id)
         page_events = page.get("events")
         if not isinstance(page_events, list) or not page_events:
             break
@@ -469,9 +474,7 @@ async def _collect_events(
         cursor = next_cursor if isinstance(next_cursor, int) else cursor + len(page_events)
         if len(page_events) < _EVENT_PAGE_LIMIT:
             break
-    selected = [
-        ev for ev in events if not turn_id or ev.get("turn_id") == turn_id
-    ]
+    selected = [ev for ev in events if not turn_id or ev.get("turn_id") == turn_id]
     return {
         "events": selected,
         "text": _extract_text(selected),
@@ -522,9 +525,7 @@ async def _start_turn(
         {"Idempotency-Key": uuid.uuid4().hex},
     )
     if status not in (200, 202) or not isinstance(turn, dict) or not turn.get("turn_id"):
-        raise SessionError(
-            f"submit turn failed ({status}): {turn}", session_id=session_id
-        )
+        raise SessionError(f"submit turn failed ({status}): {turn}", session_id=session_id)
     return session_id, str(turn["turn_id"])
 
 
@@ -575,9 +576,7 @@ async def _result_payload(
 ) -> dict:
     """Assemble the structured result for a session (safe to call mid-run)."""
     snapshot = await _snapshot(base, token, session_id, turn_id)
-    collected = await _collect_events(
-        base, token, session_id, after=after, turn_id=turn_id
-    )
+    collected = await _collect_events(base, token, session_id, after=after, turn_id=turn_id)
     payload = {
         "session_id": session_id,
         "turn_id": turn_id or snapshot["turn"].get("id") or "",
@@ -702,12 +701,8 @@ async def session_start(
         )
 
     try:
-        record, waited_s = await _wait_for_turn(
-            base, token, session_id, turn_id, wait_seconds
-        )
-        payload = await _result_payload(
-            base, token, session_id, turn_id=turn_id, waited_s=waited_s
-        )
+        record, waited_s = await _wait_for_turn(base, token, session_id, turn_id, wait_seconds)
+        payload = await _result_payload(base, token, session_id, turn_id=turn_id, waited_s=waited_s)
     except SessionError as exc:
         return _dump(exc.payload())
     del record
@@ -808,9 +803,7 @@ async def session_wait(
     """
     try:
         base, token = await _discover_api()
-        record, waited_s = await _wait_for_turn(
-            base, token, session_id, turn_id, wait_seconds
-        )
+        record, waited_s = await _wait_for_turn(base, token, session_id, turn_id, wait_seconds)
         del record
         payload = await _result_payload(
             base,
@@ -884,7 +877,7 @@ async def dry_run(
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end > start:
         try:
-            plan = json.loads(raw[start:end + 1])
+            plan = json.loads(raw[start : end + 1])
             return json.dumps(plan, indent=2)
         except json.JSONDecodeError:
             pass
@@ -923,9 +916,7 @@ async def run_json(
         base, token, session_id, turn_id = await _resolve_and_start(
             prompt, backend, cwd, model, safe, "", resume_session_id
         )
-        record, waited_s = await _wait_for_turn(
-            base, token, session_id, turn_id, timeout
-        )
+        record, waited_s = await _wait_for_turn(base, token, session_id, turn_id, timeout)
     except SessionError as exc:
         return _dump(exc.payload())
 
