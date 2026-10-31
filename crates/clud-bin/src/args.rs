@@ -1060,9 +1060,15 @@ pub enum Command {
         /// Model to serve the request with; without it the request's own model wins.
         #[arg(long)]
         model: Option<String>,
-        /// Mark the translated body as a streaming request.
+        /// Translate an Anthropic Messages response into a Gemini response.
+        #[arg(long)]
+        response: bool,
+        /// Read the response as SSE and emit one Gemini response chunk per line.
         #[arg(long)]
         stream: bool,
+        /// Emit the exact HTTP body a route writes, not one JSON per line.
+        #[arg(long, requires = "response")]
+        http: bool,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
