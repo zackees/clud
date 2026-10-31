@@ -154,15 +154,15 @@ jobs:
           # nested Cargo through dylint_testing, outside soldr's Dylint front
           # door: keep the rustup proxy visible and point the runner at the
           # verified driver setup-soldr exported. The runner asks for the
-          # short nightly directory, while soldr's asset and toolchain live
-          # under the host-qualified one, so alias the short names.
+          # short nightly directory; soldr 0.9.47+ stages the driver under
+          # both names, and the toolchain still needs the short alias.
           export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:${PATH}"
           : "${DYLINT_DRIVER_PATH:?}"
           host="$(RUSTUP_TOOLCHAIN=nightly-2026-08-15 soldr rustc -vV | sed -n 's/^host: //p')"
           qualified="nightly-2026-08-15-${host}"
           test -f "$DYLINT_DRIVER_PATH/$qualified/dylint-driver"
           test -d "${RUSTUP_HOME:?}/toolchains/$qualified"
-          ln -sfnT "$qualified" "$DYLINT_DRIVER_PATH/nightly-2026-08-15"
+          test -f "$DYLINT_DRIVER_PATH/nightly-2026-08-15/dylint-driver"
           ln -sfnT "$qualified" "$RUSTUP_HOME/toolchains/nightly-2026-08-15"
           (cd dylints/enforce_platform_boundary && \
             RUSTUP_TOOLCHAIN=nightly-2026-08-15 CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/dylint-tests" \
