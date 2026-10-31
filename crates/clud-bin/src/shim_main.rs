@@ -340,8 +340,7 @@ pub(crate) mod gh_shim {
         super::run_child("gh", ghd, &ghd_args, recorder, &env)
     }
 
-    /// ghd's variable naming the real gh (forge-ci/ghd#24).
-    pub(crate) const GHD_REAL_GH: &str = "GHD_REAL_GH";
+    pub(crate) use crate::shim_registry::GHD_REAL_GH_KEY as GHD_REAL_GH;
 }
 
 /// The central contract (#1546): dispatch alone reads session keys, and no
