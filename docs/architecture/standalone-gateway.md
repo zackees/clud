@@ -66,6 +66,15 @@ Use `/v1/models` to discover the advertised Codex IDs (for example,
 Codex-only discovery does not contact Anthropic. This is an Anthropic-compatible
 frontend; `/v1/responses` and `/v1/chat/completions` are not exposed.
 
+## MCP bridge inside `clud --claude`
+
+Every Claude launch (except the Codex->Claude bridge) registers this same
+server with Claude Code through one `--mcp-config=<json>` token, using the
+venv `python` beside the `clud` binary (`command/mcp_config.rs`). The agent
+can then delegate to Codex sub-agents with `mcp__clud__session_start`
+(`backend="codex"`). A build with no sibling `python`, such as a dev binary
+under `target/`, registers nothing.
+
 ## MCP discovery for Hermes
 
 Install clud (the MCP SDK is a base dependency; no extra needed) and register
