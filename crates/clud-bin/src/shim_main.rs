@@ -437,8 +437,7 @@ fn ghd_argv_prefixes_gh_and_preserves_every_arg() {
         let args: Vec<OsString> = words.iter().map(OsString::from).collect();
         gh_shim::ghd_argv(&args)
     }
-    let expected =
-        |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
+    let expected = |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
 
     assert_eq!(
         argv(&["pr", "view", "12", "--json", "state"]),
