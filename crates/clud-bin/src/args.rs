@@ -1055,6 +1055,15 @@ pub enum Command {
         #[arg(long, requires = "response")]
         http: bool,
     },
+    #[command(name = "__gemini-client-translate", hide = true)]
+    InternalGeminiClientTranslate {
+        /// Model to serve the request with; without it the request's own model wins.
+        #[arg(long)]
+        model: Option<String>,
+        /// Mark the translated body as a streaming request.
+        #[arg(long)]
+        stream: bool,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1618,6 +1627,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "__worker",
     "__start-cmd",
     "__openai-chat-translate",
+    "__gemini-client-translate",
 ];
 
 impl Args {
